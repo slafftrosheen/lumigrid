@@ -50,6 +50,121 @@ static httpd_handle_t s_server = NULL;
 extern const unsigned char _binary_index_html_start[] asm("_binary_index_html_start");
 extern const unsigned char _binary_index_html_end[]   asm("_binary_index_html_end");
 
+// External declaration for state retrieval
+extern effect_params_t effect_engine_get_params(int ch);
+
+typedef struct {
+    int channel;
+    char effect_name[32];
+    effect_params_t params;
+    float brightness;
+    esp_timer_handle_t timer;
+} channel_backup_t;
+
+static void restore_channel_state_cb(void *arg) {
+    channel_backup_t *bkp = (channel_backup_t*)arg;
+    if (!bkp) return;
+
+    ESP_LOGI(TAG, "Restoring channel %d state: %s", bkp->channel, bkp->effect_name);
+    // Note: fx_set_channel_by_name calls into effect engine which should be thread-safe enough for this use case
+    fx_set_channel_by_name(bkp->channel, bkp->effect_name, &bkp->params);
+    fx_set_channel_brightness(bkp->channel, bkp->brightness);
+
+    if (bkp->timer) {
+        esp_timer_delete(bkp->timer);
+    }
+    free(bkp);
+}
+
+static esp_err_t apply_preset_from_fs(const char *name, int ch, uint32_t dur_ms) {
+    // 1. Read preset file
+    char path[160];
+    if (!storage_fs_mount_path(path, sizeof(path), "presets")) return ESP_FAIL;
+    size_t base_len = strlen(path);
+    snprintf(path + base_len, sizeof(path) - base_len, "/%s.json", name);
+
+    uint8_t *buf = NULL; size_t len = 0;
+    if (storage_fs_read(path, &buf, &len) != ESP_OK) {
+        ESP_LOGE(TAG, "Preset '%s' not found", name);
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    cJSON *root = cJSON_ParseWithLength((const char*)buf, len);
+    free(buf);
+    if (!root) {
+        ESP_LOGE(TAG, "Failed to parse preset '%s'", name);
+        return ESP_FAIL;
+    }
+
+    // 2. Validate/Extract
+    cJSON *eid = cJSON_GetObjectItem(root, "effect_id");
+    if (!eid || !cJSON_IsNumber(eid)) {
+         cJSON_Delete(root);
+         ESP_LOGE(TAG, "Preset '%s' missing effect_id", name);
+         return ESP_FAIL;
+    }
+    int effect_id_val = eid->valueint;
+
+    // 3. Resolve Effect Name
+    char fx_name[32];
+    // For now, assume IDs like 1101 map to "1101" string
+    snprintf(fx_name, sizeof(fx_name), "%d", effect_id_val);
+
+    // 4. Extract Params
+    effect_params_t p = { .speed=1.0f, .intensity=0.5f, .color=0xFFFFFF, .palette_id=0, .brightness=1.0f };
+    cJSON *jv;
+    if ((jv = cJSON_GetObjectItem(root, "speed")) && cJSON_IsNumber(jv)) p.speed = (float)jv->valuedouble;
+    if ((jv = cJSON_GetObjectItem(root, "intensity")) && cJSON_IsNumber(jv)) p.intensity = (float)jv->valuedouble;
+    if ((jv = cJSON_GetObjectItem(root, "palette_id")) && cJSON_IsNumber(jv)) p.palette_id = (uint8_t)jv->valueint;
+    if ((jv = cJSON_GetObjectItem(root, "brightness")) && cJSON_IsNumber(jv)) p.brightness = (float)jv->valuedouble;
+
+    // Color handling
+    cJSON *c1 = cJSON_GetObjectItem(root, "color1");
+    if (c1 && cJSON_IsArray(c1) && cJSON_GetArraySize(c1) >= 3) {
+        int r = cJSON_GetArrayItem(c1, 0)->valueint;
+        int g = cJSON_GetArrayItem(c1, 1)->valueint;
+        int b = cJSON_GetArrayItem(c1, 2)->valueint;
+        p.color = ((r&0xFF)<<16) | ((g&0xFF)<<8) | (b&0xFF);
+    }
+
+    cJSON_Delete(root);
+
+    // 5. Backup if temporary
+    if (dur_ms > 0) {
+        channel_backup_t *bkp = calloc(1, sizeof(channel_backup_t));
+        if (bkp) {
+            bkp->channel = ch;
+            const char *cur_name = fx_current_name(ch);
+            if (cur_name) strncpy(bkp->effect_name, cur_name, sizeof(bkp->effect_name)-1);
+            bkp->params = effect_engine_get_params(ch);
+            bkp->brightness = fx_get_brightness(ch);
+
+            esp_timer_create_args_t timer_args = {
+                .callback = restore_channel_state_cb,
+                .arg = bkp,
+                .name = "restore_fx"
+            };
+            esp_timer_handle_t timer;
+            if (esp_timer_create(&timer_args, &timer) == ESP_OK) {
+                bkp->timer = timer;
+                esp_timer_start_once(timer, dur_ms * 1000ULL);
+            } else {
+                free(bkp); // Failed to create timer
+            }
+        }
+    }
+
+    // 6. Apply
+    esp_err_t err = fx_set_channel_by_name(ch, fx_name, &p);
+    if (err != ESP_OK) {
+         ESP_LOGW(TAG, "Failed to apply effect '%s' (ID %d)", fx_name, effect_id_val);
+    } else {
+         fx_set_channel_brightness(ch, p.brightness);
+    }
+
+    return err;
+}
+
 httpd_handle_t rest_api_get_handle(void) {
   return s_server;
 }
@@ -1238,9 +1353,8 @@ static esp_err_t trigger_handler(httpd_req_t* req){
         uint32_t dur_ms = (duration && cJSON_IsNumber(duration)) ? (uint32_t)duration->valueint : 0;
         ESP_LOGI(TAG, "Applying preset '%s' on channel %d for %" PRIu32 " ms", 
                  preset->valuestring, ch, dur_ms);
-        // TODO: Implement preset loading and temporary application
-        // This would require loading the preset from LittleFS and applying it to the channel
-        // If duration > 0, schedule restoration of previous effect after duration
+
+        apply_preset_from_fs(preset->valuestring, ch, dur_ms);
       }
     }
     else if (strcmp(action->valuestring, "blackout") == 0) {
@@ -1810,4 +1924,3 @@ static esp_err_t group_put_handler(httpd_req_t *req) {
     httpd_resp_sendstr(req, "{\"ok\":true}");
     return ESP_OK;
 }
-
