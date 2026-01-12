@@ -1,0 +1,14 @@
+idf_component_register(
+    SRCS 
+        "effect_pixels.c"
+        "effects_registry.c"
+        "effects_extra.c"
+        "effects_pattern.c"
+        "effects_noise.c"
+    INCLUDE_DIRS 
+        "include"
+    REQUIRES 
+        led_effects
+        main
+        audio_reactive
+)

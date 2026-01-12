@@ -1,0 +1,86 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Timeline Schema",
+  "description": "Schema for LumiGrid timeline configuration",
+  "type": "object",
+  "required": ["timeline_name", "schedule", "events"],
+  "properties": {
+    "timeline_name": {
+      "type": "string",
+      "description": "Unique name for the timeline",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-zA-Z0-9_-]+$"
+    },
+    "description": {
+      "type": "string",
+      "description": "Optional description of the timeline",
+      "maxLength": 256
+    },
+    "schedule": {
+      "type": "object",
+      "description": "Scheduling information for the timeline",
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": ["continuous", "calendar", "trigger"],
+          "description": "Playback mode for the timeline"
+        },
+        "calendar": {
+          "type": "object",
+          "description": "Calendar-based scheduling parameters",
+          "properties": {
+            "start_date": {
+              "type": "string",
+              "format": "date-time",
+              "description": "Start date and time for the timeline"
+            },
+            "end_date": {
+              "type": "string",
+              "format": "date-time",
+              "description": "End date and time for the timeline"
+            },
+            "repeat": {
+              "type": "string",
+              "enum": ["none", "daily", "weekly", "monthly"],
+              "description": "Repeat interval for the timeline"
+            }
+          },
+          "required": ["start_date"]
+        },
+        "trigger": {
+          "type": "string",
+          "description": "Trigger name that starts the timeline"
+        }
+      },
+      "required": ["mode"]
+    },
+    "events": {
+      "type": "array",
+      "description": "Array of events in the timeline",
+      "items": {
+        "type": "object",
+        "properties": {
+          "preset_name": {
+            "type": "string",
+            "description": "Name of the preset to apply"
+          },
+          "start_time": {
+            "type": "string",
+            "description": "Start time of the event (e.g., '14:00:00' or 'sunrise')"
+          },
+          "duration": {
+            "type": "integer",
+            "description": "Duration of the event in seconds"
+          },
+          "group": {
+            "type": "string",
+            "description": "Channel group to apply the preset to"
+          }
+        },
+        "required": ["preset_name", "start_time"]
+      }
+    }
+  },
+  "additionalProperties": false
+}

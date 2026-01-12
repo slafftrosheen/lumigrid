@@ -1,0 +1,31 @@
+{
+  "name": "lumigrid-nodejs-examples",
+  "version": "1.0.0",
+  "description": "Node.js examples for LumiGrid integration",
+  "main": "index.js",
+  "scripts": {
+    "test": "node validate-all.js",
+    "validate:sensor": "node validate-sensor-data.js",
+    "validate:preset-led": "node validate-preset-led.js",
+    "validate:preset-display": "node validate-preset-display.js",
+    "validate:config": "node validate-config.js",
+    "validate:sync": "node validate-sync-packet.js",
+    "example:sensor-post": "node sensor-update-post.js",
+    "example:preset-crud": "node preset-crud.js",
+    "example:udp-sync": "node udp-sync.js"
+  },
+  "keywords": [
+    "lumigrid",
+    "json-schema",
+    "validation",
+    "iot"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "ajv": "^8.12.0",
+    "ajv-formats": "^2.1.1",
+    "axios": "^1.6.0",
+    "dgram": "^1.0.1"
+  }
+}

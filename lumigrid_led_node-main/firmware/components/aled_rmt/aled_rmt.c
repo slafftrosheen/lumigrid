@@ -1,0 +1,190 @@
+#include "aled_rmt.h"
+
+#include "driver/rmt_tx.h"
+#include "driver/rmt_encoder.h"
+#include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
+#define ALED_RMT_MAX_CHANNELS 4
+#define SYMBOL_CHUNK          512
+
+static const char *TAG = "ALED_RMT";
+static rmt_encoder_handle_t s_copy_encoder;  // shared by all channels
+
+static rmt_channel_handle_t s_channels[ALED_RMT_MAX_CHANNELS];
+static gpio_num_t           s_channel_gpio[ALED_RMT_MAX_CHANNELS];
+
+typedef struct {
+  uint16_t t1h, t1l, t0h, t0l;
+} ws_timing_t;
+
+static inline ws_timing_t ws2812_t(){
+  // 100 ns ticks at 10 MHz (IDF default)
+  return (ws_timing_t){ .t1h = 8, .t1l = 4, .t0h = 4, .t0l = 9 };
+}
+
+static inline rmt_symbol_word_t sym(uint16_t high, uint16_t low){
+  return (rmt_symbol_word_t){
+    .duration0 = high,
+    .level0    = 1,
+    .duration1 = low,
+    .level1    = 0
+  };
+}
+
+esp_err_t aled_rmt_init_chan(int idx, gpio_num_t pin){
+  if (idx < 0 || idx >= ALED_RMT_MAX_CHANNELS){
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  if (s_channels[idx]){
+    ESP_LOGW(TAG, "Channel %d already initialised on GPIO %d", idx, s_channel_gpio[idx]);
+    return ESP_OK;
+  }
+
+  rmt_tx_channel_config_t cfg = {
+    .gpio_num = pin,
+    .clk_src = RMT_CLK_SRC_DEFAULT,
+    .resolution_hz = 10 * 1000 * 1000, // 10 MHz -> 100 ns ticks
+    .mem_block_symbols = 96,
+    .trans_queue_depth = 4
+  };
+
+  esp_err_t err = rmt_new_tx_channel(&cfg, &s_channels[idx]);
+  if (err != ESP_OK){
+    ESP_LOGE(TAG, "rmt_new_tx_channel failed: %s", esp_err_to_name(err));
+    return err;
+  }
+
+      err = rmt_enable(s_channels[idx]);
+      if (err != ESP_OK){
+          ESP_LOGE(TAG, "rmt_enable failed: %s", esp_err_to_name(err));
+          rmt_del_channel(s_channels[idx]);
+          s_channels[idx] = NULL;
+          return err;
+      }
+  
+      // One-time creation of a raw copy encoder
+      if (s_copy_encoder == NULL){
+          rmt_copy_encoder_config_t enc_cfg = { 0 };
+          err = rmt_new_copy_encoder(&enc_cfg, &s_copy_encoder);
+          if (err != ESP_OK){
+              ESP_LOGE(TAG, "rmt_new_copy_encoder failed: %s", esp_err_to_name(err));
+              rmt_del_channel(s_channels[idx]);
+              s_channels[idx] = NULL;
+              return err;
+          }
+      }
+  s_channel_gpio[idx] = pin;
+  ESP_LOGI(TAG, "RMT channel %d initialised on GPIO %d", idx, pin);
+  return ESP_OK;
+}
+
+static inline uint8_t pixel_component(const px_rgba_t* px, int component_idx, color_order_t order, bool rgbw){
+  switch(order){
+    case ORDER_RGB:
+      if (component_idx == 0) return px->r;
+      if (component_idx == 1) return px->g;
+      if (component_idx == 2) return px->b;
+      break;
+    case ORDER_GRB:
+      if (component_idx == 0) return px->g;
+      if (component_idx == 1) return px->r;
+      if (component_idx == 2) return px->b;
+      break;
+    case ORDER_RGBW:
+      if (component_idx == 0) return px->r;
+      if (component_idx == 1) return px->g;
+      if (component_idx == 2) return px->b;
+      if (component_idx == 3) return px->w;
+      break;
+    case ORDER_GRBW:
+      if (component_idx == 0) return px->g;
+      if (component_idx == 1) return px->r;
+      if (component_idx == 2) return px->b;
+      if (component_idx == 3) return px->w;
+      break;
+    default:
+      break;
+  }
+  if (rgbw && component_idx == 3){
+    return px->w;
+  }
+  return 0;
+}
+
+esp_err_t aled_rmt_write(int idx, const px_rgba_t* fb, int npx, led_type_t type, color_order_t order){
+  if (idx < 0 || idx >= ALED_RMT_MAX_CHANNELS || !s_channels[idx]){
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  size_t bpp = (type == LED_SK6812_RGBW) ? 4 : 3;
+  if (!fb || npx <= 0 || bpp == 0) return ESP_ERR_INVALID_ARG;
+  size_t data_bytes = (size_t)npx * bpp;
+  if (data_bytes == 0) return ESP_OK; // nothing to send
+
+  const ws_timing_t T = ws2812_t();
+  const int stride = (type == LED_SK6812_RGBW) ? 4 : 3;
+  const int total_bits = npx * stride * 8;
+
+  static rmt_symbol_word_t symbols[SYMBOL_CHUNK];
+  rmt_transmit_config_t tc = {
+    .loop_count = 0,
+    .flags.eot_level = 0,   // WS2812 line idle low after transmit
+  };
+
+  int bit_index = 0;
+  while (bit_index < total_bits){
+    int take = total_bits - bit_index;
+    if (take > SYMBOL_CHUNK){
+      take = SYMBOL_CHUNK;
+    }
+
+    for (int k = 0; k < take; ++k){
+      int global_bit = bit_index + k;
+      int pixel = global_bit / (stride * 8);
+      int within_pixel = global_bit % (stride * 8);
+      int component = within_pixel / 8;
+      int bit_pos = 7 - (within_pixel % 8);
+
+      uint8_t value = 0;
+      if (pixel < npx){
+        value = pixel_component(&fb[pixel], component, order, stride == 4);
+      }
+
+      if (value & (1 << bit_pos)){
+        symbols[k] = sym(T.t1h, T.t1l);
+      } else {
+        symbols[k] = sym(T.t0h, T.t0l);
+      }
+    }
+
+    // Batch 28: RMT "invalid argument" hardening - transmit the chunk
+    esp_err_t err = rmt_transmit(s_channels[idx], s_copy_encoder, symbols,
+                                 take * sizeof(rmt_symbol_word_t), &tc);
+    if (err != ESP_OK){
+        ESP_LOGE(TAG, "rmt_transmit failed ch%d: %s", idx, esp_err_to_name(err));
+        return err;
+    }
+    // Ensure chunk completes before queueing the next chunk
+    (void) rmt_tx_wait_all_done(s_channels[idx], pdMS_TO_TICKS(5));
+
+    bit_index += take;
+  }
+
+  // Reset pulse (>50 µs). We’re already idle-low; a small delay is fine.
+  vTaskDelay(pdMS_TO_TICKS(1));
+  return ESP_OK;
+}
+
+void aled_rmt_deinit(int idx){
+  if (idx < 0 || idx >= ALED_RMT_MAX_CHANNELS){
+    return;
+  }
+  if (s_channels[idx]){
+    rmt_disable(s_channels[idx]);
+    rmt_del_channel(s_channels[idx]);
+    s_channels[idx] = NULL;
+  }
+}

@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LumiGrid Setup Wizard</title>
+    <style>
+        /* LumiGrid Design System - Setup Wizard */
+        :root{
+            --bg:#0f1115;--surface:#151924;--muted:#1c2232;--text:#e6eaf2;--subtext:#9BA7C0;
+            --primary:#6C7CFF;--primary-600:#5366ff;--primary-700:#4256f3;
+            --accent:#86E2FF;--danger:#ff5c7a;--warn:#ffc857;--success:#38e1b3;
+            --focus:#86E2FF;
+            --ring:0 0 0 .16rem var(--focus),0 0 0 .28rem color-mix(in oklab,var(--focus) 30%,transparent);
+            --radius:14px;--radius-sm:10px;
+            --shadow-md:0 10px 30px rgba(0,0,0,.35);--shadow-sm:0 2px 10px rgba(0,0,0,.25);
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: system-ui, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Helvetica, Arial, sans-serif;
+            background: linear-gradient(135deg, var(--primary) 0%, var(--primary-700) 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+            -webkit-font-smoothing: antialiased;
+            text-rendering: optimizeLegibility;
+        }
+        .wizard {
+            background: var(--surface);
+            border-radius: var(--radius);
+            box-shadow: var(--shadow-md);
+            max-width: 500px;
+            width: 100%;
+            overflow: hidden;
+            border: 1px solid #20263a;
+        }
+        .header {
+            background: linear-gradient(135deg, var(--primary) 0%, var(--primary-700) 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+        .header h1 { font-size: 28px; margin-bottom: 8px; font-weight: 700; }
+        .header p { opacity: 0.9; font-size: 14px; }
+        .content {
+            padding: 30px;
+        }
+        .step {
+            display: none;
+        }
+        .step.active {
+            display: block;
+        }
+        .progress {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 30px;
+        }
+        .progress-item {
+            flex: 1;
+            height: 4px;
+            background: var(--muted);
+            margin: 0 4px;
+            border-radius: 2px;
+            transition: background 0.3s;
+        }
+        .progress-item.active {
+            background: var(--primary);
+        }
+        .form-group {
+            margin-bottom: 20px;
+        }
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 500;
+            color: var(--subtext);
+        }
+        .form-group input, .form-group select {
+            width: 100%;
+            padding: 12px;
+            border: 1px solid #2a3248;
+            background: var(--muted);
+            color: var(--text);
+            border-radius: var(--radius-sm);
+            font-size: 14px;
+            transition: border-color 0.3s;
+        }
+        .form-group input:focus, .form-group select:focus {
+            outline: none;
+            box-shadow: var(--ring);
+        }
+        .wifi-list {
+            max-height: 300px;
+            overflow-y: auto;
+            border: 1px solid #2a3248;
+            border-radius: var(--radius-sm);
+            margin-bottom: 20px;
+            background: var(--muted);
+        }
+        .wifi-item {
+            padding: 12px;
+            border-bottom: 1px solid #20263a;
+            cursor: pointer;
+            transition: background 0.2s;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            color: var(--text);
+        }
+        .wifi-item:hover {
+            background: color-mix(in oklab, var(--muted) 80%, transparent);
+        }
+        .wifi-item.selected {
+            background: color-mix(in oklab, var(--primary) 20%, transparent);
+            border-left: 4px solid var(--primary);
+        }
+        .wifi-item:last-child {
+            border-bottom: none;
+        }
+        .wifi-signal {
+            font-size: 12px;
+            color: var(--subtext);
+        }
+        .btn {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 12px;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.3s;
+            box-shadow: var(--shadow-sm);
+        }
+        .btn-primary {
+            background: var(--primary);
+            color: white;
+        }
+        .btn-primary:hover {
+            opacity: 0.9;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px color-mix(in oklab, var(--primary) 40%, transparent);
+        }
+        .btn-primary:focus-visible {
+            outline: none;
+            box-shadow: var(--ring);
+        }
+        .btn-secondary {
+            background: var(--muted);
+            color: var(--text);
+            margin-right: 10px;
+            border: 1px solid #2a3248;
+        }
+        .btn-secondary:hover {
+            opacity: 0.9;
+        }
+        .btn-secondary:focus-visible {
+            outline: none;
+            box-shadow: var(--ring);
+        }
+        .btn-container {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 30px;
+        }
+        .spinner {
+            border: 3px solid var(--muted);
+            border-top: 3px solid var(--primary);
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 20px auto;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .hidden { display: none; }
+        .alert {
+            padding: 12px;
+            border-radius: var(--radius-sm);
+            margin-bottom: 20px;
+        }
+        .alert-error {
+            background: color-mix(in oklab, var(--danger) 20%, transparent);
+            color: #ffbaba;
+            border: 1px solid color-mix(in oklab, var(--danger) 40%, transparent);
+        }
+        .alert-success {
+            background: color-mix(in oklab, var(--success) 20%, transparent);
+            color: #a0f0d0;
+            border: 1px solid color-mix(in oklab, var(--success) 40%, transparent);
+        }
+        h2 {
+            color: var(--text);
+            margin-bottom: 10px;
+        }
+        p {
+            color: var(--subtext);
+        }
+    </style>
+</head>
+<body>
+    <div class="wizard">
+        <div class="header">
+            <h1>🎨 LumiGrid Setup</h1>
+            <p>Let's configure your LED node</p>
+        </div>
+        <div class="content">
+            <div class="progress">
+                <div class="progress-item active" data-step="1"></div>
+                <div class="progress-item" data-step="2"></div>
+                <div class="progress-item" data-step="3"></div>
+                <div class="progress-item" data-step="4"></div>
+            </div>
+
+            <!-- Step 1: Welcome -->
+            <div class="step active" data-step="1">
+                <h2>Welcome to LumiGrid!</h2>
+                <p style="margin: 20px 0; line-height: 1.6; color: #666;">
+                    This setup wizard will guide you through the initial configuration of your LumiGrid LED node.
+                    You'll configure the WiFi connection, set a unique node ID, and choose the control mode.
+                </p>
+                <p style="margin: 20px 0; line-height: 1.6; color: #666;">
+                    The process takes just a few minutes. Let's get started!
+                </p>
+                <div class="btn-container">
+                    <div></div>
+                    <button class="btn btn-primary" onclick="nextStep()">Get Started →</button>
+                </div>
+            </div>
+
+            <!-- Step 2: WiFi Selection -->
+            <div class="step" data-step="2">
+                <h2>WiFi Network</h2>
+                <p style="margin: 10px 0 20px; color: #666;">Select your WiFi network from the list below:</p>
+                <div id="wifi-scanning" class="hidden">
+                    <div class="spinner"></div>
+                    <p style="text-align: center; color: #666;">Scanning for networks...</p>
+                </div>
+                <div id="wifi-list-container">
+                    <div class="wifi-list" id="wifi-list"></div>
+                </div>
+                <div class="form-group">
+                    <label for="wifi-password">WiFi Password:</label>
+                    <input type="password" id="wifi-password" placeholder="Enter password">
+                </div>
+                <div id="wifi-error" class="alert alert-error hidden"></div>
+                <div class="btn-container">
+                    <button class="btn btn-secondary" onclick="prevStep()">← Back</button>
+                    <button class="btn btn-primary" onclick="nextStep()">Next →</button>
+                </div>
+            </div>
+
+            <!-- Step 3: Node Configuration -->
+            <div class="step" data-step="3">
+                <h2>Node Configuration</h2>
+                <p style="margin: 10px 0 20px; color: #666;">Configure your node settings:</p>
+                <div class="form-group">
+                    <label for="node-id">Node ID:</label>
+                    <input type="text" id="node-id" placeholder="e.g., node_001" value="node_001">
+                </div>
+                <div class="form-group">
+                    <label for="control-mode">Control Mode:</label>
+                    <select id="control-mode">
+                        <option value="standalone">Standalone</option>
+                        <option value="master">Master</option>
+                        <option value="slave">Slave</option>
+                    </select>
+                </div>
+                <div class="form-group" id="master-ip-group" style="display: none;">
+                    <label for="master-ip">Master Node IP:</label>
+                    <input type="text" id="master-ip" placeholder="e.g., 192.168.1.100">
+                </div>
+                <div class="btn-container">
+                    <button class="btn btn-secondary" onclick="prevStep()">← Back</button>
+                    <button class="btn btn-primary" onclick="nextStep()">Next →</button>
+                </div>
+            </div>
+
+            <!-- Step 4: Save & Reboot -->
+            <div class="step" data-step="4">
+                <h2>Ready to Save</h2>
+                <p style="margin: 10px 0 20px; color: #666;">Review your configuration:</p>
+                <div style="background: #f8f9fa; padding: 20px; border-radius: 8px; margin-bottom: 20px;">
+                    <p style="margin: 8px 0;"><strong>WiFi:</strong> <span id="review-ssid">-</span></p>
+                    <p style="margin: 8px 0;"><strong>Node ID:</strong> <span id="review-node-id">-</span></p>
+                    <p style="margin: 8px 0;"><strong>Control Mode:</strong> <span id="review-mode">-</span></p>
+                    <p style="margin: 8px 0;" id="review-master-ip-row" class="hidden"><strong>Master IP:</strong> <span id="review-master-ip">-</span></p>
+                </div>
+                <div id="save-status" class="hidden">
+                    <div class="spinner"></div>
+                    <p style="text-align: center; color: #666;">Saving configuration...</p>
+                </div>
+                <div id="save-error" class="alert alert-error hidden"></div>
+                <div id="save-success" class="alert alert-success hidden">
+                    Configuration saved! The device will reboot in <span id="countdown">5</span> seconds...
+                </div>
+                <div class="btn-container">
+                    <button class="btn btn-secondary" onclick="prevStep()" id="back-btn">← Back</button>
+                    <button class="btn btn-primary" onclick="saveAndReboot()" id="save-btn">Save & Reboot</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentStep = 1;
+        let wifiNetworks = [];
+        let selectedSSID = '';
+
+        // Load WiFi networks when step 2 is shown
+        function loadWiFiNetworks() {
+            document.getElementById('wifi-scanning').classList.remove('hidden');
+            document.getElementById('wifi-list-container').classList.add('hidden');
+            
+            fetch('/api/wifi/scan')
+                .then(r => r.json())
+                .then(data => {
+                    wifiNetworks = data.networks || [];
+                    displayWiFiNetworks();
+                    document.getElementById('wifi-scanning').classList.add('hidden');
+                    document.getElementById('wifi-list-container').classList.remove('hidden');
+                })
+                .catch(err => {
+                    console.error('WiFi scan failed:', err);
+                    document.getElementById('wifi-scanning').classList.add('hidden');
+                    document.getElementById('wifi-error').textContent = 'Failed to scan WiFi networks. Please try again.';
+                    document.getElementById('wifi-error').classList.remove('hidden');
+                });
+        }
+
+        function displayWiFiNetworks() {
+            const list = document.getElementById('wifi-list');
+            list.innerHTML = '';
+            wifiNetworks.forEach(network => {
+                const item = document.createElement('div');
+                item.className = 'wifi-item';
+                item.innerHTML = `
+                    <div>${network.ssid}</div>
+                    <div class="wifi-signal">${network.rssi} dBm</div>
+                `;
+                item.onclick = () => selectWiFi(network.ssid, item);
+                list.appendChild(item);
+            });
+        }
+
+        function selectWiFi(ssid, element) {
+            selectedSSID = ssid;
+            document.querySelectorAll('.wifi-item').forEach(el => el.classList.remove('selected'));
+            element.classList.add('selected');
+            document.getElementById('wifi-error').classList.add('hidden');
+        }
+
+        function nextStep() {
+            if (currentStep === 2) {
+                if (!selectedSSID) {
+                    document.getElementById('wifi-error').textContent = 'Please select a WiFi network.';
+                    document.getElementById('wifi-error').classList.remove('hidden');
+                    return;
+                }
+                if (!document.getElementById('wifi-password').value) {
+                    document.getElementById('wifi-error').textContent = 'Please enter the WiFi password.';
+                    document.getElementById('wifi-error').classList.remove('hidden');
+                    return;
+                }
+            }
+            
+            if (currentStep < 4) {
+                document.querySelector(`.step[data-step="${currentStep}"]`).classList.remove('active');
+                currentStep++;
+                document.querySelector(`.step[data-step="${currentStep}"]`).classList.add('active');
+                document.querySelector(`.progress-item[data-step="${currentStep}"]`).classList.add('active');
+                
+                if (currentStep === 2) {
+                    loadWiFiNetworks();
+                } else if (currentStep === 4) {
+                    updateReview();
+                }
+            }
+        }
+
+        function prevStep() {
+            if (currentStep > 1) {
+                document.querySelector(`.step[data-step="${currentStep}"]`).classList.remove('active');
+                document.querySelector(`.progress-item[data-step="${currentStep}"]`).classList.remove('active');
+                currentStep--;
+                document.querySelector(`.step[data-step="${currentStep}"]`).classList.add('active');
+            }
+        }
+
+        function updateReview() {
+            document.getElementById('review-ssid').textContent = selectedSSID;
+            document.getElementById('review-node-id').textContent = document.getElementById('node-id').value;
+            document.getElementById('review-mode').textContent = document.getElementById('control-mode').value;
+            
+            const mode = document.getElementById('control-mode').value;
+            if (mode === 'slave') {
+                document.getElementById('review-master-ip').textContent = document.getElementById('master-ip').value;
+                document.getElementById('review-master-ip-row').classList.remove('hidden');
+            } else {
+                document.getElementById('review-master-ip-row').classList.add('hidden');
+            }
+        }
+
+        function saveAndReboot() {
+            const config = {
+                wifi_ssid: selectedSSID,
+                wifi_password: document.getElementById('wifi-password').value,
+                node_id: document.getElementById('node-id').value,
+                control_mode: document.getElementById('control-mode').value,
+                master_ip: document.getElementById('master-ip').value
+            };
+
+            document.getElementById('save-status').classList.remove('hidden');
+            document.getElementById('save-btn').disabled = true;
+            document.getElementById('back-btn').disabled = true;
+
+            fetch('/api/setup/complete', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(config)
+            })
+            .then(r => r.json())
+            .then(data => {
+                document.getElementById('save-status').classList.add('hidden');
+                if (data.success) {
+                    document.getElementById('save-success').classList.remove('hidden');
+                    let countdown = 5;
+                    const interval = setInterval(() => {
+                        countdown--;
+                        document.getElementById('countdown').textContent = countdown;
+                        if (countdown <= 0) {
+                            clearInterval(interval);
+                        }
+                    }, 1000);
+                } else {
+                    document.getElementById('save-error').textContent = data.error || 'Failed to save configuration.';
+                    document.getElementById('save-error').classList.remove('hidden');
+                    document.getElementById('save-btn').disabled = false;
+                    document.getElementById('back-btn').disabled = false;
+                }
+            })
+            .catch(err => {
+                document.getElementById('save-status').classList.add('hidden');
+                document.getElementById('save-error').textContent = 'Network error: ' + err.message;
+                document.getElementById('save-error').classList.remove('hidden');
+                document.getElementById('save-btn').disabled = false;
+                document.getElementById('back-btn').disabled = false;
+            });
+        }
+
+        // Show/hide master IP field based on control mode
+        document.getElementById('control-mode').addEventListener('change', function() {
+            const masterIpGroup = document.getElementById('master-ip-group');
+            if (this.value === 'slave') {
+                masterIpGroup.style.display = 'block';
+            } else {
+                masterIpGroup.style.display = 'none';
+            }
+        });
+    </script>
+</body>
+</html>

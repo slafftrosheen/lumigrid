@@ -1,0 +1,24 @@
+{
+  "preset_name": "info_cyan",
+  "description": "Cyan information message with scrolling",
+  "frame_config": {
+    "id": "msg_info",
+    "type": "text",
+    "name": "Info Message",
+    "text": "System operating normally. All sensors active.",
+    "enabled": true,
+    "duration": 20,
+    "colors": {
+      "background": "#000000",
+      "text": "#00FFFF"
+    },
+    "font": {
+      "size": 10
+    },
+    "scroll": true,
+    "position": {
+      "x": 0,
+      "y": "center"
+    }
+  }
+}

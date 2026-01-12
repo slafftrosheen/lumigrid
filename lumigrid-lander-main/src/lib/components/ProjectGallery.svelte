@@ -1,0 +1,320 @@
+<script>
+  import { t } from '$lib/i18n';
+
+  export let filter = 'all';
+  
+  const items = [
+    {
+      titleKey: 'gallery_retail_window',
+      descKey: 'gallery_retail_window_desc',
+      tag: 'retail',
+      background: 'radial-gradient(120% 120% at 20% 20%, rgba(118,133,255,0.35), transparent), radial-gradient(120% 120% at 80% 70%, rgba(20,36,96,0.55), rgba(11,17,32,0.9))'
+    },
+    {
+      titleKey: 'gallery_outdoor_facade',
+      descKey: 'gallery_outdoor_facade_desc',
+      tag: 'outdoor',
+      background: 'radial-gradient(140% 140% at 15% 30%, rgba(255,189,122,0.45), transparent 60%), linear-gradient(160deg, rgba(13,22,44,0.95), rgba(8,12,24,0.9))'
+    },
+    {
+      titleKey: 'gallery_logo_letter',
+      descKey: 'gallery_logo_letter_desc',
+      tag: 'brand',
+      background: 'radial-gradient(120% 120% at 70% 30%, rgba(255,105,180,0.4), transparent 55%), linear-gradient(200deg, rgba(18,28,58,0.95), rgba(9,14,28,0.92))'
+    },
+    {
+      titleKey: 'gallery_hospitality',
+      descKey: 'gallery_hospitality_desc',
+      tag: 'retail',
+      background: 'radial-gradient(120% 120% at 20% 70%, rgba(255,214,137,0.42), transparent 55%), linear-gradient(200deg, rgba(19,24,46,0.94), rgba(8,10,24,0.92))'
+    },
+    {
+      titleKey: 'gallery_product_shelf',
+      descKey: 'gallery_product_shelf_desc',
+      tag: 'retail',
+      background: 'radial-gradient(150% 150% at 80% 20%, rgba(130,233,255,0.35), transparent 60%), linear-gradient(210deg, rgba(13,22,44,0.96), rgba(11,17,32,0.9))'
+    },
+    {
+      titleKey: 'gallery_transit_hub',
+      descKey: 'gallery_transit_hub_desc',
+      tag: 'outdoor',
+      background: 'repeating-linear-gradient(120deg, rgba(41,216,255,0.2) 0 14px, rgba(41,216,255,0) 14px 28px), linear-gradient(200deg, rgba(8,16,34,0.95), rgba(5,10,24,0.92))'
+    }
+  ];
+  
+  $: filtered = filter === 'all' ? items : items.filter(it => it.tag === filter);
+  
+  let selectedIndex = null;
+  
+  function selectCard(index) {
+    selectedIndex = selectedIndex === index ? null : index;
+  }
+  
+  function handleKeyDown(event, index) {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      selectCard(index);
+    }
+  }
+</script>
+
+<section class="container section" data-hue="260">
+  <div class="header-section">
+    <h2 class="section-title" id="gallery">{@html $t('gallery_title')}</h2>
+    <p class="section-lead">{$t('gallery_lead')}</p>
+  </div>
+  <div class="projects-carousel">
+    {#each filtered as it, index}
+      <div 
+        class="project-card grad-frame" 
+        class:selected={selectedIndex === index}
+        style={`--card-bg:${it.background}`}
+        on:click={() => selectCard(index)}
+        on:keydown={(e) => handleKeyDown(e, index)}
+        tabindex="0"
+        role="button"
+        aria-pressed={selectedIndex === index}
+        aria-label={$t(it.titleKey)}
+      >
+        <div class="art-preview" role="presentation">
+          <div class="glow-effect"></div>
+        </div>
+        <div class="card-content">
+          <h3 class="project-title">{$t(it.titleKey)}</h3>
+          <p class="project-summary">{$t(it.descKey)}</p>
+          {#if selectedIndex === index}
+            <div class="expanded-info">
+              <p class="category-badge">{it.tag}</p>
+            </div>
+          {/if}
+        </div>
+      </div>
+    {/each}
+  </div>
+</section>
+
+<style>
+  .header-section {
+    text-align: center;
+    margin-bottom: clamp(2rem, 5vw, 3rem);
+  }
+
+  .section-title {
+    font-size: var(--fs-h2);
+    font-weight: 700;
+    margin-bottom: 1rem;
+    color: var(--ink);
+  }
+
+  .section-lead {
+    font-size: var(--fs-lead);
+    color: var(--muted);
+    max-width: 640px;
+    margin: 0 auto;
+    line-height: 1.6;
+  }
+
+  .projects-carousel {
+    display: flex;
+    gap: clamp(1.25rem, 3vw, 1.75rem);
+    overflow-x: auto;
+    scroll-snap-type: x mandatory;
+    padding: 1rem 0 2rem;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255, 255, 255, 0.3) transparent;
+  }
+  
+  .projects-carousel::-webkit-scrollbar {
+    height: 10px;
+  }
+  
+  .projects-carousel::-webkit-scrollbar-track {
+    background: rgba(255, 255, 255, 0.05);
+    border-radius: 5px;
+  }
+  
+  .projects-carousel::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.3);
+    border-radius: 5px;
+  }
+  
+  .projects-carousel::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.4);
+  }
+
+  .project-card {
+    padding: 0;
+    display: grid;
+    grid-template-rows: minmax(200px, 28vh) auto;
+    overflow: hidden;
+    min-width: min(85vw, 380px);
+    scroll-snap-align: center;
+    cursor: pointer;
+    transition: transform var(--dur-med) var(--ease-out),
+                box-shadow var(--dur-med) var(--ease-out),
+                border-color var(--dur-med) var(--ease-out);
+    position: relative;
+  }
+
+  .project-card:hover {
+    transform: translateY(-10px) scale(1.01);
+    box-shadow: 0 24px 48px rgba(0, 0, 0, 0.35),
+                0 8px 16px rgba(0, 0, 0, 0.2);
+  }
+  
+  .project-card.selected {
+    transform: scale(1.03);
+    box-shadow: 0 28px 56px rgba(0, 0, 0, 0.4),
+                0 10px 20px rgba(0, 0, 0, 0.25);
+  }
+  
+  .project-card:focus-visible {
+    outline: 2px solid var(--accent-primary);
+    outline-offset: 4px;
+  }
+
+  .art-preview {
+    background: var(--card-bg);
+    box-shadow: inset 0 0 60px rgba(0, 0, 0, 0.35);
+    position: relative;
+    overflow: hidden;
+  }
+
+  .art-preview::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(
+      to bottom,
+      transparent 0%,
+      transparent 50%,
+      rgba(11, 17, 32, 0.4) 100%
+    );
+    transition: opacity 0.3s ease;
+  }
+  
+  .project-card:hover .art-preview::after {
+    opacity: 0.7;
+  }
+  
+  .glow-effect {
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(
+      circle at center,
+      rgba(255, 255, 255, 0.18) 0%,
+      transparent 65%
+    );
+    opacity: 0;
+    transform: scale(0.85);
+    transition: opacity var(--dur-slow) var(--ease-out),
+                transform var(--dur-slow) var(--ease-out);
+  }
+  
+  .project-card:hover .glow-effect {
+    opacity: 1;
+    transform: scale(1.15);
+  }
+  
+  .project-card.selected .glow-effect {
+    opacity: 1;
+    transform: scale(1.25);
+    animation: pulse 2.5s ease-in-out infinite;
+  }
+  
+  @keyframes pulse {
+    0%, 100% {
+      transform: scale(1.2);
+      opacity: 0.8;
+    }
+    50% {
+      transform: scale(1.4);
+      opacity: 1;
+    }
+  }
+
+  .card-content {
+    padding: clamp(1rem, 3vw, 1.5rem);
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .project-title {
+    font-size: clamp(1.05rem, 2.1vw, 1.2rem);
+    font-weight: 700;
+    text-transform: capitalize;
+    margin: 0;
+    color: var(--ink);
+  }
+
+  .project-summary {
+    font-size: clamp(0.9rem, 1.7vw, 1rem);
+    color: var(--muted);
+    line-height: 1.6;
+    margin: 0;
+    transition: color 0.3s ease;
+  }
+  
+  .project-card:hover .project-summary {
+    color: rgba(255, 255, 255, 0.9);
+  }
+  
+  .expanded-info {
+    margin-top: 0.75rem;
+    padding-top: 0.75rem;
+    border-top: 1px solid rgba(255, 255, 255, 0.1);
+    animation: fadeIn 0.3s ease-in;
+  }
+  
+  @keyframes fadeIn {
+    from {
+      opacity: 0;
+      transform: translateY(-10px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+  
+  .category-badge {
+    display: inline-block;
+    padding: 0.25rem 0.75rem;
+    background: rgba(118, 133, 255, 0.2);
+    border: 1px solid rgba(118, 133, 255, 0.4);
+    border-radius: 12px;
+    font-size: 0.85rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: rgba(255, 255, 255, 0.9);
+  }
+
+  @media (min-width: 640px) {
+    .project-card {
+      min-width: min(75vw, 420px);
+    }
+  }
+
+  @media (min-width: 1024px) {
+    .project-card {
+      min-width: min(45vw, 480px);
+    }
+  }
+  
+  @media (prefers-reduced-motion: reduce) {
+    .project-card,
+    .glow-effect,
+    .art-preview::after,
+    .project-summary,
+    .expanded-info {
+      transition: none;
+      animation: none;
+    }
+    
+    .project-card:hover {
+      transform: none;
+    }
+  }
+</style>

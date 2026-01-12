@@ -1,0 +1,221 @@
+# Lumigrid Display Node Configuration
+
+# LED Matrix Settings (hzeller rpi-rgb-led-matrix)
+led_matrix:
+  # Panel dimensions
+  rows: 32                      # Height of a single panel (8-128)
+  cols: 64                      # Width of a single panel (8-128)
+  chain_length: 1               # Number of daisy-chained panels
+  parallel: 1                   # Number of parallel chains (1-6)
+  
+  # Hardware configuration
+  hardware_mapping: "regular"   # regular, adafruit-hat, adafruit-hat-pwm, compute-module
+  rgb_sequence: "RGB"           # RGB, RBG, GRB, GBR, BGR, BRG
+  row_address_type: 0           # 0=direct, 1=AB-addressed, 2=direct row select, 3=ABC
+  multiplexing: 0               # 0=direct, 1=stripe, 2=checker, etc.
+  panel_type: ""                # Special panel type (e.g., FM6126A)
+  pixel_mapper_config: ""       # Pixel mapper configuration string
+  
+  # PWM settings
+  pwm_bits: 11                  # Color depth (1-11, lower=faster, higher=more colors)
+  pwm_lsb_nanoseconds: 130      # Base time for PWM (50-500ns)
+  pwm_dither_bits: 0            # Temporal dithering (0-2)
+  
+  # Display quality
+  brightness: 50                # Brightness percentage (0-100)
+  scan_mode: 0                  # 0=progressive, 1=interlaced
+  gpio_slowdown: 4              # GPIO slowdown for Pi model (0-5)
+  limit_refresh_rate_hz: 0      # 0=unlimited, otherwise max refresh rate
+  
+  # Advanced options
+  show_refresh_rate: false      # Display refresh rate in console
+  inverse_colors: false         # Invert all colors
+  disable_hardware_pulsing: false # Use software PWM
+  drop_privileges: true         # Drop root after GPIO init
+
+# Display Settings
+display:
+  default_mode: "frames"        # frames, clock, temperature, message, slideshow
+  rotation: 0                   # 0, 90, 180, 270
+  font_path: "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+  slideshow_interval: 10        # seconds (for legacy slideshow mode)
+  scroll_speed: 0.05            # seconds per pixel
+
+# Frame System Configuration
+frames:
+  enabled: true
+  default_duration: 5           # Default display time per frame (seconds)
+  transition_effect: "fade"     # fade, slide, instant (future feature)
+  queue:
+    - id: "default-time"
+      type: "time"
+      name: "Current Time"
+      enabled: true
+      duration: 5
+      font:
+        path: "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+        size: 16
+      colors:
+        text: "#00FFFF"
+        background: "#000000"
+      position:
+        x: "center"
+        y: "center"
+      format: "%H:%M:%S"
+    
+    - id: "default-date"
+      type: "date"
+      name: "Current Date"
+      enabled: true
+      duration: 5
+      font:
+        path: "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+        size: 12
+      colors:
+        text: "#FFFFFF"
+        background: "#000000"
+      position:
+        x: "center"
+        y: "center"
+      format: "%Y-%m-%d"
+    
+    - id: "default-temperature"
+      type: "temperature"
+      name: "Temperature"
+      enabled: true
+      duration: 5
+      font:
+        path: "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+        size: 14
+      colors:
+        text: "#FF8000"
+        background: "#000000"
+      position:
+        x: "center"
+        y: "center"
+      unit: "celsius"
+
+# Font Settings
+fonts:
+  system_fonts_dir: "/usr/share/fonts/truetype"
+  custom_fonts_dir: "data/fonts"
+  default_font: "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+
+# Temperature Sensor Settings
+temperature:
+  enabled: true
+  sensor_type: "DS18B20"        # DS18B20, DHT22, DHT11
+  pin: 4                        # GPIO pin for DHT sensors (not used for DS18B20)
+  update_interval: 30           # seconds
+  unit: "celsius"               # celsius, fahrenheit
+
+# RTC Settings
+rtc:
+  enabled: true
+  type: "DS3231"                # DS3231, DS1307
+  sync_interval: 3600           # sync system time from RTC every hour
+
+# Web Interface Settings
+web:
+  host: "0.0.0.0"               # Listen on all interfaces
+  port: 5000                    # Web server port
+  debug: false
+
+# Network Settings
+network:
+  hostname: "lumigrid"
+  node_id: "display-node"      # Unique identifier for mDNS service discovery
+  wifi:
+    enabled: false
+    ssid: ""
+    password: ""
+  static_ip:
+    enabled: false
+    ip: ""
+    gateway: ""
+    dns: ""
+
+# Time Settings
+time:
+  timezone: "UTC"               # Timezone (e.g., America/New_York, Europe/London)
+  format_24h: true              # Use 24-hour time format
+  show_seconds: true            # Display seconds
+  ntp_enabled: true             # Enable NTP time sync
+  ntp_server: "pool.ntp.org"    # NTP server
+
+# Logging
+logging:
+  level: "INFO"                 # DEBUG, INFO, WARNING, ERROR
+  file: "logs/lumigrid.log"
+  max_bytes: 10485760           # 10MB
+  backup_count: 5
+
+# Control Mode Settings
+control:
+  mode: "independent"           # external, sync, independent
+  sync_role: "slave"            # master, slave (only when mode=sync)
+  external_source: "mqtt"       # mqtt, artnet (only when mode=external)
+  
+# Control Modes:
+# - independent: Autonomous operation (default)
+# - sync: Master/Slave synchronized playback using UDP multicast
+#   * Uses JSON packet format compatible with ESP32 LED nodes
+#   * Multicast group: 239.10.7.42:45454
+#   * Automatic fallback to local clock on packet loss
+#   * Comprehensive logging of sync events and clock state
+#   * See docs/UDP_SYNCHRONIZATION.md for detailed setup guide
+# - external: Controlled by Art-Net/MQTT (placeholder - not yet implemented)
+
+# Timeline-based Preset Sequencer (RTC-enabled)
+# Schedules presets (frames) to play at specific times with calendar-based features
+timelines: []
+  # Example timeline with calendar-based scheduling:
+  # - id: "daily-schedule"
+  #   name: "Daily Schedule"
+  #   description: "Automated daily display schedule"
+  #   enabled: true
+  #   loop: true
+  #   entries:
+  #     # Basic time-of-day trigger
+  #     - id: "morning-time"
+  #       preset_name: "Current Time"
+  #       trigger_type: "time_of_day"
+  #       time_of_day: "06:00:00"
+  #       days_of_week: [0, 1, 2, 3, 4, 5, 6]  # 0=Monday, 6=Sunday
+  #       duration: 0  # 0 = until next entry
+  #       enabled: true
+  #     
+  #     # Time-of-day with date range (seasonal schedule)
+  #     - id: "summer-temp"
+  #       preset_name: "Temperature"
+  #       trigger_type: "time_of_day"
+  #       time_of_day: "18:00:00"
+  #       days_of_week: [0, 1, 2, 3, 4, 5, 6]
+  #       valid_from: "2024-06-01"  # Only active from June 1st
+  #       valid_until: "2024-08-31"  # Until August 31st
+  #       duration: 0
+  #       enabled: true
+  #     
+  #     # Time-of-day with time window (business hours only)
+  #     - id: "business-hours-display"
+  #       preset_name: "Current Time"
+  #       trigger_type: "time_of_day"
+  #       time_of_day: "09:00:00"
+  #       days_of_week: [0, 1, 2, 3, 4]  # Weekdays only
+  #       start_time: "08:00:00"  # Active from 8 AM
+  #       end_time: "17:00:00"    # Until 5 PM
+  #       duration: 0
+  #       enabled: true
+  #     
+  #     # Schedule with exception dates (holidays)
+  #     - id: "weekday-schedule"
+  #       preset_name: "Current Date"
+  #       trigger_type: "time_of_day"
+  #       time_of_day: "12:00:00"
+  #       days_of_week: [0, 1, 2, 3, 4]  # Weekdays
+  #       exception_dates:  # Skip these dates (holidays)
+  #         - "2024-12-25"  # Christmas
+  #         - "2024-01-01"  # New Year
+  #         - "2024-07-04"  # Independence Day
+  #       duration: 0
+  #       enabled: true

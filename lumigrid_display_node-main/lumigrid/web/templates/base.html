@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Lumigrid Display Node{% endblock %}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    {% block head %}{% endblock %}
+</head>
+<body>
+    <!-- Skip Link for Accessibility -->
+    <a href="#main-content" class="skip-link">Skip to main content</a>
+    
+    <!-- Navigation Sidebar -->
+    <nav class="sidebar" id="sidebar" aria-label="Main navigation">
+        <div class="sidebar-header">
+            <div class="logo">
+                <span class="logo-icon" aria-hidden="true">🔲</span>
+                <span class="logo-text">Lumigrid</span>
+            </div>
+            <button class="sidebar-toggle" id="sidebar-toggle" aria-label="Toggle menu" aria-expanded="false">
+                <span></span>
+                <span></span>
+                <span></span>
+            </button>
+        </div>
+        
+        <ul class="nav-menu" role="menubar">
+            <li class="nav-item" role="none">
+                <a href="/" class="nav-link {% if request.path == '/' %}active{% endif %}" role="menuitem">
+                    <span class="nav-icon" aria-hidden="true">📊</span>
+                    <span class="nav-text">Dashboard</span>
+                </a>
+            </li>
+            <li class="nav-item" role="none">
+                <a href="/display-settings" class="nav-link {% if request.path == '/display-settings' %}active{% endif %}" role="menuitem">
+                    <span class="nav-icon" aria-hidden="true">⚙️</span>
+                    <span class="nav-text">Display Settings</span>
+                </a>
+            </li>
+            <li class="nav-item" role="none">
+                <a href="/content" class="nav-link {% if request.path == '/content' %}active{% endif %}" role="menuitem">
+                    <span class="nav-icon" aria-hidden="true">🎨</span>
+                    <span class="nav-text">Content & Frames</span>
+                </a>
+            </li>
+            <li class="nav-item" role="none">
+                <a href="/presets" class="nav-link {% if request.path == '/presets' %}active{% endif %}" role="menuitem">
+                    <span class="nav-icon" aria-hidden="true">📦</span>
+                    <span class="nav-text">Presets</span>
+                </a>
+            </li>
+            <li class="nav-item" role="none">
+                <a href="/timelines" class="nav-link {% if request.path == '/timelines' %}active{% endif %}" role="menuitem">
+                    <span class="nav-icon" aria-hidden="true">⏱️</span>
+                    <span class="nav-text">Timelines</span>
+                </a>
+            </li>
+            <li class="nav-item" role="none">
+                <a href="/network" class="nav-link {% if request.path == '/network' %}active{% endif %}" role="menuitem">
+                    <span class="nav-icon" aria-hidden="true">🌐</span>
+                    <span class="nav-text">Network</span>
+                </a>
+            </li>
+            <li class="nav-item" role="none">
+                <a href="/help" class="nav-link {% if request.path == '/help' %}active{% endif %}" role="menuitem">
+                    <span class="nav-icon" aria-hidden="true">📖</span>
+                    <span class="nav-text">Help & Docs</span>
+                </a>
+            </li>
+            <li class="nav-item" role="none">
+                <a href="/faq" class="nav-link {% if request.path == '/faq' %}active{% endif %}" role="menuitem">
+                    <span class="nav-icon" aria-hidden="true">❓</span>
+                    <span class="nav-text">FAQ</span>
+                </a>
+            </li>
+        </ul>
+        
+        <div class="sidebar-footer">
+            <div class="system-status" id="system-status" aria-live="polite">
+                <span class="status-dot" aria-hidden="true"></span>
+                <span class="status-text">Connecting...</span>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Main Content -->
+    <main class="main-content" id="main-content">
+        <header class="page-header">
+            <h1 class="page-title">{% block page_title %}Dashboard{% endblock %}</h1>
+            <div class="header-actions">
+                {% block header_actions %}{% endblock %}
+            </div>
+        </header>
+        
+        <div class="content-wrapper">
+            {% block content %}{% endblock %}
+        </div>
+    </main>
+
+    <!-- Notification Toast -->
+    <div id="notification" class="notification hidden" role="alert" aria-live="assertive"></div>
+
+    <!-- Base Scripts -->
+    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+    {% block scripts %}{% endblock %}
+</body>
+</html>

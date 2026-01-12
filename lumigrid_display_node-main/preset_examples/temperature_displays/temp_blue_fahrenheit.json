@@ -1,0 +1,24 @@
+{
+  "preset_name": "temp_blue_fahrenheit",
+  "description": "Blue temperature display in Fahrenheit",
+  "frame_config": {
+    "id": "temp_blue_f",
+    "type": "temperature",
+    "name": "Blue Temperature (F)",
+    "enabled": true,
+    "duration": 5,
+    "unit": "fahrenheit",
+    "colors": {
+      "background": "#000000",
+      "text": "#0088FF"
+    },
+    "font": {
+      "size": 14
+    },
+    "position": {
+      "x": "center",
+      "y": "center"
+    },
+    "show_icon": false
+  }
+}

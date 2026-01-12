@@ -1,0 +1,42 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "UDP Sync Packet",
+  "description": "Schema for UDP synchronization packet format between nodes",
+  "type": "object",
+  "required": ["packet_type", "node_id", "timestamp"],
+  "properties": {
+    "packet_type": {
+      "type": "string",
+      "description": "Type of sync packet",
+      "enum": ["state_update", "color_change", "effect_trigger", "heartbeat", "config_change"]
+    },
+    "node_id": {
+      "type": "string",
+      "description": "Originating node identifier",
+      "minLength": 1
+    },
+    "timestamp": {
+      "type": "integer",
+      "description": "Unix timestamp in milliseconds",
+      "minimum": 0
+    },
+    "sequence_number": {
+      "type": "integer",
+      "description": "Packet sequence number for ordering",
+      "minimum": 0
+    },
+    "payload": {
+      "type": "object",
+      "description": "Packet-specific payload data"
+    },
+    "target_nodes": {
+      "type": "array",
+      "description": "Optional list of target node IDs (empty = broadcast to all)",
+      "items": {
+        "type": "string"
+      },
+      "default": []
+    }
+  },
+  "additionalProperties": false
+}

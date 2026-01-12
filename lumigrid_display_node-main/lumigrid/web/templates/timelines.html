@@ -1,0 +1,1533 @@
+{% extends "base.html" %}
+
+{% block title %}Timelines - Lumigrid Display Node{% endblock %}
+
+{% block page_title %}Timeline Sequencer{% endblock %}
+
+{% block content %}
+<div class="timelines-container">
+    <!-- Playback Controls Card -->
+    <div class="card playback-card" data-halo="3">
+        <div class="card-header">
+            <h2 class="card-title">
+                <span class="card-icon" aria-hidden="true">▶️</span>
+                Playback Controls
+            </h2>
+            <div class="playback-mode-selector" role="radiogroup" aria-label="Playback mode">
+                <button type="button" class="playback-mode-btn active" data-mode="continuous" aria-pressed="true">
+                    <span aria-hidden="true">🔄</span> Continuous
+                </button>
+                <button type="button" class="playback-mode-btn" data-mode="calendar" aria-pressed="false">
+                    <span aria-hidden="true">📅</span> Calendar
+                </button>
+                <button type="button" class="playback-mode-btn" data-mode="trigger" aria-pressed="false">
+                    <span aria-hidden="true">⚡</span> Trigger
+                </button>
+            </div>
+        </div>
+        <div class="card-body">
+            <div class="playback-controls">
+                <div class="transport-controls">
+                    <button id="play-btn" class="transport-btn play" aria-label="Play timeline">
+                        <span aria-hidden="true">▶</span>
+                    </button>
+                    <button id="stop-btn" class="transport-btn stop" aria-label="Stop timeline">
+                        <span aria-hidden="true">⏹</span>
+                    </button>
+                    <button id="rewind-btn" class="transport-btn" aria-label="Go to start">
+                        <span aria-hidden="true">⏮</span>
+                    </button>
+                </div>
+                <div class="playback-info">
+                    <div class="playback-status">
+                        <span class="status-label">Status</span>
+                        <span id="sequencer-status" class="status-value status-badge">-</span>
+                    </div>
+                    <div class="playback-status">
+                        <span class="status-label">Active Timeline</span>
+                        <span id="active-timeline" class="status-value">-</span>
+                    </div>
+                    <div class="playback-status">
+                        <span class="status-label">Current Preset</span>
+                        <span id="active-preset" class="status-value">-</span>
+                    </div>
+                    <div class="playback-status">
+                        <span class="status-label">RTC Source</span>
+                        <select id="rtc-source-select" class="form-select rtc-select" aria-label="RTC source">
+                            <option value="system">System Time</option>
+                            <option value="ds3231">DS3231 RTC</option>
+                            <option value="network">Network Time (NTP)</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Visual Timeline Editor Card -->
+    <div class="card timeline-editor-card" data-halo="2">
+        <div class="card-header">
+            <h2 class="card-title">
+                <span class="card-icon" aria-hidden="true">🎬</span>
+                Visual Timeline Editor
+            </h2>
+            <div class="timeline-editor-actions">
+                <div class="zoom-controls">
+                    <button id="zoom-out-btn" class="btn btn-secondary btn-small" aria-label="Zoom out">
+                        <span aria-hidden="true">➖</span>
+                    </button>
+                    <span id="zoom-level" class="zoom-level">100%</span>
+                    <button id="zoom-in-btn" class="btn btn-secondary btn-small" aria-label="Zoom in">
+                        <span aria-hidden="true">➕</span>
+                    </button>
+                </div>
+                <select id="timeline-select" class="form-select timeline-select" aria-label="Select timeline">
+                    <option value="">Select a timeline...</option>
+                </select>
+                <button id="create-timeline-btn" class="btn btn-primary">
+                    <span aria-hidden="true">➕</span> New Timeline
+                </button>
+            </div>
+        </div>
+        <div class="card-body timeline-editor-body">
+            <!-- Timeline Grid Container -->
+            <div class="timeline-grid-container" role="application" aria-label="Timeline editor grid">
+                <!-- Time Ruler -->
+                <div class="time-ruler" id="time-ruler" role="presentation">
+                    <div class="time-ruler-track" id="time-ruler-track">
+                        <!-- Time markers generated by JS -->
+                    </div>
+                </div>
+                
+                <!-- Track Container -->
+                <div class="tracks-container" id="tracks-container">
+                    <div class="tracks-sidebar" id="tracks-sidebar">
+                        <!-- Track labels generated by JS -->
+                    </div>
+                    <div class="tracks-content" id="tracks-content" 
+                         tabindex="0"
+                         aria-label="Timeline tracks. Use arrow keys to navigate, Enter to select blocks, Delete to remove."
+                         role="grid">
+                        <!-- Timeline blocks generated by JS -->
+                    </div>
+                </div>
+                
+                <!-- Playhead -->
+                <div class="playhead" id="playhead" role="presentation">
+                    <div class="playhead-marker"></div>
+                    <div class="playhead-line"></div>
+                </div>
+            </div>
+            
+            <!-- Empty State -->
+            <div id="timeline-empty-state" class="timeline-empty-state">
+                <span class="empty-icon" aria-hidden="true">📅</span>
+                <p>Select a timeline to edit or create a new one</p>
+                <button class="btn btn-primary" onclick="openTimelineModal()">
+                    <span aria-hidden="true">➕</span> Create Timeline
+                </button>
+            </div>
+            
+            <!-- Block Properties Panel -->
+            <div id="block-properties-panel" class="block-properties-panel hidden" role="complementary" aria-label="Block properties">
+                <h4>Block Properties</h4>
+                <div class="properties-content">
+                    <div class="form-group">
+                        <label for="block-preset">Preset</label>
+                        <select id="block-preset" class="form-select">
+                            <option value="">Select preset...</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="block-start">Start Time</label>
+                        <input type="time" id="block-start" class="form-input" step="1">
+                    </div>
+                    <div class="form-group">
+                        <label for="block-duration">Duration (seconds)</label>
+                        <input type="number" id="block-duration" class="form-input" min="0" value="0">
+                        <span class="form-hint">0 = until next entry</span>
+                    </div>
+                    <div class="form-group">
+                        <label>
+                            <input type="checkbox" id="block-enabled" checked>
+                            Enabled
+                        </label>
+                    </div>
+                    <div class="properties-actions">
+                        <button id="apply-block-props-btn" class="btn btn-primary btn-small">Apply</button>
+                        <button id="delete-block-btn" class="btn btn-danger btn-small">Delete</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="card-footer timeline-editor-footer">
+            <button id="add-track-btn" class="btn btn-secondary">
+                <span aria-hidden="true">➕</span> Add Track
+            </button>
+            <button id="add-block-btn" class="btn btn-secondary">
+                <span aria-hidden="true">📦</span> Add Block
+            </button>
+            <span class="timeline-stats">
+                <span id="enabled-count">0</span> / <span id="total-timelines">0</span> timelines enabled
+            </span>
+        </div>
+    </div>
+
+    <!-- Timeline List Card -->
+    <div class="card" data-halo="2">
+        <div class="card-header">
+            <h2 class="card-title">
+                <span class="card-icon" aria-hidden="true">📋</span>
+                All Timelines
+            </h2>
+        </div>
+        <div class="card-body">
+            <div id="timelines-list" class="timelines-list">
+                <div class="loading-state">Loading timelines...</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Calendar Scheduling Card -->
+    <div class="card calendar-card" data-halo="1">
+        <div class="card-header">
+            <h2 class="card-title">
+                <span class="card-icon" aria-hidden="true">📅</span>
+                Calendar Scheduling
+            </h2>
+        </div>
+        <div class="card-body">
+            <div class="calendar-grid">
+                <div class="calendar-section">
+                    <h4>Date Range</h4>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="calendar-valid-from">Valid From</label>
+                            <input type="date" id="calendar-valid-from" class="form-input">
+                        </div>
+                        <div class="form-group">
+                            <label for="calendar-valid-until">Valid Until</label>
+                            <input type="date" id="calendar-valid-until" class="form-input">
+                        </div>
+                    </div>
+                </div>
+                <div class="calendar-section">
+                    <h4>Time Window</h4>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="calendar-start-time">Start Time</label>
+                            <input type="time" id="calendar-start-time" class="form-input" step="1">
+                        </div>
+                        <div class="form-group">
+                            <label for="calendar-end-time">End Time</label>
+                            <input type="time" id="calendar-end-time" class="form-input" step="1">
+                        </div>
+                    </div>
+                </div>
+                <div class="calendar-section">
+                    <h4>Days of Week</h4>
+                    <div class="days-of-week-selector" role="group" aria-label="Select days of week">
+                        <label class="day-toggle"><input type="checkbox" value="0" checked> Mon</label>
+                        <label class="day-toggle"><input type="checkbox" value="1" checked> Tue</label>
+                        <label class="day-toggle"><input type="checkbox" value="2" checked> Wed</label>
+                        <label class="day-toggle"><input type="checkbox" value="3" checked> Thu</label>
+                        <label class="day-toggle"><input type="checkbox" value="4" checked> Fri</label>
+                        <label class="day-toggle"><input type="checkbox" value="5"> Sat</label>
+                        <label class="day-toggle"><input type="checkbox" value="6"> Sun</label>
+                    </div>
+                </div>
+                <div class="calendar-section">
+                    <h4>Exception Dates</h4>
+                    <div class="exception-dates-container">
+                        <div id="exception-dates-list" class="exception-dates-list">
+                            <!-- Exception dates added here -->
+                        </div>
+                        <div class="add-exception-row">
+                            <input type="date" id="new-exception-date" class="form-input">
+                            <button id="add-exception-btn" class="btn btn-secondary btn-small">Add</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="calendar-actions">
+                <button id="apply-calendar-btn" class="btn btn-primary">Apply to Selected</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Advanced Features Card -->
+    <div class="card" data-halo="2">
+        <div class="card-header">
+            <h2 class="card-title">
+                <span class="card-icon" aria-hidden="true">⚙️</span>
+                Advanced Features
+            </h2>
+        </div>
+        <div class="card-body">
+            <div class="advanced-features-grid">
+                <button class="feature-btn" id="manage-channel-groups-btn">
+                    <span class="feature-icon">📂</span>
+                    <span class="feature-title">Channel Groups</span>
+                    <span class="feature-desc">Group channels as logical subgroups</span>
+                </button>
+                <button class="feature-btn" id="manage-preset-links-btn">
+                    <span class="feature-icon">🔗</span>
+                    <span class="feature-title">Preset Linking</span>
+                    <span class="feature-desc">Link presets across nodes</span>
+                </button>
+                <button class="feature-btn" id="manage-conditional-rules-btn">
+                    <span class="feature-icon">🔀</span>
+                    <span class="feature-title">Conditional Logic</span>
+                    <span class="feature-desc">Create sensor-based rules</span>
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Create/Edit Timeline Modal -->
+<div id="timeline-modal" class="modal hidden" role="dialog" aria-labelledby="timeline-modal-title">
+    <div class="modal-content">
+        <div class="modal-header">
+            <h3 id="timeline-modal-title">Create Timeline</h3>
+            <button class="modal-close" aria-label="Close">&times;</button>
+        </div>
+        <div class="modal-body">
+            <form id="timeline-form">
+                <input type="hidden" id="timeline-id" value="">
+                
+                <div class="form-group">
+                    <label for="timeline-name">Timeline Name</label>
+                    <input type="text" id="timeline-name" class="form-control" required>
+                </div>
+                
+                <div class="form-group">
+                    <label for="timeline-description">Description</label>
+                    <textarea id="timeline-description" class="form-control" rows="3"></textarea>
+                </div>
+                
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" id="timeline-enabled">
+                        Enabled
+                    </label>
+                </div>
+                
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" id="timeline-loop">
+                        Loop Playback
+                    </label>
+                </div>
+                
+                <h4>Timeline Entries</h4>
+                <div id="timeline-entries">
+                    <!-- Entries will be added here dynamically -->
+                </div>
+                
+                <button type="button" id="add-entry-btn" class="btn btn-secondary">
+                    <span aria-hidden="true">➕</span> Add Entry
+                </button>
+            </form>
+        </div>
+        <div class="modal-footer">
+            <button type="button" class="btn btn-secondary modal-close">Cancel</button>
+            <button type="button" id="save-timeline-btn" class="btn btn-primary">Save Timeline</button>
+        </div>
+    </div>
+</div>
+
+<!-- Entry Template -->
+<template id="entry-template">
+    <div class="timeline-entry card" data-halo="0">
+        <div class="entry-header">
+            <h5>Entry <span class="entry-number"></span></h5>
+            <button type="button" class="btn btn-danger btn-small remove-entry-btn">Remove</button>
+        </div>
+        <div class="entry-body">
+            <div class="form-group">
+                <label>Preset Name</label>
+                <select class="form-control entry-preset">
+                    <option value="">Loading presets...</option>
+                </select>
+            </div>
+            
+            <div class="form-group">
+                <label>Trigger Type</label>
+                <select class="form-control entry-trigger-type">
+                    <option value="time_of_day">Time of Day</option>
+                    <option value="datetime">Specific Date & Time</option>
+                    <option value="interval">Interval</option>
+                    <option value="manual">Manual Only</option>
+                </select>
+            </div>
+            
+            <div class="form-group trigger-time-of-day">
+                <label>Time (HH:MM:SS)</label>
+                <input type="time" step="1" class="form-control entry-time">
+            </div>
+            
+            <div class="form-group trigger-datetime hidden">
+                <label>Date & Time</label>
+                <input type="datetime-local" class="form-control entry-datetime">
+            </div>
+            
+            <div class="form-group trigger-interval hidden">
+                <label>Interval (seconds)</label>
+                <input type="number" class="form-control entry-interval" min="1">
+            </div>
+            
+            <div class="form-group trigger-time-of-day">
+                <label>Days of Week</label>
+                <div class="days-of-week">
+                    <label><input type="checkbox" class="day-checkbox" value="0" checked> Mon</label>
+                    <label><input type="checkbox" class="day-checkbox" value="1" checked> Tue</label>
+                    <label><input type="checkbox" class="day-checkbox" value="2" checked> Wed</label>
+                    <label><input type="checkbox" class="day-checkbox" value="3" checked> Thu</label>
+                    <label><input type="checkbox" class="day-checkbox" value="4" checked> Fri</label>
+                    <label><input type="checkbox" class="day-checkbox" value="5" checked> Sat</label>
+                    <label><input type="checkbox" class="day-checkbox" value="6" checked> Sun</label>
+                </div>
+            </div>
+            
+            <div class="form-group">
+                <label>Duration (seconds, 0 = until next)</label>
+                <input type="number" class="form-control entry-duration" value="0" min="0">
+            </div>
+            
+            <div class="form-group">
+                <label>
+                    <input type="checkbox" class="entry-enabled" checked>
+                    Enabled
+                </label>
+            </div>
+        </div>
+    </div>
+</template>
+
+<style>
+.timelines-container {
+    display: grid;
+    gap: 1.5rem;
+}
+
+/* ==================== PLAYBACK CONTROLS ==================== */
+.playback-card .card-header {
+    flex-wrap: wrap;
+    gap: 1rem;
+}
+
+.playback-mode-selector {
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+}
+
+.playback-mode-btn {
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius-full);
+    padding: 0.5rem 1rem;
+    color: var(--muted);
+    cursor: pointer;
+    transition: all var(--dur-fast) var(--ease-default);
+    font-size: 0.875rem;
+    min-height: var(--touch-target-min);
+}
+
+.playback-mode-btn:hover {
+    background: rgba(255, 255, 255, 0.12);
+    color: var(--ink);
+}
+
+.playback-mode-btn.active {
+    background: var(--grad-rf);
+    color: white;
+    border-color: transparent;
+    box-shadow: var(--shadow-glow-cyan);
+}
+
+.playback-controls {
+    display: flex;
+    gap: 2rem;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.transport-controls {
+    display: flex;
+    gap: 0.5rem;
+}
+
+.transport-btn {
+    width: 48px;
+    height: 48px;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid var(--glass-border);
+    color: var(--ink);
+    cursor: pointer;
+    font-size: 1.25rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all var(--dur-fast) var(--ease-default);
+}
+
+.transport-btn:hover {
+    background: rgba(255, 255, 255, 0.12);
+    transform: scale(1.05);
+}
+
+.transport-btn.play:hover {
+    background: rgba(16, 185, 129, 0.2);
+    border-color: var(--success);
+}
+
+.transport-btn.stop:hover {
+    background: rgba(255, 45, 85, 0.2);
+    border-color: var(--mag);
+}
+
+.playback-info {
+    display: flex;
+    gap: 1.5rem;
+    flex-wrap: wrap;
+    flex: 1;
+}
+
+.playback-status {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    min-width: 120px;
+}
+
+.rtc-select {
+    padding: 0.35rem 0.5rem;
+    font-size: 0.85rem;
+    min-height: auto;
+}
+
+/* ==================== VISUAL TIMELINE EDITOR ==================== */
+.timeline-editor-card .card-body {
+    padding: 0;
+    position: relative;
+}
+
+.timeline-editor-body {
+    min-height: 400px;
+    position: relative;
+}
+
+.timeline-editor-actions {
+    display: flex;
+    gap: 1rem;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.zoom-controls {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.zoom-level {
+    font-size: 0.85rem;
+    color: var(--muted);
+    min-width: 40px;
+    text-align: center;
+}
+
+.timeline-select {
+    min-width: 200px;
+}
+
+/* Timeline Grid Container */
+.timeline-grid-container {
+    position: relative;
+    background: var(--bg-0);
+    border-radius: var(--radius-md);
+    overflow: hidden;
+    margin: 1rem;
+}
+
+/* Time Ruler */
+.time-ruler {
+    height: 40px;
+    background: var(--glass-1);
+    border-bottom: 1px solid var(--glass-border);
+    position: relative;
+    margin-left: 150px;
+    overflow: hidden;
+}
+
+.time-ruler-track {
+    display: flex;
+    height: 100%;
+    position: relative;
+}
+
+.time-marker {
+    position: absolute;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-end;
+    padding-bottom: 4px;
+    font-size: 0.75rem;
+    color: var(--muted);
+    user-select: none;
+}
+
+.time-marker::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    width: 1px;
+    height: 12px;
+    background: rgba(255, 255, 255, 0.2);
+}
+
+.time-marker.major::before {
+    height: 20px;
+    background: rgba(255, 255, 255, 0.4);
+}
+
+/* Tracks Container */
+.tracks-container {
+    display: flex;
+    min-height: 300px;
+    max-height: 500px;
+    overflow: auto;
+}
+
+.tracks-sidebar {
+    width: 150px;
+    background: var(--glass-1);
+    border-right: 1px solid var(--glass-border);
+    flex-shrink: 0;
+    position: sticky;
+    left: 0;
+    z-index: 10;
+}
+
+.track-label {
+    height: 60px;
+    display: flex;
+    align-items: center;
+    padding: 0 1rem;
+    border-bottom: 1px solid var(--glass-border);
+    font-size: 0.875rem;
+    font-weight: 500;
+    color: var(--ink);
+    gap: 0.5rem;
+}
+
+.track-label-icon {
+    opacity: 0.6;
+}
+
+.track-label-text {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.tracks-content {
+    flex: 1;
+    position: relative;
+    background: repeating-linear-gradient(
+        90deg,
+        transparent,
+        transparent 59px,
+        rgba(255, 255, 255, 0.05) 59px,
+        rgba(255, 255, 255, 0.05) 60px
+    );
+}
+
+.track-row {
+    height: 60px;
+    border-bottom: 1px solid var(--glass-border);
+    position: relative;
+}
+
+/* Timeline Blocks */
+.timeline-block {
+    position: absolute;
+    height: 44px;
+    top: 8px;
+    min-width: 40px;
+    background: var(--grad-rf);
+    border-radius: var(--radius-sm);
+    cursor: grab;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 8px;
+    overflow: hidden;
+    user-select: none;
+    transition: box-shadow var(--dur-fast) var(--ease-default);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+.timeline-block:hover {
+    box-shadow: 0 4px 16px rgba(0, 212, 255, 0.3);
+}
+
+.timeline-block.selected {
+    outline: 2px solid var(--cya);
+    outline-offset: 2px;
+}
+
+.timeline-block.dragging {
+    opacity: 0.8;
+    cursor: grabbing;
+    z-index: 100;
+}
+
+.timeline-block-content {
+    font-size: 0.75rem;
+    color: white;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    overflow: hidden;
+}
+
+/* Resize Handles */
+.resize-handle {
+    position: absolute;
+    top: 0;
+    width: 8px;
+    height: 100%;
+    cursor: ew-resize;
+    z-index: 1;
+}
+
+.resize-handle-left {
+    left: 0;
+    border-radius: var(--radius-sm) 0 0 var(--radius-sm);
+}
+
+.resize-handle-right {
+    right: 0;
+    border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+}
+
+.resize-handle:hover {
+    background: rgba(255, 255, 255, 0.2);
+}
+
+/* Playhead */
+.playhead {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    z-index: 20;
+    pointer-events: none;
+    margin-left: 150px;
+}
+
+.playhead-marker {
+    width: 12px;
+    height: 12px;
+    background: var(--cya);
+    border-radius: 50%;
+    position: absolute;
+    top: 14px;
+    left: -5px;
+}
+
+.playhead-line {
+    width: 2px;
+    background: var(--cya);
+    position: absolute;
+    top: 40px;
+    bottom: 0;
+    box-shadow: 0 0 8px var(--cya);
+}
+
+/* Empty State */
+.timeline-empty-state {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 0, 0, 0.5);
+    gap: 1rem;
+}
+
+.timeline-empty-state.hidden {
+    display: none;
+}
+
+/* Block Properties Panel */
+.block-properties-panel {
+    position: absolute;
+    right: 1rem;
+    top: 1rem;
+    width: 250px;
+    background: var(--glass-bg);
+    backdrop-filter: var(--glass-blur);
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius-md);
+    padding: 1rem;
+    z-index: 30;
+}
+
+.block-properties-panel.hidden {
+    display: none;
+}
+
+.block-properties-panel h4 {
+    margin: 0 0 1rem 0;
+    font-size: 1rem;
+    color: var(--ink);
+}
+
+.properties-content .form-group {
+    margin-bottom: 0.75rem;
+}
+
+.properties-actions {
+    display: flex;
+    gap: 0.5rem;
+    margin-top: 1rem;
+}
+
+.timeline-editor-footer {
+    display: flex;
+    gap: 1rem;
+    align-items: center;
+    padding: 1rem 1.5rem;
+    border-top: 1px solid var(--glass-border);
+}
+
+.timeline-stats {
+    margin-left: auto;
+    font-size: 0.875rem;
+    color: var(--muted);
+}
+
+/* ==================== TIMELINES LIST ==================== */
+.timelines-list {
+    min-height: 200px;
+}
+
+.timeline-item {
+    background: var(--glass-0);
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius-md);
+    padding: 1rem;
+    margin-bottom: 1rem;
+    transition: all var(--dur-fast) var(--ease-default);
+}
+
+.timeline-item:hover {
+    border-color: var(--cya);
+    box-shadow: 0 0 10px rgba(0, 212, 255, 0.1);
+}
+
+.timeline-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.5rem;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+}
+
+.timeline-title {
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: var(--ink);
+}
+
+.timeline-actions {
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+}
+
+.timeline-info {
+    font-size: 0.9rem;
+    color: var(--muted);
+    margin-bottom: 0.5rem;
+}
+
+.timeline-entries-count {
+    font-size: 0.85rem;
+    color: var(--text-tertiary);
+}
+
+/* ==================== CALENDAR SCHEDULING ==================== */
+.calendar-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+    gap: 1.5rem;
+}
+
+.calendar-section h4 {
+    margin: 0 0 0.75rem 0;
+    font-size: 0.9rem;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.days-of-week-selector {
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+}
+
+.day-toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.5rem 0.75rem;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition: all var(--dur-fast) var(--ease-default);
+    font-size: 0.85rem;
+}
+
+.day-toggle:has(input:checked) {
+    background: rgba(0, 113, 227, 0.2);
+    border-color: var(--accent-primary);
+}
+
+.day-toggle input {
+    accent-color: var(--accent-primary);
+}
+
+.exception-dates-container {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+.exception-dates-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+}
+
+.exception-date-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.35rem 0.75rem;
+    background: rgba(255, 45, 85, 0.1);
+    border: 1px solid rgba(255, 45, 85, 0.3);
+    border-radius: var(--radius-full);
+    font-size: 0.85rem;
+    color: var(--mag);
+}
+
+.exception-date-tag button {
+    background: none;
+    border: none;
+    color: var(--mag);
+    cursor: pointer;
+    padding: 0;
+    font-size: 1rem;
+    line-height: 1;
+}
+
+.add-exception-row {
+    display: flex;
+    gap: 0.5rem;
+}
+
+.add-exception-row input {
+    flex: 1;
+}
+
+.calendar-actions {
+    margin-top: 1.5rem;
+    display: flex;
+    justify-content: flex-end;
+}
+
+/* ==================== TIMELINE ENTRY FORM ==================== */
+.timeline-entry {
+    margin-bottom: 1rem;
+    padding: 1rem;
+}
+
+.entry-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 1rem;
+}
+
+.entry-body .form-group {
+    margin-bottom: 1rem;
+}
+
+.days-of-week {
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+}
+
+.days-of-week label {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+}
+
+.status-badge {
+    padding: 0.25rem 0.75rem;
+    border-radius: 12px;
+    font-size: 0.85rem;
+    font-weight: 500;
+}
+
+.status-badge.running {
+    background: rgba(46, 213, 115, 0.2);
+    color: #2ed573;
+}
+
+.status-badge.stopped {
+    background: rgba(255, 71, 87, 0.2);
+    color: #ff4757;
+}
+
+/* ==================== MODALS ==================== */
+.modal {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.7);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+}
+
+.modal.hidden {
+    display: none;
+}
+
+.modal-content {
+    background: var(--bg-1);
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius-lg);
+    max-width: 800px;
+    max-height: 90vh;
+    width: 90%;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 25px 50px rgba(0, 0, 0, 0.5);
+}
+
+.modal-header {
+    padding: 1.5rem;
+    border-bottom: 1px solid var(--glass-border);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.modal-body {
+    padding: 1.5rem;
+    overflow-y: auto;
+    flex: 1;
+}
+
+.modal-footer {
+    padding: 1rem 1.5rem;
+    border-top: 1px solid var(--glass-border);
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.5rem;
+}
+
+.modal-close {
+    background: none;
+    border: none;
+    font-size: 1.5rem;
+    cursor: pointer;
+    color: var(--muted);
+    padding: 0.5rem;
+    line-height: 1;
+}
+
+.modal-close:hover {
+    color: var(--ink);
+}
+
+.btn-small {
+    padding: 0.25rem 0.75rem;
+    font-size: 0.85rem;
+}
+
+.btn-warning {
+    background: rgba(255, 149, 0, 0.2);
+    color: var(--amb);
+    border: 1px solid var(--amb);
+}
+
+.btn-warning:hover {
+    background: rgba(255, 149, 0, 0.3);
+}
+
+.btn-success {
+    background: rgba(16, 185, 129, 0.2);
+    color: var(--success-light);
+    border: 1px solid var(--success-light);
+}
+
+.btn-success:hover {
+    background: rgba(16, 185, 129, 0.3);
+}
+
+.btn-danger {
+    background: rgba(255, 45, 85, 0.2);
+    color: var(--mag);
+    border: 1px solid var(--mag);
+}
+
+.btn-danger:hover {
+    background: rgba(255, 45, 85, 0.3);
+}
+
+.loading-state, .empty-state {
+    text-align: center;
+    padding: 2rem;
+    color: var(--muted);
+}
+
+/* ==================== ADVANCED FEATURES ==================== */
+.advanced-features-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 1rem;
+}
+
+.feature-btn {
+    background: var(--glass-0);
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius-md);
+    padding: 1.5rem;
+    cursor: pointer;
+    transition: all var(--dur-fast) var(--ease-default);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    gap: 0.5rem;
+    color: var(--ink);
+}
+
+.feature-btn:hover {
+    border-color: var(--cya);
+    background: rgba(0, 212, 255, 0.05);
+    transform: translateY(-2px);
+}
+
+.feature-icon {
+    font-size: 2rem;
+}
+
+.feature-title {
+    font-weight: 600;
+    font-size: 1rem;
+    color: var(--ink);
+}
+
+.feature-desc {
+    font-size: 0.85rem;
+    color: var(--muted);
+}
+
+.item-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+.item-card {
+    background: var(--glass-0);
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius-md);
+    padding: 1rem;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+}
+
+.item-info h4 {
+    margin: 0 0 0.25rem 0;
+    font-size: 1rem;
+    color: var(--ink);
+}
+
+.item-info p {
+    margin: 0;
+    font-size: 0.85rem;
+    color: var(--muted);
+}
+
+.item-actions {
+    display: flex;
+    gap: 0.5rem;
+}
+
+.condition-builder {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+.condition-row {
+    display: flex;
+    gap: 0.5rem;
+    align-items: flex-end;
+    flex-wrap: wrap;
+}
+
+.condition-row .form-group {
+    flex: 1;
+    min-width: 150px;
+    margin-bottom: 0;
+}
+
+.logic-operator-section {
+    background: var(--glass-0);
+    padding: 0.75rem;
+    border-radius: var(--radius-sm);
+    margin: 0.5rem 0;
+}
+
+.action-section {
+    background: var(--glass-0);
+    padding: 1rem;
+    border-radius: var(--radius-md);
+    margin-top: 1rem;
+}
+
+.action-section h4 {
+    margin-top: 0;
+    margin-bottom: 1rem;
+    color: var(--ink);
+}
+
+/* ==================== RESPONSIVE ==================== */
+@media (max-width: 768px) {
+    .playback-controls {
+        flex-direction: column;
+        align-items: stretch;
+    }
+    
+    .transport-controls {
+        justify-content: center;
+    }
+    
+    .playback-info {
+        justify-content: center;
+    }
+    
+    .timeline-editor-actions {
+        flex-direction: column;
+        align-items: stretch;
+    }
+    
+    .timeline-select {
+        width: 100%;
+    }
+    
+    .tracks-sidebar {
+        width: 100px;
+    }
+    
+    .time-ruler {
+        margin-left: 100px;
+    }
+    
+    .playhead {
+        margin-left: 100px;
+    }
+    
+    .block-properties-panel {
+        position: fixed;
+        right: 0;
+        bottom: 0;
+        left: 0;
+        top: auto;
+        width: auto;
+        border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+    }
+}
+</style>
+
+<!-- Channel Groups Modal -->
+<div id="channel-groups-modal" class="modal hidden" role="dialog" aria-labelledby="channel-groups-modal-title">
+    <div class="modal-content">
+        <div class="modal-header">
+            <h3 id="channel-groups-modal-title">Channel Groups</h3>
+            <button class="modal-close" aria-label="Close">&times;</button>
+        </div>
+        <div class="modal-body">
+            <button id="add-channel-group-btn" class="btn btn-primary" style="margin-bottom: 1rem;">
+                <span aria-hidden="true">➕</span> Add Channel Group
+            </button>
+            <div id="channel-groups-list" class="item-list">
+                <div class="loading-state">Loading channel groups...</div>
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button type="button" class="btn btn-secondary modal-close">Close</button>
+        </div>
+    </div>
+</div>
+
+<!-- Channel Group Editor Modal -->
+<div id="channel-group-editor-modal" class="modal hidden" role="dialog" aria-labelledby="channel-group-editor-title">
+    <div class="modal-content">
+        <div class="modal-header">
+            <h3 id="channel-group-editor-title">Add Channel Group</h3>
+            <button class="modal-close" aria-label="Close">&times;</button>
+        </div>
+        <div class="modal-body">
+            <form id="channel-group-form">
+                <input type="hidden" id="group-id" value="">
+                
+                <div class="form-group">
+                    <label for="group-name">Group Name</label>
+                    <input type="text" id="group-name" class="form-control" required>
+                </div>
+                
+                <div class="form-group">
+                    <label for="group-description">Description</label>
+                    <textarea id="group-description" class="form-control" rows="2"></textarea>
+                </div>
+                
+                <div class="form-group">
+                    <label for="group-channels">Channels (comma-separated IDs)</label>
+                    <input type="text" id="group-channels" class="form-control" placeholder="led_0, led_1, pwm_0" required>
+                    <small>Example: led_0, led_1, pwm_0, display_main</small>
+                </div>
+                
+                <div class="form-group">
+                    <label for="group-color">Color (for visualization)</label>
+                    <input type="color" id="group-color" class="form-control" value="#0071e3">
+                </div>
+                
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" id="group-enabled" checked>
+                        Enabled
+                    </label>
+                </div>
+            </form>
+        </div>
+        <div class="modal-footer">
+            <button type="button" class="btn btn-secondary modal-close">Cancel</button>
+            <button type="button" id="save-channel-group-btn" class="btn btn-primary">Save</button>
+        </div>
+    </div>
+</div>
+
+<!-- Preset Links Modal -->
+<div id="preset-links-modal" class="modal hidden" role="dialog" aria-labelledby="preset-links-modal-title">
+    <div class="modal-content">
+        <div class="modal-header">
+            <h3 id="preset-links-modal-title">Preset Links</h3>
+            <button class="modal-close" aria-label="Close">&times;</button>
+        </div>
+        <div class="modal-body">
+            <button id="add-preset-link-btn" class="btn btn-primary" style="margin-bottom: 1rem;">
+                <span aria-hidden="true">➕</span> Add Preset Link
+            </button>
+            <div id="preset-links-list" class="item-list">
+                <div class="loading-state">Loading preset links...</div>
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button type="button" class="btn btn-secondary modal-close">Close</button>
+        </div>
+    </div>
+</div>
+
+<!-- Preset Link Editor Modal -->
+<div id="preset-link-editor-modal" class="modal hidden" role="dialog" aria-labelledby="preset-link-editor-title">
+    <div class="modal-content">
+        <div class="modal-header">
+            <h3 id="preset-link-editor-title">Add Preset Link</h3>
+            <button class="modal-close" aria-label="Close">&times;</button>
+        </div>
+        <div class="modal-body">
+            <form id="preset-link-form">
+                <input type="hidden" id="link-id" value="">
+                
+                <div class="form-group">
+                    <label for="link-name">Link Name</label>
+                    <input type="text" id="link-name" class="form-control" required>
+                </div>
+                
+                <div class="form-group">
+                    <label for="link-description">Description</label>
+                    <textarea id="link-description" class="form-control" rows="2"></textarea>
+                </div>
+                
+                <div class="form-group">
+                    <label for="link-source-preset">Source Preset</label>
+                    <select id="link-source-preset" class="form-control" required>
+                        <option value="">Select preset...</option>
+                    </select>
+                </div>
+                
+                <div class="form-group">
+                    <label for="link-target-node">Target Node (IP or hostname)</label>
+                    <input type="text" id="link-target-node" class="form-control" placeholder="192.168.1.100" required>
+                </div>
+                
+                <div class="form-group">
+                    <label for="link-target-preset">Target Preset Name</label>
+                    <input type="text" id="link-target-preset" class="form-control" required>
+                </div>
+                
+                <div class="form-group">
+                    <label for="link-type">Link Type</label>
+                    <select id="link-type" class="form-control">
+                        <option value="trigger">Trigger - Start target preset</option>
+                        <option value="sync">Sync - Keep in sync</option>
+                        <option value="cascade">Cascade - Sequential trigger</option>
+                    </select>
+                </div>
+                
+                <div class="form-group">
+                    <label for="link-delay">Delay (milliseconds)</label>
+                    <input type="number" id="link-delay" class="form-control" value="0" min="0" max="60000">
+                </div>
+                
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" id="link-enabled" checked>
+                        Enabled
+                    </label>
+                </div>
+            </form>
+        </div>
+        <div class="modal-footer">
+            <button type="button" class="btn btn-secondary modal-close">Cancel</button>
+            <button type="button" id="save-preset-link-btn" class="btn btn-primary">Save</button>
+        </div>
+    </div>
+</div>
+
+<!-- Conditional Rules Modal -->
+<div id="conditional-rules-modal" class="modal hidden" role="dialog" aria-labelledby="conditional-rules-modal-title">
+    <div class="modal-content">
+        <div class="modal-header">
+            <h3 id="conditional-rules-modal-title">Conditional Logic Rules</h3>
+            <button class="modal-close" aria-label="Close">&times;</button>
+        </div>
+        <div class="modal-body">
+            <button id="add-conditional-rule-btn" class="btn btn-primary" style="margin-bottom: 1rem;">
+                <span aria-hidden="true">➕</span> Add Conditional Rule
+            </button>
+            <div id="conditional-rules-list" class="item-list">
+                <div class="loading-state">Loading conditional rules...</div>
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button type="button" class="btn btn-secondary modal-close">Close</button>
+        </div>
+    </div>
+</div>
+
+<!-- Conditional Rule Editor Modal -->
+<div id="conditional-rule-editor-modal" class="modal hidden" role="dialog" aria-labelledby="conditional-rule-editor-title">
+    <div class="modal-content">
+        <div class="modal-header">
+            <h3 id="conditional-rule-editor-title">Add Conditional Rule</h3>
+            <button class="modal-close" aria-label="Close">&times;</button>
+        </div>
+        <div class="modal-body">
+            <form id="conditional-rule-form">
+                <input type="hidden" id="rule-id" value="">
+                
+                <div class="form-group">
+                    <label for="rule-name">Rule Name</label>
+                    <input type="text" id="rule-name" class="form-control" required>
+                </div>
+                
+                <div class="form-group">
+                    <label for="rule-description">Description</label>
+                    <textarea id="rule-description" class="form-control" rows="2"></textarea>
+                </div>
+                
+                <h4>Conditions</h4>
+                <div id="conditions-container" class="condition-builder">
+                    <!-- Conditions will be added here -->
+                </div>
+                
+                <button type="button" id="add-condition-btn" class="btn btn-secondary" style="margin-top: 0.5rem;">
+                    <span aria-hidden="true">➕</span> Add Condition
+                </button>
+                
+                <div class="logic-operator-section">
+                    <label for="logic-operator">Logic Operator</label>
+                    <select id="logic-operator" class="form-control">
+                        <option value="AND">AND - All conditions must be true</option>
+                        <option value="OR">OR - At least one condition must be true</option>
+                    </select>
+                </div>
+                
+                <div class="action-section">
+                    <h4>Action if TRUE</h4>
+                    <div class="form-group">
+                        <label for="action-true-type">Action Type</label>
+                        <select id="action-true-type" class="form-control">
+                            <option value="play_preset">Play Preset</option>
+                            <option value="trigger_timeline">Trigger Timeline</option>
+                            <option value="set_mode">Set Mode</option>
+                        </select>
+                    </div>
+                    <div class="form-group" id="action-true-preset-group">
+                        <label for="action-true-preset">Preset</label>
+                        <select id="action-true-preset" class="form-control">
+                            <option value="">Select preset...</option>
+                        </select>
+                    </div>
+                </div>
+                
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" id="rule-enabled" checked>
+                        Enabled
+                    </label>
+                </div>
+            </form>
+        </div>
+        <div class="modal-footer">
+            <button type="button" class="btn btn-secondary modal-close">Cancel</button>
+            <button type="button" id="save-conditional-rule-btn" class="btn btn-primary">Save</button>
+        </div>
+    </div>
+</div>
+
+</style>
+
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/timelines.js') }}"></script>
+{% endblock %}

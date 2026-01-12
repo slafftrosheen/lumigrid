@@ -1,0 +1,39 @@
+{
+  "node_id": "node-led-001",
+  "node_name": "Main LED Controller",
+  "node_type": "led_controller",
+  "network": {
+    "ssid": "CubeLedRF",
+    "password": "cube1234",
+    "ip_address": "192.168.4.1"
+  },
+  "hardware": {
+    "led_pins": {
+      "red": 25,
+      "green": 26,
+      "blue": 27,
+      "white": 32
+    },
+    "rf_frequency_mhz": 433.92,
+    "common_anode": false
+  },
+  "sync": {
+    "enabled": true,
+    "udp_port": 4210,
+    "interval_ms": 1000
+  },
+  "presets": {
+    "button1": {
+      "r": 28,
+      "g": 78,
+      "b": 255,
+      "w": 0
+    },
+    "button2": {
+      "r": 0,
+      "g": 0,
+      "b": 0,
+      "w": 255
+    }
+  }
+}

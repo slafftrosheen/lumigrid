@@ -1,0 +1,24 @@
+{
+  "preset_name": "temp_orange_celsius",
+  "description": "Orange temperature display in Celsius with icon",
+  "frame_config": {
+    "id": "temp_orange_c",
+    "type": "temperature",
+    "name": "Orange Temperature",
+    "enabled": true,
+    "duration": 5,
+    "unit": "celsius",
+    "colors": {
+      "background": "#000000",
+      "text": "#FF8000"
+    },
+    "font": {
+      "size": 16
+    },
+    "position": {
+      "x": "center",
+      "y": "center"
+    },
+    "show_icon": true
+  }
+}

@@ -1,0 +1,141 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/algorhythmicdev/lumigrid_misc/blob/main/schemas/conditional-logic.schema.json",
+  "title": "LumiGrid Conditional Logic Schema",
+  "description": "Schema for conditional logic rules in sequences - branch or trigger based on sensor data, time, or system state",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "Unique identifier for the conditional rule",
+      "minLength": 1,
+      "maxLength": 100
+    },
+    "name": {
+      "type": "string",
+      "description": "Human-readable name for the rule",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "description": {
+      "type": "string",
+      "description": "Optional description of the rule",
+      "maxLength": 500
+    },
+    "enabled": {
+      "type": "boolean",
+      "description": "Whether the rule is currently active",
+      "default": true
+    },
+    "conditions": {
+      "type": "array",
+      "description": "List of conditions that must be met",
+      "items": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "description": "Type of condition",
+            "enum": ["sensor", "time", "system_state", "custom"]
+          },
+          "sensor_type": {
+            "type": "string",
+            "description": "Type of sensor (for sensor conditions)",
+            "enum": ["motion", "temperature", "humidity", "light", "custom"]
+          },
+          "operator": {
+            "type": "string",
+            "description": "Comparison operator",
+            "enum": ["equals", "not_equals", "greater_than", "less_than", "greater_or_equal", "less_or_equal", "contains", "in_range"]
+          },
+          "value": {
+            "description": "Value to compare against (type varies)",
+            "oneOf": [
+              {"type": "string"},
+              {"type": "number"},
+              {"type": "boolean"}
+            ]
+          },
+          "value_min": {
+            "type": "number",
+            "description": "Minimum value for range comparisons"
+          },
+          "value_max": {
+            "type": "number",
+            "description": "Maximum value for range comparisons"
+          },
+          "time_start": {
+            "type": "string",
+            "description": "Start time for time-based conditions (HH:MM:SS)",
+            "pattern": "^([01]\\d|2[0-3]):([0-5]\\d):([0-5]\\d)$"
+          },
+          "time_end": {
+            "type": "string",
+            "description": "End time for time-based conditions (HH:MM:SS)",
+            "pattern": "^([01]\\d|2[0-3]):([0-5]\\d):([0-5]\\d)$"
+          }
+        },
+        "required": ["type", "operator"]
+      },
+      "minItems": 1
+    },
+    "logic_operator": {
+      "type": "string",
+      "description": "How to combine multiple conditions",
+      "enum": ["AND", "OR"],
+      "default": "AND"
+    },
+    "action_if_true": {
+      "type": "object",
+      "description": "Action to perform when conditions are met",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["play_preset", "trigger_timeline", "set_mode", "send_notification"]
+        },
+        "preset_name": {
+          "type": "string",
+          "description": "Preset to play (for play_preset action)"
+        },
+        "timeline_id": {
+          "type": "string",
+          "description": "Timeline to trigger (for trigger_timeline action)"
+        },
+        "mode": {
+          "type": "string",
+          "description": "Mode to set (for set_mode action)"
+        },
+        "message": {
+          "type": "string",
+          "description": "Notification message (for send_notification action)"
+        }
+      },
+      "required": ["type"]
+    },
+    "action_if_false": {
+      "type": "object",
+      "description": "Optional action to perform when conditions are NOT met",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["play_preset", "trigger_timeline", "set_mode", "send_notification"]
+        },
+        "preset_name": {
+          "type": "string"
+        },
+        "timeline_id": {
+          "type": "string"
+        },
+        "mode": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": ["type"]
+    }
+  },
+  "required": ["id", "name", "conditions", "action_if_true"],
+  "additionalProperties": false
+}

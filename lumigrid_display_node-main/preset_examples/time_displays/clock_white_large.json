@@ -1,0 +1,24 @@
+{
+  "preset_name": "clock_white_large",
+  "description": "Large white clock display with seconds",
+  "frame_config": {
+    "id": "clock_white_large",
+    "type": "time",
+    "name": "Large White Clock",
+    "enabled": true,
+    "duration": 10,
+    "colors": {
+      "background": "#000000",
+      "text": "#FFFFFF",
+      "accent": "#CCCCCC"
+    },
+    "font": {
+      "size": 20
+    },
+    "position": {
+      "x": "center",
+      "y": "center"
+    },
+    "format": "%H:%M:%S"
+  }
+}

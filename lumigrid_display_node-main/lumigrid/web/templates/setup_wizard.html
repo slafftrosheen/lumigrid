@@ -1,0 +1,536 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Setup Wizard - Lumigrid Display Node</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <style>
+        .wizard-container {
+            max-width: 800px;
+            margin: 40px auto;
+            padding: 20px;
+        }
+        .wizard-header {
+            text-align: center;
+            margin-bottom: 40px;
+        }
+        .wizard-header h1 {
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+        }
+        .wizard-header p {
+            font-size: 1.1rem;
+            opacity: 0.8;
+        }
+        .wizard-steps {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 40px;
+            padding: 0 20px;
+        }
+        .wizard-step {
+            flex: 1;
+            text-align: center;
+            position: relative;
+        }
+        .wizard-step:not(:last-child)::after {
+            content: '';
+            position: absolute;
+            top: 20px;
+            left: 50%;
+            width: 100%;
+            height: 2px;
+            background: rgba(255, 255, 255, 0.2);
+            z-index: -1;
+        }
+        .wizard-step.active:not(:last-child)::after {
+            background: var(--primary-color, #00d4ff);
+        }
+        .step-number {
+            display: inline-block;
+            width: 40px;
+            height: 40px;
+            line-height: 40px;
+            border-radius: 50%;
+            background: rgba(255, 255, 255, 0.1);
+            margin-bottom: 10px;
+            font-weight: bold;
+        }
+        .wizard-step.active .step-number {
+            background: var(--primary-color, #00d4ff);
+            color: #000;
+        }
+        .wizard-step.completed .step-number {
+            background: #00ff88;
+            color: #000;
+        }
+        .step-title {
+            font-size: 0.9rem;
+            opacity: 0.7;
+        }
+        .wizard-step.active .step-title {
+            opacity: 1;
+            font-weight: bold;
+        }
+        .wizard-content {
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 8px;
+            padding: 40px;
+            min-height: 400px;
+        }
+        .wizard-section {
+            display: none;
+        }
+        .wizard-section.active {
+            display: block;
+        }
+        .wizard-section h2 {
+            font-size: 2rem;
+            margin-bottom: 20px;
+        }
+        .wizard-section p {
+            margin-bottom: 20px;
+            line-height: 1.6;
+        }
+        .form-group {
+            margin-bottom: 25px;
+        }
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 500;
+        }
+        .form-group input,
+        .form-group select {
+            width: 100%;
+            padding: 12px;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 4px;
+            background: rgba(0, 0, 0, 0.3);
+            color: white;
+            font-size: 1rem;
+        }
+        .form-group input:focus,
+        .form-group select:focus {
+            outline: none;
+            border-color: var(--primary-color, #00d4ff);
+        }
+        .form-group .help-text {
+            font-size: 0.9rem;
+            opacity: 0.7;
+            margin-top: 5px;
+        }
+        .network-info {
+            background: rgba(0, 212, 255, 0.1);
+            border: 1px solid rgba(0, 212, 255, 0.3);
+            border-radius: 4px;
+            padding: 20px;
+            margin: 20px 0;
+        }
+        .network-info-item {
+            margin-bottom: 10px;
+        }
+        .network-info-item strong {
+            display: inline-block;
+            min-width: 120px;
+        }
+        .wizard-actions {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 40px;
+        }
+        .btn {
+            padding: 12px 30px;
+            border: none;
+            border-radius: 4px;
+            font-size: 1rem;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        .btn-primary {
+            background: var(--primary-color, #00d4ff);
+            color: #000;
+        }
+        .btn-primary:hover {
+            background: #00b8e6;
+        }
+        .btn-secondary {
+            background: rgba(255, 255, 255, 0.1);
+            color: white;
+        }
+        .btn-secondary:hover {
+            background: rgba(255, 255, 255, 0.2);
+        }
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        .alert {
+            padding: 15px;
+            border-radius: 4px;
+            margin-bottom: 20px;
+        }
+        .alert-success {
+            background: rgba(0, 255, 136, 0.1);
+            border: 1px solid rgba(0, 255, 136, 0.3);
+            color: #00ff88;
+        }
+        .alert-error {
+            background: rgba(255, 68, 68, 0.1);
+            border: 1px solid rgba(255, 68, 68, 0.3);
+            color: #ff4444;
+        }
+    </style>
+</head>
+<body>
+    <div class="wizard-container">
+        <div class="wizard-header">
+            <h1>🔲 Welcome to Lumigrid</h1>
+            <p>Let's set up your display node</p>
+        </div>
+
+        <div class="wizard-steps">
+            <div class="wizard-step active" data-step="1">
+                <div class="step-number">1</div>
+                <div class="step-title">Welcome</div>
+            </div>
+            <div class="wizard-step" data-step="2">
+                <div class="step-number">2</div>
+                <div class="step-title">Network</div>
+            </div>
+            <div class="wizard-step" data-step="3">
+                <div class="step-number">3</div>
+                <div class="step-title">Node Config</div>
+            </div>
+            <div class="wizard-step" data-step="4">
+                <div class="step-number">4</div>
+                <div class="step-title">Display Mode</div>
+            </div>
+            <div class="wizard-step" data-step="5">
+                <div class="step-number">5</div>
+                <div class="step-title">Complete</div>
+            </div>
+        </div>
+
+        <div class="wizard-content">
+            <!-- Step 1: Welcome -->
+            <div class="wizard-section active" data-section="1">
+                <h2>Welcome to Lumigrid Display Node</h2>
+                <p>This wizard will guide you through the initial setup of your Raspberry Pi LED matrix display node.</p>
+                <p>We'll configure:</p>
+                <ul>
+                    <li>Network settings and connectivity</li>
+                    <li>Node identification and control mode</li>
+                    <li>Display hardware type (HUB75 vs HDMI)</li>
+                </ul>
+                <p>The setup process takes just a few minutes. Click "Next" to begin.</p>
+            </div>
+
+            <!-- Step 2: Network -->
+            <div class="wizard-section" data-section="2">
+                <h2>Network Configuration</h2>
+                <div class="network-info">
+                    <h3>Current Network Status</h3>
+                    <div class="network-info-item">
+                        <strong>IP Address:</strong>
+                        <span id="network-ip">Loading...</span>
+                    </div>
+                    <div class="network-info-item">
+                        <strong>Hostname:</strong>
+                        <span id="network-hostname">Loading...</span>
+                    </div>
+                    <div class="network-info-item">
+                        <strong>Connection:</strong>
+                        <span id="network-connection">Loading...</span>
+                    </div>
+                </div>
+                
+                <p>Your device is accessible at the IP address shown above. You can configure Wi-Fi settings using the Network page after setup, or use <code>nmcli</code> from the command line.</p>
+                
+                <div class="form-group">
+                    <label for="hostname">Device Hostname</label>
+                    <input type="text" id="hostname" name="hostname" value="lumigrid" placeholder="lumigrid">
+                    <div class="help-text">A friendly name for this device on your network</div>
+                </div>
+            </div>
+
+            <!-- Step 3: Node Configuration -->
+            <div class="wizard-section" data-section="3">
+                <h2>Node Configuration</h2>
+                
+                <div class="form-group">
+                    <label for="node-id">Node ID</label>
+                    <input type="text" id="node-id" name="node-id" placeholder="display-node-01" required>
+                    <div class="help-text">Unique identifier for this display node (use letters, numbers, and hyphens)</div>
+                </div>
+
+                <div class="form-group">
+                    <label for="control-mode">Control Mode</label>
+                    <select id="control-mode" name="control-mode">
+                        <option value="independent">Independent - Autonomous operation</option>
+                        <option value="sync">Sync - Master/Slave synchronized playback</option>
+                        <option value="external">External - Art-Net/MQTT control (future)</option>
+                    </select>
+                    <div class="help-text">How this node will be controlled</div>
+                </div>
+
+                <div class="form-group" id="sync-role-group" style="display: none;">
+                    <label for="sync-role">Sync Role</label>
+                    <select id="sync-role" name="sync-role">
+                        <option value="slave">Slave - Follow master node</option>
+                        <option value="master">Master - Control other nodes</option>
+                    </select>
+                    <div class="help-text">Role in synchronized playback (only applies to Sync mode)</div>
+                </div>
+            </div>
+
+            <!-- Step 4: Display Mode -->
+            <div class="wizard-section" data-section="4">
+                <h2>Display Hardware</h2>
+                
+                <div class="form-group">
+                    <label for="display-type">Display Type</label>
+                    <select id="display-type" name="display-type">
+                        <option value="hub75">HUB75 - RGB LED Matrix Panel</option>
+                        <option value="hdmi">HDMI - Standard display (future)</option>
+                    </select>
+                    <div class="help-text">Select your display hardware type</div>
+                </div>
+
+                <div id="hub75-settings">
+                    <h3>HUB75 Matrix Settings</h3>
+                    
+                    <div class="form-group">
+                        <label for="matrix-rows">Matrix Rows</label>
+                        <input type="number" id="matrix-rows" name="matrix-rows" value="32" min="8" max="128">
+                        <div class="help-text">Height of your LED matrix panel</div>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="matrix-cols">Matrix Columns</label>
+                        <input type="number" id="matrix-cols" name="matrix-cols" value="64" min="16" max="256">
+                        <div class="help-text">Width of your LED matrix panel</div>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="hardware-mapping">Hardware Mapping</label>
+                        <select id="hardware-mapping" name="hardware-mapping">
+                            <option value="regular">Regular</option>
+                            <option value="adafruit-hat">Adafruit HAT</option>
+                            <option value="adafruit-hat-pwm">Adafruit HAT PWM</option>
+                        </select>
+                        <div class="help-text">Hardware adapter type</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Step 5: Complete -->
+            <div class="wizard-section" data-section="5">
+                <h2>Setup Complete!</h2>
+                <div id="save-status"></div>
+                <p>Your Lumigrid display node has been configured successfully.</p>
+                <p>The service will restart to apply your settings. You can access the full web interface at:</p>
+                <div class="network-info">
+                    <div class="network-info-item">
+                        <strong>Web Interface:</strong>
+                        <span id="web-url">http://[loading...]</span>
+                    </div>
+                </div>
+                <p>Click "Finish" to complete setup and restart the service.</p>
+            </div>
+        </div>
+
+        <div class="wizard-actions">
+            <button type="button" class="btn btn-secondary" id="btn-prev" style="visibility: hidden;">Previous</button>
+            <button type="button" class="btn btn-primary" id="btn-next">Next</button>
+        </div>
+    </div>
+
+    <script>
+        let currentStep = 1;
+        const totalSteps = 5;
+        
+        const wizardData = {
+            hostname: 'lumigrid',
+            nodeId: '',
+            controlMode: 'independent',
+            syncRole: 'slave',
+            displayType: 'hub75',
+            matrixRows: 32,
+            matrixCols: 64,
+            hardwareMapping: 'regular'
+        };
+
+        function showValidationError(message) {
+            // Create temporary validation alert
+            const currentSection = document.querySelector(`[data-section="${currentStep}"]`);
+            const existingAlert = currentSection.querySelector('.validation-alert');
+            if (existingAlert) {
+                existingAlert.remove();
+            }
+            
+            const alert = document.createElement('div');
+            alert.className = 'alert alert-error validation-alert';
+            alert.textContent = message;
+            currentSection.insertBefore(alert, currentSection.firstChild);
+            
+            // Auto-remove after 5 seconds
+            setTimeout(() => alert.remove(), 5000);
+        }
+
+        function updateStepDisplay() {
+            // Update step indicators
+            document.querySelectorAll('.wizard-step').forEach(step => {
+                const stepNum = parseInt(step.dataset.step);
+                step.classList.remove('active', 'completed');
+                if (stepNum === currentStep) {
+                    step.classList.add('active');
+                } else if (stepNum < currentStep) {
+                    step.classList.add('completed');
+                }
+            });
+
+            // Update sections
+            document.querySelectorAll('.wizard-section').forEach(section => {
+                section.classList.remove('active');
+            });
+            document.querySelector(`[data-section="${currentStep}"]`).classList.add('active');
+
+            // Update buttons
+            const btnPrev = document.getElementById('btn-prev');
+            const btnNext = document.getElementById('btn-next');
+            
+            if (currentStep === 1) {
+                btnPrev.style.visibility = 'hidden';
+            } else {
+                btnPrev.style.visibility = 'visible';
+            }
+
+            if (currentStep === totalSteps) {
+                btnNext.textContent = 'Finish';
+            } else {
+                btnNext.textContent = 'Next';
+            }
+        }
+
+        function loadNetworkInfo() {
+            fetch('/api/wizard/network-info')
+                .then(response => response.json())
+                .then(data => {
+                    document.getElementById('network-ip').textContent = data.ip || 'Unknown';
+                    document.getElementById('network-hostname').textContent = data.hostname || 'Unknown';
+                    document.getElementById('network-connection').textContent = data.connection || 'Unknown';
+                    // Use window.location.port or default to 5000
+                    const port = window.location.port || '5000';
+                    document.getElementById('web-url').textContent = `http://${data.ip}:${port}`;
+                    wizardData.hostname = data.hostname || 'lumigrid';
+                    document.getElementById('hostname').value = wizardData.hostname;
+                })
+                .catch(error => {
+                    console.error('Error loading network info:', error);
+                });
+        }
+
+        function saveConfiguration() {
+            const saveStatus = document.getElementById('save-status');
+            saveStatus.innerHTML = '<div class="alert alert-success">Saving configuration...</div>';
+
+            const config = {
+                network: {
+                    hostname: wizardData.hostname,
+                    node_id: wizardData.nodeId
+                },
+                control: {
+                    mode: wizardData.controlMode,
+                    sync_role: wizardData.syncRole
+                },
+                led_matrix: {
+                    rows: parseInt(wizardData.matrixRows),
+                    cols: parseInt(wizardData.matrixCols),
+                    hardware_mapping: wizardData.hardwareMapping
+                }
+            };
+
+            fetch('/api/wizard/save', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(config)
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    saveStatus.innerHTML = '<div class="alert alert-success">✓ Configuration saved successfully!</div>';
+                } else {
+                    saveStatus.innerHTML = `<div class="alert alert-error">Error: ${data.error || 'Failed to save configuration'}</div>`;
+                }
+            })
+            .catch(error => {
+                console.error('Error saving configuration:', error);
+                saveStatus.innerHTML = '<div class="alert alert-error">Error saving configuration. Please try again.</div>';
+            });
+        }
+
+        function nextStep() {
+            if (currentStep === 2) {
+                wizardData.hostname = document.getElementById('hostname').value;
+            } else if (currentStep === 3) {
+                wizardData.nodeId = document.getElementById('node-id').value;
+                wizardData.controlMode = document.getElementById('control-mode').value;
+                wizardData.syncRole = document.getElementById('sync-role').value;
+                
+                if (!wizardData.nodeId) {
+                    showValidationError('Please enter a Node ID');
+                    return;
+                }
+            } else if (currentStep === 4) {
+                wizardData.displayType = document.getElementById('display-type').value;
+                wizardData.matrixRows = document.getElementById('matrix-rows').value;
+                wizardData.matrixCols = document.getElementById('matrix-cols').value;
+                wizardData.hardwareMapping = document.getElementById('hardware-mapping').value;
+            }
+
+            if (currentStep < totalSteps) {
+                currentStep++;
+                updateStepDisplay();
+                
+                if (currentStep === 2) {
+                    loadNetworkInfo();
+                } else if (currentStep === 5) {
+                    saveConfiguration();
+                    loadNetworkInfo();
+                }
+            } else {
+                // Finish - redirect to main interface
+                window.location.href = '/';
+            }
+        }
+
+        function prevStep() {
+            if (currentStep > 1) {
+                currentStep--;
+                updateStepDisplay();
+            }
+        }
+
+        // Event listeners
+        document.getElementById('btn-next').addEventListener('click', nextStep);
+        document.getElementById('btn-prev').addEventListener('click', prevStep);
+
+        // Control mode change handler
+        document.getElementById('control-mode').addEventListener('change', function() {
+            const syncRoleGroup = document.getElementById('sync-role-group');
+            if (this.value === 'sync') {
+                syncRoleGroup.style.display = 'block';
+            } else {
+                syncRoleGroup.style.display = 'none';
+            }
+        });
+
+        // Initialize
+        updateStepDisplay();
+    </script>
+</body>
+</html>

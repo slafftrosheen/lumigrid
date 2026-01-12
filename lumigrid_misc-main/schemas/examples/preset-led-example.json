@@ -1,0 +1,11 @@
+{
+  "preset_id": 1,
+  "name": "Cool Blue",
+  "color": {
+    "r": 28,
+    "g": 78,
+    "b": 255,
+    "w": 0
+  },
+  "effect": "static"
+}

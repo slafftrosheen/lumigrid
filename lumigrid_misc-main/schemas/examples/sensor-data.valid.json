@@ -1,0 +1,12 @@
+{
+  "node_id": "sensor-001",
+  "node_name": "Living Room Sensor",
+  "timestamp": 1678886400,
+  "readings": {
+    "temperature_c": 22.5,
+    "humidity_percent": 45.2,
+    "pressure_hpa": 1012.5,
+    "light_lux": 500,
+    "motion_detected": true
+  }
+}

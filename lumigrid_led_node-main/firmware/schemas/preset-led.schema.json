@@ -1,0 +1,109 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "LED Preset Schema",
+  "description": "Schema for LumiGrid LED preset configuration",
+  "type": "object",
+  "required": ["preset_name", "effect_id"],
+  "properties": {
+    "preset_name": {
+      "type": "string",
+      "description": "Unique name for the preset",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-zA-Z0-9_-]+$"
+    },
+    "description": {
+      "type": "string",
+      "description": "Optional description of the preset",
+      "maxLength": 256
+    },
+    "effect_id": {
+      "type": "integer",
+      "description": "Effect identifier",
+      "minimum": 1000,
+      "maximum": 9999
+    },
+    "speed": {
+      "type": "number",
+      "description": "Effect speed (0.0 to 5.0)",
+      "minimum": 0.0,
+      "maximum": 5.0,
+      "default": 1.0
+    },
+    "intensity": {
+      "type": "number",
+      "description": "Effect intensity (0.0 to 1.0)",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "default": 0.5
+    },
+    "brightness": {
+      "type": "number",
+      "description": "Global brightness (0.0 to 1.0)",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "default": 1.0
+    },
+    "palette_id": {
+      "type": "integer",
+      "description": "Palette identifier",
+      "minimum": 0,
+      "maximum": 255
+    },
+    "color1": {
+      "type": "array",
+      "description": "Primary color as RGB array [R, G, B]",
+      "items": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 255
+      },
+      "minItems": 3,
+      "maxItems": 3
+    },
+    "color2": {
+      "type": "array",
+      "description": "Secondary color as RGB array [R, G, B]",
+      "items": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 255
+      },
+      "minItems": 3,
+      "maxItems": 3
+    },
+    "color3": {
+      "type": "array",
+      "description": "Tertiary color as RGB array [R, G, B]",
+      "items": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 255
+      },
+      "minItems": 3,
+      "maxItems": 3
+    }
+  },
+  "additionalProperties": false,
+  "examples": [
+    {
+      "preset_name": "led_ocean",
+      "description": "Smooth ocean wave effect",
+      "effect_id": 1105,
+      "speed": 0.8,
+      "intensity": 1.0,
+      "palette_id": 1,
+      "color1": [0, 0, 255],
+      "color2": [0, 100, 200],
+      "color3": [0, 50, 150]
+    },
+    {
+      "preset_name": "fire_warm",
+      "description": "Warm fire effect",
+      "effect_id": 1104,
+      "speed": 0.8,
+      "intensity": 1.0,
+      "color1": [255, 40, 40]
+    }
+  ]
+}

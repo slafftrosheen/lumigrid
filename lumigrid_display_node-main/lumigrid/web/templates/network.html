@@ -1,0 +1,307 @@
+{% extends "base.html" %}
+
+{% block title %}Network Settings - Lumigrid Display Node{% endblock %}
+
+{% block page_title %}Network Settings{% endblock %}
+
+{% block header_actions %}
+<button class="btn btn-primary" onclick="saveNetworkSettings()">
+    <span>💾</span> Save Settings
+</button>
+{% endblock %}
+
+{% block content %}
+<div class="settings-container">
+    <!-- Current Network Status -->
+    <div class="card status-card" data-halo="2">
+        <div class="card-header">
+            <h2 class="card-title">
+                <span class="card-icon">📡</span>
+                Network Status
+            </h2>
+        </div>
+        <div class="card-body">
+            <div class="status-grid network-status">
+                <div class="status-item">
+                    <span class="status-label">Hostname</span>
+                    <span id="net-hostname" class="status-value">Loading...</span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">IP Address</span>
+                    <span id="net-ip" class="status-value">Loading...</span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Web Interface</span>
+                    <span id="net-web" class="status-value">Loading...</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Hostname Settings -->
+    <div class="card settings-card" data-halo="1">
+        <div class="card-header">
+            <h2 class="card-title">
+                <span class="card-icon">🏷️</span>
+                Device Identification
+            </h2>
+        </div>
+        <div class="card-body">
+            <div class="form-grid">
+                <div class="form-group">
+                    <label for="hostname">Hostname</label>
+                    <input type="text" id="hostname" class="form-input" placeholder="lumigrid">
+                    <span class="form-hint">Device name on the network. Access via hostname.local (e.g., lumigrid.local)</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- WiFi Settings -->
+    <div class="card settings-card" data-halo="1">
+        <div class="card-header">
+            <h2 class="card-title">
+                <span class="card-icon">📶</span>
+                WiFi Configuration
+            </h2>
+            <div class="card-badge">
+                <span class="badge badge-info">Requires Restart</span>
+            </div>
+        </div>
+        <div class="card-body">
+            <div class="alert alert-warning">
+                <span class="alert-icon">⚠️</span>
+                <span class="alert-text">WiFi configuration changes require a system restart and must be applied at the OS level. These settings are saved for reference.</span>
+            </div>
+            <div class="form-grid">
+                <div class="form-group checkbox-group">
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="wifi-enabled" class="form-checkbox">
+                        <span class="checkbox-text">Enable WiFi</span>
+                    </label>
+                </div>
+                <div class="form-group">
+                    <label for="wifi-ssid">Network Name (SSID)</label>
+                    <input type="text" id="wifi-ssid" class="form-input" placeholder="Your WiFi Network">
+                </div>
+                <div class="form-group">
+                    <label for="wifi-password">Password</label>
+                    <div class="password-input-wrapper">
+                        <input type="password" id="wifi-password" class="form-input" placeholder="WiFi Password">
+                        <button type="button" class="btn-icon password-toggle" onclick="togglePasswordVisibility('wifi-password', this)">👁️</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Static IP Settings -->
+    <div class="card settings-card">
+        <div class="card-header">
+            <h2 class="card-title">
+                <span class="card-icon">🔢</span>
+                Static IP Configuration
+            </h2>
+            <div class="card-badge">
+                <span class="badge badge-info">Optional</span>
+            </div>
+        </div>
+        <div class="card-body">
+            <div class="alert alert-info">
+                <span class="alert-icon">ℹ️</span>
+                <span class="alert-text">Leave disabled to use DHCP (recommended for most setups).</span>
+            </div>
+            <div class="form-grid">
+                <div class="form-group checkbox-group">
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="static-ip-enabled" class="form-checkbox" onchange="toggleStaticIpFields()">
+                        <span class="checkbox-text">Use Static IP</span>
+                    </label>
+                </div>
+            </div>
+            <div id="static-ip-fields" class="form-grid" style="display: none;">
+                <div class="form-group">
+                    <label for="static-ip">IP Address</label>
+                    <input type="text" id="static-ip" class="form-input" placeholder="192.168.1.100">
+                    <span class="form-hint">e.g., 192.168.1.100</span>
+                </div>
+                <div class="form-group">
+                    <label for="static-gateway">Gateway</label>
+                    <input type="text" id="static-gateway" class="form-input" placeholder="192.168.1.1">
+                    <span class="form-hint">Usually your router's IP</span>
+                </div>
+                <div class="form-group">
+                    <label for="static-dns">DNS Server</label>
+                    <input type="text" id="static-dns" class="form-input" placeholder="8.8.8.8">
+                    <span class="form-hint">e.g., 8.8.8.8 (Google) or 1.1.1.1 (Cloudflare)</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Web Server Settings -->
+    <div class="card settings-card">
+        <div class="card-header">
+            <h2 class="card-title">
+                <span class="card-icon">🌐</span>
+                Web Server Settings
+            </h2>
+        </div>
+        <div class="card-body">
+            <div class="form-grid">
+                <div class="form-group">
+                    <label for="web-port">Port</label>
+                    <input type="number" id="web-port" class="form-input" min="80" max="65535" value="5000">
+                    <span class="form-hint">Port for web interface (default: 5000)</span>
+                </div>
+                <div class="form-group">
+                    <label for="web-host">Listen Address</label>
+                    <select id="web-host" class="form-select">
+                        <option value="0.0.0.0">All interfaces (0.0.0.0)</option>
+                        <option value="127.0.0.1">Localhost only (127.0.0.1)</option>
+                    </select>
+                    <span class="form-hint">Which network interfaces to listen on</span>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="action-bar">
+    <button class="btn btn-secondary" onclick="loadNetworkSettings()">
+        <span>🔄</span> Reset to Saved
+    </button>
+    <button class="btn btn-primary" onclick="saveNetworkSettings()">
+        <span>💾</span> Save Settings
+    </button>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Load settings on page load
+document.addEventListener('DOMContentLoaded', function() {
+    loadNetworkSettings();
+    loadNetworkStatus();
+});
+
+async function loadNetworkStatus() {
+    try {
+        const response = await fetch('/api/system/info');
+        if (response.ok) {
+            const data = await response.json();
+            document.getElementById('net-hostname').textContent = data.hostname || 'Unknown';
+        }
+        
+        // Get web interface URL
+        document.getElementById('net-web').textContent = `Port ${location.port || 80}`;
+        document.getElementById('net-ip').textContent = location.hostname;
+    } catch (error) {
+        console.error('Error loading network status:', error);
+    }
+}
+
+async function loadNetworkSettings() {
+    try {
+        const response = await fetch('/api/network');
+        if (response.ok) {
+            const network = await response.json();
+            
+            // Hostname
+            document.getElementById('hostname').value = network.hostname || 'lumigrid';
+            
+            // WiFi
+            const wifi = network.wifi || {};
+            document.getElementById('wifi-enabled').checked = wifi.enabled || false;
+            document.getElementById('wifi-ssid').value = wifi.ssid || '';
+            document.getElementById('wifi-password').value = wifi.password || '';
+            
+            // Static IP
+            const staticIp = network.static_ip || {};
+            document.getElementById('static-ip-enabled').checked = staticIp.enabled || false;
+            document.getElementById('static-ip').value = staticIp.ip || '';
+            document.getElementById('static-gateway').value = staticIp.gateway || '';
+            document.getElementById('static-dns').value = staticIp.dns || '';
+            
+            toggleStaticIpFields();
+        }
+        
+        // Load web settings from config
+        const configResponse = await fetch('/api/config');
+        if (configResponse.ok) {
+            const config = await configResponse.json();
+            document.getElementById('web-port').value = config.web?.port || 5000;
+            document.getElementById('web-host').value = config.web?.host || '0.0.0.0';
+        }
+        
+        showNotification('Settings loaded', 'success');
+    } catch (error) {
+        console.error('Error loading network settings:', error);
+        showNotification('Failed to load settings', 'error');
+    }
+}
+
+async function saveNetworkSettings() {
+    try {
+        // Save network settings
+        const networkSettings = {
+            hostname: document.getElementById('hostname').value,
+            wifi: {
+                enabled: document.getElementById('wifi-enabled').checked,
+                ssid: document.getElementById('wifi-ssid').value,
+                password: document.getElementById('wifi-password').value
+            },
+            static_ip: {
+                enabled: document.getElementById('static-ip-enabled').checked,
+                ip: document.getElementById('static-ip').value,
+                gateway: document.getElementById('static-gateway').value,
+                dns: document.getElementById('static-dns').value
+            }
+        };
+        
+        const networkResponse = await fetch('/api/network', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(networkSettings)
+        });
+        
+        // Save web settings
+        const webSettings = {
+            'web.port': parseInt(document.getElementById('web-port').value),
+            'web.host': document.getElementById('web-host').value
+        };
+        
+        const configResponse = await fetch('/api/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(webSettings)
+        });
+        
+        if (networkResponse.ok && configResponse.ok) {
+            showNotification('Network settings saved. Some changes may require a restart.', 'success');
+        } else {
+            showNotification('Error saving some settings', 'error');
+        }
+    } catch (error) {
+        console.error('Error saving network settings:', error);
+        showNotification('Failed to save settings', 'error');
+    }
+}
+
+function toggleStaticIpFields() {
+    const enabled = document.getElementById('static-ip-enabled').checked;
+    document.getElementById('static-ip-fields').style.display = enabled ? 'grid' : 'none';
+}
+
+function togglePasswordVisibility(inputId, button) {
+    const input = document.getElementById(inputId);
+    if (input.type === 'password') {
+        input.type = 'text';
+        button.textContent = '🙈';
+    } else {
+        input.type = 'password';
+        button.textContent = '👁️';
+    }
+}
+</script>
+{% endblock %}

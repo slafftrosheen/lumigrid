@@ -1,0 +1,50 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Trigger Schema",
+  "description": "Schema for LumiGrid trigger configuration",
+  "type": "object",
+  "required": ["trigger_name", "type", "action"],
+  "properties": {
+    "trigger_name": {
+      "type": "string",
+      "description": "Unique name for the trigger",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-zA-Z0-9_-]+$"
+    },
+    "type": {
+      "type": "string",
+      "enum": ["mqtt", "gpio", "sensor"],
+      "description": "Type of the trigger"
+    },
+    "condition": {
+      "type": "string",
+      "description": "Condition that must be met for the trigger to fire (e.g., 'temperature > 25')"
+    },
+    "action": {
+      "type": "object",
+      "description": "Action to perform when the trigger fires",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["start_timeline", "apply_preset"],
+          "description": "Type of action to perform"
+        },
+        "timeline_name": {
+          "type": "string",
+          "description": "Name of the timeline to start"
+        },
+        "preset_name": {
+          "type": "string",
+          "description": "Name of the preset to apply"
+        },
+        "group": {
+          "type": "string",
+          "description": "Channel group to apply the action to"
+        }
+      },
+      "required": ["type"]
+    }
+  },
+  "additionalProperties": false
+}

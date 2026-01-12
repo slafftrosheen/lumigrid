@@ -1,0 +1,5 @@
+menu "LumiGrid"
+config LUMIGRID_TEST_MODE
+  bool "Deterministic FX test mode"
+  default n
+endmenu

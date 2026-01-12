@@ -1,0 +1,39 @@
+# RGB LED Matrix Library
+# Note: rgbmatrix requires compilation from hzeller's rpi-rgb-led-matrix
+# Install from: https://github.com/hzeller/rpi-rgb-led-matrix
+# See install.sh for automated installation
+
+# Web Framework
+Flask==3.0.0
+Flask-CORS==4.0.0
+Flask-Limiter>=3.5.0
+Werkzeug>=3.0.0
+
+# Configuration
+PyYAML==6.0.1
+
+# Image Processing & Font Support
+Pillow>=10.0.0
+
+# CircuitPython support for Raspberry Pi
+# Required for board and busio modules used by sensor libraries
+adafruit-blinka>=8.0.0
+
+# Temperature Sensors
+# For DS18B20 (1-Wire)
+w1thermsensor==2.3.0
+# For DHT sensors (DHT11, DHT22) - using CircuitPython library (replaces deprecated Adafruit-DHT)
+adafruit-circuitpython-dht>=4.0.0
+
+# RTC Support (DS3231)
+adafruit-circuitpython-ds3231>=2.4.15
+
+# Additional utilities
+pytz==2023.3
+python-dateutil==2.8.2
+
+# mDNS Service Discovery
+zeroconf>=0.80.0
+
+# JSON Schema Validation
+jsonschema>=4.0.0

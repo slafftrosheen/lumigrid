@@ -1,0 +1,351 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard - Lumigrid Display Node{% endblock %}
+
+{% block page_title %}Dashboard{% endblock %}
+
+{% block content %}
+<!-- Status Cards -->
+<div class="dashboard-grid">
+    <!-- Status Overview Card -->
+    <div class="card status-card" data-halo="2">
+        <div class="card-header">
+            <h2 class="card-title">
+                <span class="card-icon" aria-hidden="true">📊</span>
+                System Status
+            </h2>
+        </div>
+        <div class="card-body">
+            <div class="status-grid">
+                <div class="status-item">
+                    <span class="status-label">Display Mode</span>
+                    <span id="current-mode" class="status-value highlight">Loading...</span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Current Frame</span>
+                    <span id="current-frame" class="status-value">-</span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Control Mode</span>
+                    <span id="control-mode" class="status-value">-</span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Brightness</span>
+                    <span id="brightness-value" class="status-value">-</span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">System Status</span>
+                    <span id="running-status" class="status-value status-badge">-</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Sensors Card -->
+    <div class="card sensors-card" data-halo="1">
+        <div class="card-header">
+            <h2 class="card-title">
+                <span class="card-icon" aria-hidden="true">🌡️</span>
+                Sensors
+            </h2>
+        </div>
+        <div class="card-body">
+            <div class="sensor-display">
+                <div class="sensor-item temperature">
+                    <div class="sensor-icon" aria-hidden="true">🌡️</div>
+                    <div class="sensor-data">
+                        <span class="sensor-label">Temperature</span>
+                        <span id="temperature" class="sensor-value">--°C</span>
+                    </div>
+                </div>
+                <div class="sensor-item humidity">
+                    <div class="sensor-icon" aria-hidden="true">💧</div>
+                    <div class="sensor-data">
+                        <span class="sensor-label">Humidity</span>
+                        <span id="humidity" class="sensor-value">--%</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Quick Mode Selection -->
+    <div class="card modes-card" data-halo="3">
+        <div class="card-header">
+            <h2 class="card-title">
+                <span class="card-icon" aria-hidden="true">🎬</span>
+                Display Modes
+            </h2>
+        </div>
+        <div class="card-body">
+            <div class="mode-buttons" role="group" aria-label="Display mode selection">
+                <button class="mode-btn" data-mode="frames" onclick="setMode('frames')" aria-pressed="false">
+                    <span class="btn-icon" aria-hidden="true">🔄</span>
+                    <span class="btn-text">Frames</span>
+                    <span class="btn-desc">Auto-rotating content</span>
+                </button>
+                <button class="mode-btn" data-mode="clock" onclick="setMode('clock')" aria-pressed="false">
+                    <span class="btn-icon" aria-hidden="true">🕐</span>
+                    <span class="btn-text">Clock</span>
+                    <span class="btn-desc">Current time</span>
+                </button>
+                <button class="mode-btn" data-mode="temperature" onclick="setMode('temperature')" aria-pressed="false">
+                    <span class="btn-icon" aria-hidden="true">🌡️</span>
+                    <span class="btn-text">Temperature</span>
+                    <span class="btn-desc">Sensor reading</span>
+                </button>
+                <button class="mode-btn" data-mode="message" onclick="setMode('message')" aria-pressed="false">
+                    <span class="btn-icon" aria-hidden="true">💬</span>
+                    <span class="btn-text">Message</span>
+                    <span class="btn-desc">Custom text</span>
+                </button>
+                <button class="mode-btn" data-mode="slideshow" onclick="setMode('slideshow')" aria-pressed="false">
+                    <span class="btn-icon" aria-hidden="true">🎞️</span>
+                    <span class="btn-text">Slideshow</span>
+                    <span class="btn-desc">Legacy cycling</span>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Quick Message -->
+    <div class="card message-card" data-halo="1">
+        <div class="card-header">
+            <h2 class="card-title">
+                <span class="card-icon" aria-hidden="true">💬</span>
+                Quick Message
+            </h2>
+        </div>
+        <div class="card-body">
+            <div class="message-form">
+                <label for="message-input" class="visually-hidden">Message to display</label>
+                <input type="text" id="message-input" class="form-input" 
+                       placeholder="Enter a message to display..." maxlength="200">
+                <button class="btn btn-primary" onclick="sendMessage()">
+                    <span>Send</span>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Brightness Control -->
+    <div class="card brightness-card" data-halo="2">
+        <div class="card-header">
+            <h2 class="card-title">
+                <span class="card-icon" aria-hidden="true">☀️</span>
+                Brightness Control
+            </h2>
+        </div>
+        <div class="card-body">
+            <div class="brightness-control">
+                <div class="brightness-slider-container">
+                    <span class="brightness-icon dim" aria-hidden="true">🌙</span>
+                    <label for="brightness-slider" class="visually-hidden">Brightness level</label>
+                    <input type="range" id="brightness-slider" class="brightness-slider" 
+                           min="0" max="100" value="50"
+                           oninput="updateBrightnessLabel(this.value)" 
+                           onchange="setBrightness(this.value)"
+                           aria-valuemin="0" aria-valuemax="100">
+                    <span class="brightness-icon bright" aria-hidden="true">☀️</span>
+                </div>
+                <div class="brightness-value-display">
+                    <span id="brightness-slider-value">50%</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- System Info -->
+    <div class="card info-card" data-halo="1">
+        <div class="card-header">
+            <h2 class="card-title">
+                <span class="card-icon" aria-hidden="true">ℹ️</span>
+                System Information
+            </h2>
+        </div>
+        <div class="card-body">
+            <div class="info-grid">
+                <div class="info-item">
+                    <span class="info-label">Version</span>
+                    <span id="sys-version" class="info-value">1.0.0</span>
+                </div>
+                <div class="info-item">
+                    <span class="info-label">Hostname</span>
+                    <span id="sys-hostname" class="info-value">-</span>
+                </div>
+                <div class="info-item">
+                    <span class="info-label">Platform</span>
+                    <span id="sys-platform" class="info-value">-</span>
+                </div>
+                <div class="info-item">
+                    <span class="info-label">RTC Time</span>
+                    <span id="rtc-time" class="info-value">-</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Control Mode Settings -->
+    <div class="card control-mode-card" data-halo="3">
+        <div class="card-header">
+            <h2 class="card-title">
+                <span class="card-icon" aria-hidden="true">🎛️</span>
+                Control Mode
+            </h2>
+        </div>
+        <div class="card-body">
+            <div class="control-mode-selector">
+                <label for="control-mode-select" class="form-label">Operating Mode</label>
+                <select id="control-mode-select" class="form-select" onchange="updateControlModeOptions()">
+                    <option value="independent">Independent - Autonomous operation</option>
+                    <option value="sync">Sync - Master/Slave synchronized</option>
+                    <option value="external">External - MQTT/Art-Net (coming soon)</option>
+                </select>
+                
+                <div id="sync-role-section" class="control-option-section" style="display: none;">
+                    <label for="sync-role-select" class="form-label">Sync Role</label>
+                    <select id="sync-role-select" class="form-select">
+                        <option value="slave">Slave - Follow master</option>
+                        <option value="master">Master - Lead synchronization</option>
+                    </select>
+                </div>
+                
+                <div id="external-source-section" class="control-option-section" style="display: none;">
+                    <label for="external-source-select" class="form-label">External Source</label>
+                    <select id="external-source-select" class="form-select">
+                        <option value="mqtt">MQTT</option>
+                        <option value="artnet">Art-Net</option>
+                    </select>
+                    <p class="form-hint"><span aria-label="Warning" role="img">⚠️</span> External control sources are not yet implemented.</p>
+                </div>
+                
+                <button class="btn btn-primary" onclick="applyControlMode()" style="margin-top: 1rem;">
+                    Apply Control Mode
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Dashboard-specific initialization
+document.addEventListener('DOMContentLoaded', function() {
+    loadSystemInfo();
+});
+
+async function loadSystemInfo() {
+    try {
+        const response = await fetch('/api/system/info');
+        if (response.ok) {
+            const data = await response.json();
+            document.getElementById('sys-version').textContent = data.version || '1.0.0';
+            document.getElementById('sys-hostname').textContent = data.hostname || '-';
+            document.getElementById('sys-platform').textContent = data.platform || '-';
+        }
+    } catch (error) {
+        console.error('Error loading system info:', error);
+    }
+    
+    // Also load control mode settings
+    loadControlModeSettings();
+}
+
+async function loadControlModeSettings() {
+    try {
+        const response = await fetch('/api/control');
+        if (response.ok) {
+            const settings = await response.json();
+            
+            // Update control mode selector
+            const modeSelect = document.getElementById('control-mode-select');
+            if (modeSelect) {
+                modeSelect.value = settings.mode ?? 'independent';
+            }
+            
+            // Update sync role selector
+            const syncRoleSelect = document.getElementById('sync-role-select');
+            if (syncRoleSelect) {
+                syncRoleSelect.value = settings.sync_role ?? 'slave';
+            }
+            
+            // Update external source selector
+            const externalSourceSelect = document.getElementById('external-source-select');
+            if (externalSourceSelect) {
+                externalSourceSelect.value = settings.external_source ?? 'mqtt';
+            }
+            
+            // Show/hide appropriate sections
+            updateControlModeOptions();
+        }
+    } catch (error) {
+        console.error('Error loading control mode settings:', error);
+    }
+}
+
+function updateControlModeOptions() {
+    const modeSelect = document.getElementById('control-mode-select');
+    const syncRoleSection = document.getElementById('sync-role-section');
+    const externalSourceSection = document.getElementById('external-source-section');
+    
+    if (!modeSelect) return;
+    
+    const mode = modeSelect.value;
+    
+    // Show/hide sections based on mode
+    if (syncRoleSection) {
+        syncRoleSection.style.display = mode === 'sync' ? 'block' : 'none';
+    }
+    if (externalSourceSection) {
+        externalSourceSection.style.display = mode === 'external' ? 'block' : 'none';
+    }
+}
+
+async function applyControlMode() {
+    const modeSelect = document.getElementById('control-mode-select');
+    const syncRoleSelect = document.getElementById('sync-role-select');
+    const externalSourceSelect = document.getElementById('external-source-select');
+    
+    if (!modeSelect) return;
+    
+    const data = {
+        mode: modeSelect.value
+    };
+    
+    // Add sync_role if in sync mode
+    if (data.mode === 'sync' && syncRoleSelect) {
+        data.sync_role = syncRoleSelect.value;
+    }
+    
+    // Add external_source if in external mode
+    if (data.mode === 'external' && externalSourceSelect) {
+        data.external_source = externalSourceSelect.value;
+    }
+    
+    try {
+        const response = await fetch('/api/control', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(data)
+        });
+        
+        if (response.ok) {
+            const result = await response.json();
+            showNotification(`Control mode set to: ${data.mode}`, 'success');
+            
+            // Reload status to update display
+            updateStatus();
+        } else {
+            const error = await response.json();
+            showNotification(error.error || 'Failed to set control mode', 'error');
+        }
+    } catch (error) {
+        console.error('Error setting control mode:', error);
+        showNotification('Error setting control mode', 'error');
+    }
+}
+</script>
+{% endblock %}

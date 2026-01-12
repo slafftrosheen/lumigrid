@@ -1,0 +1,61 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/algorhythmicdev/lumigrid_misc/blob/main/schemas/preset-link.schema.json",
+  "title": "LumiGrid Preset Link Schema",
+  "description": "Schema for linking presets across nodes - one node's preset can trigger/affect another node's preset",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "Unique identifier for the preset link",
+      "minLength": 1,
+      "maxLength": 100
+    },
+    "name": {
+      "type": "string",
+      "description": "Human-readable name for the link",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "description": {
+      "type": "string",
+      "description": "Optional description of the link behavior",
+      "maxLength": 500
+    },
+    "source_preset": {
+      "type": "string",
+      "description": "Name of the source preset that triggers the link",
+      "minLength": 1
+    },
+    "target_node": {
+      "type": "string",
+      "description": "Target node identifier (IP, hostname, or node ID)",
+      "minLength": 1
+    },
+    "target_preset": {
+      "type": "string",
+      "description": "Name of the preset to trigger on the target node",
+      "minLength": 1
+    },
+    "link_type": {
+      "type": "string",
+      "description": "Type of link behavior",
+      "enum": ["trigger", "sync", "cascade"],
+      "default": "trigger"
+    },
+    "delay_ms": {
+      "type": "integer",
+      "description": "Delay in milliseconds before triggering target preset",
+      "minimum": 0,
+      "maximum": 60000,
+      "default": 0
+    },
+    "enabled": {
+      "type": "boolean",
+      "description": "Whether the link is currently active",
+      "default": true
+    }
+  },
+  "required": ["id", "source_preset", "target_node", "target_preset"],
+  "additionalProperties": false
+}

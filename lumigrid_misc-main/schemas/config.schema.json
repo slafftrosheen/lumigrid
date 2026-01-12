@@ -1,0 +1,179 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Node Configuration",
+  "description": "Schema for node configuration settings",
+  "type": "object",
+  "required": ["node_id", "node_type"],
+  "properties": {
+    "node_id": {
+      "type": "string",
+      "description": "Unique identifier for the node",
+      "minLength": 1
+    },
+    "node_name": {
+      "type": "string",
+      "description": "Human-readable name for the node",
+      "maxLength": 50
+    },
+    "node_type": {
+      "type": "string",
+      "description": "Type of node",
+      "enum": ["led_controller", "display", "sensor", "gateway"]
+    },
+    "network": {
+      "type": "object",
+      "description": "Network configuration",
+      "properties": {
+        "ssid": {
+          "type": "string",
+          "description": "WiFi SSID"
+        },
+        "password": {
+          "type": "string",
+          "description": "WiFi password"
+        },
+        "ip_address": {
+          "type": "string",
+          "description": "Static IP address",
+          "format": "ipv4"
+        },
+        "gateway": {
+          "type": "string",
+          "description": "Gateway IP address",
+          "format": "ipv4"
+        },
+        "subnet_mask": {
+          "type": "string",
+          "description": "Subnet mask",
+          "format": "ipv4"
+        }
+      }
+    },
+    "hardware": {
+      "type": "object",
+      "description": "Hardware configuration",
+      "properties": {
+        "led_pins": {
+          "type": "object",
+          "description": "LED GPIO pin assignments",
+          "properties": {
+            "red": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 39
+            },
+            "green": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 39
+            },
+            "blue": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 39
+            },
+            "white": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 39
+            }
+          }
+        },
+        "rf_frequency_mhz": {
+          "type": "number",
+          "description": "RF frequency in MHz",
+          "minimum": 300,
+          "maximum": 928
+        },
+        "common_anode": {
+          "type": "boolean",
+          "description": "Whether LED hardware uses common anode",
+          "default": false
+        }
+      }
+    },
+    "sync": {
+      "type": "object",
+      "description": "Synchronization settings",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Whether sync is enabled",
+          "default": true
+        },
+        "udp_port": {
+          "type": "integer",
+          "description": "UDP port for sync packets",
+          "minimum": 1024,
+          "maximum": 65535
+        },
+        "interval_ms": {
+          "type": "integer",
+          "description": "Sync broadcast interval in milliseconds",
+          "minimum": 100
+        }
+      }
+    },
+    "presets": {
+      "type": "object",
+      "description": "Preset button mappings",
+      "properties": {
+        "button1": {
+          "type": "object",
+          "description": "Button 1 preset color",
+          "required": ["r", "g", "b", "w"],
+          "properties": {
+            "r": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 255
+            },
+            "g": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 255
+            },
+            "b": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 255
+            },
+            "w": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 255
+            }
+          }
+        },
+        "button2": {
+          "type": "object",
+          "description": "Button 2 preset color",
+          "required": ["r", "g", "b", "w"],
+          "properties": {
+            "r": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 255
+            },
+            "g": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 255
+            },
+            "b": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 255
+            },
+            "w": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 255
+            }
+          }
+        }
+      }
+    }
+  },
+  "additionalProperties": false
+}

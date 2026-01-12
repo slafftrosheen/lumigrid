@@ -1,0 +1,132 @@
+<!doctype html><html lang="en"><meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>LumiGrid Node</title>
+<style>
+/* LumiGrid Design System - Design Tokens */
+:root{
+  --bg:#0f1115;--surface:#151924;--muted:#1c2232;--text:#e6eaf2;--subtext:#9BA7C0;
+  --primary:#6C7CFF;--primary-600:#5366ff;--primary-700:#4256f3;
+  --accent:#86E2FF;--danger:#ff5c7a;--warn:#ffc857;--success:#38e1b3;
+  --focus:#86E2FF;
+  --ring:0 0 0 .16rem var(--focus),0 0 0 .28rem color-mix(in oklab,var(--focus) 30%,transparent);
+  --radius:14px;--radius-sm:10px;
+  --shadow-md:0 10px 30px rgba(0,0,0,.35);--shadow-sm:0 2px 10px rgba(0,0,0,.25);
+  --gap:14px;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,Segoe UI,Roboto,Ubuntu,Cantarell,Noto Sans,Helvetica,Arial;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
+.header{display:flex;gap:12px;align-items:center;padding:14px 16px;border-bottom:1px solid #20263a;position:sticky;top:0;background:linear-gradient(180deg,var(--surface),color-mix(in oklab,var(--surface) 80%,transparent))}
+.badge{padding:6px 10px;border-radius:999px;background:var(--muted);color:var(--subtext);display:inline-flex;align-items:center;gap:8px}
+.grid{display:grid;gap:var(--gap);padding:16px;grid-template-columns:repeat(auto-fit,minmax(260px,1fr))}
+.card{background:var(--surface);border:1px solid #20263a;border-radius:var(--radius);padding:12px;box-shadow:var(--shadow-md)}
+h2{font-size:14px;margin:0 0 8px;color:var(--text)}
+button,select,input[type=range],input[type=text]{width:100%}
+input[type=text]{background:var(--muted);color:var(--text);border:1px solid #2a3248;padding:10px 12px;border-radius:var(--radius-sm)}
+input[type=text]:focus-visible{outline:none;box-shadow:var(--ring)}
+button{background:var(--primary);color:white;border:none;padding:10px 14px;border-radius:12px;cursor:pointer;box-shadow:var(--shadow-sm)}
+button:hover{opacity:0.9}
+button:focus-visible{outline:none;box-shadow:var(--ring)}
+label{display:block;color:var(--subtext);margin:8px 0 6px}
+.row{display:flex;gap:8px;align-items:center}
+small{color:var(--subtext)}
+hr{border:none;border-top:1px solid #20263a;margin:10px 0}
+.status{display:flex;gap:8px;align-items:center}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--success);box-shadow:0 0 10px var(--success)}
+</style>
+<body>
+<div class="header">
+  <strong>LumiGrid LED Node</strong>
+  <span id="dmx" class="badge">DMX: …</span>
+  <span id="mqtt" class="badge">MQTT: …</span>
+  <span id="sync" class="badge">SYNC: …</span>
+</div>
+
+<div class="grid">
+  <div class="card">
+    <h2>Palette</h2>
+    <label>Active palette</label>
+    <select id="pal"></select>
+    <button id="palApply">Apply</button>
+    <hr/>
+    <label>Graph (layer composer)</label>
+    <div class="row"><button id="graphReload">Reload graph.json</button></div>
+    <small>Place <code>/storage/graph.json</code> via WebDAV/flash, then reload.</small>
+  </div>
+
+  <div class="card">
+    <h2>Global</h2>
+    <label>BPM</label><input id="bpm" type="range" min="40" max="200" value="120" />
+    <label>Master Sync</label><button id="beMaster">Become master</button>
+    <label>Broadcast Effect</label><input id="sceneEffect" placeholder="effect name" value="barber_pole"/>
+    <button id="broadcastScene">Broadcast scene</button>
+  </div>
+
+  <div class="card">
+    <h2>OTA</h2>
+    <label>Firmware URL</label>
+    <input id="otaUrl" placeholder="http://host/fw.bin"/>
+    <button id="flash">Flash & Reboot</button>
+  </div>
+
+  <div class="card" id="ch0"><h2>Channel 0</h2>
+    <label>Effect</label><input id="fx0" placeholder="effect name"/>
+    <label>Speed</label><input id="sp0" type="range" min="0" max="2" step="0.01" value="0.5"/>
+    <label>Intensity</label><input id="in0" type="range" min="0" max="1" step="0.01" value="0.8"/>
+    <label>Brightness</label><input id="br0" type="range" min="0" max="1" step="0.01" value="1"/>
+    <button id="apply0">Apply</button>
+  </div>
+
+  <div class="card" id="ch1"><h2>Channel 1</h2>
+    <label>Effect</label><input id="fx1" placeholder="effect name"/>
+    <label>Speed</label><input id="sp1" type="range" min="0" max="2" step="0.01" value="0.5"/>
+    <label>Intensity</label><input id="in1" type="range" min="0" max="1" step="0.01" value="0.8"/>
+    <label>Brightness</label><input id="br1" type="range" min="0" max="1" step="0.01" value="1"/>
+    <button id="apply1">Apply</button>
+  </div>
+</div>
+
+<script>
+const g = sel => document.querySelector(sel);
+async function j(url, opt){ const r = await fetch(url,opt); if(!r.ok) throw new Error(r.status); return r.headers.get('content-type')?.includes('json')? r.json() : r.text(); }
+
+async function refresh() {
+  // palettes
+  try{
+    const list = await j('/api/palettes');
+    const s = g('#pal'); s.innerHTML='';
+    list.forEach(x=>{ const o=document.createElement('option'); o.value=o.textContent=x.name; s.appendChild(o); });
+  }catch(e){ console.warn(e); }
+
+  // state snapshot (requires your existing /api/state or fallback to mqtt badge only)
+  try{
+    const st = await j('/api/state');  // implement a minimal state endpoint if missing
+    g('#dmx').textContent = 'DMX: ' + (st.dmx_active?'ON':'off');
+    g('#mqtt').textContent = 'MQTT: ' + (st.mqtt?'OK':'—');
+    g('#sync').textContent = 'SYNC: ' + (st.master?'master':'follower');
+    g('#bpm').value = st.bpm||120;
+  }catch(e){
+    g('#dmx').textContent='DMX: ?'; g('#mqtt').textContent='MQTT: ?'; g('#sync').textContent='SYNC: ?';
+  }
+}
+g('#palApply').onclick = ()=> fetch('/api/palette',{method:'POST',body:g('#pal').value});
+g('#graphReload').onclick= ()=> fetch('/api/graph/reload').catch(()=>{});
+g('#beMaster').onclick  = ()=> fetch('/api/sync/master?on=1').catch(()=>{});
+g('#broadcastScene').onclick= ()=> {
+  const fx = g('#sceneEffect').value.trim(); const bpm = +g('#bpm').value||120;
+  if (fx) fetch('/api/sync/scene',{method:'POST',body:JSON.stringify({effect:fx,bpm}),headers:{'content-type':'application/json'}});
+};
+g('#flash').onclick = ()=> {
+  const url=g('#otaUrl').value.trim(); if(!url) return;
+  fetch('/api/ota/url',{method:'POST',body:url});
+};
+
+function applyCh(i){
+  const body=JSON.stringify({ ch:i, effect:g('#fx'+i).value, speed:+g('#sp'+i).value, intensity:+g('#in'+i).value, brightness:+g('#br'+i).value });
+  fetch('/api/fx/apply',{method:'POST',headers:{'content-type':'application/json'},body});
+}
+g('#apply0').onclick=()=>applyCh(0);
+g('#apply1').onclick=()=>applyCh(1);
+
+refresh(); setInterval(refresh, 3000);
+</script>
+</body></html>

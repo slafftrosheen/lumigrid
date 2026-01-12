@@ -1,0 +1,79 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Display Frame Preset",
+  "description": "Schema for display frame presets with pixel data",
+  "type": "object",
+  "required": ["preset_id", "name", "width", "height", "frame_data"],
+  "properties": {
+    "preset_id": {
+      "type": "integer",
+      "description": "Unique identifier for the preset",
+      "minimum": 1
+    },
+    "name": {
+      "type": "string",
+      "description": "Human-readable name for the preset",
+      "minLength": 1,
+      "maxLength": 50
+    },
+    "width": {
+      "type": "integer",
+      "description": "Frame width in pixels",
+      "minimum": 1,
+      "maximum": 256
+    },
+    "height": {
+      "type": "integer",
+      "description": "Frame height in pixels",
+      "minimum": 1,
+      "maximum": 256
+    },
+    "frame_data": {
+      "type": "array",
+      "description": "Array of pixel color values in row-major order",
+      "items": {
+        "type": "object",
+        "description": "RGB or RGBW color values for a single pixel",
+        "required": ["r", "g", "b"],
+        "properties": {
+          "r": {
+            "type": "integer",
+            "description": "Red channel value",
+            "minimum": 0,
+            "maximum": 255
+          },
+          "g": {
+            "type": "integer",
+            "description": "Green channel value",
+            "minimum": 0,
+            "maximum": 255
+          },
+          "b": {
+            "type": "integer",
+            "description": "Blue channel value",
+            "minimum": 0,
+            "maximum": 255
+          },
+          "w": {
+            "type": "integer",
+            "description": "Optional white channel value for RGBW displays",
+            "minimum": 0,
+            "maximum": 255
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "duration_ms": {
+      "type": "integer",
+      "description": "Display duration in milliseconds",
+      "minimum": 0
+    },
+    "loop": {
+      "type": "boolean",
+      "description": "Whether the frame should loop",
+      "default": false
+    }
+  },
+  "additionalProperties": false
+}

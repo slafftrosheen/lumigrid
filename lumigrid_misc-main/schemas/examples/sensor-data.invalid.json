@@ -1,0 +1,6 @@
+{
+  "node_id": "sensor-001",
+  "readings": {
+    "humidity_percent": 110
+  }
+}
