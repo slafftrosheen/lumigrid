@@ -10,19 +10,25 @@ LumiGrid miscellaneous files - integration toolbox with API shims, schema valida
 
 ## Quick Start
 
-### Validate Your Data
+### 1. Install Dependencies
+
+To install dependencies for the Node.js and Python examples, run the following command from the repository root:
+
+```bash
+make install
+```
+
+### 2. Validate Your Data
 
 **Node.js:**
 ```bash
 cd examples/nodejs
-npm install
 node validate-sensor-data.js
 ```
 
 **Python:**
 ```bash
 cd examples/python
-pip install -r requirements.txt
 python validate_sensor_data.py
 ```
 

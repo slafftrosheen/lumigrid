@@ -51,37 +51,35 @@ A comprehensive Raspberry Pi-based LED matrix information display system with we
 
 ## Installation
 
-**New users**: See the **[Quick Start Guide](QUICKSTART.md)** for step-by-step installation instructions.
+This project is part of the LumiGrid monorepo. All development tasks, including installation and testing, should be managed using the `Makefile` in the root of the repository.
 
-### Quick Install Summary
+### 1. Install Dependencies
+
+To install Python dependencies for this project, run the following command from the repository root:
 
 ```bash
-# Clone repository
-git clone https://github.com/algorhythmicdev/lumigrid_display_node.git
-cd lumigrid_display_node
-
-# Run installation script (takes 10-15 minutes)
-chmod +x install.sh
-./install.sh
-
-# Edit configuration
-nano config.yaml
-
-# Start the service
-sudo systemctl enable lumigrid
-sudo systemctl start lumigrid
-
-# Access web interface at http://YOUR_PI_IP:5000
+make install
 ```
 
-For detailed installation instructions, hardware setup, and troubleshooting, see:
-- **[Quick Start Guide](QUICKSTART.md)** - Complete installation walkthrough
-- **[Hardware Setup Guide](HARDWARE.md)** - Wiring diagrams and hardware details
-- **[Configuration Guide](CONFIGURATION.md)** - All configuration options
+This command will install all necessary packages inside a virtual environment (`venv/`) located in this directory.
 
-### Manual Installation
+### 2. Initial Raspberry Pi Setup
 
-For manual installation or if the quick install script fails, see the [Quick Start Guide - Manual Installation section](QUICKSTART.md#manual-installation).
+If you are setting up a new Raspberry Pi, an `install.sh` script is provided to configure the environment. This is a **one-time setup** that:
+
+- Installs system-level packages (`apt-get`).
+- Clones and builds the `rpi-rgb-led-matrix` library.
+- Enables I2C and 1-Wire interfaces.
+- Configures a `systemd` service for auto-starting the application.
+
+To run the setup script:
+
+```bash
+# The script will ask for sudo permissions
+./install.sh
+```
+
+**Note**: You do not need to run this script if your environment is already configured. The root `make install` command is sufficient for installing Python dependencies.
 
 ## Configuration
 
