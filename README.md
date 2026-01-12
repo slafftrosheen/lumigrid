@@ -11,27 +11,29 @@ This repository contains the following sub-projects:
 *   **[lumigrid_led_node-main/](lumigrid_led_node-main/)**: ESP-IDF firmware for ESP32-based addressable LED controllers.
 *   **[lumigrid_misc-main/](lumigrid_misc-main/)**: Shared JSON schemas, API examples, and tools.
 
-## Getting Started
+## Universal Onboarding
 
-A `Makefile` is provided to help manage the sub-projects.
+This monorepo uses a root `Makefile` to standardize the setup and development process for all subprojects. Whether you are a frontend developer, a Python scripter, or a firmware engineer, your onboarding journey starts here.
 
-### Prerequisites
-*   Node.js (v20+)
-*   Python (3.9+)
-*   ESP-IDF (v5.3+) - for firmware development
+### 1. Install Dependencies
 
-### Common Commands
+The `make install` command installs all necessary dependencies for every subproject, including `npm` packages and Python libraries.
 
 ```bash
-# Install dependencies for all sub-projects
 make install
-
-# Run tests for all sub-projects
-make test
-
-# Clean build artifacts
-make clean
 ```
+
+### 2. Run Tests
+
+The `make test` command runs all available tests for the subprojects to ensure that everything is working correctly.
+
+```bash
+make test
+```
+
+### 3. Explore Subprojects
+
+Once the initial setup is complete, you can explore the subproject directories for more specific development tasks. Each subproject's `README.md` file contains detailed instructions that build on this universal onboarding process.
 
 ### Documentation
 

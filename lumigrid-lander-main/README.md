@@ -2,15 +2,29 @@
 
 Ultra‑modern, glassy, depthy landing for creative signage makers. Truthful, simple language for all ages. Background 3D flares with safe motion, WCAG‑minded contrast, soft parallax, and interactive demos.
 
-## Dev
+## Development
+
+This project is part of the LumiGrid monorepo. All development tasks, including installation and testing, should be managed using the `Makefile` in the root of the repository.
+
+### Standardized Commands
+
+*   **Install Dependencies**: Run `make install` from the repository root.
+*   **Run Tests**: Run `make test` from the repository root.
+
+### Project-Specific Commands
+
+Alternatively, you can use `npm` for project-specific tasks:
 
 ```bash
+# Install local dependencies
 npm install
-npm run dev -- --open
-```
 
-Open http://localhost:5173. Run `npm run check` for a quick Svelte/TypeScript sanity check before committing changes.
-Execute `npm run test` to run the Vitest suite (if present).
+# Start the development server
+npm run dev -- --open
+
+# Run local tests
+npm run test
+```
 
 ### Accessibility helpers
 
