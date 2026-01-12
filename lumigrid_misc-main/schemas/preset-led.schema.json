@@ -1,63 +1,84 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "LED Effect Preset",
-  "description": "Schema for LED effect presets including RGBW color values",
+  "title": "LED Node Preset",
+  "description": "Schema for LumiGrid LED Node presets",
   "type": "object",
-  "required": ["preset_id", "name", "color"],
+  "required": ["preset_name", "effect_id"],
   "properties": {
-    "preset_id": {
-      "type": "integer",
-      "description": "Unique identifier for the preset",
-      "minimum": 1
-    },
-    "name": {
+    "preset_name": {
       "type": "string",
-      "description": "Human-readable name for the preset",
       "minLength": 1,
-      "maxLength": 50
+      "maxLength": 64,
+      "pattern": "^[a-zA-Z0-9_-]+$",
+      "description": "Unique preset identifier"
     },
-    "color": {
-      "type": "object",
-      "description": "RGBW color values",
-      "required": ["r", "g", "b", "w"],
-      "properties": {
-        "r": {
-          "type": "integer",
-          "description": "Red channel value",
-          "minimum": 0,
-          "maximum": 255
-        },
-        "g": {
-          "type": "integer",
-          "description": "Green channel value",
-          "minimum": 0,
-          "maximum": 255
-        },
-        "b": {
-          "type": "integer",
-          "description": "Blue channel value",
-          "minimum": 0,
-          "maximum": 255
-        },
-        "w": {
-          "type": "integer",
-          "description": "White channel value",
-          "minimum": 0,
-          "maximum": 255
-        }
-      },
-      "additionalProperties": false
-    },
-    "effect": {
+    "description": {
       "type": "string",
-      "description": "Optional effect type",
-      "enum": ["static", "fade", "pulse", "strobe", "rainbow"]
+      "maxLength": 256,
+      "description": "Optional preset description"
     },
-    "duration_ms": {
+    "effect_id": {
       "type": "integer",
-      "description": "Effect duration in milliseconds",
-      "minimum": 0
+      "minimum": 1000,
+      "maximum": 9999,
+      "description": "Effect identifier"
+    },
+    "speed": {
+      "type": "number",
+      "minimum": 0.0,
+      "maximum": 5.0,
+      "description": "Effect speed"
+    },
+    "intensity": {
+      "type": "number",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "description": "Effect intensity"
+    },
+    "brightness": {
+      "type": "number",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "description": "Global brightness"
+    },
+    "palette_id": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 255,
+      "description": "Palette identifier"
+    },
+    "color1": {
+      "type": "array",
+      "description": "Primary RGB color",
+      "items": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 255
+      },
+      "minItems": 3,
+      "maxItems": 3
+    },
+    "color2": {
+      "type": "array",
+      "description": "Secondary RGB color",
+      "items": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 255
+      },
+      "minItems": 3,
+      "maxItems": 3
+    },
+    "color3": {
+      "type": "array",
+      "description": "Tertiary RGB color",
+      "items": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 255
+      },
+      "minItems": 3,
+      "maxItems": 3
     }
-  },
-  "additionalProperties": false
+  }
 }
