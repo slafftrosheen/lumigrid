@@ -25,7 +25,7 @@ make install
 
 ### 2. Run Tests
 
-The `make test` command runs all available tests for the subprojects to ensure that everything is working correctly.
+The `make test` command runs all available tests for the subprojects—including the new cross-node integration tests—to ensure that everything is working correctly.
 
 ```bash
 make test
