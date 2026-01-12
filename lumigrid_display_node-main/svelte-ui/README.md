@@ -1,38 +1,36 @@
-# sv
+# LumiGrid Display Node UI
 
-Everything you need to build a Svelte project, powered by [`sv`](https://github.com/sveltejs/cli).
+This directory contains the source code for the SvelteKit web interface used to control and manage the LumiGrid Display Node.
 
-## Creating a project
+## Development
 
-If you're seeing this, you've probably already done this step. Congrats!
+The SvelteKit UI is served by the main Python/Flask application. To develop the UI, you can run a local development server that will proxy API requests to the running display node.
 
-```sh
-# create a new project in the current directory
-npx sv create
+### Prerequisites
 
-# create a new project in my-app
-npx sv create my-app
-```
+- Node.js 18+
+- npm
 
-## Developing
+### Setup and Running
 
-Once you've created a project and installed dependencies with `npm install` (or `pnpm install` or `yarn`), start a development server:
+1.  **Install dependencies:**
+    ```bash
+    npm install
+    ```
 
-```sh
-npm run dev
+2.  **Run the development server:**
+    ```bash
+    npm run dev
+    ```
 
-# or start the server and open the app in a new browser tab
-npm run dev -- --open
-```
+This will start a development server on `http://localhost:5173`. The UI will make API calls to the Python backend, which should be running separately.
 
-## Building
+## Building for Production
 
-To create a production version of your app:
+To build the static UI assets for production, run the following command:
 
-```sh
+```bash
 npm run build
 ```
 
-You can preview the production build with `npm run preview`.
-
-> To deploy your app, you may need to install an [adapter](https://svelte.dev/docs/kit/adapters) for your target environment.
+The build output will be located in the `build` directory. The main Flask application is configured to serve the static files from this directory.
