@@ -3,6 +3,7 @@
   import RevealOnScroll from '$lib/components/RevealOnScroll.svelte';
   import Header from '$lib/components/Header.svelte';
   import EpicHero from '$lib/components/EpicHero.svelte';
+  import HeroShowcase from '$lib/components/HeroShowcase.svelte';
 
   import FeatureGrid from '$lib/components/FeatureGrid.svelte';
   import UseCaseStory from '$lib/components/UseCaseStory.svelte';
@@ -49,6 +50,7 @@
   id="hero"
   data-hue={data?.theme?.hue}
 >
+  <HeroShowcase />
   <EpicHero kicker={$t('hero_kicker')} title={$t('hero_title')} sub={$t('hero_sub')} />
 </section>
 
