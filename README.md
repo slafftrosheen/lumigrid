@@ -41,6 +41,14 @@ Once the initial setup is complete, you can explore the subproject directories f
 *   **[Design System](lumigrid-lander-main/StyleSystem.md)**: UI/UX guidelines.
 *   **[API Schemas](lumigrid_misc-main/schemas/)**: JSON Schemas for data interchange.
 
+#### Module Documentation
+
+*   **[Lander Components](lumigrid-lander-main/src/lib/components/README.md)**: Svelte components for the landing page.
+*   **[Lander Stores](lumigrid-lander-main/src/lib/stores/README.md)**: Svelte stores for the landing page.
+*   **[Lander Utils](lumigrid-lander-main/src/lib/utils/README.md)**: Utility functions for the landing page.
+*   **[Display Node Source](lumigrid_display_node-main/lumigrid/README.md)**: Core Python source for the display node.
+*   **[Display Node UI](lumigrid_display_node-main/svelte-ui/README.md)**: SvelteKit UI for the display node.
+
 ## Development
 
 Each sub-project has its own `README.md` with specific development instructions. Please refer to them for detailed setup guides.
