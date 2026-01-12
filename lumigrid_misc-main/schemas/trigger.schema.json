@@ -1,0 +1,74 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "LumiGrid Trigger Action",
+  "description": "Schema for the /api/trigger endpoint, which initiates actions on a node.",
+  "type": "object",
+  "properties": {
+    "action": {
+      "type": "string",
+      "description": "The name of the action to perform."
+    }
+  },
+  "required": ["action"],
+  "oneOf": [
+    {
+      "properties": {
+        "action": { "const": "play_preset" },
+        "name": { "type": "string" }
+      },
+      "required": ["name"]
+    },
+    {
+      "properties": {
+        "action": { "const": "set_mode" },
+        "mode": { "type": "string" }
+      },
+      "required": ["mode"]
+    },
+    {
+      "properties": {
+        "action": { "const": "set_brightness" },
+        "value": { "type": "number", "minimum": 0, "maximum": 100 }
+      },
+      "required": ["value"]
+    },
+    {
+      "properties": {
+        "action": { "const": "show_message" },
+        "message": { "type": "string" }
+      },
+      "required": ["message"]
+    },
+    {
+      "properties": {
+        "action": { "const": "reboot" }
+      }
+    },
+    {
+      "properties": {
+        "action": { "const": "blackout" }
+      }
+    },
+    {
+      "properties": {
+        "action": { "const": "flash" },
+        "duration_ms": { "type": "integer", "minimum": 0 }
+      }
+    },
+    {
+      "properties": {
+        "action": { "const": "pulse" },
+        "duration_ms": { "type": "integer", "minimum": 0 }
+      }
+    },
+    {
+      "properties": {
+        "action": { "const": "apply_preset" },
+        "preset": { "type": "string" },
+        "channel": { "type": "integer", "minimum": 0 },
+        "duration_ms": { "type": "integer", "minimum": 0 }
+      },
+      "required": ["preset"]
+    }
+  ]
+}

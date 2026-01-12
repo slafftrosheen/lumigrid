@@ -792,14 +792,14 @@ def validate_timeline(timeline_data: Any) -> Dict[str, Any]:
 
 
 # Schema file path
-_SCHEMA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'schemas')
-_PRESET_SCHEMA_PATH = os.path.join(_SCHEMA_DIR, 'preset-display.schema.json')
+_SCHEMA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'lumigrid_misc-main', 'schemas')
+_PRESET_SCHEMA_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'schemas', 'preset-display.schema.json')
 _CONFIG_SCHEMA_PATH = os.path.join(_SCHEMA_DIR, 'config.schema.json')
 _SENSOR_DATA_SCHEMA_PATH = os.path.join(_SCHEMA_DIR, 'sensor-data.schema.json')
 _TRIGGER_SCHEMA_PATH = os.path.join(_SCHEMA_DIR, 'trigger.schema.json')
-_CHANNEL_GROUP_SCHEMA_PATH = os.path.join(_SCHEMA_DIR, 'channel-group.schema.json')
-_PRESET_LINK_SCHEMA_PATH = os.path.join(_SCHEMA_DIR, 'preset-link.schema.json')
-_CONDITIONAL_LOGIC_SCHEMA_PATH = os.path.join(_SCHEMA_DIR, 'conditional-logic.schema.json')
+_CHANNEL_GROUP_SCHEMA_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'schemas', 'channel-group.schema.json')
+_PRESET_LINK_SCHEMA_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'schemas', 'preset-link.schema.json')
+_CONDITIONAL_LOGIC_SCHEMA_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'schemas', 'conditional-logic.schema.json')
 
 _SCHEMA_CACHE: Dict[str, Dict[str, Any]] = {}
 

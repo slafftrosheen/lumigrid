@@ -1150,6 +1150,15 @@ static esp_err_t config_post_handler(httpd_req_t* req){
     httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "config must be JSON object");
     return ESP_FAIL;
   }
+
+  // Validate config JSON against schema
+  char error_msg[256];
+  if (!rest_api_validate_config_json(updates, error_msg, sizeof(error_msg))) {
+    cJSON_Delete(updates);
+    ESP_LOGW(TAG, "Config validation failed: %s", error_msg);
+    httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, error_msg);
+    return ESP_FAIL;
+  }
   
   // Merge updates into current config
   config_merge(updates);
@@ -1186,6 +1195,15 @@ static esp_err_t trigger_handler(httpd_req_t* req){
   cJSON *root = cJSON_Parse(buf);
   if (!root) {
     httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "json");
+    return ESP_FAIL;
+  }
+
+  // Validate trigger JSON against schema
+  char error_msg[256];
+  if (!rest_api_validate_trigger_json(root, error_msg, sizeof(error_msg))) {
+    cJSON_Delete(root);
+    ESP_LOGW(TAG, "Trigger validation failed: %s", error_msg);
+    httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, error_msg);
     return ESP_FAIL;
   }
   
@@ -1653,6 +1671,28 @@ static esp_err_t group_post_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
+// Validate config JSON against schema
+bool rest_api_validate_config_json(cJSON *root, char *error_buf, size_t error_buf_len) {
+    if (!root || !cJSON_IsObject(root)) {
+        snprintf(error_buf, error_buf_len, "config must be a JSON object");
+        return false;
+    }
+
+    cJSON *node_id = cJSON_GetObjectItem(root, "node_id");
+    if (node_id && (!cJSON_IsString(node_id) || !node_id->valuestring || !node_id->valuestring[0])) {
+        snprintf(error_buf, error_buf_len, "node_id must be a non-empty string");
+        return false;
+    }
+
+    cJSON *node_name = cJSON_GetObjectItem(root, "node_name");
+    if (node_name && !cJSON_IsString(node_name)) {
+        snprintf(error_buf, error_buf_len, "node_name must be a string");
+        return false;
+    }
+
+    return true;
+}
+
 // Validate trigger JSON against schema
 bool rest_api_validate_trigger_json(cJSON *root, char *error_buf, size_t error_buf_len) {
     if (!root || !cJSON_IsObject(root)) {
@@ -1660,21 +1700,9 @@ bool rest_api_validate_trigger_json(cJSON *root, char *error_buf, size_t error_b
         return false;
     }
 
-    cJSON *trigger_name = cJSON_GetObjectItem(root, "trigger_name");
-    if (!trigger_name || !cJSON_IsString(trigger_name) || !trigger_name->valuestring || !trigger_name->valuestring[0]) {
-        snprintf(error_buf, error_buf_len, "trigger_name is required");
-        return false;
-    }
-
-    cJSON *type = cJSON_GetObjectItem(root, "type");
-    if (!type || !cJSON_IsString(type)) {
-        snprintf(error_buf, error_buf_len, "type is required");
-        return false;
-    }
-
     cJSON *action = cJSON_GetObjectItem(root, "action");
-    if (!action || !cJSON_IsObject(action)) {
-        snprintf(error_buf, error_buf_len, "action is required");
+    if (!action || !cJSON_IsString(action) || !action->valuestring || !action->valuestring[0]) {
+        snprintf(error_buf, error_buf_len, "action is required (string, non-empty)");
         return false;
     }
 
@@ -1783,67 +1811,3 @@ static esp_err_t group_put_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
-// POST /api/groups - Create a new channel group
-static esp_err_t group_post_handler(httpd_req_t *req) {
-    char buf[512];
-    size_t total = 0;
-    esp_err_t err = recv_body(req, buf, sizeof(buf), &total);
-    if (err != ESP_OK || total == 0) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "empty");
-        return ESP_FAIL;
-    }
-
-    cJSON *root = cJSON_Parse(buf);
-    if (!root) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "json");
-        return ESP_FAIL;
-    }
-
-    cJSON *name_obj = cJSON_GetObjectItem(root, "name");
-    cJSON *channels_obj = cJSON_GetObjectItem(root, "channels");
-
-    if (!name_obj || !cJSON_IsString(name_obj) || !channels_obj || !cJSON_IsArray(channels_obj)) {
-        cJSON_Delete(root);
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing 'name' or 'channels'");
-        return ESP_FAIL;
-    }
-
-    uint8_t channels[16];
-    int num_channels = 0;
-    cJSON* channel_val;
-    cJSON_ArrayForEach(channel_val, channels_obj) {
-        if (cJSON_IsNumber(channel_val) && num_channels < 16) {
-            channels[num_channels++] = channel_val->valueint;
-        }
-    }
-
-    err = channel_groups_add(name_obj->valuestring, channels, num_channels);
-    cJSON_Delete(root);
-
-    if (err != ESP_OK) {
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to create group");
-        return ESP_FAIL;
-    }
-
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_sendstr(req, "{\"ok\":true}");
-    return ESP_OK;
-}
-
-// DELETE /api/groups/{name} - Delete a channel group
-static esp_err_t group_delete_handler(httpd_req_t *req) {
-    char name[64];
-    if (sscanf(req->uri, "/api/groups/%63s", name) != 1) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid group name");
-        return ESP_FAIL;
-    }
-
-    if (channel_groups_remove(name) != ESP_OK) {
-        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "Group not found");
-        return ESP_FAIL;
-    }
-
-    httpd_resp_set_status(req, "204 No Content");
-    httpd_resp_send(req, NULL, 0);
-    return ESP_OK;
-}
