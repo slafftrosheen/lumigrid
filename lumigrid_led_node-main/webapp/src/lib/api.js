@@ -412,6 +412,141 @@ export function createEventSource(endpoint) {
   return new EventSource(url);
 }
 
+// Display API (for compatibility with display node)
+export const display = {
+  async getMode() {
+    return request('/mode');
+  },
+  
+  async setMode(mode) {
+    return request('/mode', {
+      method: 'POST',
+      body: JSON.stringify({ mode })
+    });
+  },
+  
+  async getBrightness() {
+    return request('/brightness');
+  },
+  
+  async setBrightness(brightness) {
+    return request('/brightness', {
+      method: 'POST',
+      body: JSON.stringify({ brightness })
+    });
+  },
+  
+  async setMessage(message) {
+    return request('/message', {
+      method: 'POST',
+      body: JSON.stringify({ message })
+    });
+  }
+};
+
+// Frames API (for compatibility with display node)
+export const frames = {
+  async list() {
+    return request('/frames');
+  },
+  
+  async get(id) {
+    return request(`/frames/${id}`);
+  },
+  
+  async create(frame) {
+    return request('/frames', {
+      method: 'POST',
+      body: JSON.stringify(frame)
+    });
+  },
+  
+  async update(id, frame) {
+    return request(`/frames/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(frame)
+    });
+  },
+  
+  async delete(id) {
+    return request(`/frames/${id}`, {
+      method: 'DELETE'
+    });
+  },
+  
+  async reorder(order) {
+    return request('/frames/reorder', {
+      method: 'POST',
+      body: JSON.stringify({ order })
+    });
+  },
+  
+  async toggle(id, enabled) {
+    return request(`/frames/${id}/toggle`, {
+      method: 'POST',
+      body: JSON.stringify({ enabled })
+    });
+  }
+};
+
+// Font API (for compatibility with display node)
+export const fonts = {
+  async list() {
+    return request('/fonts');
+  },
+  
+  async upload(file) {
+    const formData = new FormData();
+    formData.append('font', file);
+    
+    const response = await fetch(`${API_BASE}/fonts/upload`, {
+      method: 'POST',
+      body: formData
+    });
+    
+    if (!response.ok) {
+      throw new APIError(`HTTP ${response.status}`, response.status);
+    }
+    
+    return response.json();
+  },
+  
+  async delete(path) {
+    return request('/fonts/delete', {
+      method: 'POST',
+      body: JSON.stringify({ path })
+    });
+  }
+};
+
+// Time Settings API (for compatibility with display node)
+export const time = {
+  async getSettings() {
+    return request('/time');
+  },
+  
+  async updateSettings(settings) {
+    return request('/time', {
+      method: 'POST',
+      body: JSON.stringify(settings)
+    });
+  }
+};
+
+// Control Settings API (for compatibility with display node)
+export const control = {
+  async getSettings() {
+    return request('/control');
+  },
+  
+  async updateSettings(settings) {
+    return request('/control', {
+      method: 'POST',
+      body: JSON.stringify(settings)
+    });
+  }
+};
+
 export default {
   system,
   config,
@@ -426,5 +561,10 @@ export default {
   schedule,
   layout,
   palettes,
+  display,
+  frames,
+  fonts,
+  time,
+  control,
   createEventSource
 };
