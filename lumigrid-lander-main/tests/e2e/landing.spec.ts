@@ -9,12 +9,16 @@ test('hero renders and CTAs are visible', async ({ page }) => {
 
 test('process steps are numbered and visible', async ({ page }) => {
   await page.goto('/');
-  const howItWorksSection = page.getByTestId('how-it-works');
-  await expect(howItWorksSection).toBeVisible();
-  await expect(howItWorksSection.getByText(/brief/i)).toBeVisible();
-  await expect(howItWorksSection.getByText(/plan/i)).toBeVisible();
-  await expect(howItWorksSection.getByText(/install/i)).toBeVisible();
-  await expect(howItWorksSection.getByText(/support/i)).toBeVisible();
+  // Process section is #process, not how-it-works (which is stories)
+  const processSection = page.locator('#process');
+  await expect(processSection).toBeVisible();
+
+  // Use regex to be flexible about case, but 'Brief', 'Plan', etc are in the process section
+  // We use .first() because the description might also contain the word
+  await expect(processSection.getByText(/brief/i).first()).toBeVisible();
+  await expect(processSection.getByText(/plan/i).first()).toBeVisible();
+  await expect(processSection.getByText(/install/i).first()).toBeVisible();
+  await expect(processSection.getByText(/support/i).first()).toBeVisible();
 });
 
 test('feature grid shows all sections', async ({ page }) => {
