@@ -7,6 +7,7 @@
 
   import FeatureGrid from '$lib/components/FeatureGrid.svelte';
   import UseCaseStory from '$lib/components/UseCaseStory.svelte';
+  import ProcessSteps from '$lib/components/ProcessSteps.svelte';
   import ProjectGallery from '$lib/components/ProjectGallery.svelte';
   import MediaGallery from '$lib/components/MediaGallery.svelte';
   import SpecHighlights from '$lib/components/SpecHighlights.svelte';
@@ -96,6 +97,8 @@
 <section id="stories">
   <UseCaseStory />
 </section>
+
+<ProcessSteps />
 
 <ProjectGallery />
 <MediaGallery />
