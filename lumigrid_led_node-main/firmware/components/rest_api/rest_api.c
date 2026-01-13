@@ -1365,12 +1365,12 @@ static esp_err_t trigger_handler(httpd_req_t* req){
     else if (strcmp(action->valuestring, "play_preset") == 0) {
       if (preset && cJSON_IsString(preset)) {
         int ch = (channel && cJSON_IsNumber(channel)) ? channel->valueint : 0;
-        ESP_LOGI(TAG, "Applying preset '%s' on channel %d", preset->valuestring, ch);
-        // TODO: Implement preset loading and temporary application
+        uint32_t dur_ms = (duration && cJSON_IsNumber(duration)) ? (uint32_t)duration->valueint : 0;
+        ESP_LOGI(TAG, "Playing preset '%s' on channel %d for %" PRIu32 " ms",
+                 preset->valuestring, ch, dur_ms);
+
+        apply_preset_from_fs(preset->valuestring, ch, dur_ms);
       }
-      // Immediate blackout - turn off all channels
-      trigger_blackout();
-      ESP_LOGI(TAG, "Blackout trigger");
     }
   }
   
