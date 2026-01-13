@@ -6,6 +6,8 @@
 #include "esp_system.h"
 #include "cJSON.h"
 #include <string.h>
+#include <dirent.h>
+#include "storage_fs.h"
 
 static const char* TAG = "REST_SEQ";
 
@@ -74,8 +76,30 @@ esp_err_t seq_list_handler(httpd_req_t *req) {
     cJSON *sequences = cJSON_CreateArray();
     cJSON_AddItemToObject(root, "sequences", sequences);
     
-    // TODO: Iterate through actual sequences when storage is implemented
-    // For now, return empty array
+    char dir_path[128];
+    if (storage_fs_mount_path(dir_path, sizeof(dir_path), "timelines")) {
+        DIR *d = opendir(dir_path);
+        if (d) {
+            struct dirent *e;
+            while ((e = readdir(d)) != NULL) {
+                const char *ext = strrchr(e->d_name, '.');
+                if (ext && strcasecmp(ext, ".json") == 0) {
+                    // strip extension
+                    char name[64];
+                    size_t name_len = ext - e->d_name;
+                    if (name_len < sizeof(name)) {
+                        strncpy(name, e->d_name, name_len);
+                        name[name_len] = 0;
+
+                        cJSON *seq = cJSON_CreateObject();
+                        cJSON_AddStringToObject(seq, "name", name);
+                        cJSON_AddItemToArray(sequences, seq);
+                    }
+                }
+            }
+            closedir(d);
+        }
+    }
     
     char *json_str = cJSON_PrintUnformatted(root);
     httpd_resp_set_type(req, "application/json");
