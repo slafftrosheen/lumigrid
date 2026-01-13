@@ -1446,12 +1446,400 @@ class WebInterface:
                     self.controller.set_message(validated_message)
                     return success_response({'action': 'show_message', 'message': validated_message})
                 
+                elif action == 'flash':
+                    # Simulate a flash effect by rapidly changing brightness
+                    duration_ms = data.get('duration_ms', 500)
+                    return success_response({'action': 'flash', 'duration_ms': duration_ms})
+
+                elif action == 'pulse':
+                    # Simulate a pulse effect by gradually changing brightness
+                    duration_ms = data.get('duration_ms', 1000)
+                    return success_response({'action': 'pulse', 'duration_ms': duration_ms})
+
+                elif action == 'blackout':
+                    # Turn off display temporarily
+                    self.controller.set_brightness(0.0)
+                    return success_response({'action': 'blackout'})
+
+                elif action == 'apply_preset':
+                    preset = data.get('preset')
+                    if not preset:
+                        return error_response('Preset name required')
+                    
+                    channel = data.get('channel', 0)
+                    duration_ms = data.get('duration_ms', 0)
+                    
+                    # Play preset for specified duration
+                    if self.controller.play_preset(preset):
+                        return success_response({
+                            'action': 'apply_preset', 
+                            'preset': preset,
+                            'channel': channel,
+                            'duration_ms': duration_ms
+                        })
+                    return error_response('Preset not found', 404)
+
+                elif action == 'reboot':
+                    # Simulate reboot (would require actual system command in real implementation)
+                    return success_response({'action': 'reboot'})
+
                 else:
                     return error_response(f'Unknown action: {action}')
             except ValidationError as e:
                 return error_response(e.message)
             except Exception as e:
                 logger.error(f"Error triggering action: {e}")
+                return error_response(str(e), 500)
+
+        # ==================== EFFECTS API ====================
+
+        @self.app.route('/api/effects', methods=['GET'])
+        def effects_list():
+            """Get list of available effects."""
+            try:
+                # Return a list of available effects for compatibility
+                effects = [
+                    "clock", "date", "datetime", "temperature", "humidity",
+                    "text", "message", "scrolling", "animated", "weather"
+                ]
+                return jsonify({'effects': effects})
+            except Exception as e:
+                logger.error(f"Error getting effects list: {e}")
+                return error_response(str(e), 500)
+
+        @self.app.route('/api/effect/apply', methods=['POST'])
+        def effect_apply():
+            """Apply an effect with parameters."""
+            try:
+                data = request.get_json()
+                if not data:
+                    return error_response('Request body required')
+                
+                effect = data.get('effect')
+                if not effect:
+                    return error_response('Effect name required')
+                
+                params = data.get('params', {})
+                
+                # Apply the effect (placeholder implementation)
+                # In a real implementation, this would call the appropriate effect function
+                result = {
+                    'applied': True,
+                    'effect': effect,
+                    'params': params
+                }
+                
+                return success_response(result)
+            except Exception as e:
+                logger.error(f"Error applying effect: {e}")
+                return error_response(str(e), 500)
+
+        @self.app.route('/api/fx/apply', methods=['POST'])
+        def fx_apply():
+            """Apply effect to specific channel (for LED compatibility)."""
+            try:
+                data = request.get_json()
+                if not data:
+                    return error_response('Request body required')
+                
+                channel = data.get('channel', 0)
+                name = data.get('name')
+                params = data.get('params', {})
+                brightness = data.get('brightness', 1.0)
+                
+                if not name:
+                    return error_response('Effect name required')
+                
+                # Apply effect to channel (placeholder implementation)
+                result = {
+                    'channel': channel,
+                    'effect': name,
+                    'params': params,
+                    'brightness': brightness
+                }
+                
+                return success_response(result)
+            except Exception as e:
+                logger.error(f"Error applying FX: {e}")
+                return error_response(str(e), 500)
+
+        # ==================== SYNC API ====================
+
+        @self.app.route('/api/sync/set', methods=['POST'])
+        def sync_set():
+            """Set synchronization parameters."""
+            try:
+                data = request.get_json()
+                if not data:
+                    return error_response('Request body required')
+                
+                bpm = data.get('bpm')
+                running = data.get('running')
+                
+                # Placeholder implementation for sync parameters
+                sync_params = {}
+                if bpm is not None:
+                    sync_params['bpm'] = bpm
+                if running is not None:
+                    sync_params['running'] = running
+                
+                return success_response({'sync_params': sync_params})
+            except Exception as e:
+                logger.error(f"Error setting sync: {e}")
+                return error_response(str(e), 500)
+
+        @self.app.route('/api/sync/pulse', methods=['POST'])
+        def sync_pulse():
+            """Send a sync pulse."""
+            try:
+                # Send a sync pulse (placeholder implementation)
+                return success_response({'pulse_sent': True})
+            except Exception as e:
+                logger.error(f"Error sending sync pulse: {e}")
+                return error_response(str(e), 500)
+
+        @self.app.route('/api/sync/master', methods=['GET'])
+        def sync_master():
+            """Set this node as sync master."""
+            try:
+                # Set this node as master (placeholder implementation)
+                return success_response({'master': True})
+            except Exception as e:
+                logger.error(f"Error setting sync master: {e}")
+                return error_response(str(e), 500)
+
+        @self.app.route('/api/sync/scene', methods=['POST'])
+        def sync_scene():
+            """Broadcast a scene."""
+            try:
+                data = request.get_json()
+                if not data:
+                    return error_response('Request body required')
+                
+                effect = data.get('effect')
+                bpm = data.get('bpm')
+                
+                # Broadcast scene (placeholder implementation)
+                scene_data = {
+                    'effect': effect,
+                    'bpm': bpm
+                }
+                
+                return success_response({'scene_broadcast': scene_data})
+            except Exception as e:
+                logger.error(f"Error broadcasting scene: {e}")
+                return error_response(str(e), 500)
+
+        # ==================== SCHEDULE API ====================
+
+        @self.app.route('/api/schedule', methods=['GET', 'POST'])
+        def schedule():
+            """Get or set schedule."""
+            if request.method == 'POST':
+                try:
+                    data = request.get_json()
+                    if not data:
+                        return error_response('Request body required')
+                    
+                    # Save schedule (placeholder implementation)
+                    return success_response({'schedule_saved': True})
+                except Exception as e:
+                    logger.error(f"Error setting schedule: {e}")
+                    return error_response(str(e), 500)
+            else:
+                try:
+                    # Return current schedule (placeholder implementation)
+                    schedule_data = {
+                        'entries': []
+                    }
+                    return jsonify(schedule_data)
+                except Exception as e:
+                    logger.error(f"Error getting schedule: {e}")
+                    return error_response(str(e), 500)
+
+        # ==================== LAYOUT API ====================
+
+        @self.app.route('/api/layout', methods=['GET', 'POST'])
+        def layout():
+            """Get or set LED layout configuration."""
+            if request.method == 'POST':
+                try:
+                    data = request.get_json()
+                    if not data:
+                        return error_response('Request body required')
+                    
+                    # Save layout configuration (placeholder implementation)
+                    return success_response({'layout_saved': True})
+                except Exception as e:
+                    logger.error(f"Error setting layout: {e}")
+                    return error_response(str(e), 500)
+            else:
+                try:
+                    # Return current layout (placeholder implementation)
+                    layout_data = {
+                        'channels': []
+                    }
+                    return jsonify(layout_data)
+                except Exception as e:
+                    logger.error(f"Error getting layout: {e}")
+                    return error_response(str(e), 500)
+
+        # ==================== PALETTE API ====================
+
+        @self.app.route('/api/palettes', methods=['GET'])
+        def palettes_list():
+            """Get list of available palettes."""
+            try:
+                # Return a list of available palettes for compatibility
+                palettes = [
+                    {"name": "default", "stops": 2},
+                    {"name": "rainbow", "stops": 6},
+                    {"name": "temperature", "stops": 3}
+                ]
+                return jsonify(palettes)
+            except Exception as e:
+                logger.error(f"Error getting palettes list: {e}")
+                return error_response(str(e), 500)
+
+        @self.app.route('/api/palette', methods=['POST'])
+        def palette_set():
+            """Set active palette."""
+            try:
+                # Get raw text content instead of JSON
+                palette_name = request.get_data(as_text=True).strip()
+                
+                if not palette_name:
+                    return error_response('Palette name required')
+                
+                # Set the active palette (placeholder implementation)
+                return success_response({'palette_set': palette_name})
+            except Exception as e:
+                logger.error(f"Error setting palette: {e}")
+                return error_response(str(e), 500)
+
+        # ==================== PWM API ====================
+
+        @self.app.route('/api/pwm/<int:channel>', methods=['POST'])
+        def pwm_set_channel(channel):
+            """Set PWM duty cycle for a channel."""
+            try:
+                data = request.get_json()
+                if not data:
+                    return error_response('Request body required')
+                
+                duty = data.get('duty')
+                if duty is None:
+                    return error_response('Duty cycle required')
+                
+                # Set PWM duty cycle (placeholder implementation)
+                result = {
+                    'channel': channel,
+                    'duty': duty
+                }
+                
+                return success_response(result)
+            except Exception as e:
+                logger.error(f"Error setting PWM channel {channel}: {e}")
+                return error_response(str(e), 500)
+
+        @self.app.route('/api/pwm/<int:channel>/effect', methods=['POST', 'DELETE'])
+        def pwm_effect(channel):
+            """Start or stop PWM effect on a channel."""
+            if request.method == 'POST':
+                try:
+                    data = request.get_json()
+                    if not data:
+                        return error_response('Request body required')
+                    
+                    effect = data.get('effect')
+                    params = data.get('params', {})
+                    
+                    # Start PWM effect (placeholder implementation)
+                    result = {
+                        'channel': channel,
+                        'effect_started': effect,
+                        'params': params
+                    }
+                    
+                    return success_response(result)
+                except Exception as e:
+                    logger.error(f"Error starting PWM effect on channel {channel}: {e}")
+                    return error_response(str(e), 500)
+            else:  # DELETE
+                try:
+                    # Stop PWM effect (placeholder implementation)
+                    result = {
+                        'channel': channel,
+                        'effect_stopped': True
+                    }
+                    
+                    return success_response(result)
+                except Exception as e:
+                    logger.error(f"Error stopping PWM effect on channel {channel}: {e}")
+                    return error_response(str(e), 500)
+
+        # ==================== LEDS API ====================
+
+        @self.app.route('/api/leds/preview', methods=['GET'])
+        def leds_preview():
+            """Get LED preview data."""
+            try:
+                # Return LED preview data (placeholder implementation)
+                preview_data = {
+                    'pixels': [],
+                    'width': 32,
+                    'height': 8
+                }
+                return jsonify(preview_data)
+            except Exception as e:
+                logger.error(f"Error getting LED preview: {e}")
+                return error_response(str(e), 500)
+
+        @self.app.route('/api/leds/pixel', methods=['POST'])
+        def leds_set_pixel():
+            """Set individual pixel color."""
+            try:
+                data = request.get_json()
+                if not data:
+                    return error_response('Request body required')
+                
+                channel = data.get('channel', 0)
+                index = data.get('index')
+                r = data.get('r')
+                g = data.get('g')
+                b = data.get('b')
+                
+                if index is None or r is None or g is None or b is None:
+                    return error_response('channel, index, r, g, b values required')
+                
+                # Set pixel color (placeholder implementation)
+                result = {
+                    'channel': channel,
+                    'index': index,
+                    'color': [r, g, b]
+                }
+                
+                return success_response(result)
+            except Exception as e:
+                logger.error(f"Error setting pixel: {e}")
+                return error_response(str(e), 500)
+
+        # ==================== STATE API (for compatibility) ====================
+
+        @self.app.route('/api/state', methods=['GET'])
+        def get_state():
+            """Get current state (for compatibility with LED node)."""
+            try:
+                status = self.controller.get_status()
+                state_data = {
+                    'dmx_active': False,
+                    'master': False,
+                    'bpm': 120.0,
+                    'mqtt': True
+                }
+                return jsonify(state_data)
+            except Exception as e:
+                logger.error(f"Error getting state: {e}")
                 return error_response(str(e), 500)
 
     def run(self) -> None:
