@@ -1428,24 +1428,46 @@ static esp_err_t sensor_update_handler(httpd_req_t* req){
     
     cJSON *jv;
     if ((jv = cJSON_GetObjectItem(jr, "temperature_c")) && cJSON_IsNumber(jv)) {
-      ESP_LOGI(TAG, "  Temperature: %.2f°C", jv->valuedouble);
+      double temp = jv->valuedouble;
+      ESP_LOGI(TAG, "  Temperature: %.2f°C", temp);
+      // Temperature-reactive palette
+      if (temp < 18.0) {
+        palettes_set_active("Cool");
+      } else if (temp > 28.0) {
+        palettes_set_active("Warm");
+      }
     }
     if ((jv = cJSON_GetObjectItem(jr, "humidity_percent")) && cJSON_IsNumber(jv)) {
-      ESP_LOGI(TAG, "  Humidity: %.2f%%", jv->valuedouble);
+      double humidity = jv->valuedouble;
+      ESP_LOGI(TAG, "  Humidity: %.2f%%", humidity);
+      // Adjust speed based on humidity
+      // Higher humidity -> Slower speed (heavy air). 0% -> 1.5, 100% -> 0.5
+      float speed = 1.5f - ((float)humidity / 100.0f);
+      if (speed < 0.1f) speed = 0.1f;
+      // Apply to all channels
+      for (int i=0; i<4; i++) {
+        fx_set_speed(i, speed);
+      }
     }
     if ((jv = cJSON_GetObjectItem(jr, "motion_detected")) && cJSON_IsBool(jv)) {
-      ESP_LOGI(TAG, "  Motion: %s", cJSON_IsTrue(jv) ? "detected" : "not detected");
+      bool motion = cJSON_IsTrue(jv);
+      ESP_LOGI(TAG, "  Motion: %s", motion ? "detected" : "not detected");
+      if (motion) {
+         // Trigger 'motion' preset on channel 0 for 5 seconds
+         apply_preset_from_fs("motion", 0, 5000);
+      }
     }
     if ((jv = cJSON_GetObjectItem(jr, "light_level")) && cJSON_IsNumber(jv)) {
-      ESP_LOGI(TAG, "  Light level: %.2f", jv->valuedouble);
+      double light = jv->valuedouble;
+      ESP_LOGI(TAG, "  Light level: %.2f", light);
+      // Auto-brightness: Assume normalized light level 0.0-1.0
+      float br = (float)light;
+      if (br < 0.1f) br = 0.1f; // Minimum brightness
+      if (br > 1.0f) br = 1.0f;
+      for (int i=0; i<4; i++) {
+        fx_set_channel_brightness(i, br);
+      }
     }
-    
-    // TODO: Integrate sensor-reactive effects:
-    // - temperature_c: trigger temperature-reactive LED color changes (cool/warm palettes)
-    // - humidity_percent: adjust effect intensity or speed based on humidity
-    // - motion_detected: activate motion-triggered sequences or scenes
-    // - light_level: adjust brightness based on ambient light (auto-brightness)
-    // For now, we just log the data
   }
   
   cJSON_Delete(root);
