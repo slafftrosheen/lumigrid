@@ -1,6 +1,0 @@
-menu "LumiGrid LED Node"
-config LUMIGRID_ALED_CH_MAX
-    int "Max addressable LED channels (ESP32 classic: 4)"
-    range 1 4
-    default 4
-endmenu

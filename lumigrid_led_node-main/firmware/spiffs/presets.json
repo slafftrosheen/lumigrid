@@ -1,9 +1,0 @@
-[
-  {"preset_name":"FX_1101","effect_id":1101,"color1":[255,255,255],"speed":1.2,"intensity":1.0},
-  {"preset_name":"FX_1102","effect_id":1102,"color1":[255,160,60],"speed":1.0,"intensity":1.0},
-  {"preset_name":"FX_1103","effect_id":1103,"color1":[50,120,255],"speed":1.0,"intensity":0.7},
-  {"preset_name":"FX_1104","effect_id":1104,"color1":[255,40,40],"speed":0.8,"intensity":1.0},
-  {"preset_name":"FX_1105","effect_id":1105,"palette_id":0,"speed":0.25,"intensity":1.0},
-  {"preset_name":"FX_1106","effect_id":1106,"palette_id":1,"speed":0.8,"intensity":1.0},
-  {"preset_name":"FX_1107","effect_id":1107,"color1":[255,255,255],"speed":2.0,"intensity":1.0}
-]

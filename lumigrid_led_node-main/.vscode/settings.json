@@ -1,5 +1,0 @@
-{
-    "idf.pythonInstallPath": "/usr/bin/python3",
-    "cmake.sourceDirectory": "/home/slaff/Documents/lumigrid-1/firmware",
-    "idf.monitorPort": "/dev/ttyUSB0"
-}
