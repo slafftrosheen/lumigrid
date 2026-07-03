@@ -1,7 +1,19 @@
+// LumiGrid PCA9685 PWM Usermod
+// Drives 8 PWM channels (LED0–LED7) on a single PCA9685 at I2C address 0x40.
+// Board: ESP32-WROOM-32U
+// I2C: SDA=GPIO21, SCL=GPIO22
+// OE#:  GPIO25 (active-low output enable, pulled LOW in setup)
+//
+// Channel types:
+//   0 = Off
+//   1 = Dumb PWM  (1 PCA channel, brightness = max of RGBW components)
+//   2 = CCT       (2 PCA channels: WW + CW)
+//   3 = RGB        (3 PCA channels)
+//   4 = RGBW       (4 PCA channels)
+
 #pragma once
 
 #include "wled.h"
-#include <SPI.h>
 #include <Wire.h>
 #include <Adafruit_PWMServoDriver.h>
 #include <OneWire.h>
@@ -9,395 +21,382 @@
 
 class UsermodLumigridPCA9685 : public Usermod {
   private:
-    bool enabled = true;
-    bool initDone = false;
-    
-    // 0=Off, 1=Dumb PWM, 2=CCT, 3=RGB, 4=RGBW
-    uint8_t pcaType[32]; 
-    String channelLabels[32];
-    
-    int8_t emergencyBtnPin = 32; // Default to GPIO 32
-    bool lastBtnState = HIGH;
+    // ── Hardware constants ────────────────────────────────────────────────────
+    static constexpr uint8_t  NUM_CHANNELS = 8;     // LED0–LED7
+    static constexpr uint8_t  PCA_ADDR     = 0x40;  // single chip
+    static constexpr uint16_t PWM_FREQ_DEFAULT = 1000; // Hz — safe for LED dimming
+
+    // ── State ─────────────────────────────────────────────────────────────────
+    bool    enabled   = true;
+    bool    initDone  = false;
+    bool    pcaFound  = false;
+
+    // ── Channel configuration ─────────────────────────────────────────────────
+    uint8_t channelType[NUM_CHANNELS];          // 0–4 per channel
+    char    channelLabel[NUM_CHANNELS][24];     // user-visible name per channel
+    uint8_t channelCalibration[NUM_CHANNELS];   // 0–100 % brightness cap per channel
+
+    // ── Emergency button ──────────────────────────────────────────────────────
+    int8_t  emergencyBtnPin = 32;
+    bool    lastBtnState    = HIGH;
     unsigned long btnPressTime = 0;
-    bool emergencyOff = false;
+    bool    emergencyOff    = false;
 
-    int8_t tempPin = 4; // Default to GPIO 4
-    float currentTemp = 0.0;
+    // ── Temperature sensor (DS18B20) ─────────────────────────────────────────
+    // Default -1 = disabled. Do NOT use a pin that is shared with an addressable
+    // LED channel (GPIO 4/17/18/19/23/26/27). A free GPIO such as GPIO33 is safe.
+    int8_t  tempPin         = -1;
+    float   currentTemp     = 0.0f;
     unsigned long lastTempUpdate = 0;
-    bool tempSensorFound = false;
-
-    OneWire* oneWire = nullptr;
+    bool    tempSensorFound = false;
+    OneWire*           oneWire = nullptr;
     DallasTemperature* sensors = nullptr;
 
-    uint8_t  layoutChannelCount = 0;
-    uint8_t  chipChannelOffset[2] = {0, 0};
-    uint8_t  channelCalibration[32];
-    uint8_t  chipAddr[2] = {0x40, 0x41};
+    // ── PWM ──────────────────────────────────────────────────────────────────
+    uint16_t pwmFrequency = PWM_FREQ_DEFAULT; // 24–1526 Hz
+    Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver(PCA_ADDR);
 
-    // Macro preset support
-    static constexpr uint8_t MACRO_COUNT = 4;
-    String macroNames[MACRO_COUNT];
-    uint8_t macroTypes[MACRO_COUNT][32];
-    bool macroConfigured = false;
-
-    uint32_t lastUpdate = 0;
-    Adafruit_PWMServoDriver pwm1 = Adafruit_PWMServoDriver(0x40);
-    Adafruit_PWMServoDriver pwm2 = Adafruit_PWMServoDriver(0x41);
-    bool pca1Found = false;
-    bool pca2Found = false;
-
-    // Watchdog
-    unsigned long lastWatchdogCheck = 0;
+    // ── Timing ────────────────────────────────────────────────────────────────
+    uint32_t      lastUpdate   = 0;
+    unsigned long lastWatchdog = 0;
 
     static const char _name[];
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // Private helpers
+    // ─────────────────────────────────────────────────────────────────────────
+
     void setupTemperature() {
-      if (tempPin >= 0) {
-        if (oneWire) delete oneWire;
-        if (sensors) delete sensors;
-        oneWire = new OneWire(tempPin);
-        sensors = new DallasTemperature(oneWire);
-        sensors->begin();
-        tempSensorFound = (sensors->getDeviceCount() > 0);
+      if (tempPin < 0) {
+        tempSensorFound = false;
+        return;
       }
+      delete sensors; sensors = nullptr;
+      delete oneWire; oneWire = nullptr;
+      oneWire = new OneWire(tempPin);
+      sensors = new DallasTemperature(oneWire);
+      sensors->begin();
+      tempSensorFound = (sensors->getDeviceCount() > 0);
+      DEBUG_PRINTF_P(PSTR("LumiGrid PCA9685: temp sensor %s (pin %d)\n"),
+                     tempSensorFound ? "found" : "not found", (int)tempPin);
+    }
+
+    // Map 8-bit color value → 12-bit PCA9685 duty cycle.
+    //   ch  – channel index (0–7), used for per-channel calibration lookup
+    // Applies: per-channel calibration cap → global bri → thermal throttle → quadratic gamma.
+    uint16_t mapTo12Bit(uint8_t val, uint8_t ch) {
+      if (emergencyOff || !enabled) return 0;
+
+      // Thermal protection thresholds
+      float mult = 1.0f;
+      if (currentTemp > 60.0f) mult = 0.5f;
+      if (currentTemp > 75.0f) mult = 0.1f;
+      if (currentTemp > 85.0f) return 0; // full shutdown
+
+      // Per-channel calibration cap (0–100 %)
+      uint8_t capped = (uint16_t(val) * uint16_t(channelCalibration[ch])) / 100u;
+
+      // Scale by global master brightness and thermal multiplier
+      uint32_t bri32  = uint32_t(float(bri) * mult);
+      uint16_t linear = uint16_t((uint32_t(capped) * bri32 * 4095u) / 65025u);
+
+      // Quadratic gamma (~2.0) for perceptually linear dimming
+      return uint16_t((uint32_t(linear) * uint32_t(linear)) / 4095u);
+    }
+
+    // Write a 12-bit value to a single PCA9685 channel (bounds-checked).
+    void applyPWM(uint8_t ch, uint16_t val) {
+      if (!pcaFound || ch >= NUM_CHANNELS) return;
+      pwm.setPWM(ch, 0, val);
     }
 
   public:
     UsermodLumigridPCA9685() {
-      for(int i=0; i<32; i++) {
-        pcaType[i] = 1;
-        channelLabels[i] = "Channel " + String(i);
-        channelCalibration[i] = 100;
-      }
-      chipChannelOffset[0] = 0;
-      chipChannelOffset[1] = 16;
-      macroConfigured = false;
-      for (int m=0; m<MACRO_COUNT; m++) {
-        macroNames[m] = "Preset " + String(m+1);
-        for (int i=0; i<32; i++) macroTypes[m][i] = pcaType[i];
+      for (uint8_t i = 0; i < NUM_CHANNELS; i++) {
+        channelType[i]        = 1;   // Dumb PWM
+        channelCalibration[i] = 100; // full range
+        snprintf(channelLabel[i], sizeof(channelLabel[i]), "LED%d", i);
       }
     }
 
-    void rebuildLayout() {
-      uint8_t pca_ch = 0;
-      chipChannelOffset[0] = 0;
-      for (int i=0; i<32; i++) {
-        uint8_t t = pcaType[i];
-        if (t == 0) {
-          // Off
-        } else if (t == 1) {
-          pca_ch += 1;
-        } else if (t == 2) {
-          pca_ch += 2;
-        } else if (t == 3) {
-          pca_ch += 3;
-        } else if (t == 4) {
-          pca_ch += 4;
-        } else {
-          pca_ch += 1;
-        }
-      }
-      chipChannelOffset[1] = pca_ch;
-      layoutChannelCount = min<uint8_t>(pca_ch, 32);
-    }
+    // ─────────────────────────────────────────────────────────────────────────
+    // WLED lifecycle
+    // ─────────────────────────────────────────────────────────────────────────
+
     void setup() override {
-
+      // Enable PCA9685 output (OE# = active-low)
       #ifdef PCA9685_OE
-      pinMode(PCA9685_OE, OUTPUT);
-      digitalWrite(PCA9685_OE, LOW);
+        pinMode(PCA9685_OE, OUTPUT);
+        digitalWrite(PCA9685_OE, LOW);
       #else
-      pinMode(25, OUTPUT);
-      digitalWrite(25, LOW);
+        pinMode(25, OUTPUT);     // default OE# pin
+        digitalWrite(25, LOW);
       #endif
-      
-      Wire.begin();
-      
-      // I2C Scanner
-      Wire.beginTransmission(0x40);
-      if (Wire.endTransmission() == 0) {
-        pca1Found = true;
-        pwm1.begin();
-        pwm1.setPWMFreq(1500);
-      }
-      
-      Wire.beginTransmission(0x41);
-      if (Wire.endTransmission() == 0) {
-        pca2Found = true;
-        pwm2.begin();
-        pwm2.setPWMFreq(1500);
+
+      Wire.begin(); // SDA=GPIO21, SCL=GPIO22 on ESP32
+
+      // Probe single PCA9685 chip
+      Wire.beginTransmission(PCA_ADDR);
+      pcaFound = (Wire.endTransmission() == 0);
+      if (pcaFound) {
+        pwm.begin();
+        pwm.setPWMFreq(pwmFrequency);
+        DEBUG_PRINTF_P(PSTR("LumiGrid PCA9685: chip found at 0x%02X, %d Hz\n"),
+                       (int)PCA_ADDR, (int)pwmFrequency);
+      } else {
+        DEBUG_PRINTLN(F("LumiGrid PCA9685: no chip at 0x40!"));
       }
 
+      // Emergency button (active-low, internal pull-up)
       if (emergencyBtnPin >= 0) {
         pinMode(emergencyBtnPin, INPUT_PULLUP);
       }
-      
+
       setupTemperature();
-      
-      rebuildLayout();
-
       initDone = true;
-      initDone = true;
-    }
-
-    uint16_t mapTo12Bit(uint8_t val) {
-      if (emergencyOff) return 0;
-      
-      // Thermal throttling
-      float multiplier = 1.0;
-      if (currentTemp > 60.0) multiplier = 0.5;
-      if (currentTemp > 75.0) multiplier = 0.1;
-      if (currentTemp > 85.0) multiplier = 0.0; // Shut down completely
-
-      val = (uint16_t(val) * uint16_t(channelCalibration[0])) / 100;
-
-      uint32_t val32 = val;
-      uint32_t bri32 = bri * multiplier;
-      uint16_t pwmVal = (val32 * bri32 * 4095) / 65025;
-      return (uint32_t(pwmVal) * uint32_t(pwmVal)) / 4095;
-    }
-
-    void applyPWM(uint8_t ch, uint16_t val) {
-      if (ch < 16 && pca1Found) {
-        pwm1.setPWM(ch, 0, val);
-      } else if (ch >= 16 && pca2Found) {
-        pwm2.setPWM(ch - 16, 0, val);
-      }
     }
 
     void loop() override {
       if (!enabled || !initDone || strip.isUpdating()) return;
 
-      // Watchdog
-      if (millis() - lastWatchdogCheck > 5000) {
-        lastWatchdogCheck = millis();
-        if (pca1Found) {
-           Wire.beginTransmission(0x40);
-           if (Wire.endTransmission() != 0) {
-             DEBUG_PRINTLN(F("PCA1 I2C ERROR"));
-             pwm1.begin(); // Retry
-           }
-        }
-        if (pca2Found) {
-           Wire.beginTransmission(0x41);
-           if (Wire.endTransmission() != 0) {
-             DEBUG_PRINTLN(F("PCA2 I2C ERROR"));
-             pwm2.begin(); // Retry
-           }
+      // ── I2C watchdog: re-init if chip lost ──────────────────────────────
+      if (millis() - lastWatchdog > 5000) {
+        lastWatchdog = millis();
+        Wire.beginTransmission(PCA_ADDR);
+        if (pcaFound && Wire.endTransmission() != 0) {
+          DEBUG_PRINTLN(F("LumiGrid PCA9685: I2C error — retrying init"));
+          pwm.begin();
+          pwm.setPWMFreq(pwmFrequency);
         }
       }
 
-      // Temp sensor reading
+      // ── Temperature reading every 2 s ────────────────────────────────────
       if (tempSensorFound && millis() - lastTempUpdate > 2000) {
         lastTempUpdate = millis();
         sensors->requestTemperatures();
         currentTemp = sensors->getTempCByIndex(0);
       }
 
-      // Button handler
+      // ── Emergency button ─────────────────────────────────────────────────
       if (emergencyBtnPin >= 0) {
         bool reading = digitalRead(emergencyBtnPin);
         if (reading == LOW && lastBtnState == HIGH) {
           btnPressTime = millis();
         } else if (reading == HIGH && lastBtnState == LOW) {
-          unsigned long duration = millis() - btnPressTime;
-          if (duration > 1500) {
-             // Long press -> Emergency Off
-             emergencyOff = !emergencyOff;
-          } else if (duration > 50) {
-             // Short press -> toggle power
-             toggleOnOff();
+          unsigned long dur = millis() - btnPressTime;
+          if (dur > 1500) {
+            // Long press → toggle emergency-off
+            emergencyOff = !emergencyOff;
+            if (emergencyOff) {
+              // Drive all channels to 0 immediately
+              for (uint8_t i = 0; i < NUM_CHANNELS; i++) applyPWM(i, 0);
+            }
+            DEBUG_PRINTF_P(PSTR("LumiGrid: emergencyOff=%d\n"), (int)emergencyOff);
+          } else if (dur > 50) {
+            // Short press → WLED power toggle
+            toggleOnOff();
           }
         }
         lastBtnState = reading;
       }
 
+      // ── Rate-limit PWM writes to ~66 Hz ─────────────────────────────────
       if (millis() - lastUpdate < 15) return;
       lastUpdate = millis();
 
-      uint8_t pca_ch = 0;
-      uint16_t virtual_pixel_idx = 0;
-      uint8_t total_channels = pca2Found ? 32 : 16;
+      // ── Map WLED pixel colors → PCA9685 channels ─────────────────────────
+      // Each multi-channel type (CCT/RGB/RGBW) consumes one virtual pixel and
+      // multiple consecutive PCA channels.
+      uint16_t pixelIdx = 0;
+      uint8_t  ch       = 0;
 
-      while (pca_ch < total_channels) {
-        uint8_t type = pcaType[pca_ch];
-        uint32_t color = strip.getPixelColor(virtual_pixel_idx);
-        
-        if (type == 0) {
-          applyPWM(pca_ch, 0);
-          pca_ch += 1;
-        } 
-        else if (type == 1) {
-          uint8_t w = max(max((color >> 16) & 0xFF, (color >> 8) & 0xFF), max((color >> 0) & 0xFF, (color >> 24) & 0xFF));
-          applyPWM(pca_ch, mapTo12Bit(w));
-          pca_ch += 1;
-          virtual_pixel_idx += 1;
-        }
-        else if (type == 2) {
-          if (pca_ch + 1 >= total_channels) { applyPWM(pca_ch, 0); break; }
-          uint8_t ww = (color >> 16) & 0xFF;
-          uint8_t cw = (color >> 8) & 0xFF;
-          applyPWM(pca_ch, mapTo12Bit(ww));
-          applyPWM(pca_ch + 1, mapTo12Bit(cw));
-          pca_ch += 2;
-          virtual_pixel_idx += 1;
-        }
-        else if (type == 3) {
-          if (pca_ch + 2 >= total_channels) { applyPWM(pca_ch, 0); break; }
-          applyPWM(pca_ch, mapTo12Bit((color >> 16) & 0xFF));
-          applyPWM(pca_ch + 1, mapTo12Bit((color >> 8) & 0xFF));
-          applyPWM(pca_ch + 2, mapTo12Bit((color >> 0) & 0xFF));
-          pca_ch += 3;
-          virtual_pixel_idx += 1;
-        }
-        else if (type == 4) {
-          if (pca_ch + 3 >= total_channels) { applyPWM(pca_ch, 0); break; }
-          applyPWM(pca_ch, mapTo12Bit((color >> 16) & 0xFF));
-          applyPWM(pca_ch + 1, mapTo12Bit((color >> 8) & 0xFF));
-          applyPWM(pca_ch + 2, mapTo12Bit((color >> 0) & 0xFF));
-          applyPWM(pca_ch + 3, mapTo12Bit((color >> 24) & 0xFF));
-          pca_ch += 4;
-          virtual_pixel_idx += 1;
-        } else {
-          applyPWM(pca_ch, 0);
-          pca_ch += 1;
+      while (ch < NUM_CHANNELS) {
+        uint32_t color = strip.getPixelColor(pixelIdx);
+        uint8_t  type  = channelType[ch];
+
+        switch (type) {
+          case 0: // Off — force channel dark
+            applyPWM(ch, 0);
+            ch++;
+            break;
+
+          case 1: { // Dumb PWM — brightness = max component of RGBW pixel
+            uint8_t r = (color >> 16) & 0xFF;
+            uint8_t g = (color >>  8) & 0xFF;
+            uint8_t b = (color      ) & 0xFF;
+            uint8_t w = (color >> 24) & 0xFF;
+            uint8_t v = max(max(r, g), max(b, w));
+            applyPWM(ch, mapTo12Bit(v, ch));
+            ch++;
+            pixelIdx++;
+            break;
+          }
+
+          case 2: { // CCT — WW on ch, CW on ch+1
+            if (ch + 1 >= NUM_CHANNELS) { applyPWM(ch, 0); ch++; break; }
+            applyPWM(ch,     mapTo12Bit((color >> 16) & 0xFF, ch));
+            applyPWM(ch + 1, mapTo12Bit((color >>  8) & 0xFF, ch + 1));
+            ch += 2;
+            pixelIdx++;
+            break;
+          }
+
+          case 3: { // RGB
+            if (ch + 2 >= NUM_CHANNELS) { applyPWM(ch, 0); ch++; break; }
+            applyPWM(ch,     mapTo12Bit((color >> 16) & 0xFF, ch));
+            applyPWM(ch + 1, mapTo12Bit((color >>  8) & 0xFF, ch + 1));
+            applyPWM(ch + 2, mapTo12Bit((color      ) & 0xFF, ch + 2));
+            ch += 3;
+            pixelIdx++;
+            break;
+          }
+
+          case 4: { // RGBW
+            if (ch + 3 >= NUM_CHANNELS) { applyPWM(ch, 0); ch++; break; }
+            applyPWM(ch,     mapTo12Bit((color >> 16) & 0xFF, ch));
+            applyPWM(ch + 1, mapTo12Bit((color >>  8) & 0xFF, ch + 1));
+            applyPWM(ch + 2, mapTo12Bit((color      ) & 0xFF, ch + 2));
+            applyPWM(ch + 3, mapTo12Bit((color >> 24) & 0xFF, ch + 3));
+            ch += 4;
+            pixelIdx++;
+            break;
+          }
+
+          default:
+            applyPWM(ch, 0);
+            ch++;
+            break;
         }
       }
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // JSON info (shown on the WLED Info page and /json/info)
+    // ─────────────────────────────────────────────────────────────────────────
 
     void addToJsonInfo(JsonObject& root) override {
       if (!enabled) return;
-      JsonObject user = root["u"];
-      if (user.isNull()) user = root.createNestedObject("u");
-      
-      JsonObject pca = user.createNestedObject(FPSTR(_name));
-      {
-        JsonArray tempArr = pca.createNestedArray("temp");
-        if (!tempSensorFound) {
-          tempArr.add(0);
-          tempArr.add(F(" Sensor Not Found"));
-        } else {
-          tempArr.add(currentTemp);
-          tempArr.add(F(" °C"));
-        }
+      JsonObject user = root.containsKey("u") ? root["u"].as<JsonObject>() : root.createNestedObject("u");
+      JsonObject pca  = user.createNestedObject(FPSTR(_name));
+
+      JsonArray tempArr = pca.createNestedArray("temp");
+      if (!tempSensorFound) {
+        tempArr.add(0);
+        tempArr.add(F(" °C (no sensor — set tempPin in config)"));
+      } else {
+        tempArr.add(currentTemp);
+        tempArr.add(F(" °C"));
       }
-      pca["emergencyOff"]    = emergencyOff;
-      pca["layoutChannels"]  = layoutChannelCount;
-      pca["chipA"]           = pca1Found;
-      pca["chipB"]           = pca2Found;
+      pca["chip"]         = pcaFound;
+      pca["addr"]         = F("0x40");
+      pca["channels"]     = NUM_CHANNELS;
+      pca["pwmFreq"]      = pwmFrequency;
+      pca["emergencyOff"] = emergencyOff;
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Persistent configuration (written to / read from cfg.json)
+    // ─────────────────────────────────────────────────────────────────────────
 
     void addToConfig(JsonObject& root) override {
       JsonObject top = root.createNestedObject(FPSTR(_name));
       top["enabled"] = enabled;
       top["tempPin"] = tempPin;
-      top["emergencyBtnPin"] = emergencyBtnPin;
-      
-      for (int i=0; i<32; i++) {
-        top["type_" + String(i)] = pcaType[i];
-        top["label_" + String(i)] = channelLabels[i];
-        top["cal_" + String(i)] = channelCalibration[i];
-      }
-      top["groupPins"] = pca2Found;
-      top["chipAaddr"] = chipAddr[0];
-      top["chipBaddr"] = chipAddr[1];
-      
-      for (int m=0; m<MACRO_COUNT; m++) {
-        top[("mname_"+String(m))] = macroNames[m];
-        for (int i=0; i<32; i++) {
-          top[("mtype_"+String(m)+"_"+String(i))] = macroTypes[m][i];
-        }
+      top["btnPin"]  = emergencyBtnPin;
+      top["pwmFreq"] = pwmFrequency;
+      for (uint8_t i = 0; i < NUM_CHANNELS; i++) {
+        top["t" + String(i)] = channelType[i];
+        top["l" + String(i)] = channelLabel[i];
+        top["c" + String(i)] = channelCalibration[i];
       }
     }
 
     bool readFromConfig(JsonObject& root) override {
       JsonObject top = root[FPSTR(_name)];
       if (top.isNull()) return false;
-      bool configComplete = !top.isNull();
-      configComplete &= getJsonValue(top["enabled"], enabled);
-      
-      int8_t oldTemp = tempPin;
+
+      bool ok = true;
+      ok &= getJsonValue(top["enabled"], enabled);
+
+      int8_t oldTempPin = tempPin;
       getJsonValue(top["tempPin"], tempPin);
-      getJsonValue(top["emergencyBtnPin"], emergencyBtnPin);
-      
-      if (tempPin != oldTemp && initDone) {
-         setupTemperature();
+      getJsonValue(top["btnPin"],  emergencyBtnPin);
+
+      // PWM frequency — clamped to PCA9685 hardware limits [24, 1526] Hz
+      uint16_t newFreq = pwmFrequency;
+      if (getJsonValue(top["pwmFreq"], newFreq)) {
+        newFreq = constrain(newFreq, (uint16_t)24u, (uint16_t)1526u);
+        if (newFreq != pwmFrequency) {
+          pwmFrequency = newFreq;
+          if (initDone && pcaFound) pwm.setPWMFreq(pwmFrequency);
+        }
       }
 
-      for (int i=0; i<32; i++) {
-        getJsonValue(top["type_" + String(i)], pcaType[i]);
+      // Per-channel settings
+      for (uint8_t i = 0; i < NUM_CHANNELS; i++) {
+        getJsonValue(top["t" + String(i)], channelType[i]);
         String lbl;
-        if (getJsonValue(top["label_" + String(i)], lbl)) {
-           channelLabels[i] = lbl;
+        if (getJsonValue(top["l" + String(i)], lbl)) {
+          strlcpy(channelLabel[i], lbl.c_str(), sizeof(channelLabel[i]));
         }
         uint8_t cal = 100;
-        getJsonValue(top["cal_" + String(i)], cal);
-        channelCalibration[i] = constrain(cal, 0, 255);
-      }
-      uint8_t g = 1;
-      getJsonValue(top["groupPins"], g);
-      pca2Found = g;
-      uint8_t addrA = chipAddr[0], addrB = chipAddr[1];
-      getJsonValue(top["chipAaddr"], addrA);
-      getJsonValue(top["chipBaddr"], addrB);
-      chipAddr[0] = addrA; chipAddr[1] = addrB;
-      rebuildLayout();
-
-      for (int m=0; m<MACRO_COUNT; m++) {
-        String nm;
-        getJsonValue(top[("mname_"+String(m))], nm);
-        if (nm.length()) macroNames[m] = nm;
-      }
-      macroConfigured = false;
-      for (int m=0; m<MACRO_COUNT; m++) {
-        for (int i=0; i<32; i++) {
-          uint8_t t = pcaType[i];
-          getJsonValue(top[("mtype_"+String(m)+"_"+String(i))], t);
-          if (macroConfigured || t != pcaType[i]) macroConfigured = true;
-          macroTypes[m][i] = t;
+        if (getJsonValue(top["c" + String(i)], cal)) {
+          channelCalibration[i] = constrain(cal, (uint8_t)0u, (uint8_t)100u);
         }
       }
-      return configComplete;
+
+      // Re-init temp sensor only if the pin actually changed
+      if (tempPin != oldTempPin && initDone) setupTemperature();
+
+      return ok;
     }
 
-
-
-    uint16_t getId() override {
-      return USERMOD_ID_LUMIGRID_PCA9685;
-    }
+    // ─────────────────────────────────────────────────────────────────────────
+    // Settings UI — injected JavaScript rendered by the WLED settings page.
+    // Buffer limit: ~3840 bytes on ESP32.  8 channels × 5 options = manageable.
+    // ─────────────────────────────────────────────────────────────────────────
 
     void appendConfigData() override {
-      oappend(F("addInfo('")); oappend(String(FPSTR(_name)).c_str()); oappend(F(":groupPins")); oappend(F("',1,'<i>(Enable if using 2nd PCA9685)</i>');"));
-      
-      // Inject Javascript to dynamically create the 32 channel type dropdowns
-      // This saves flash and prevents oappend 3KB buffer overflow!
-      oappend(F("for(let i=0;i<32;i++){"));
-      oappend(F("let dd=addDropdown('")); oappend(String(FPSTR(_name)).c_str()); oappend(F("','type_'+i);"));
-      oappend(F("addOption(dd,'Off',0);"));
-      oappend(F("addOption(dd,'Dumb PWM',1);"));
-      oappend(F("addOption(dd,'CCT',2);"));
-      oappend(F("addOption(dd,'RGB',3);"));
-      oappend(F("addOption(dd,'RGBW',4);"));
+      // ── Section header hint ──────────────────────────────────────────────
+      oappend(F("addInfo('"));
+      oappend(String(FPSTR(_name)).c_str());
+      oappend(F(":enabled',1,'<b>LumiGrid PCA9685 — 8-ch PWM controller (LED0–LED7)</b>');"));
+
+      // ── Per-channel type dropdowns (LED0–LED7) ────────────────────────────
+      oappend(F("for(var i=0;i<8;i++){"));
+      oappend(F("var d=addDropdown('"));
+      oappend(String(FPSTR(_name)).c_str());
+      oappend(F("','t'+i);"));
+      oappend(F("addOption(d,'Off',0);"));
+      oappend(F("addOption(d,'Dumb PWM',1);"));
+      oappend(F("addOption(d,'CCT (2ch)',2);"));
+      oappend(F("addOption(d,'RGB (3ch)',3);"));
+      oappend(F("addOption(d,'RGBW (4ch)',4);"));
       oappend(F("}"));
 
-      // Dropdowns for the 4 macro presets
-      oappend(F("for(let m=0;m<4;m++){"));
-      oappend(F("for(let i=0;i<32;i++){"));
-      oappend(F("let dd=addDropdown('")); oappend(String(FPSTR(_name)).c_str()); oappend(F("','mtype_'+m+'_'+i);"));
-      oappend(F("addOption(dd,'Off',0);"));
-      oappend(F("addOption(dd,'Dumb PWM',1);"));
-      oappend(F("addOption(dd,'CCT',2);"));
-      oappend(F("addOption(dd,'RGB',3);"));
-      oappend(F("addOption(dd,'RGBW',4);"));
-      oappend(F("}}"));
+      // ── Hint: calibration fields ──────────────────────────────────────────
+      oappend(F("addInfo('"));
+      oappend(String(FPSTR(_name)).c_str());
+      oappend(F(":c0',1,'<i>0–100: per-channel brightness cap (%)</i>');"));
+
+      // ── Hint: pwmFreq field ───────────────────────────────────────────────
+      oappend(F("addInfo('"));
+      oappend(String(FPSTR(_name)).c_str());
+      oappend(F(":pwmFreq',1,'<i>PCA9685 PWM frequency in Hz (24–1526). Default: 1000</i>');"));
+
+      // ── Hint: tempPin field ───────────────────────────────────────────────
+      oappend(F("addInfo('"));
+      oappend(String(FPSTR(_name)).c_str());
+      oappend(F(":tempPin',1,'<i>DS18B20 GPIO (-1 = disabled). Must NOT be GPIO 4/17/18/19/23/26/27</i>');"));
+
+      // ── Hint: btnPin field ────────────────────────────────────────────────
+      oappend(F("addInfo('"));
+      oappend(String(FPSTR(_name)).c_str());
+      oappend(F(":btnPin',1,'<i>Emergency-off button GPIO (active-low, internal pull-up). Default: 32</i>');"));
     }
 
-    // Apply a stored preset by index (0..MACRO_COUNT-1)
-    void applyPreset(uint8_t presetIndex) {
-      if (presetIndex >= MACRO_COUNT) return;
-      memcpy(pcaType, macroTypes[presetIndex], sizeof(pcaType));
-      rebuildLayout();
-    }
-  };
+    uint16_t getId() override { return USERMOD_ID_LUMIGRID_PCA9685; }
+};
 
 const char UsermodLumigridPCA9685::_name[] PROGMEM = "Lumigrid_PCA9685";
 static UsermodLumigridPCA9685 lumigridPCA9685;

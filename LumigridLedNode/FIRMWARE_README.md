@@ -7,7 +7,7 @@ ESP32/ESP8266 firmware for professional LED signage, built as a fork of [WLED](h
 A WLED fork customized for **Reclame Fabriek's** commercial signage hardware. Adds:
 
 - **Lumigrid branding** — dark red glassmorphism theme throughout the web UI
-- **PCA9685 PWM controller usermod** — 16-channel (expandable to 32) PWM output with per-channel mode selection, emergency button support, and temperature monitoring
+- **PCA9685 PWM controller usermod** — 8-channel PWM output (LED0–LED7, single PCA9685 at 0x40) with per-channel mode selection, emergency button support, and optional DS18B20 temperature monitoring
 - **Content scheduler usermod** — time-based animation playback from JSON schedule files
 - **Telemetry usermod** — heartbeat pings to a monitoring endpoint + configurable daily auto-reboot
 
@@ -53,19 +53,29 @@ A WLED fork customized for **Reclame Fabriek's** commercial signage hardware. Ad
 
 ## Hardware
 
-### Target Board: ESP32 DevKit
+### Target Board: ESP32-WROOM-32U
 
-| Pin | Function |
-|---|---|
-| GPIO 16,4,17,18,19,23,26,27 | LED data pins (8 strips) |
-| GPIO 21 | I2C SDA |
-| GPIO 22 | I2C SCL |
-| GPIO 0 | Emergency button |
+| Pin | Function | Notes |
+|---|---|---|
+| GPIO16 | ALEDch1 data | via SN74HCT245 A1 |
+| GPIO4  | ALEDch2 data | via SN74HCT245 A2 |
+| GPIO17 | ALEDch3 data | via SN74HCT245 A3 |
+| GPIO18 | ALEDch4 data | via SN74HCT245 A4 |
+| GPIO19 | ALEDch5 data | via SN74HCT245 A5 |
+| GPIO23 | ALEDch6 data | via SN74HCT245 A6 |
+| GPIO26 | ALEDch7 data | via SN74HCT245 A7 |
+| GPIO27 | ALEDch8 data | via SN74HCT245 A8 |
+| GPIO21 | I2C SDA | PCA9685 |
+| GPIO22 | I2C SCL | PCA9685 |
+| GPIO25 | PCA9685 OE# | active-low output enable |
+| GPIO32 | Emergency button | active-low, internal pull-up |
+| GPIO33 | DS18B20 (recommended) | free pin — do NOT use GPIO4/16–27 |
 
 ### Peripherals
 
-- **PCA9685** × 1–2 — 16-channel PWM driver (I2C, addresses 0x40/0x41)
-- **DS18B20** — temperature sensor (GPIO 4, OneWire)
+- **SN74HCT245DWR** — 8-channel 3.3 V → 5 V level shifter for addressable LED data lines (DIR + OE# hardware-tied)
+- **PCA9685** × 1 — 8-channel PWM driver (LED0–LED7, I2C address 0x40)
+- **DS18B20** *(optional)* — temperature sensor on a free GPIO (recommended: GPIO33)
 - Addressable LED strips: WS2812B, SK6812, etc.
 
 ## Build Instructions
@@ -85,7 +95,7 @@ npm ci
 npm run build
 
 # 3. Build firmware for Lumigrid target
-pio run -e lumigrid
+pio run -e lumigrid_node
 ```
 
 ### Watch Mode (development)
@@ -98,10 +108,10 @@ npm run dev    # auto-rebuilds web UI on file changes in wled00/data/
 
 ```bash
 # After building, upload via USB
-pio run -t upload -e lumigrid
+pio run -t upload -e lumigrid_node
 
 # Or OTA (if previously flashed with OTA enabled)
-pio run -t upload -e lumigrid --upload-port <device-ip>
+pio run -t upload -e lumigrid_node --upload-port <device-ip>
 ```
 
 ## Project Structure
@@ -136,20 +146,21 @@ LumigridLedNode/
 
 ### PCA9685 Controller (`usermods/lumigrid_pca9685/`)
 
-Drives 16–32 PWM channels via one or two PCA9685 I2C chips. Each channel supports:
+Drives 8 PWM channels (LED0–LED7) via a single PCA9685 at I2C address 0x40. Each channel supports:
 
 - **Off** — disabled
-- **Dumb PWM** — single-channel PWM output
-- **CCT** — warm/cool white dimming from WLED color
-- **RGB** — 3-channel RGB from WLED color
-- **RGBW** — 4-channel RGB+white from WLED color
+- **Dumb PWM** — single-channel PWM (brightness = max of RGBW components)
+- **CCT** — 2 channels: warm white + cool white
+- **RGB** — 3 channels: R, G, B
+- **RGBW** — 4 channels: R, G, B, W
 
 Features:
-- Per-channel labels and calibration
-- Emergency stop button (GPIO configurable)
-- DS18B20 temperature monitoring with overheat protection
-- Macro presets for scene recall
-- I2C auto-detection of PCA9685 chips (addresses 0x40–0x4F)
+- Per-channel label and calibration cap (0–100 %)
+- Configurable PWM frequency (24–1526 Hz, default 1000 Hz)
+- Emergency-off button (configurable GPIO, active-low, default GPIO32)
+- DS18B20 temperature monitoring with thermal throttle + overheat shutdown (optional, pin configurable — must NOT conflict with addressable LED pins)
+- I2C watchdog: auto-reinit if chip stops responding
+- All settings fully configurable from the WLED Usermods settings UI
 
 ### Content Scheduler (`usermods/lumigrid_content_scheduler/`)
 
@@ -188,21 +199,30 @@ Health monitoring and reliability features:
 ### Build Flags (`platformio_override.ini`)
 
 ```ini
-[env:lumigrid]
+[env:lumigrid_node]
 extends = env:esp32dev
-board = esp32dev
-build_flags = ...
-  -D WLED_MAX_BUSSES=12
-  -D DATA_PINS="16,4,17,18,19,23,26,27"
+build_flags =
+  ${common.build_flags} ${esp32_idf_V4.build_flags}
+  -D WLED_RELEASE_NAME=\"LumiGrid_Node\"
+  -D DATA_PINS=16,4,17,18,19,23,26,27   ; 8 addressable channels
+  -D DEFAULT_LED_COUNT=30
+  -D DEFAULT_LED_TYPE=22                 ; WS2812_RGB
   -D I2CSDAPIN=21
   -D I2CSCLPIN=22
-  -D BTNPIN=0
+  -D PCA9685_OE=25
+  -D BTNPIN=32
+  -D IRPIN=-1
   -D WIFI_TX_POWER=78
   -D WLED_ENABLE_DMX
-  -D USERMOD_LUMIGRID_PCA9685
-  -D USERMOD_LUMIGRID_CONTENT_SCHEDULER
-  -D USERMOD_LUMIGRID_TELEMETRY
-custom_usermods = ... lumigrid_pca9685 lumigrid_content_scheduler lumigrid_telemetry
+lib_deps =
+  ${esp32_idf_V4.lib_deps}
+  adafruit/Adafruit PWM Servo Driver Library @ ^2.4.1
+  paulstoffregen/OneWire @ ^2.3.8
+  milesburton/DallasTemperature @ ^3.11.0
+custom_usermods =
+  lumigrid_pca9685
+  lumigrid_telemetry
+  lumigrid_content_scheduler
 ```
 
 ### Disabled Features (for signage use case)
