@@ -1,0 +1,5 @@
+{
+  "name": "lumigrid_pca9685",
+  "build": { "libArchive": false },
+  "dependencies": {}
+}

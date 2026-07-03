@@ -1,0 +1,5 @@
+{
+  "name": "lumigrid_content_scheduler",
+  "build": { "libArchive": false },
+  "dependencies": {}
+}
