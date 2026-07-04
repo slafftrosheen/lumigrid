@@ -21,7 +21,7 @@ All LumiGrid nodes share these core components:
 
 ### Hardware Base
 
-- ESP32-based microcontrollers (ESP32, ESP32-S3, or compatible)
+- LED Node Board-based microcontrollers (LED Node Board, LumiGrid Hub Processor, or compatible)
 - LittleFS for configuration persistence
 - I²C bus for sensor and driver communication
 - UDP/TCP networking over Wi-Fi or Ethernet
@@ -38,9 +38,9 @@ All LumiGrid nodes share these core components:
 
 | Component | Specification |
 |-----------|--------------|
-| **MCU** | ESP32-WROOM-32U (4MB Flash, 520KB SRAM) |
-| **PWM Driver** | PCA9685 (16-channel, 12-bit, 1 kHz) |
-| **Level Shifter** | SN74HCT245DWR (8-channel, 3.3V → 5V) |
+| **MCU** | LumiGrid Node Core Processor (4MB Flash, 520KB SRAM) |
+| **PWM Driver** | Multi-channel PWM Driver (16-channel, 12-bit, 1 kHz) |
+| **Level Shifter** | Logic Level Shifter (8-channel, 3.3V → 5V) |
 | **MOSFET Channels** | 8 × high-power (up to 5A per channel) |
 | **Addressable Outputs** | 8 × WS2812/SK6812 compatible |
 | **I²C Bus** | SDA: GPIO 21, SCL: GPIO 22 @ 400 kHz |
@@ -121,8 +121,8 @@ POST /api/trigger
 
 | Component | Specification |
 |-----------|--------------|
-| **MCU** | ESP32-WROOM-32 |
-| **Motor Driver** | DRV8833 dual H-bridge or PCA9685 servo expander |
+| **MCU** | LED Node Board-WROOM-32 |
+| **Motor Driver** | DRV8833 dual H-bridge or Multi-channel PWM Driver servo expander |
 | **Servo Outputs** | Up to 16 channels (12-bit position) |
 | **DC Motors** | Up to 4 channels with speed/direction control |
 | **Encoder Support** | Optional quadrature encoder inputs |
@@ -178,7 +178,7 @@ POST /api/trigger
 
 | Component | Specification |
 |-----------|--------------|
-| **MCU** | ESP32-WROOM-32 |
+| **MCU** | LED Node Board-WROOM-32 |
 | **Sensor Hub** | I²C multiplexer (TCA9548A) for up to 64 sensors |
 | **Common Sensors** | PIR motion, ultrasonic distance, light level, temperature |
 | **Sample Rate** | 1-1000 Hz configurable |
@@ -198,7 +198,7 @@ POST /api/trigger
 | **Motion** | HC-SR501 PIR | Occupancy detection, interactive triggers |
 | **Distance** | HC-SR04 Ultrasonic, VL53L0X ToF | Proximity sensing, gesture control |
 | **Light** | BH1750 Lux Meter | Ambient light compensation |
-| **Temperature** | BME280, DS18B20 | Thermal monitoring, HVAC integration |
+| **Temperature** | BME280, Digital Temperature Sensor | Thermal monitoring, HVAC integration |
 | **Gesture** | APDS-9960 | Swipe controls, presence |
 
 #### Event Publishing Example
@@ -232,7 +232,7 @@ POST /api/trigger
 
 | Component | Specification |
 |-----------|--------------|
-| **MCU** | ESP32-S3 (8MB Flash, 2MB PSRAM) or Raspberry Pi 4 |
+| **MCU** | LumiGrid Hub Processor (8MB Flash, 2MB PSRAM) or Raspberry Pi 4 |
 | **Network** | Wi-Fi + Ethernet for redundancy |
 | **Storage** | microSD card for playlists and logs |
 | **RTC** | Battery-backed real-time clock |
@@ -291,7 +291,7 @@ The Hub broadcasts UDP multicast packets at 10 Hz:
 #### Hardware Specifications
 
 - **Form Factor**: 200mm × 30mm × 15mm PCB
-- **MCU**: ESP32-C3 (RISC-V, compact footprint)
+- **MCU**: LED Node Board-C3 (RISC-V, compact footprint)
 - **Outputs**: 4 × addressable LED channels, 200+ pixels each
 - **Power**: Screw terminals for 5V/12V LED strips
 - **Mounting**: Magnetic or adhesive backing
@@ -472,11 +472,11 @@ This ensures visual consistency from web UI to embedded node interfaces.
 - **LED Node**: `lumigrid-node-led` (ESP-IDF v5 + FreeRTOS)
 - **Kinetic Node**: `lumigrid-node-kinetic`
 - **Sensor Node**: `lumigrid-node-sensor`
-- **Hub**: `lumigrid-hub` (ESP32-S3 or Pi Python)
+- **Hub**: `lumigrid-hub` (LumiGrid Hub Processor or Pi Python)
 
 ### Toolchain
 
-- **ESP-IDF**: v5.1+ for ESP32 nodes
+- **ESP-IDF**: v5.1+ for LED Node Board nodes
 - **PlatformIO**: Alternative build system
 - **VS Code**: Recommended IDE with ESP-IDF extension
 - **GitHub Actions**: CI/CD for firmware builds

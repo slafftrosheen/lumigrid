@@ -7,16 +7,16 @@
 - **CSS Tokens:** 83
 - **TypeScript Colors:** 8
 - **Documented Tokens:** 1
-- **ESP32 Subset Size:** 0.65 KB
+- **LED Node Board Subset Size:** 0.65 KB
 
 ## Validation Issues
 
 ✓ No issues found. All tokens are consistent.
 
-## ESP32 Token Subset
+## LED Node Board Token Subset
 
 ```css
-/* LumiGrid ESP32 Minimal Tokens */
+/* LumiGrid LED Node Board Minimal Tokens */
 /* Auto-generated - DO NOT EDIT MANUALLY */
 /* Generated: 2026-01-08T11:10:29.770Z */
 :root{
@@ -47,6 +47,6 @@
 ## Recommended Actions
 
 1. Review any validation issues above
-2. Copy ESP32 tokens to embedded project when ready
+2. Copy LED Node Board tokens to embedded project when ready
 3. Update documentation if tokens have changed
 4. Test token changes across all components

@@ -1,11 +1,11 @@
 /**
- * WLED HTTP API client for LumiGrid Operator Dashboard.
+ * LumiGrid API client for LumiGrid Operator Dashboard.
  * All functions return typed responses; errors throw with a human-readable message.
  */
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-export interface WledInfo {
+export interface NodeInfo {
   ver:    string;
   name:   string;
   uptime: number;
@@ -15,7 +15,7 @@ export interface WledInfo {
   u?: Record<string, Record<string, unknown>>;
 }
 
-export interface WledSegment {
+export interface NodeSegment {
   id:  number;
   start: number;
   stop: number;
@@ -28,15 +28,15 @@ export interface WledSegment {
   i?:  unknown[];
 }
 
-export interface WledState {
+export interface NodeState {
   on:  boolean;
   bri: number;
   transition: number;
   ps:  number;
-  seg: WledSegment[];
+  seg: NodeSegment[];
 }
 
-export interface WledNode {
+export interface ApiNode {
   name: string;
   type: number;
   ip:   string;
@@ -53,8 +53,8 @@ export interface ChannelConfig {
 
 export interface NodeStatus {
   ip:      string;
-  info:    WledInfo | null;
-  state:   WledState | null;
+  info:    NodeInfo | null;
+  state:   NodeState | null;
   error:   string | null;
   latency: number;
 }
@@ -79,16 +79,16 @@ async function wfetch<T>(ip: string, path: string, opts?: RequestInit, timeout =
 
 // ── Read endpoints ─────────────────────────────────────────────────────────────
 
-export function getInfo(ip: string): Promise<WledInfo> {
-  return wfetch<WledInfo>(ip, '/json/info');
+export function getInfo(ip: string): Promise<NodeInfo> {
+  return wfetch<NodeInfo>(ip, '/json/info');
 }
 
-export function getState(ip: string): Promise<WledState> {
-  return wfetch<WledState>(ip, '/json/state');
+export function getState(ip: string): Promise<NodeState> {
+  return wfetch<NodeState>(ip, '/json/state');
 }
 
-export function getNodes(ip: string): Promise<{ nodes: WledNode[] }> {
-  return wfetch<{ nodes: WledNode[] }>(ip, '/json/nodes');
+export function getNodes(ip: string): Promise<{ nodes: ApiNode[] }> {
+  return wfetch<{ nodes: ApiNode[] }>(ip, '/json/nodes');
 }
 
 export async function getChannelConfig(ip: string): Promise<ChannelConfig | null> {
@@ -100,7 +100,7 @@ export async function getChannelConfig(ip: string): Promise<ChannelConfig | null
   }
 }
 
-/** Read /animations.json from WLED filesystem. Returns null if not found. */
+/** Read /animations.json from LED Node Storage. Returns null if not found. */
 export async function getSchedule(ip: string): Promise<AnimationBlock[] | null> {
   try {
     const ctrl = new AbortController();
@@ -116,37 +116,37 @@ export async function getSchedule(ip: string): Promise<AnimationBlock[] | null> 
 
 // ── Write endpoints ────────────────────────────────────────────────────────────
 
-export function setState(ip: string, state: Partial<WledState> | Record<string, unknown>): Promise<WledState> {
-  return wfetch<WledState>(ip, '/json/state', {
+export function setState(ip: string, state: Partial<NodeState> | Record<string, unknown>): Promise<NodeState> {
+  return wfetch<NodeState>(ip, '/json/state', {
     method:  'POST',
     headers: { 'Content-Type': 'application/json' },
     body:    JSON.stringify(state)
   });
 }
 
-export function applyPreset(ip: string, presetId: number): Promise<WledState> {
+export function applyPreset(ip: string, presetId: number): Promise<NodeState> {
   return setState(ip, { ps: presetId });
 }
 
-export function setBrightness(ip: string, bri: number): Promise<WledState> {
+export function setBrightness(ip: string, bri: number): Promise<NodeState> {
   return setState(ip, { bri: Math.max(0, Math.min(255, bri)) });
 }
 
-export function setPower(ip: string, on: boolean): Promise<WledState> {
+export function setPower(ip: string, on: boolean): Promise<NodeState> {
   return setState(ip, { on });
 }
 
-export function emergencyOff(ip: string): Promise<WledState> {
+export function emergencyOff(ip: string): Promise<NodeState> {
   return setState(ip, { Lumigrid_PCA9685: { emergencyOff: true } } as Record<string, unknown>);
 }
 
 /** Set an individual pixel's RGBW color in segment 0. */
-export function setPixelColor(ip: string, pixelIdx: number, r: number, g: number, b: number, w = 0): Promise<WledState> {
+export function setPixelColor(ip: string, pixelIdx: number, r: number, g: number, b: number, w = 0): Promise<NodeState> {
   return setState(ip, { seg: [{ id: 0, i: [pixelIdx, [r, g, b, w]] }] });
 }
 
 /** Set multiple pixels at once in segment 0. */
-export function setPixels(ip: string, pixels: Array<[number, [number, number, number, number]]>): Promise<WledState> {
+export function setPixels(ip: string, pixels: Array<[number, [number, number, number, number]]>): Promise<NodeState> {
   const i: unknown[] = [];
   for (const [idx, [r, g, b, w]] of pixels) i.push(idx, [r, g, b, w]);
   return setState(ip, { seg: [{ id: 0, i }] });
@@ -154,7 +154,7 @@ export function setPixels(ip: string, pixels: Array<[number, [number, number, nu
 
 // ── Filesystem ─────────────────────────────────────────────────────────────────
 
-/** Upload a text file to WLED filesystem via /edit endpoint. */
+/** Upload a text file to LED Node Storage via /edit endpoint. */
 export async function uploadFile(ip: string, filename: string, content: string): Promise<void> {
   const form = new FormData();
   form.append('data', new Blob([content], { type: 'application/json' }), filename);
@@ -162,7 +162,7 @@ export async function uploadFile(ip: string, filename: string, content: string):
   if (!res.ok) throw new Error(`Upload failed: HTTP ${res.status}`);
 }
 
-/** Save animations schedule to /animations.json on WLED filesystem. */
+/** Save animations schedule to /animations.json on LED Node Storage. */
 export async function saveSchedule(ip: string, blocks: AnimationBlock[]): Promise<void> {
   const json = JSON.stringify({ animations: blocks }, null, 2);
   return uploadFile(ip, 'animations.json', json);
@@ -171,7 +171,7 @@ export async function saveSchedule(ip: string, blocks: AnimationBlock[]): Promis
 // ── OTA ───────────────────────────────────────────────────────────────────────
 
 /**
- * Upload firmware binary to a WLED node's /update endpoint.
+ * Upload firmware binary to a LumiGrid LED Node's /update endpoint.
  * Returns a promise that resolves when the upload is accepted (not when rebooted).
  */
 export async function uploadFirmware(

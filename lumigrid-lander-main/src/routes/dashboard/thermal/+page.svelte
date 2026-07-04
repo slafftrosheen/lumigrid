@@ -1,19 +1,19 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { getInfo } from '$lib/api/wled';
-  import type { WledInfo } from '$lib/api/wled';
+  import { getInfo } from '$lib/api/node';
+  import type { NodeInfo } from '$lib/api/node';
 
   // ── Feature 2: Thermal Dashboard ─────────────────────────────────────────────
 
   let nodeIp    = $state('');
-  let info      = $state<WledInfo | null>(null);
+  let info      = $state<NodeInfo | null>(null);
   let error     = $state('');
   let history   = $state<number[]>([]);  // last 60 readings
   let alertTemp = $state(Number(localStorage.getItem('lg_alert_temp') ?? 65));
   let alertSent = $state(false);
   let polling: ReturnType<typeof setInterval> | null = null;
 
-  function getTemp(i: WledInfo | null): number | null {
+  function getTemp(i: NodeInfo | null): number | null {
     const arr = i?.u?.Lumigrid_PCA9685?.temp;
     if (!Array.isArray(arr) || !arr.length) return null;
     return Number(arr[0]);

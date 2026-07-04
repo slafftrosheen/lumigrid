@@ -1,12 +1,12 @@
-# ESP32 and Raspberry Pi Token Migration Guide
+# LED Node Board and Raspberry Pi Token Migration Guide
 
-This guide provides step-by-step instructions for implementing the LumiGrid design token system on ESP32 LED Nodes and Raspberry Pi Gateway/Hub devices.
+This guide provides step-by-step instructions for implementing the LumiGrid design token system on LED Node Board LED Nodes and Raspberry Pi Gateway/Hub devices.
 
 ---
 
 ## Table of Contents
 
-1. [ESP32 LED Node Implementation](#esp32-led-node-implementation)
+1. [LED Node Board LED Node Implementation](#LED Node Board-led-node-implementation)
 2. [Raspberry Pi Gateway Implementation](#raspberry-pi-gateway-implementation)
 3. [Token Synchronization](#token-synchronization)
 4. [Testing & Validation](#testing--validation)
@@ -14,7 +14,7 @@ This guide provides step-by-step instructions for implementing the LumiGrid desi
 
 ---
 
-## ESP32 LED Node Implementation
+## LED Node Board LED Node Implementation
 
 ### Prerequisites
 
@@ -24,7 +24,7 @@ This guide provides step-by-step instructions for implementing the LumiGrid desi
 
 ### Step 1: Extract Minimal Token Subset
 
-The ESP32 has flash memory constraints, so we use a minimal token subset (~0.65KB).
+The LED Node Board has flash memory constraints, so we use a minimal token subset (~0.65KB).
 
 **Run the token sync script:**
 ```bash
@@ -32,7 +32,7 @@ cd /path/to/lumigrid-lander
 npm run sync:tokens
 ```
 
-This generates `TOKEN_SYNC_REPORT.md` with the ESP32 minimal token subset.
+This generates `TOKEN_SYNC_REPORT.md` with the LED Node Board minimal token subset.
 
 **Minimal tokens included:**
 - Core colors: `--bg-0`, `--bg-1`, `--ink`, `--muted`
@@ -44,16 +44,16 @@ This generates `TOKEN_SYNC_REPORT.md` with the ESP32 minimal token subset.
 - Spacing: `--spacing-mobile-sm`, `--spacing-mobile-md`
 - Touch: `--touch-target-min`
 
-### Step 2: Create ESP32 Styles Header
+### Step 2: Create LED Node Board Styles Header
 
-Create `main/web/lumigrid_tokens.h` in your ESP32 project:
+Create `main/web/lumigrid_tokens.h` in your LED Node Board project:
 
 ```c
 #ifndef LUMIGRID_TOKENS_H
 #define LUMIGRID_TOKENS_H
 
 /**
- * LumiGrid Minimal Design Tokens for ESP32
+ * LumiGrid Minimal Design Tokens for LED Node Board
  * Auto-generated from lumigrid-lander repository
  * 
  * Size: ~0.65 KB minified
@@ -85,7 +85,7 @@ static const char* LUMIGRID_MINIMAL_CSS =
 "}"
 "@media(prefers-reduced-motion:reduce){:root{--dur-med:0ms;}}";
 
-/* Base component styles for ESP32 */
+/* Base component styles for LED Node Board */
 static const char* LUMIGRID_COMPONENT_CSS =
 "body{"
 "margin:0;"
@@ -472,8 +472,8 @@ npm run sync:tokens
 cat TOKEN_SYNC_REPORT.md
 ```
 
-**Update ESP32:**
-1. Copy ESP32 token subset from report
+**Update LED Node Board:**
+1. Copy LED Node Board token subset from report
 2. Update `lumigrid_tokens.h`
 3. Rebuild and flash firmware
 
@@ -490,7 +490,7 @@ When tokens change in `lumigrid-lander`:
 - [ ] Update `src/lib/styles.css`
 - [ ] Run `npm run sync:tokens`
 - [ ] Review `TOKEN_SYNC_REPORT.md`
-- [ ] Update ESP32 `lumigrid_tokens.h`
+- [ ] Update LED Node Board `lumigrid_tokens.h`
 - [ ] Update Pi `tokens.py`
 - [ ] Copy `styles.css` to Pi gateway
 - [ ] Update `StyleSystem.md` documentation
@@ -501,7 +501,7 @@ When tokens change in `lumigrid-lander`:
 
 ## Testing & Validation
 
-### ESP32 Testing Checklist
+### LED Node Board Testing Checklist
 
 **Visual:**
 - [ ] Cards render with glass effect
@@ -559,7 +559,7 @@ When tokens change in `lumigrid-lander`:
 
 ## Troubleshooting
 
-### ESP32 Issues
+### LED Node Board Issues
 
 **Problem: Styles not loading**
 ```c
@@ -636,7 +636,7 @@ python app.py --port 5001
 
 ## Best Practices
 
-### ESP32
+### LED Node Board
 1. **Minimize CSS size** - Every byte counts on flash-constrained devices
 2. **Test on real hardware** - Emulators don't catch flash/memory issues
 3. **Use GZIP** - Reduces transmitted size by ~70%
@@ -662,7 +662,7 @@ python app.py --port 5001
 ## Next Steps
 
 ### Short Term
-- [ ] Implement ESP32 web UI with minimal tokens
+- [ ] Implement LED Node Board web UI with minimal tokens
 - [ ] Set up Pi Gateway with full token system
 - [ ] Test cross-platform consistency
 - [ ] Document any platform-specific issues

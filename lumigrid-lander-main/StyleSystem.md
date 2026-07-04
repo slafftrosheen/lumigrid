@@ -1507,7 +1507,7 @@ The header uses glassmorphism with a sticky position:
 
 ### ESP-IDF C Web UI Examples
 
-For ESP32-based LumiGrid nodes, the web UI is served from flash memory. Here's how to use the design tokens:
+For LED Node Board-based LumiGrid nodes, the web UI is served from flash memory. Here's how to use the design tokens:
 
 ```c
 // In your ESP-IDF web server handler
@@ -1755,7 +1755,7 @@ static/
 
 ### Current Token Usage Audit
 
-The LumiGrid system spans multiple platforms: SvelteKit landing page, ESP32 LED Nodes, and Raspberry Pi gateways. This section documents the adoption status of design tokens across these platforms.
+The LumiGrid system spans multiple platforms: SvelteKit landing page, LED Node Board LED Nodes, and Raspberry Pi gateways. This section documents the adoption status of design tokens across these platforms.
 
 #### SvelteKit Landing Page ✓
 
@@ -1773,11 +1773,11 @@ All components in the landing page use the design token system via:
 - Interactive demos (LightSettings.svelte, etc.)
 - Form elements and buttons
 
-#### ESP32 LED Node Web UI
+#### LED Node Board LED Node Web UI
 
 **Status:** Partial adoption recommended
 
-The ESP32 nodes serve their web UI from flash memory with size constraints. A minimal token subset is recommended:
+The LED Node Board nodes serve their web UI from flash memory with size constraints. A minimal token subset is recommended:
 
 **Currently Used (embedded in C strings):**
 ```c
@@ -1858,7 +1858,7 @@ def dashboard():
 For ensuring complete token adoption across platforms:
 
 - [x] SvelteKit landing page using full token system
-- [ ] ESP32 web UI updated with minimal token subset
+- [ ] LED Node Board web UI updated with minimal token subset
 - [ ] Raspberry Pi gateway using full token system
 - [ ] Documentation includes ESP-IDF code examples
 - [ ] Documentation includes Flask/Python examples
@@ -1880,7 +1880,7 @@ To maintain consistency when updating tokens:
 | Platform | Token Format | Size Constraint | Adoption Level |
 |----------|-------------|-----------------|----------------|
 | **SvelteKit** | CSS Custom Properties + TS | None | Full (100%) |
-| **ESP32** | Inlined CSS strings | ~4KB flash | Minimal subset (30%) |
+| **LED Node Board** | Inlined CSS strings | ~4KB flash | Minimal subset (30%) |
 | **Raspberry Pi** | CSS file + Python dict | None | Full recommended (100%) |
 | **C/Native** | Compile-time constants | Varies | Manual extraction |
 

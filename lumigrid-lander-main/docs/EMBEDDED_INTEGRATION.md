@@ -1,10 +1,10 @@
 # Embedded Integration Guide
 
-Implementation samples and best practices for integrating LumiGrid design tokens, APIs, and UX patterns into ESP32 and Raspberry Pi nodes.
+Implementation samples and best practices for integrating LumiGrid design tokens, APIs, and UX patterns into LED Node Board and Raspberry Pi nodes.
 
 ## Table of Contents
 
-1. [ESP32 Integration](#esp32-integration)
+1. [LED Node Board Integration](#LED Node Board-integration)
 2. [Raspberry Pi Integration](#raspberry-pi-integration)
 3. [Design Token Mapping](#design-token-mapping)
 4. [Web UI Implementation](#web-ui-implementation)
@@ -13,7 +13,7 @@ Implementation samples and best practices for integrating LumiGrid design tokens
 
 ---
 
-## ESP32 Integration
+## LED Node Board Integration
 
 ### Development Environment
 
@@ -29,7 +29,7 @@ Implementation samples and best practices for integrating LumiGrid design tokens
 # Install ESP-IDF
 git clone --recursive https://github.com/espressif/esp-idf.git
 cd esp-idf
-./install.sh esp32
+./install.sh LED Node Board
 
 # Activate environment
 . ./export.sh
@@ -45,7 +45,7 @@ idf.py --version
 pip install platformio
 
 # Create new project
-pio project init --board esp32dev
+pio project init --board LED Node Boarddev
 
 # Build and flash
 pio run --target upload
@@ -61,7 +61,7 @@ lumigrid-node-led/
 │   ├── wifi.c / wifi.h         # Wi-Fi management
 │   ├── http_server.c / .h      # REST API server
 │   ├── effect_engine.c / .h    # LED effect rendering
-│   ├── pwm_driver.c / .h       # PCA9685 PWM driver
+│   ├── pwm_driver.c / .h       # Multi-channel PWM Driver PWM driver
 │   ├── aled_driver.c / .h      # RMT addressable LED driver
 │   ├── sync_protocol.c / .h    # UDP multicast sync
 │   └── web_ui/                 # Embedded HTML/CSS/JS
@@ -71,12 +71,12 @@ lumigrid-node-led/
 ├── components/                 # Reusable libraries
 │   ├── cJSON/
 │   ├── littlefs/
-│   └── pca9685/
+│   └── Multi-channel PWM Driver/
 ├── CMakeLists.txt
 └── sdkconfig
 ```
 
-### Design Token Implementation (ESP32)
+### Design Token Implementation (LED Node Board)
 
 #### C Header File: `design_tokens.h`
 
@@ -255,7 +255,7 @@ httpd_handle_t start_webserver(void) {
 }
 ```
 
-### Embedded Web UI (ESP32)
+### Embedded Web UI (LED Node Board)
 
 Store HTML/CSS/JS in flash and serve via HTTP server:
 
@@ -623,7 +623,7 @@ sudo systemctl status lumigrid-hub.service
 
 1. **Source of Truth**: `src/lib/tokens.ts` (landing repo)
 2. **CSS Mirror**: `src/lib/styles.css` (auto-synced via script)
-3. **ESP32 Mirror**: Manual sync to `design_tokens.h`
+3. **LED Node Board Mirror**: Manual sync to `design_tokens.h`
 4. **Python Mirror**: Manual sync to `config.py`
 
 ### Sync Script (Node.js)
@@ -656,7 +656,7 @@ function generatePython() {
   return python;
 }
 
-fs.writeFileSync('embedded/esp32/design_tokens.h', generateCHeader());
+fs.writeFileSync('embedded/LED Node Board/design_tokens.h', generateCHeader());
 fs.writeFileSync('embedded/python/design_tokens.py', generatePython());
 console.log('✅ Embedded tokens synced');
 ```
@@ -667,7 +667,7 @@ console.log('✅ Embedded tokens synced');
 
 ### Visual Parity Checklist
 
-- [ ] **Colors**: Same hex values across web, ESP32, Pi
+- [ ] **Colors**: Same hex values across web, LED Node Board, Pi
 - [ ] **Spacing**: Proportional scaling (adjust for screen DPI)
 - [ ] **Typography**: System fonts on all platforms
 - [ ] **Glassmorphism**: Blur effects (web only, simulate with gradients on embedded)
@@ -676,7 +676,7 @@ console.log('✅ Embedded tokens synced');
 
 ### Testing Matrix
 
-| Feature | SvelteKit (Web) | ESP32 | Raspberry Pi |
+| Feature | SvelteKit (Web) | LED Node Board | Raspberry Pi |
 |---------|----------------|-------|--------------|
 | Color Tokens | ✅ CSS vars | ✅ C defines | ✅ Python constants |
 | REST API | ✅ SvelteKit | ✅ esp_http_server | ✅ Flask |

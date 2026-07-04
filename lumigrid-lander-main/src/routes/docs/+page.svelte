@@ -30,7 +30,7 @@
 		</a>
 		<a href="{base}/docs/EMBEDDED_INTEGRATION" class="card" data-halo="1">
 			<h3>Embedded Integration</h3>
-			<p>Guides for integrating LumiGrid into ESP32 and Raspberry Pi nodes.</p>
+			<p>Guides for integrating LumiGrid into LED Node Board and Raspberry Pi nodes.</p>
 		</a>
 		<a href="{base}/docs/StyleSystem" class="card" data-halo="1">
 			<h3>Style System</h3>

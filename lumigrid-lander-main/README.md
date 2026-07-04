@@ -39,11 +39,11 @@ paragraph, list item, or caption to hear it read through the browser's voice eng
 - **[StyleSystem.md](StyleSystem.md)** — Design token reference, component library, and usage examples
 - **[docs/NODE_FAMILY.md](docs/NODE_FAMILY.md)** — Detailed specifications for all LumiGrid node types
 - **[docs/API_REFERENCE.md](docs/API_REFERENCE.md)** — REST, MQTT, and SSE API documentation with code examples
-- **[docs/EMBEDDED_INTEGRATION.md](docs/EMBEDDED_INTEGRATION.md)** — ESP32 and Raspberry Pi integration guide
+- **[docs/EMBEDDED_INTEGRATION.md](docs/EMBEDDED_INTEGRATION.md)** — LED Node Board and Raspberry Pi integration guide
 
 ## Design System
 
-LumiGrid uses a comprehensive design token system inspired by Apple's design language with vibrant LED brand colors. The system ensures visual consistency across all platforms (SvelteKit lander, ESP32 nodes, Pi gateways).
+LumiGrid uses a comprehensive design token system inspired by Apple's design language with vibrant LED brand colors. The system ensures visual consistency across all platforms (SvelteKit lander, LED Node Board nodes, Pi gateways).
 
 ### Key Resources
 
@@ -181,11 +181,11 @@ The choreography is data-light—just timestamps and preset names—yet the visu
 
 | Node                  | Core Function                                                            | Typical Hardware                 |
 | --------------------- | ------------------------------------------------------------------------ | -------------------------------- |
-| **LED Node**          | Drives “dumb” PWM and addressable LEDs, effects engine, sync participant | ESP32 + PCA9685 + SN74HCT245     |
-| **Kinetic Node**      | Motor/servo driver with motion profiles synced to grid                   | ESP32 + DRV8833 / servo expander |
-| **Sensor Node**       | Aggregates ambient, motion, or proximity sensors; publishes events       | ESP32 + I²C sensor hub           |
-| **Hub Node / Master** | Acts as time-base, playlist server, and cloud bridge                     | ESP32-S3 / Raspberry Pi gateway  |
-| **Light Bar Module**  | Linear LED Node variant for architectural strips                         | Slim ESP32 + MOSFET array        |
+| **LED Node**          | Drives “dumb” PWM and addressable LEDs, effects engine, sync participant | LED Node Board + Multi-channel PWM Driver + SN74HCT245     |
+| **Kinetic Node**      | Motor/servo driver with motion profiles synced to grid                   | LED Node Board + DRV8833 / servo expander |
+| **Sensor Node**       | Aggregates ambient, motion, or proximity sensors; publishes events       | LED Node Board + I²C sensor hub           |
+| **Hub Node / Master** | Acts as time-base, playlist server, and cloud bridge                     | LumiGrid Hub Processor / Raspberry Pi gateway  |
+| **Light Bar Module**  | Linear LED Node variant for architectural strips                         | Slim LED Node Board + MOSFET array        |
 | **Logic Node**        | Headless compute module running choreography or AI inference             | Jetson Nano / Pi 5 companion     |
 
 Each shares the same firmware skeleton and API language; only the hardware profile and effect libraries differ.
@@ -219,9 +219,9 @@ Each node can perform solo, join an ensemble, or lead as a sync master.
 
 ### Hardware at a glance
 
-* **Controller:** ESP32-WROOM-32U
-* **PWM driver:** PCA9685 (12-bit, 1 kHz) → 8 MOSFET channels
-* **Addressable outputs:** 8 × level-shifted 5 V via SN74HCT245DWR
+* **Controller:** LumiGrid Node Core Processor
+* **PWM driver:** Multi-channel PWM Driver (12-bit, 1 kHz) → 8 MOSFET channels
+* **Addressable outputs:** 8 × level-shifted 5 V via Logic Level Shifter
 * **I²C bus:** SDA 21 / SCL 22 @ 400 kHz
 * **OE / Blackout:** GPIO 25
 * **ALED GPIOs:** 16, 4, 17, 18, 19, 23, 26, 27
@@ -241,7 +241,7 @@ It can:
 ### The firmware in layers
 
 1. **Board Init:** sets GPIO, I²C, mounts LittleFS, reads config.
-2. **PWM Driver:** wraps PCA9685 with fade curves, soft-start, and OE safety.
+2. **PWM Driver:** wraps Multi-channel PWM Driver with fade curves, soft-start, and OE safety.
 3. **RMT Driver:** outputs WS2812 / SK6812 data streams with 100 ns precision.
 4. **Effect Engine:** modular renderer supporting base + overlay, blend modes, and virtual segments.
 5. **Scheduler / Cue Player:** interprets JSON timelines into real-time sequences.
@@ -293,7 +293,7 @@ The same schema works across all LumiGrid devices, so a central web dashboard or
 
 ### Reliability and safety
 
-* **Fail-safe blackout:** PCA9685 OE pin cuts power on fault or command.
+* **Fail-safe blackout:** Multi-channel PWM Driver OE pin cuts power on fault or command.
 * **Thermal / voltage watch:** automatic derate under stress.
 * **Watchdog & diagnostics:** continuous heap and task monitoring.
 * **Offline autonomy:** local schedules run even without the master.

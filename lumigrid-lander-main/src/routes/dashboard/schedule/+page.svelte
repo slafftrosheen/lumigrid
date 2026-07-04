@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { getSchedule, saveSchedule } from '$lib/api/wled';
-  import type { AnimationBlock } from '$lib/api/wled';
+  import { getSchedule, saveSchedule } from '$lib/api/node';
+  import type { AnimationBlock } from '$lib/api/node';
 
   // ── Feature 1: Visual Schedule Builder ───────────────────────────────────────
 
@@ -211,7 +211,7 @@
         <input type="text" bind:value={fId} placeholder="morning_greeting" />
       </label>
       <label class="field">
-        <span>File on WLED FS</span>
+        <span>File on Node Storage</span>
         <input type="text" bind:value={fFile} placeholder="greeting.gif" />
       </label>
       <label class="field">

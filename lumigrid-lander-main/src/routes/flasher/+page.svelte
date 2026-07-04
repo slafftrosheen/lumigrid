@@ -6,7 +6,7 @@
 <div class="container section">
   <div class="flasher-header">
     <h1>LumiGrid Node Flasher</h1>
-    <p>Connect your LumiGrid Node (ESP32) via USB and click below to install or update the firmware directly from your browser.</p>
+    <p>Connect your LumiGrid Node (LED Node Board) via USB and click below to install or update the firmware directly from your browser.</p>
   </div>
 
   <div class="flasher-box">

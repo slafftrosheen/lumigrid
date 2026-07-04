@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { getChannelConfig, setPixels, getState, setBrightness, setPower } from '$lib/api/wled';
-  import type { ChannelConfig } from '$lib/api/wled';
+  import { getChannelConfig, setPixels, getState, setBrightness, setPower } from '$lib/api/node';
+  import type { ChannelConfig } from '$lib/api/node';
 
   // ── Feature 3: PWM Channel Live Control ──────────────────────────────────────
 

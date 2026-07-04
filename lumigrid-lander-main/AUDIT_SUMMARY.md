@@ -9,7 +9,7 @@
 
 ## Executive Summary
 
-This audit successfully evaluated and documented the LumiGrid StyleSystem across all UI platforms (SvelteKit lander, ESP32 nodes, Raspberry Pi gateways). The SvelteKit implementation shows excellent adherence (95%+) to the design token system, and comprehensive migration guides have been created for ESP32 and Pi platforms.
+This audit successfully evaluated and documented the LumiGrid StyleSystem across all UI platforms (SvelteKit lander, LED Node Board nodes, Raspberry Pi gateways). The SvelteKit implementation shows excellent adherence (95%+) to the design token system, and comprehensive migration guides have been created for LED Node Board and Pi platforms.
 
 ---
 
@@ -31,7 +31,7 @@ This audit successfully evaluated and documented the LumiGrid StyleSystem across
    - Common patterns reference
 
 3. **PLATFORM_MIGRATION_GUIDE.md** (17KB)
-   - Step-by-step ESP32 implementation
+   - Step-by-step LED Node Board implementation
    - Complete Raspberry Pi Flask setup
    - Token synchronization workflows
    - Testing checklists for each platform
@@ -39,7 +39,7 @@ This audit successfully evaluated and documented the LumiGrid StyleSystem across
 
 4. **TOKEN_SYNC_REPORT.md** (1KB)
    - Auto-generated token consistency report
-   - ESP32 minimal subset (0.65 KB)
+   - LED Node Board minimal subset (0.65 KB)
    - Validation results
    - Recommended actions
 
@@ -60,7 +60,7 @@ This audit successfully evaluated and documented the LumiGrid StyleSystem across
 **scripts/sync-tokens.mjs** (9KB)
 - Extracts 83 CSS custom properties from styles.css
 - Validates token consistency
-- Generates ESP32 minimal subset
+- Generates LED Node Board minimal subset
 - Creates sync reports
 - Added as `npm run sync:tokens` command
 
@@ -90,7 +90,7 @@ This audit successfully evaluated and documented the LumiGrid StyleSystem across
 
 **Recommendation:** Excellent implementation. Minor refinements documented for future PRs.
 
-### ESP32 LED Node Web UI 📋
+### LED Node Board LED Node Web UI 📋
 
 **Status:** Not implemented (as expected - separate repository)
 
@@ -101,7 +101,7 @@ This audit successfully evaluated and documented the LumiGrid StyleSystem across
 - Complete implementation guide
 
 **Ready for Implementation:**
-- ESP32 token header template created
+- LED Node Board token header template created
 - HTTP server integration examples
 - Testing checklist prepared
 - Size constraints documented (~4KB target)
@@ -128,7 +128,7 @@ This audit successfully evaluated and documented the LumiGrid StyleSystem across
 
 ### Token Categories
 
-| Category | SvelteKit | ESP32 | Pi Gateway |
+| Category | SvelteKit | LED Node Board | Pi Gateway |
 |----------|-----------|-------|------------|
 | Colors | 83 vars | 10 core | 83 vars |
 | Typography | Full | Minimal | Full |
@@ -144,7 +144,7 @@ graph LR
     A[Update tokens.ts] --> B[Update styles.css]
     B --> C[Run npm run sync:tokens]
     C --> D[Review TOKEN_SYNC_REPORT.md]
-    D --> E1[Update ESP32 header]
+    D --> E1[Update LED Node Board header]
     D --> E2[Update Pi tokens.py]
     D --> E3[Update docs]
 ```
@@ -163,7 +163,7 @@ graph LR
 
 ### ✅ High Priority (Complete)
 
-1. ✅ Documented ESP32 implementation strategy
+1. ✅ Documented LED Node Board implementation strategy
 2. ✅ Created Pi Gateway migration guide
 3. ✅ Established token sync workflow
 4. ✅ Documented all hard-coded values
@@ -172,7 +172,7 @@ graph LR
 ### 📋 Future Work (Documented for Team)
 
 1. Refactor identified hard-coded values
-2. Implement ESP32 UI in embedded repository
+2. Implement LED Node Board UI in embedded repository
 3. Implement Pi Gateway UI in gateway repository
 4. Add visual regression tests
 5. Create component showcase page
@@ -201,10 +201,10 @@ graph LR
 </div>
 ```
 
-### For Developers Implementing ESP32 UI
+### For Developers Implementing LED Node Board UI
 
 **Follow these steps:**
-1. Read `PLATFORM_MIGRATION_GUIDE.md` ESP32 section
+1. Read `PLATFORM_MIGRATION_GUIDE.md` LED Node Board section
 2. Copy token subset from `TOKEN_SYNC_REPORT.md`
 3. Create `lumigrid_tokens.h` header file
 4. Integrate into HTTP server
@@ -257,7 +257,7 @@ cat TOKEN_SYNC_REPORT.md
 ### Platform Readiness
 
 - **SvelteKit:** ✅ Production ready (95%+ compliant)
-- **ESP32:** 📋 Ready for implementation (guide complete)
+- **LED Node Board:** 📋 Ready for implementation (guide complete)
 - **Pi Gateway:** 📋 Ready for implementation (guide complete)
 
 ---
@@ -311,12 +311,12 @@ cat TOKEN_SYNC_REPORT.md
 
 1. **Review and merge this PR** - All documentation is ready
 2. **Share guides with team** - Distribute to embedded and gateway developers
-3. **Plan ESP32 implementation** - Use PLATFORM_MIGRATION_GUIDE.md
+3. **Plan LED Node Board implementation** - Use PLATFORM_MIGRATION_GUIDE.md
 4. **Plan Pi implementation** - Use PLATFORM_MIGRATION_GUIDE.md
 
 ### Medium Term (Next Quarter)
 
-1. **Implement ESP32 UI** - Following minimal token approach
+1. **Implement LED Node Board UI** - Following minimal token approach
 2. **Implement Pi Gateway UI** - Following full token approach
 3. **Create visual regression tests** - Prevent style drift
 4. **Build component showcase** - Interactive documentation

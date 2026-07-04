@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { getNodeStatus, setBrightness, setPower, applyPreset, emergencyOff } from '$lib/api/wled';
-  import type { NodeStatus } from '$lib/api/wled';
+  import { getNodeStatus, setBrightness, setPower, applyPreset, emergencyOff } from '$lib/api/node';
+  import type { NodeStatus } from '$lib/api/node';
 
   // ── Feature 4: Multi-Node Fleet Manager ──────────────────────────────────────
 

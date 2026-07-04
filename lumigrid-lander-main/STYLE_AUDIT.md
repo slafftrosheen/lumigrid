@@ -2,7 +2,7 @@
 
 **Date:** 2026-01-08  
 **Audited By:** GitHub Copilot  
-**Scope:** System-wide styling consistency across SvelteKit lander, ESP32, and Pi node UIs
+**Scope:** System-wide styling consistency across SvelteKit lander, LED Node Board, and Pi node UIs
 
 ---
 
@@ -11,13 +11,13 @@
 This audit evaluates the adherence to the LumiGrid StyleSystem across all UI implementations. The audit covers:
 
 1. **SvelteKit Landing Page** (current implementation)
-2. **ESP32 LED Node Web UI** (planned/documented)
+2. **LED Node Board LED Node Web UI** (planned/documented)
 3. **Raspberry Pi Gateway/Hub UI** (planned/documented)
 
 ### Key Findings
 
 ✅ **SvelteKit Landing Page**: Excellent adherence (95%+ compliance)  
-⚠️ **ESP32 Node UI**: Documented but not implemented in this repository  
+⚠️ **LED Node Board Node UI**: Documented but not implemented in this repository  
 ⚠️ **Pi Gateway UI**: Documented but not implemented in this repository  
 ✅ **Documentation**: Comprehensive and well-structured (StyleSystem.md)
 
@@ -117,7 +117,7 @@ Some components define custom classes that could use global tokens:
 
 ---
 
-## 2. ESP32 LED Node Web UI
+## 2. LED Node Board LED Node Web UI
 
 ### 2.1 Current Status
 
@@ -250,7 +250,7 @@ StyleSystem.md (lines 1739-1766) provides:
 
 ## 5. Cross-Platform Consistency Matrix
 
-| Token Category | SvelteKit | ESP32 | Pi Gateway | Documentation |
+| Token Category | SvelteKit | LED Node Board | Pi Gateway | Documentation |
 |----------------|-----------|-------|------------|---------------|
 | **Colors** | ✅ 100% | 📋 Planned | 📋 Planned | ✅ Complete |
 | **Typography** | ✅ 100% | 📋 30% subset | 📋 Planned | ✅ Complete |
@@ -290,15 +290,15 @@ StyleSystem.md (lines 1739-1766) provides:
 2. 📝 Create interactive token explorer
 3. 📝 Document dark/light mode switching
 
-### 6.2 ESP32 Implementation Checklist
+### 6.2 LED Node Board Implementation Checklist
 
-**When implementing ESP32 web UI in separate repository:**
+**When implementing LED Node Board web UI in separate repository:**
 
 - [ ] Extract minimal token subset from tokens.ts
 - [ ] Create minified inline CSS (~4KB target)
 - [ ] Implement core card and button components
 - [ ] Add reduced-motion support
-- [ ] Test on actual ESP32 hardware for performance
+- [ ] Test on actual LED Node Board hardware for performance
 - [ ] Document flash memory usage
 - [ ] Create OTA update strategy for UI changes
 - [ ] Add touch-optimized controls (44px minimum)
@@ -345,7 +345,7 @@ StyleSystem.md (lines 1739-1766) provides:
 ### 7.1 Current Process (Manual)
 
 1. Update source: `src/lib/tokens.ts` and `src/lib/styles.css`
-2. Manually extract subset for ESP32
+2. Manually extract subset for LED Node Board
 3. Manually copy to Pi static assets
 4. Update StyleSystem.md documentation
 5. Test across platforms
@@ -356,7 +356,7 @@ StyleSystem.md (lines 1739-1766) provides:
 
 ```javascript
 // Extract tokens from tokens.ts
-// Generate minified CSS for ESP32
+// Generate minified CSS for LED Node Board
 // Copy full styles.css to Pi repo
 // Update documentation
 // Run validation checks
@@ -416,7 +416,7 @@ Before merging style changes:
 
 ### 9.2 Inline Styles Security
 
-**ESP32 Implementation:**
+**LED Node Board Implementation:**
 - All CSS embedded in C strings (compile-time)
 - No runtime CSS generation from network input
 - Safe from CSS injection attacks
@@ -437,7 +437,7 @@ Before merging style changes:
 - Paint performance: Good (GPU-accelerated transforms)
 - Animation performance: Excellent (60fps target)
 
-### 10.2 ESP32 Constraints
+### 10.2 LED Node Board Constraints
 
 **Target Metrics:**
 - Minified CSS: <4KB
@@ -461,7 +461,7 @@ Before merging style changes:
 - 📝 Create token sync script
 - 📝 Update README.md
 
-### Phase 3: ESP32 Implementation (When separate repo created)
+### Phase 3: LED Node Board Implementation (When separate repo created)
 - 📋 Extract minimal token subset
 - 📋 Create embedded CSS
 - 📋 Implement core components
@@ -485,14 +485,14 @@ The LumiGrid StyleSystem is comprehensive, well-documented, and properly impleme
 1. Comprehensive design token system
 2. Excellent SvelteKit implementation (95%+ adherence)
 3. Detailed documentation with code examples
-4. Platform-specific guidance (ESP32, Pi)
+4. Platform-specific guidance (LED Node Board, Pi)
 5. Strong accessibility foundation
 6. Mobile-first responsive design
 
 ### Opportunities:
 1. Refine remaining hard-coded values to tokens
 2. Create automated token sync workflow
-3. Implement ESP32 and Pi UIs in separate repositories
+3. Implement LED Node Board and Pi UIs in separate repositories
 4. Add visual examples to documentation
 5. Create component showcase page
 
@@ -500,7 +500,7 @@ The LumiGrid StyleSystem is comprehensive, well-documented, and properly impleme
 1. Address high-priority action items
 2. Update README.md with style system references
 3. Create token sync automation script
-4. Plan ESP32/Pi implementation timeline
+4. Plan LED Node Board/Pi implementation timeline
 
 ---
 

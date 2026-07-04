@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { getInfo, uploadFirmware } from '$lib/api/wled';
-  import type { WledInfo } from '$lib/api/wled';
+  import { getInfo, uploadFirmware } from '$lib/api/node';
+  import type { NodeInfo } from '$lib/api/node';
 
   // ── Feature 8: OTA Group Firmware Update ─────────────────────────────────────
 
@@ -35,7 +35,7 @@
     }));
     nodes = nodeList.map((ip, i) => {
       const r = infos[i];
-      const info: WledInfo | null = r.status === 'fulfilled' ? r.value.info : null;
+      const info: NodeInfo | null = r.status === 'fulfilled' ? r.value.info : null;
       return {
         ip,
         name:     info?.name ?? ip,
