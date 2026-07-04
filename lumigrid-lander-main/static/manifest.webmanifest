@@ -1,11 +1,47 @@
 {
-  "name": "LumiGrid Lander",
+  "name": "LumiGrid Operator",
   "short_name": "LumiGrid",
-  "start_url": ".",
+  "description": "LumiGrid LED Node operator dashboard — fleet management, thermal monitoring, schedule builder, and OTA firmware updates.",
+  "start_url": "/dashboard",
+  "scope": "/",
   "display": "standalone",
-  "background_color": "#0b1120",
-  "theme_color": "#0b1120",
+  "background_color": "#050505",
+  "theme_color": "#ff2d55",
+  "orientation": "any",
+  "categories": ["utilities", "productivity"],
+  "lang": "en",
   "icons": [
-    { "src": "/lumigrid-lander/icons/icon.svg", "sizes": "any", "type": "image/svg+xml" }
+    {
+      "src": "/lumigrid-lander/icons/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Fleet Manager",
+      "short_name": "Fleet",
+      "url": "/dashboard",
+      "description": "Monitor all nodes"
+    },
+    {
+      "name": "Channel Control",
+      "short_name": "Channels",
+      "url": "/dashboard/channels",
+      "description": "Control PWM channels"
+    },
+    {
+      "name": "Schedule Builder",
+      "short_name": "Schedule",
+      "url": "/dashboard/schedule",
+      "description": "Edit animation schedule"
+    },
+    {
+      "name": "Thermal Monitor",
+      "short_name": "Thermal",
+      "url": "/dashboard/thermal",
+      "description": "Monitor temperatures"
+    }
   ]
 }

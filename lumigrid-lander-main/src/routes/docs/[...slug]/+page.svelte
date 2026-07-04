@@ -3,7 +3,12 @@
 	import { base } from '$app/paths';
 	import { onMount } from 'svelte';
 
-	export let data;
+	interface DocData {
+		title: string;
+		content: string;
+	}
+
+	export let data: DocData;
 
 	let contentEl: HTMLElement;
 

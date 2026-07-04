@@ -233,6 +233,7 @@ static_assert(WLED_MAX_BUSSES <= 32, "WLED_MAX_BUSSES exceeds hard limit");
 #define USERMOD_ID_LUMIGRID_PCA9685      96     //Usermod "lumigrid_pca9685"
 #define USERMOD_ID_LUMIGRID_TELEMETRY    97     //Usermod "lumigrid_telemetry"
 #define USERMOD_ID_LUMIGRID_CONTENT_SCHED 98    //Usermod "lumigrid_content_scheduler"
+#define USERMOD_ID_LUMIGRID_SOLAR        99     //Usermod "lumigrid_solar"
 
 //Wifi encryption type
 #ifdef WLED_ENABLE_WPA_ENTERPRISE

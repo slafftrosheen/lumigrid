@@ -1,0 +1,268 @@
+<script lang="ts">
+  import { onMount } from 'svelte';
+
+  // ── Feature 6: Uptime History Heatmap ────────────────────────────────────────
+
+  type Event = { ts: number; online: boolean };
+  type DayData = { date: string; onlineSecs: number; totalSecs: number; events: number };
+
+  let nodeIp    = $state('');
+  let nodeList  = $state<string[]>([]);
+  let selected  = $state('');
+  let days      = $state<DayData[]>([]);
+  let stats     = $state({ uptimePct: 0, reboots: 0, longestStreak: 0 });
+
+  onMount(() => {
+    nodeList = JSON.parse(localStorage.getItem('lg_nodes') ?? '[]');
+    nodeIp   = localStorage.getItem('lg_node_ip') ?? '';
+    selected = nodeIp || nodeList[0] || '';
+    if (selected) compute(selected);
+  });
+
+  function compute(ip: string) {
+    selected = ip;
+    const raw = localStorage.getItem(`lg_uptime_${ip}`);
+    if (!raw) { days = []; stats = { uptimePct: 0, reboots: 0, longestStreak: 0 }; return; }
+    const events: Event[] = JSON.parse(raw);
+
+    // Build day map for last 91 days (13 weeks)
+    const now = Date.now();
+    const dayMap: Record<string, DayData> = {};
+    const DAYS = 91;
+    for (let i = 0; i < DAYS; i++) {
+      const d = new Date(now - i * 86400_000);
+      const key = d.toISOString().slice(0, 10);
+      dayMap[key] = { date: key, onlineSecs: 0, totalSecs: 86400, events: 0 };
+    }
+
+    // Accumulate intervals
+    let reboots = 0;
+    let prevOnline = true;
+    for (let e = 0; e < events.length; e++) {
+      const ev = events[e];
+      const next = events[e + 1];
+      if (!ev.online && prevOnline) reboots++;
+      prevOnline = ev.online;
+      if (!ev.online) continue;
+      const start = ev.ts;
+      const end   = next ? next.ts : now;
+      // Distribute seconds across days
+      let t = start;
+      while (t < end) {
+        const d = new Date(t);
+        const key = d.toISOString().slice(0, 10);
+        if (dayMap[key]) {
+          const dayEnd = new Date(key + 'T23:59:59.999Z').getTime();
+          const slice = Math.min(end, dayEnd + 1) - t;
+          dayMap[key].onlineSecs += slice / 1000;
+          dayMap[key].events++;
+        }
+        t = new Date(d.toISOString().slice(0, 10) + 'T00:00:00Z').getTime() + 86400_000;
+      }
+    }
+
+    const dayArr = Object.values(dayMap).sort((a, b) => a.date.localeCompare(b.date));
+    days = dayArr;
+
+    const totalOn = dayArr.reduce((s, d) => s + d.onlineSecs, 0);
+    const total   = dayArr.reduce((s, d) => s + d.totalSecs, 0);
+
+    // Longest online streak (in days)
+    let streak = 0, maxStreak = 0, cur = 0;
+    for (const d of dayArr) {
+      if (d.onlineSecs / 86400 > 0.5) { cur++; maxStreak = Math.max(maxStreak, cur); }
+      else cur = 0;
+    }
+    stats = { uptimePct: total ? (totalOn / total) * 100 : 0, reboots, longestStreak: maxStreak };
+  }
+
+  // SVG heatmap: 13 columns (weeks) × 7 rows (days)
+  const CELL = 14, GAP = 2, COLS = 13, ROWS = 7;
+  const W = COLS * (CELL + GAP);
+  const H = ROWS * (CELL + GAP);
+
+  function cellColor(d: DayData): string {
+    const pct = d.onlineSecs / 86400;
+    if (pct < 0.01) return 'rgba(255,255,255,.05)';
+    if (pct < 0.5)  return 'rgba(255,45,85,.25)';
+    if (pct < 0.8)  return 'rgba(255,45,85,.55)';
+    if (pct < 0.95) return 'rgba(255,45,85,.80)';
+    return '#ff2d55';
+  }
+
+  function cellTitle(d: DayData): string {
+    const pct = ((d.onlineSecs / 86400) * 100).toFixed(1);
+    return `${d.date}: ${pct}% uptime (${d.events} events)`;
+  }
+
+  // Fill to start on Monday
+  let grid = $derived.by(() => {
+    if (!days.length) return [];
+    // Pad to start of first week Monday
+    const firstDate  = new Date(days[0].date + 'T00:00:00Z');
+    const startDow   = (firstDate.getDay() + 6) % 7; // 0=Mon
+    const padded: (DayData | null)[] = Array(startDow).fill(null).concat(days);
+    // Pad end to fill last column
+    while (padded.length % 7) padded.push(null);
+    // Chunk into weeks (columns)
+    const weeks: (DayData | null)[][] = [];
+    for (let i = 0; i < padded.length; i += 7) weeks.push(padded.slice(i, i + 7));
+    return weeks.slice(-COLS);
+  });
+
+  const DOW_LABELS = ['Mon','','Wed','','Fri','','Sun'];
+</script>
+
+<svelte:head>
+  <title>Uptime History — LumiGrid</title>
+</svelte:head>
+
+<div class="page">
+  <header class="page-header">
+    <div>
+      <h1>Uptime History</h1>
+      <p class="sub">Last 91 days · recorded locally per browser session</p>
+    </div>
+  </header>
+
+  <!-- Node picker -->
+  {#if nodeList.length > 1}
+    <div class="node-pills">
+      {#each nodeList as ip}
+        <button class="pill" class:active={selected === ip} onclick={() => compute(ip)}>{ip}</button>
+      {/each}
+    </div>
+  {/if}
+
+  {#if !selected}
+    <div class="empty">No nodes configured. Add a node in the sidebar.</div>
+  {:else if !days.length}
+    <div class="empty">No uptime data yet for <code>{selected}</code>. Visit the Fleet page to start recording.</div>
+  {:else}
+    <!-- Summary stats -->
+    <div class="stats-row">
+      <div class="stat-card">
+        <div class="stat-val" style:color={stats.uptimePct > 95 ? '#34c759' : stats.uptimePct > 80 ? '#ff9500' : '#ff453a'}>
+          {stats.uptimePct.toFixed(1)}%
+        </div>
+        <div class="stat-label">Avg Uptime</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-val">{stats.reboots}</div>
+        <div class="stat-label">Reboots</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-val">{stats.longestStreak}d</div>
+        <div class="stat-label">Best Streak</div>
+      </div>
+    </div>
+
+    <!-- Heatmap -->
+    <div class="heatmap-card">
+      <div class="hm-wrap">
+        <!-- Row labels (days of week) -->
+        <div class="dow-labels">
+          {#each DOW_LABELS as l}
+            <span class="dow-label">{l}</span>
+          {/each}
+        </div>
+        <!-- Grid -->
+        <svg viewBox={`0 0 ${W} ${H}`} class="heatmap-svg" aria-label="Uptime heatmap">
+          {#each grid as week, wi}
+            {#each week as cell, di}
+              {#if cell}
+                <rect
+                  x={wi * (CELL + GAP)}
+                  y={di * (CELL + GAP)}
+                  width={CELL}
+                  height={CELL}
+                  rx="3"
+                  fill={cellColor(cell)}
+                >
+                  <title>{cellTitle(cell)}</title>
+                </rect>
+              {:else}
+                <rect
+                  x={wi * (CELL + GAP)}
+                  y={di * (CELL + GAP)}
+                  width={CELL}
+                  height={CELL}
+                  rx="3"
+                  fill="rgba(255,255,255,.03)"
+                />
+              {/if}
+            {/each}
+          {/each}
+        </svg>
+      </div>
+      <!-- Legend -->
+      <div class="hm-legend">
+        <span class="legend-label">Less</span>
+        {#each [.05, .25, .55, .80, 1] as op}
+          <div class="legend-cell" style:background={op < 0.1 ? 'rgba(255,255,255,.05)' : `rgba(255,45,85,${op})`}></div>
+        {/each}
+        <span class="legend-label">More</span>
+      </div>
+    </div>
+
+    <!-- Day detail table -->
+    <div class="day-table-wrap">
+      <table class="day-table">
+        <thead>
+          <tr><th>Date</th><th>Uptime %</th><th>Online (h)</th><th>Events</th></tr>
+        </thead>
+        <tbody>
+          {#each [...days].reverse().slice(0, 30) as d}
+            <tr>
+              <td class="mono">{d.date}</td>
+              <td>
+                <div class="bar-wrap">
+                  <div class="bar-fill" style:width={`${(d.onlineSecs/86400*100).toFixed(1)}%`} style:background={cellColor(d)}></div>
+                  <span class="bar-val">{(d.onlineSecs/86400*100).toFixed(1)}%</span>
+                </div>
+              </td>
+              <td class="mono">{(d.onlineSecs/3600).toFixed(1)}</td>
+              <td class="mono">{d.events}</td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    </div>
+  {/if}
+</div>
+
+<style>
+  .page { max-width: 900px; }
+  .page-header { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 1.5rem; }
+  h1 { margin: 0; font-size: 1.6rem; font-weight: 700; color: #f5f5f7; }
+  .sub { margin: .25rem 0 0; color: #a1a1a6; font-size: .85rem; }
+  .empty { color: #a1a1a6; padding: 3rem; text-align: center; }
+  .empty code { background: rgba(255,255,255,.08); padding: .1em .4em; border-radius: 4px; }
+
+  .node-pills { display: flex; flex-wrap: wrap; gap: .5rem; margin-bottom: 1.25rem; }
+  .pill { background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.12); border-radius: 999px; color: #a1a1a6; font-size: .78rem; font-family: monospace; padding: .3rem .7rem; cursor: pointer; transition: all .2s; }
+  .pill.active { background: rgba(255,45,85,.18); border-color: rgba(255,45,85,.4); color: #f5f5f7; }
+
+  .stats-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; margin-bottom: 1.25rem; }
+  .stat-card { background: rgba(29,29,31,.72); border: 1px solid rgba(255,255,255,.08); border-radius: 16px; padding: 1rem; text-align: center; }
+  .stat-val { font-size: 1.8rem; font-weight: 700; color: #f5f5f7; line-height: 1.1; }
+  .stat-label { font-size: .72rem; color: #a1a1a6; text-transform: uppercase; letter-spacing: .06em; margin-top: .25rem; }
+
+  .heatmap-card { background: rgba(29,29,31,.72); border: 1px solid rgba(255,255,255,.08); border-radius: 18px; padding: 1.25rem; margin-bottom: 1.25rem; overflow-x: auto; }
+  .hm-wrap { display: flex; align-items: flex-start; gap: .5rem; min-width: max-content; }
+  .dow-labels { display: flex; flex-direction: column; gap: 2px; padding-top: 0; }
+  .dow-label { font-size: .6rem; color: #a1a1a6; height: 14px; line-height: 14px; width: 24px; }
+  .heatmap-svg { width: auto; height: auto; }
+  .hm-legend { display: flex; align-items: center; gap: .35rem; margin-top: .75rem; }
+  .legend-label { font-size: .65rem; color: #a1a1a6; }
+  .legend-cell { width: 13px; height: 13px; border-radius: 3px; }
+
+  .day-table-wrap { overflow-x: auto; }
+  .day-table { width: 100%; border-collapse: collapse; font-size: .82rem; }
+  .day-table th { text-align: left; padding: .4rem .75rem; color: #a1a1a6; font-size: .68rem; text-transform: uppercase; letter-spacing: .05em; border-bottom: 1px solid rgba(255,255,255,.08); }
+  .day-table td { padding: .4rem .75rem; color: #f5f5f7; border-bottom: 1px solid rgba(255,255,255,.04); }
+  .mono { font-family: monospace; }
+  .bar-wrap { display: flex; align-items: center; gap: .5rem; }
+  .bar-fill { height: 8px; border-radius: 999px; min-width: 2px; }
+  .bar-val { font-size: .75rem; color: #a1a1a6; font-family: monospace; min-width: 4ch; }
+</style>

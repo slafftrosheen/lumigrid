@@ -10,8 +10,8 @@ const config = {
     prerender: { 
       entries: ['/', '/style-demo'],
       handleHttpError: ({ path, referrer, message }) => {
-        // Ignore 404 errors for removed routes
-        if (path.endsWith('/cases') || path.endsWith('/contact')) {
+        // Ignore 404 errors for removed routes or client-only dashboard
+        if (path.endsWith('/cases') || path.endsWith('/contact') || path.startsWith('/dashboard')) {
           return;
         }
         throw new Error(message);
