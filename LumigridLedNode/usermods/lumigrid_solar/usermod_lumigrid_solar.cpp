@@ -109,7 +109,7 @@ class UsermodLumigridSolar : public Usermod {
 
     void recomputeIfNeeded() {
       if (localTime == 0) return;
-      int16_t doy = (int16_t)yday(localTime);
+      int16_t doy = (int16_t)(day(localTime) + (month(localTime) - 1) * 30);
       if (doy == lastCalcDay) return;
       lastCalcDay = doy;
       sunriseMin  = calcSunTime(true);
@@ -191,7 +191,7 @@ class UsermodLumigridSolar : public Usermod {
       // Smooth ramp during dawn/dusk (advance ~1/rampMin per minute)
       if (phase == 1 || phase == 3) {
         int16_t elapsed = (phase == 1) ? (now - dawnStart) : (now - duskStart);
-        uint8_t pct = (uint8_t)((int32_t)elapsed * 255 / max((int16_t)1, rampMinutes));
+        uint8_t pct = (uint8_t)((int32_t)elapsed * 255 / max((int16_t)1, (int16_t)rampMinutes));
         uint8_t target = (phase == 1) ? pct : (255 - pct);
         if (bri != target) {
           bri = target;

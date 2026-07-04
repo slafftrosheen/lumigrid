@@ -95,7 +95,7 @@ npm ci
 npm run build
 
 # 3. Build firmware for Lumigrid target
-pio run -e lumigrid_node
+pio run -e lumigridLedNode
 ```
 
 ### Watch Mode (development)
@@ -108,10 +108,10 @@ npm run dev    # auto-rebuilds web UI on file changes in wled00/data/
 
 ```bash
 # After building, upload via USB
-pio run -t upload -e lumigrid_node
+pio run -t upload -e lumigridLedNode
 
 # Or OTA (if previously flashed with OTA enabled)
-pio run -t upload -e lumigrid_node --upload-port <device-ip>
+pio run -t upload -e lumigridLedNode --upload-port <device-ip>
 ```
 
 ## Project Structure
@@ -199,7 +199,7 @@ Health monitoring and reliability features:
 ### Build Flags (`platformio_override.ini`)
 
 ```ini
-[env:lumigrid_node]
+[env:lumigridLedNode]
 extends = env:esp32dev
 build_flags =
   ${common.build_flags} ${esp32_idf_V4.build_flags}
