@@ -102,6 +102,16 @@
 		const ALED_PINS = [16, 4, 17, 18, 19, 23, 26, 27];
 
 		function updateUI() {
+			// Populate global settings from hidden fields
+			let frField = d.Sf["FR"];
+			if (frField && frField.value) d.getElementById("gl_fps").value = frField.value;
+			let maField = d.Sf["MA"];
+			if (maField && maField.value) d.getElementById("gl_ma").value = maField.value;
+			let msField = d.Sf["MS"];
+			if (msField) d.getElementById("gl_ms").checked = (msField.value == "1");
+			let cctField = d.Sf["CCT"];
+			if (cctField && cctField.value) d.getElementById("gl_cct").value = cctField.value;
+
 			// Populate UI from hidden fields that GetV() populated
 			for(let i=0; i<8; i++) {
 				let n = i.toString();
@@ -116,8 +126,17 @@
 				}
 				d.getElementById("aled_len_"+i).value = (lc > 0) ? lc : 30;
 				d.getElementById("aled_co_"+i).value = co;
+
+				// Advanced per-channel fields
+				let laField = d.Sf["LA"+n];
+				if (laField && laField.value) d.getElementById("aled_la_"+i).value = laField.value;
+				let cvField = d.Sf["CV"+n];
+				if (cvField) d.getElementById("aled_cv_"+i).checked = (cvField.value == "1");
+				let slField = d.Sf["SL"+n];
+				if (slField && slField.value) d.getElementById("aled_sl_"+i).value = slField.value;
 				
 				toggleRow(i, en.checked);
+			}
 			}
 			updatePCA();
 		}
@@ -166,6 +185,12 @@
 			while(ledCount < 9) {
 			    addLEDs(1);
 			}
+
+			// Save global settings from visible inputs to hidden form fields
+			d.Sf["FR"].value = d.getElementById("gl_fps").value;
+			d.Sf["MA"].value = d.getElementById("gl_ma").value;
+			d.Sf["MS"].value = d.getElementById("gl_ms").checked ? 1 : 0;
+			d.Sf["CCT"].value = d.getElementById("gl_cct").value;
 			
 			// Update hidden fields with our custom UI data
 			let start = 0;
@@ -182,6 +207,10 @@
 					d.Sf["LS"+n].value = start;
 					d.Sf["L0"+n].value = ALED_PINS[i];
 					d.Sf["CO"+n].value = co;
+					// Advanced per-channel settings
+					d.Sf["LA"+n].value = d.getElementById("aled_la_"+i).value;
+					d.Sf["CV"+n].value = d.getElementById("aled_cv_"+i).checked ? 1 : 0;
+					d.Sf["SL"+n].value = d.getElementById("aled_sl_"+i).value;
 					start += len;
 				} else {
 					d.Sf["LC"+n].value = 0; // Disable bus
@@ -213,7 +242,6 @@
 			
 			// Form globals that Lumigrid expects to save
 			d.Sf["BF"].value = 100;
-			d.Sf["MA"].value = 850;
 			d.Sf["AW"].value = 0;
 			
 			// Save PCA config via API, then submit form
@@ -266,6 +294,30 @@
 		<button type="button" onclick="save(event)">Save</button>
 		<hr>
 	</div>
+
+	<h2>Global LED Settings</h2>
+	<div class="sec">
+		<div style="margin-bottom: 10px;">
+			<label>Target FPS: <input type="number" id="gl_fps" name="FR" min="1" max="250" value="42" class="s"></label>
+		</div>
+		<div style="margin-bottom: 10px;">
+			<label>Max Current (mA): <input type="number" id="gl_ma" name="MA" min="0" max="65000" value="850" class="s"></label>
+			<i>(0 = ABL disabled)</i>
+		</div>
+		<div style="margin-bottom: 10px;">
+			<label>Auto-Segments: <input type="checkbox" id="gl_ms" name="MS"></label>
+		</div>
+		<div style="margin-bottom: 10px;">
+			<label>CCT Blending Mode: 
+				<select id="gl_cct" name="CCT">
+					<option value="0">None (CCT slider ignored)</option>
+					<option value="1">Additive (warm + cold)</option>
+					<option value="2">CW only</option>
+					<option value="3">WW only</option>
+				</select>
+			</label>
+		</div>
+	</div>
 	
 	<h2>Addressable Channels</h2>
 	<div class="sec">
@@ -289,6 +341,13 @@
 					<option value="5">GBR</option>
 				</select>
 				Length: <input type="number" id="aled_len_${i}" min="1" max="1000" class="s" value="30">
+				<details style="margin-top:6px;"><summary style="cursor:pointer;font-size:0.9em;color:#a1a1a6;">Advanced</summary>
+					<div style="margin-top:6px;">
+						mA/LED: <input type="number" id="aled_la_${i}" min="0" max="255" value="55" class="s" style="width:60px;">
+						<label><input type="checkbox" id="aled_cv_${i}"> Reversed</label>
+						Skip first: <input type="number" id="aled_sl_${i}" min="0" max="255" value="0" class="s" style="width:50px;"> LEDs
+					</div>
+				</details>
 			</div>
 			`);
 		}

@@ -6,7 +6,7 @@
 export const tokens = {
   colors: {
     brand: {
-      primary: '#0071e3',
+      primary: '#ff2d55',
       ledCyan: '#00d4ff',
       ledAmber: '#ff9500',
       ledMagenta: '#ff2d55',

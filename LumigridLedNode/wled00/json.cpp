@@ -1033,8 +1033,10 @@ void serializeNetworks(JsonObject root)
   switch (status) {
     case WIFI_SCAN_FAILED:
       WiFi.scanNetworks(true);
+      root[F("scanPending")] = true;
       return;
     case WIFI_SCAN_RUNNING:
+      root[F("scanPending")] = true;
       return;
   }
 
