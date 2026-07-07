@@ -327,6 +327,10 @@ void fillStr2MAC(uint8_t *mac, const char *str) {
 // returns configured WiFi ID with the strongest signal (or default if no configured networks available)
 int findWiFi(bool doScan) {
   if (multiWiFi.size() <= 1) {
+    // Still initiate a background scan so that /json/net can report available networks
+    if (doScan || WiFi.scanComplete() == WIFI_SCAN_FAILED) {
+      WiFi.scanNetworks(true);
+    }
     DEBUG_PRINTF_P(PSTR("WiFi: Default SSID (%s) used.\n"), multiWiFi[0].clientSSID);
     return 0;
   }
