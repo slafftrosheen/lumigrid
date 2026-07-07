@@ -187,10 +187,10 @@
 			}
 
 			// Save global settings from visible inputs to hidden form fields
-			d.Sf["FR"].value = d.getElementById("gl_fps").value;
-			d.Sf["MA"].value = d.getElementById("gl_ma").value;
+			d.Sf["FR"].value = d.getElementById("gl_fps").value || 42;
+			d.Sf["MA"].value = d.getElementById("gl_ma").value || 850;
 			d.Sf["MS"].value = d.getElementById("gl_ms").checked ? 1 : 0;
-			d.Sf["CCT"].value = d.getElementById("gl_cct").value;
+			d.Sf["CCT"].value = d.getElementById("gl_cct").value || 0;
 			
 			// Update hidden fields with our custom UI data
 			let start = 0;
