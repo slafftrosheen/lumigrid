@@ -198,7 +198,7 @@ void notify(byte callMode, bool followUp)
     DEBUG_PRINTLN(F("UDP sending packet."));
     IPAddress broadcastIp = ~uint32_t(Network.subnetMask()) | uint32_t(Network.gatewayIP());
     notifierUdp.beginPacket(broadcastIp, udpPort);
-    notifierUdp.write(udpOut, WLEDPACKETSIZE); // TODO: add actual used buffer size
+    notifierUdp.write(udpOut, 41 + (s * UDP_SEG_SIZE));
     notifierUdp.endPacket();
   }
   notificationSentCallMode = callMode;
