@@ -30,6 +30,7 @@ class UsermodLumigridPCA9685 : public Usermod {
     bool    enabled   = true;
     bool    initDone  = false;
     bool    pcaFound  = false;
+    uint16_t startLED = 0;
 
     // ── Channel configuration ─────────────────────────────────────────────────
     uint8_t channelType[NUM_CHANNELS];          // 0–4 per channel
@@ -66,10 +67,20 @@ class UsermodLumigridPCA9685 : public Usermod {
     // Private helpers
     // ─────────────────────────────────────────────────────────────────────────
 
-    void setupTemperature() {
+    void setupTemperature(int8_t oldPin = -1) {
+      if (oldPin >= 0 && oldPin != tempPin) {
+        PinManager::deallocatePin((uint8_t)oldPin, PinOwner::UM_Unspecified);
+      }
       if (tempPin < 0) {
         tempSensorFound = false;
         return;
+      }
+      if (oldPin != tempPin) {
+        if (!PinManager::allocatePin((uint8_t)tempPin, false, PinOwner::UM_Unspecified)) {
+          tempPin = -1;
+          tempSensorFound = false;
+          return;
+        }
       }
       delete sensors; sensors = nullptr;
       delete oneWire; oneWire = nullptr;
@@ -157,10 +168,14 @@ class UsermodLumigridPCA9685 : public Usermod {
 
       // Emergency button (active-low, internal pull-up)
       if (emergencyBtnPin >= 0) {
-        pinMode(emergencyBtnPin, INPUT_PULLUP);
+        if (PinManager::allocatePin((uint8_t)emergencyBtnPin, false, PinOwner::UM_Unspecified)) {
+          pinMode(emergencyBtnPin, INPUT_PULLUP);
+        } else {
+          emergencyBtnPin = -1;
+        }
       }
 
-      setupTemperature();
+      setupTemperature(-1);
       initDone = true;
     }
 
@@ -225,7 +240,7 @@ class UsermodLumigridPCA9685 : public Usermod {
       // ── Map WLED pixel colors → PCA9685 channels ─────────────────────────
       // Each multi-channel type (CCT/RGB/RGBW) consumes one virtual pixel and
       // multiple consecutive PCA channels.
-      uint16_t pixelIdx = 0;
+      uint16_t pixelIdx = startLED;
       uint8_t  ch       = 0;
 
       while (ch < NUM_CHANNELS) {
@@ -251,7 +266,11 @@ class UsermodLumigridPCA9685 : public Usermod {
           }
 
           case 2: { // CCT — WW on ch, CW on ch+1
-            if (ch + 1 >= NUM_CHANNELS) { applyPWM(ch, 0); ch++; break; }
+            if (ch + 1 >= NUM_CHANNELS) { 
+              for (uint8_t i = ch; i < NUM_CHANNELS; i++) applyPWM(i, 0);
+              ch = NUM_CHANNELS; 
+              break; 
+            }
             applyPWM(ch,     mapTo12Bit((color >> 16) & 0xFF, ch));
             applyPWM(ch + 1, mapTo12Bit((color >>  8) & 0xFF, ch + 1));
             ch += 2;
@@ -260,7 +279,11 @@ class UsermodLumigridPCA9685 : public Usermod {
           }
 
           case 3: { // RGB
-            if (ch + 2 >= NUM_CHANNELS) { applyPWM(ch, 0); ch++; break; }
+            if (ch + 2 >= NUM_CHANNELS) { 
+              for (uint8_t i = ch; i < NUM_CHANNELS; i++) applyPWM(i, 0);
+              ch = NUM_CHANNELS; 
+              break; 
+            }
             applyPWM(ch,     mapTo12Bit((color >> 16) & 0xFF, ch));
             applyPWM(ch + 1, mapTo12Bit((color >>  8) & 0xFF, ch + 1));
             applyPWM(ch + 2, mapTo12Bit((color      ) & 0xFF, ch + 2));
@@ -270,7 +293,11 @@ class UsermodLumigridPCA9685 : public Usermod {
           }
 
           case 4: { // RGBW
-            if (ch + 3 >= NUM_CHANNELS) { applyPWM(ch, 0); ch++; break; }
+            if (ch + 3 >= NUM_CHANNELS) { 
+              for (uint8_t i = ch; i < NUM_CHANNELS; i++) applyPWM(i, 0);
+              ch = NUM_CHANNELS; 
+              break; 
+            }
             applyPWM(ch,     mapTo12Bit((color >> 16) & 0xFF, ch));
             applyPWM(ch + 1, mapTo12Bit((color >>  8) & 0xFF, ch + 1));
             applyPWM(ch + 2, mapTo12Bit((color      ) & 0xFF, ch + 2));
@@ -308,6 +335,7 @@ class UsermodLumigridPCA9685 : public Usermod {
       pca["chip"]         = pcaFound;
       pca["addr"]         = F("0x40");
       pca["channels"]     = NUM_CHANNELS;
+      pca["startLED"]     = startLED;
       pca["pwmFreq"]      = pwmFrequency;
       pca["emergencyOff"] = emergencyOff;
     }
@@ -319,6 +347,7 @@ class UsermodLumigridPCA9685 : public Usermod {
     void addToConfig(JsonObject& root) override {
       JsonObject top = root.createNestedObject(FPSTR(_name));
       top["enabled"] = enabled;
+      top["startLED"] = startLED;
       top["tempPin"] = tempPin;
       top["btnPin"]  = emergencyBtnPin;
       top["pwmFreq"] = pwmFrequency;
@@ -335,8 +364,10 @@ class UsermodLumigridPCA9685 : public Usermod {
 
       bool ok = true;
       ok &= getJsonValue(top["enabled"], enabled);
+      getJsonValue(top["startLED"], startLED);
 
       int8_t oldTempPin = tempPin;
+      int8_t oldBtnPin  = emergencyBtnPin;
       getJsonValue(top["tempPin"], tempPin);
       getJsonValue(top["btnPin"],  emergencyBtnPin);
 
@@ -364,7 +395,21 @@ class UsermodLumigridPCA9685 : public Usermod {
       }
 
       // Re-init temp sensor only if the pin actually changed
-      if (tempPin != oldTempPin && initDone) setupTemperature();
+      if (tempPin != oldTempPin && initDone) {
+        setupTemperature(oldTempPin);
+      }
+
+      // Re-init button pin if changed
+      if (emergencyBtnPin != oldBtnPin && initDone) {
+        if (oldBtnPin >= 0) PinManager::deallocatePin((uint8_t)oldBtnPin, PinOwner::UM_Unspecified);
+        if (emergencyBtnPin >= 0) {
+          if (PinManager::allocatePin((uint8_t)emergencyBtnPin, false, PinOwner::UM_Unspecified)) {
+            pinMode(emergencyBtnPin, INPUT_PULLUP);
+          } else {
+            emergencyBtnPin = -1;
+          }
+        }
+      }
 
       return ok;
     }
@@ -379,6 +424,11 @@ class UsermodLumigridPCA9685 : public Usermod {
       oappend(F("addInfo('"));
       oappend(String(FPSTR(_name)).c_str());
       oappend(F(":enabled',1,'<b>LumiGrid PCA9685 — 8-ch PWM controller (LED0–LED7)</b>');"));
+
+      // ── Hint: startLED field ──────────────────────────────────────────────
+      oappend(F("addInfo('"));
+      oappend(String(FPSTR(_name)).c_str());
+      oappend(F(":startLED',1,'<i>Start mapping from WLED pixel index (e.g. 0 for main strip, or map to virtual bus)</i>');"));
 
       // ── Per-channel type dropdowns (LED0–LED7) ────────────────────────────
       oappend(F("for(var i=0;i<8;i++){"));
