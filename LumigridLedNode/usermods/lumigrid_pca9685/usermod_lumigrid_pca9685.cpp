@@ -107,7 +107,7 @@ class UsermodLumigridPCA9685 : public Usermod {
     // Write a 12-bit value to a single PCA9685 channel (bounds-checked).
     void applyPWM(uint8_t ch, uint16_t val) {
       if (!pcaFound || ch >= NUM_CHANNELS) return;
-      pwm.setPWM(ch, 0, val);
+      pwm.setPin(ch, val, false);
     }
 
   public:
@@ -126,14 +126,22 @@ class UsermodLumigridPCA9685 : public Usermod {
     void setup() override {
       // Enable PCA9685 output (OE# = active-low)
       #ifdef PCA9685_OE
-        pinMode(PCA9685_OE, OUTPUT);
-        digitalWrite(PCA9685_OE, LOW);
+        if (PinManager::allocatePin(PCA9685_OE, true, PinOwner::UM_Unspecified)) {
+          pinMode(PCA9685_OE, OUTPUT);
+          digitalWrite(PCA9685_OE, LOW);
+        }
       #else
-        pinMode(25, OUTPUT);     // default OE# pin
-        digitalWrite(25, LOW);
+        if (PinManager::allocatePin(25, true, PinOwner::UM_Unspecified)) {
+          pinMode(25, OUTPUT);     // default OE# pin
+          digitalWrite(25, LOW);
+        }
       #endif
 
-      Wire.begin(); // SDA=GPIO21, SCL=GPIO22 on ESP32
+      #if defined(I2CSDAPIN) && defined(I2CSCLPIN)
+        Wire.begin(I2CSDAPIN, I2CSCLPIN);
+      #else
+        Wire.begin(); 
+      #endif
 
       // Probe single PCA9685 chip
       Wire.beginTransmission(PCA_ADDR);
@@ -163,10 +171,20 @@ class UsermodLumigridPCA9685 : public Usermod {
       if (millis() - lastWatchdog > 5000) {
         lastWatchdog = millis();
         Wire.beginTransmission(PCA_ADDR);
-        if (pcaFound && Wire.endTransmission() != 0) {
-          DEBUG_PRINTLN(F("LumiGrid PCA9685: I2C error — retrying init"));
-          pwm.begin();
-          pwm.setPWMFreq(pwmFrequency);
+        uint8_t i2cErr = Wire.endTransmission();
+        
+        if (i2cErr == 0) {
+          if (!pcaFound) {
+            DEBUG_PRINTLN(F("LumiGrid PCA9685: chip found (recovered)"));
+            pcaFound = true;
+            pwm.begin();
+            pwm.setPWMFreq(pwmFrequency);
+          }
+        } else {
+          if (pcaFound) {
+            DEBUG_PRINTLN(F("LumiGrid PCA9685: I2C error — lost chip"));
+            pcaFound = false;
+          }
         }
       }
 
@@ -194,7 +212,7 @@ class UsermodLumigridPCA9685 : public Usermod {
             DEBUG_PRINTF_P(PSTR("LumiGrid: emergencyOff=%d\n"), (int)emergencyOff);
           } else if (dur > 50) {
             // Short press → WLED power toggle
-            toggleOnOff();
+            // toggleOnOff(); // Commented out to prevent double-toggle (WLED core handles BTNPIN)
           }
         }
         lastBtnState = reading;
