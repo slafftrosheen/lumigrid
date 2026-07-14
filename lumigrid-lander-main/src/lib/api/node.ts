@@ -149,7 +149,7 @@ export function setPixelColor(ip: string, pixelIdx: number, r: number, g: number
 export function setPixels(ip: string, pixels: Array<[number, [number, number, number, number]]>): Promise<NodeState> {
   const i: unknown[] = [];
   for (const [idx, [r, g, b, w]] of pixels) i.push(idx, [r, g, b, w]);
-  return setState(ip, { seg: [{ id: 0, i }] });
+  return setState(ip, { seg: [{ id: 0, fx: 0, i }] });
 }
 
 // ── Filesystem ─────────────────────────────────────────────────────────────────

@@ -1,0 +1,15 @@
+{
+  "name": "LumiGrid LED Node",
+  "version": "latest",
+  "builds": [
+    {
+      "chipFamily": "LED Node Board",
+      "parts": [
+        {
+          "path": "merged_firmware.bin",
+          "offset": 0
+        }
+      ]
+    }
+  ]
+}
