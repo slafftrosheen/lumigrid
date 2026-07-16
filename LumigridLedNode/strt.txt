@@ -1,0 +1,505 @@
+Next milestone: add a **configuration-driven protocol router**, Art-Net receiver, MQTT integration, and a hardware-test API. This gets the node from “firmware structure” to a bench-testable device: every ALED lane, PCA9685 output, OE safety state, Wi-Fi path, and external protocol can be exercised without the final UI.
+
+Art-Net runs over UDP, conventionally on port 6454, while ESP-IDF’s MQTT component supports TLS and MQTT 5 integrations through Espressif’s maintained component. [docs.espressif](https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/protocols/mqtt.html)
+
+## Firmware target
+
+Keep the firmware ESP-IDF-native rather than mixing Arduino libraries into the critical protocol/output layers. The testable data path should be:
+
+```text
+Art-Net UDP / MQTT / REST test API
+             |
+             v
+        ProtocolRouter
+             |
+             v
+    NodeState + validated config
+             |
+             v
+   Render / mapping / power limit
+             |
+             v
+  PixelBus + PwmBus (sole owners)
+```
+
+No network callback, REST handler, or MQTT callback may write GPIO, PCA9685 registers, or pixel hardware directly. They submit commands to the router; the output task applies a coherent frame.
+
+## Configuration schema
+
+Use one persisted `NodeConfig`, version it from the first release, and make every output assignable. Store normal configuration in NVS; keep Wi-Fi and MQTT credentials in a separate secure namespace. NVS encryption is supported by ESP-IDF, but it depends on an appropriate flash-encryption / key-storage strategy, so enable it only as part of a controlled production-flashing flow. [docs.espressif](https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/storage/nvs_encryption.html)
+
+```cpp
+// components/config/include/lg_config.hpp
+#pragma once
+#include <array>
+#include <cstdint>
+#include <string>
+
+namespace lg {
+
+constexpr size_t kPixelLanes = 8;
+constexpr size_t kPwmChannels = 16;
+constexpr size_t kMaxPixelsPerLane = 1000;
+
+enum class PixelOrder : uint8_t { GRB, RGB, GRBW, RGBW };
+enum class PwmKind : uint8_t { Disabled, Dimmer, RGB, RGBW, CCT };
+
+struct PixelLaneConfig {
+    bool enabled = false;
+    uint8_t gpio = 0;
+    uint16_t pixel_count = 0;
+    uint16_t logical_start = 0;
+    PixelOrder order = PixelOrder::GRB;
+    bool reversed = false;
+    uint8_t brightness = 255;
+};
+
+struct PwmGroupConfig {
+    bool enabled = false;
+    PwmKind kind = PwmKind::Disabled;
+    uint8_t first_channel = 0;
+    uint8_t channel_count = 0;
+    uint16_t logical_start = 0;
+    bool invert = false;
+};
+
+struct ArtnetConfig {
+    bool enabled = true;
+    uint16_t first_universe = 0;
+    uint16_t universe_count = 16;
+    uint32_t source_timeout_ms = 3000;
+    bool accept_broadcast = true;
+};
+
+struct MqttConfig {
+    bool enabled = false;
+    std::string uri;          // mqtts://broker.example:8883
+    std::string username;
+    std::string password;
+    std::string base_topic;   // lumigrid/<node-id>
+    bool tls_verify = true;
+};
+
+struct NodeConfig {
+    uint16_t schema_version = 1;
+    std::string node_id = "lumigrid-node";
+    std::string group_id = "default";
+    uint16_t target_fps = 60;
+    uint16_t pwm_frequency_hz = 1000;
+    uint32_t max_pixel_ma = 0; // 0 = no software cap until calibrated
+    std::array<PixelLaneConfig, kPixelLanes> lanes{};
+    std::array<PwmGroupConfig, kPwmChannels> pwm_groups{};
+    ArtnetConfig artnet{};
+    MqttConfig mqtt{};
+};
+
+} // namespace lg
+```
+
+Reject a configuration if a PWM group crosses channel 15, overlaps another group, points to a non-existent lane, requests more than your compiled pixel-buffer capacity, or declares more Art-Net universes than can map into its assigned logical output space.
+
+## Persistent config service
+
+Persist only a validated document. Never partially apply a PATCH request: decode it into a candidate config, validate it, write it atomically, then swap it into the active runtime state.
+
+```cpp
+// components/config/include/lg_config_store.hpp
+#pragma once
+#include "esp_err.h"
+#include "lg_config.hpp"
+
+namespace lg {
+
+enum class ConfigError {
+    None,
+    InvalidSchema,
+    InvalidLane,
+    InvalidPwmGroup,
+    PwmOverlap,
+    InvalidNetwork,
+    StorageFailure
+};
+
+class ConfigStore {
+public:
+    esp_err_t init();
+    esp_err_t load(NodeConfig& out);
+    ConfigError validate(const NodeConfig& cfg) const;
+    esp_err_t save(const NodeConfig& cfg);
+    esp_err_t reset_to_factory(NodeConfig& out);
+
+private:
+    static constexpr const char* kNamespace = "lumigrid";
+    static constexpr const char* kKey = "node_config";
+};
+
+} // namespace lg
+```
+
+Expose these configuration endpoints:
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| `GET` | `/api/v1/config` | Retrieve sanitized active configuration; omit passwords |
+| `PUT` | `/api/v1/config` | Replace the complete config after validation |
+| `PATCH` | `/api/v1/config` | Update a small subset, then validate the whole result |
+| `POST` | `/api/v1/config/reboot` | Commit config and reboot intentionally |
+| `POST` | `/api/v1/factory-reset` | Require physical confirmation or an authenticated one-time token |
+| `GET` | `/api/v1/status` | Node, protocol, output, fault, and health state |
+| `POST` | `/api/v1/test/*` | Authenticated hardware-test commands only |
+
+For development, JSON configuration is fine. For production, retain an internal binary NVS representation plus JSON import/export; it avoids repeatedly parsing large documents at every boot.
+
+## Art-Net receiver
+
+Implement only the receive path first: `OpDmx`, ArtPoll reply, optional ArtSync, source tracking, and timeout. Art-Net 4 specifies UDP transport, while `OpDmx` maps up to a single DMX universe per packet; LumiGrid maps many universes into a canonical linear pixel/PWM frame. [art-net.org](https://art-net.org.uk/downloads/art-net.pdf)
+
+```cpp
+// components/protocols/include/lg_artnet.hpp
+#pragma once
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+
+namespace lg {
+
+constexpr uint16_t kArtnetPort = 6454;
+constexpr uint16_t kOpDmx = 0x5000;
+constexpr uint16_t kOpPoll = 0x2000;
+constexpr uint16_t kOpSync = 0x5200;
+
+struct DmxPacket {
+    uint16_t universe;
+    uint8_t sequence;
+    const uint8_t* data;
+    size_t length;
+};
+
+using DmxCallback = std::function<void(const DmxPacket&)>;
+
+class ArtnetReceiver {
+public:
+    bool start(DmxCallback callback);
+    void stop();
+    void set_universe_range(uint16_t first, uint16_t count);
+    void set_enabled(bool enabled);
+
+private:
+    void task_loop();
+    bool parse_packet(const uint8_t* packet, size_t length);
+
+    DmxCallback on_dmx_;
+    uint16_t first_universe_ = 0;
+    uint16_t universe_count_ = 0;
+    bool enabled_ = false;
+};
+
+} // namespace lg
+```
+
+The important parser detail is byte order: Art-Net opcodes are little-endian, while the universe field is represented low-byte first. Do not cast an incoming byte buffer to a C++ struct because alignment, packing, and endianness errors will become intermittent field bugs.
+
+```cpp
+// components/protocols/lg_artnet.cpp
+#include "lg_artnet.hpp"
+#include <cstring>
+
+namespace lg {
+
+static uint16_t le16(const uint8_t* p) {
+    return static_cast<uint16_t>(p[0]) |
+           (static_cast<uint16_t>(p [docs.espressif](https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/protocols/mqtt.html)) << 8);
+}
+
+bool ArtnetReceiver::parse_packet(const uint8_t* p, size_t n) {
+    if (!enabled_ || n < 18) return false;
+    if (std::memcmp(p, "Art-Net\0", 8) != 0) return false;
+
+    const uint16_t opcode = le16(p + 8);
+    if (opcode != kOpDmx) return false;
+
+    const uint16_t universe = le16(p + 14);
+    const uint16_t data_len =
+        (static_cast<uint16_t>(p[16]) << 8) | p[17];
+
+    if (data_len == 0 || data_len > 512 || n < 18 + data_len) return false;
+    if (universe < first_universe_) return false;
+    if (universe >= first_universe_ + universe_count_) return false;
+
+    if (on_dmx_) {
+        on_dmx_({
+            .universe = universe,
+            .sequence = p [docs.espressif](https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/storage/storage-security.html),
+            .data = p + 18,
+            .length = data_len
+        });
+    }
+    return true;
+}
+
+} // namespace lg
+```
+
+Map Art-Net universe data into a **staging frame**. Only make it live on `ArtSync`, or after a small frame-coalescing deadline such as 10 ms. This prevents partial frames when universes arrive at different times.
+
+```cpp
+void ProtocolRouter::on_artnet_dmx(const lg::DmxPacket& dmx) {
+    if (active_source_ != Source::ArtNet) {
+        take_source(Source::ArtNet);
+    }
+
+    const uint32_t offset =
+        static_cast<uint32_t>(dmx.universe - config_.artnet.first_universe) * 512U;
+
+    artnet_staging_.write(offset, dmx.data, dmx.length);
+    artnet_last_packet_ms_ = millis();
+    artnet_dirty_ = true;
+}
+
+void ProtocolRouter::on_artnet_sync() {
+    if (artnet_dirty_) {
+        publish_frame(artnet_staging_);
+        artnet_dirty_ = false;
+    }
+}
+```
+
+## MQTT contract
+
+MQTT should control configuration, scenes, diagnostics, and integration with Home Assistant—not stream full 60 FPS pixel frames. ESP-MQTT supports secure broker connections and has reference TLS examples, so production nodes should use `mqtts://` with broker certificate validation instead of plaintext MQTT. [docs.espressif](https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/protocols/mqtt.html)
+
+Topic layout:
+
+```text
+lumigrid/<node-id>/status              retained JSON
+lumigrid/<node-id>/availability        retained: online | offline
+lumigrid/<node-id>/telemetry           periodic JSON
+lumigrid/<node-id>/event               faults and state changes
+lumigrid/<node-id>/command             command JSON
+lumigrid/<node-id>/config/set          desired config JSON
+lumigrid/<node-id>/config/state        retained sanitized config
+lumigrid/<node-id>/test/set            hardware-test command
+lumigrid/<node-id>/test/state          retained active test state
+```
+
+Example status message:
+
+```json
+{
+  "nodeId": "lg-riga-sign-01",
+  "firmware": "0.2.0-dev",
+  "uptimeSeconds": 1632,
+  "wifiRssi": -56,
+  "ip": "192.168.10.84",
+  "activeSource": "artnet",
+  "artnetUniverse": 0,
+  "outputFps": 59.8,
+  "frameDrops": 3,
+  "pca9685Present": true,
+  "outputsEnabled": true,
+  "fault": null
+}
+```
+
+MQTT command payloads should carry an ID for idempotence and a response topic:
+
+```json
+{
+  "id": "b70e630c-cd46-4b2c-9f8e-82a5999eb9cf",
+  "type": "scene.activate",
+  "scene": "night-mode",
+  "replyTo": "lumigrid/commands/replies"
+}
+```
+
+```cpp
+// components/protocols/lg_mqtt_router.cpp
+void MqttRouter::handle_message(std::string_view topic,
+                                std::span<const uint8_t> payload) {
+    if (topic == topic_command_) {
+        Command command;
+        if (!decode_command(payload, command)) {
+            publish_error("invalid_command", "Payload validation failed");
+            return;
+        }
+        command_queue_.push(command);
+        return;
+    }
+
+    if (topic == topic_test_set_) {
+        TestRequest request;
+        if (!decode_test_request(payload, request)) {
+            publish_error("invalid_test_request", "Unsupported test payload");
+            return;
+        }
+        test_queue_.push(request);
+    }
+}
+```
+
+Set an MQTT Last Will on `availability` to `offline`, publish `online` after startup health checks, and publish retained sanitized config after every successful change.
+
+## Hardware-test subsystem
+
+The test subsystem needs a strict rule: **test mode has exclusive ownership of the outputs.** Starting a test immediately suspends Art-Net, DDP, effects, scenes, and normal MQTT commands. Any timeout, Wi-Fi disconnect policy, manual abort, boot reset, or detected fault returns the node to safe-off.
+
+```cpp
+// components/diagnostics/include/lg_hardware_test.hpp
+#pragma once
+#include <cstdint>
+
+namespace lg {
+
+enum class TestKind : uint8_t {
+    None,
+    PixelLaneSolid,
+    PixelLaneChase,
+    PixelAllLanes,
+    PwmSingleChannel,
+    PwmGroup,
+    PwmSweep,
+    OutputBlackout
+};
+
+struct TestRequest {
+    TestKind kind = TestKind::None;
+    uint8_t target = 0;            // lane, PWM channel, or group
+    uint8_t red = 0;
+    uint8_t green = 0;
+    uint8_t blue = 0;
+    uint16_t level_12bit = 0;      // PCA9685: 0..4095
+    uint32_t duration_ms = 30000;  // hard-capped
+};
+
+enum class TestResult : uint8_t {
+    Idle,
+    Running,
+    Passed,
+    Rejected,
+    TimedOut,
+    Aborted,
+    Faulted
+};
+
+class HardwareTestService {
+public:
+    bool start(const TestRequest& request);
+    void tick(uint32_t now_ms);
+    void abort();
+    TestResult result() const;
+    bool owns_outputs() const;
+
+private:
+    bool validate(const TestRequest& request) const;
+    void begin_safe_state();
+    void complete(TestResult result);
+
+    TestRequest active_{};
+    TestResult result_ = TestResult::Idle;
+    uint32_t expires_at_ms_ = 0;
+};
+
+} // namespace lg
+```
+
+### Test endpoints
+
+| Endpoint | Test | Expected bench observation |
+|---|---|---|
+| `POST /api/v1/test/blackout` | Forces OE disabled and pixel data black | PWM drivers inactive; strips black |
+| `POST /api/v1/test/pixel/lane` | Solid RGB/RGBW output on one lane | Correct connector, color order, lane assignment |
+| `POST /api/v1/test/pixel/chase` | Moving single-pixel chase | Pixel count, direction, data integrity |
+| `POST /api/v1/test/pixel/all` | All eight lanes, unique colors | Confirms mapping and no crosstalk |
+| `POST /api/v1/test/pwm/channel` | One PCA output at known duty | Correct MOSFET and fixture channel |
+| `POST /api/v1/test/pwm/sweep` | Controlled 0 to 100 percent ramp | No inversion, dead-zone, or visible flicker |
+| `POST /api/v1/test/report` | Executes non-destructive self-checks | Returns I²C probe, config, output ownership, heap, Wi-Fi, protocol state |
+
+Example request:
+
+```json
+POST /api/v1/test/pixel/lane
+
+{
+  "lane": 3,
+  "color": "#00A8FF",
+  "brightness": 64,
+  "durationMs": 15000
+}
+```
+
+Hard-cap remote test duration at 60 seconds. Do not allow an unauthenticated or indefinite “all outputs at 100 percent” command—especially before real thermal and current validation.
+
+## Bench test sequence
+
+Use this sequence for the first powered board:
+
+1. Flash a `factory-test` firmware profile that defaults to OE disabled and never restores outputs automatically after reset.
+2. Confirm boot log, chip identity, reset reason, flash size, Wi-Fi MAC, and firmware hash.
+3. Probe PCA9685 at `0x40`; report failure as blocking, with OE remaining disabled.
+4. Test PCA channels one at a time at 5 percent duty, then 50 percent, then a short 100 percent pulse only with an appropriate load attached.
+5. Test all eight ALED lines using 10–30 known-good pixels per lane before attaching long strips.
+6. Verify each lane’s GRB/RGB order, physical connector mapping, direction, and reset/latch behavior.
+7. Run all lanes concurrently for at least 30 minutes at the expected target frame rate and conservative brightness.
+8. Send sequential Art-Net universes, then an `ArtSync`; verify no partial frame is shown.
+9. Reboot during active Art-Net and during MQTT connection; outputs must remain off until initialization completes.
+10. Disconnect the Art-Net source; after source timeout, transition to the configured fallback or blackout—not the final received image.
+11. Test MQTT reconnect, retained configuration, invalid command rejection, and fail-safe test timeout.
+12. Save the generated JSON test report with board serial number, PCB revision, firmware hash, and operator result.
+
+## Factory-test report
+
+Make the node create a downloadable, immutable report after commissioning:
+
+```json
+{
+  "reportVersion": 1,
+  "boardSerial": "LGN-260714-0001",
+  "hardwareRevision": "A1",
+  "firmwareGitSha": "a1b2c3d4",
+  "startedAt": "2026-07-14T21:20:00Z",
+  "results": {
+    "pca9685Detected": true,
+    "pca9685Address": "0x40",
+    "pixelLaneMask": 255,
+    "pwmChannelMask": 65535,
+    "artnetRxPassed": true,
+    "mqttTlsPassed": true,
+    "outputWatchdogPassed": true,
+    "safeBootPassed": true
+  },
+  "operator": "reclamefabriek",
+  "result": "passed"
+}
+```
+
+This report is not certification evidence by itself, but it creates traceability from the earliest prototypes through the planned pilot batch.
+
+## Build components
+
+Add the components in this order:
+
+```text
+components/
+├── board/           # OE, I²C probe, safe boot, board revision
+├── config/          # config schema, NVS persistence, validation
+├── output/          # PixelBus, PwmBus, frame buffers, limiter
+├── protocols/       # Art-Net socket, MQTT client, protocol router
+├── diagnostics/     # hardware test, status, metrics, test reports
+├── api/             # REST + WebSocket handlers
+└── app/             # task supervision and lifecycle
+```
+
+Compile and validate this first narrow feature set:
+
+```text
+[ ] OE never enables until PCA probe and initial all-off commit succeed
+[ ] Config survives reboot and invalid config cannot replace it
+[ ] Art-Net universes appear in staging buffer
+[ ] ArtSync causes one atomic display update
+[ ] MQTT publishes retained status and accepts one safe command
+[ ] Test mode blocks Art-Net/MQTT scene output
+[ ] Every test has an enforced timeout and safe-off exit
+[ ] JSON factory report can be downloaded from the web API
+```
+
+The immediate implementation order should be **`ConfigStore` → `HardwareTestService` → PCA/pixel test endpoints → Art-Net staging + ArtSync → MQTT state/commands**. That gives you a real hardware validation tool before spending time on effects, full UI polish, DDP optimization, or multi-node synchronization.

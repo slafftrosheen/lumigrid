@@ -1,9 +1,0 @@
-{
-  "name": "lumigrid_pca9685",
-  "build": { "libArchive": false },
-  "dependencies": {
-    "adafruit/Adafruit PWM Servo Driver Library": "^2.4.1",
-    "paulstoffregen/OneWire": "^2.3.8",
-    "milesburton/DallasTemperature": "^3.11.0"
-  }
-}

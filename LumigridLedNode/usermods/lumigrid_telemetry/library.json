@@ -1,5 +1,0 @@
-{
-  "name": "lumigrid_telemetry",
-  "build": { "libArchive": false },
-  "dependencies": {}
-}
