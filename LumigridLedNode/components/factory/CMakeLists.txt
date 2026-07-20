@@ -1,3 +1,14 @@
-idf_component_register(SRCS "FactoryEffects.cpp" "FactoryRunner.cpp"
-                       INCLUDE_DIRS "include"
-                       REQUIRES output espressif__led_strip esp_timer)
+idf_component_register(
+    SRCS
+        "FactoryEffects.cpp"
+        "FactoryRunner.cpp"
+        "FactoryApi.cpp"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        output
+        esp_http_server
+        cjson
+    EMBED_FILES
+        "dashboard.html"
+)

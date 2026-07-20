@@ -1,21 +1,11 @@
+// components/factory/include/FactoryEffects.hpp
 #pragma once
 #include <cstdint>
+
+#include "FactoryTypes.hpp"
 #include "OutputController.hpp"
 
 namespace lg {
-
-enum class FactoryEffect : uint8_t {
-    SafeBlackout,
-    Identity,
-    PixelChase,
-    Rainbow,
-    WhiteWalk,
-    PwmWalk,
-    PwmFade,
-    CombinedPulse,
-    BurnIn,
-    Manual
-};
 
 const char* effect_name(FactoryEffect effect);
 

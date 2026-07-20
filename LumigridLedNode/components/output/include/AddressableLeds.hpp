@@ -3,7 +3,7 @@
 #include <cstdint>
 #include "esp_err.h"
 #include "led_strip.h"
-#include "../../../main/FactoryApp.hpp"
+#include "FactoryApp.hpp"
 
 namespace lg {
 

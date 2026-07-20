@@ -1,7 +1,12 @@
+// components/factory/include/FactoryRunner.hpp
 #pragma once
 #include "FactoryEffects.hpp"
-#include "OutputController.hpp"
-#include "../../../main/FactoryApp.hpp"
+#include "FactoryTypes.hpp"
+#include <functional>
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+#include "freertos/semphr.h"
 
 namespace lg {
 
@@ -9,23 +14,42 @@ class FactoryRunner {
 public:
     explicit FactoryRunner(OutputController& output);
 
-    void start();
-    void select(FactoryEffect effect, uint32_t duration_ms, uint8_t brightness);
-    void stop();
+    esp_err_t start();
+    bool enqueue(const FactoryCommand& command);
+    void set_stream_frame(const StreamFramePayload& payload, uint8_t brightness, uint32_t duration_ms);
+    FactoryStatus status() const;
 
-    OutputController& output() { return output_; }
-    FactoryEffect active_effect() const { return active_; }
+    using StatusCallback = std::function<void()>;
+    void set_status_callback(StatusCallback cb) { status_callback_ = std::move(cb); }
 
 private:
     static void task_entry(void* argument);
     void task();
 
+    void apply_command(const FactoryCommand& command, uint32_t now_ms);
+    void start_effect(
+        FactoryEffect effect,
+        uint32_t duration_ms,
+        uint8_t brightness,
+        uint32_t now_ms
+    );
+    void blackout();
+
     OutputController& output_;
-    FactoryEffect active_ = FactoryEffect::Identity;
-    uint32_t started_ms_ = 0;
-    uint32_t duration_ms_ = 0;
-    uint8_t brightness_ = LG_FACTORY_DEFAULT_BRIGHTNESS;
-    bool auto_loop_ = true;
+
+    QueueHandle_t queue_ = nullptr;
+    SemaphoreHandle_t status_mutex_ = nullptr;
+    TaskHandle_t task_handle_ = nullptr;
+
+    FactoryStatus status_{};
+    FactoryCommand direct_test_{};
+    bool direct_test_active_ = false;
+
+    FactoryCommand stream_frame_{};
+    bool stream_active_ = false;
+    uint32_t stream_last_ms_ = 0;
+
+    StatusCallback status_callback_{};
 };
 
 } // namespace lg

@@ -1,7 +1,16 @@
 idf_component_register(
-    SRCS "main.cpp"
-    INCLUDE_DIRS "."
-    REQUIRES board output factory factory_api nvs_flash esp_wifi
+    SRCS
+        "main.cpp"
+    INCLUDE_DIRS
+        "."
+    REQUIRES
+        board
+        output
+        factory
+        api
+        esp_http_server
+        network
+        protocols
 )
 
 if(COMMAND littlefs_create_partition_image)

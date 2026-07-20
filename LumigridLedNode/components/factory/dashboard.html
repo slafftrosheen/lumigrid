@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LumiGrid Factory Dashboard</title>
+    <style>
+        :root {
+            --bg-color: #121212;
+            --surface-color: rgba(255, 255, 255, 0.05);
+            --border-color: rgba(255, 255, 255, 0.1);
+            --accent-color: #bb86fc;
+            --danger-color: #cf6679;
+            --text-color: #e1e1e1;
+            --text-muted: #888;
+            --font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        }
+
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            font-family: var(--font-family);
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            justify-content: center;
+        }
+
+        .container {
+            width: 100%;
+            max-width: 600px;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        h1 {
+            font-size: 24px;
+            margin: 0;
+            text-align: center;
+            font-weight: 600;
+        }
+
+        .card {
+            background: var(--surface-color);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 20px;
+            backdrop-filter: blur(10px);
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+
+        .card-header {
+            font-size: 18px;
+            font-weight: 500;
+            margin: 0;
+            padding-bottom: 12px;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        label {
+            font-size: 14px;
+            color: var(--text-muted);
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        input, select, button {
+            background: rgba(0, 0, 0, 0.2);
+            border: 1px solid var(--border-color);
+            color: var(--text-color);
+            border-radius: 8px;
+            padding: 0 16px;
+            height: 44px; /* Touch target size */
+            font-size: 16px;
+            font-family: var(--font-family);
+            outline: none;
+            transition: all 0.2s;
+        }
+
+        input:focus, select:focus {
+            border-color: var(--accent-color);
+            box-shadow: 0 0 0 2px rgba(187, 134, 252, 0.2);
+        }
+
+        button {
+            cursor: pointer;
+            background: var(--surface-color);
+            font-weight: 500;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+        }
+
+        button:hover {
+            background: rgba(255, 255, 255, 0.1);
+        }
+
+        button:active {
+            transform: scale(0.98);
+        }
+
+        button.primary {
+            background: var(--accent-color);
+            color: #000;
+            border: none;
+        }
+
+        button.primary:hover {
+            background: #a371f7;
+        }
+
+        button.danger {
+            background: var(--danger-color);
+            color: #000;
+            border: none;
+        }
+
+        button.danger:hover {
+            background: #b55061;
+        }
+
+        .row {
+            display: flex;
+            gap: 12px;
+            align-items: center;
+        }
+
+        .row > * {
+            flex: 1;
+        }
+
+        .status-badge {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 600;
+            background: rgba(255, 255, 255, 0.1);
+        }
+
+        .status-badge.active {
+            background: rgba(46, 204, 113, 0.2);
+            color: #2ecc71;
+        }
+
+        .status-badge.error {
+            background: rgba(231, 76, 60, 0.2);
+            color: #e74c3c;
+        }
+
+        .grid-2 {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+        }
+
+        #status-json {
+            font-family: monospace;
+            font-size: 12px;
+            background: rgba(0, 0, 0, 0.3);
+            padding: 12px;
+            border-radius: 8px;
+            white-space: pre-wrap;
+            margin: 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>LumiGrid Dashboard</h1>
+
+        <div class="card">
+            <h2 class="card-header">Connection</h2>
+            <label>
+                Base URL
+                <input type="text" id="base-url" value="http://lumigrid-factory.local">
+            </label>
+            <label>
+                Bearer Token
+                <input type="password" id="token" value="lumigrid-factory-token-v1">
+            </label>
+            <div class="row">
+                <button id="btn-connect" class="primary">Connect</button>
+                <span id="conn-status" class="status-badge">Disconnected</span>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2 class="card-header">Device Status</h2>
+            <pre id="status-json">Waiting for connection...</pre>
+            <div class="row">
+                <button id="btn-autoloop">Toggle Auto-Loop</button>
+                <button id="btn-abort" class="danger">Abort (Blackout)</button>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2 class="card-header">Effects</h2>
+            <div class="row">
+                <select id="effect-select">
+                    <option value="Blackout">Blackout</option>
+                    <option value="SolidRed">Solid Red</option>
+                    <option value="SolidGreen">Solid Green</option>
+                    <option value="SolidBlue">Solid Blue</option>
+                    <option value="SolidWhite">Solid White</option>
+                    <option value="ColorCycle">Color Cycle</option>
+                    <option value="Alternating">Alternating</option>
+                    <option value="RandomSparks">Random Sparks</option>
+                </select>
+                <button id="btn-effect" class="primary">Run Effect</button>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2 class="card-header">Lane Test</h2>
+            <div class="grid-2">
+                <label>Lane (0-7)<input type="number" id="lane-idx" min="0" max="7" value="0"></label>
+                <label>Color (Hex)<input type="color" id="lane-color" value="#ff0000"></label>
+            </div>
+            <button id="btn-lane" class="primary">Test Lane</button>
+        </div>
+
+        <div class="card">
+            <h2 class="card-header">PWM Test</h2>
+            <div class="grid-2">
+                <label>Channel (0-7)<input type="number" id="pwm-idx" min="0" max="7" value="0"></label>
+                <label>Duty (0-4095)<input type="number" id="pwm-duty" min="0" max="4095" value="2048"></label>
+            </div>
+            <button id="btn-pwm" class="primary">Test PWM</button>
+        </div>
+    </div>
+
+    <script>
+        let ws = null;
+        let baseUrl = '';
+        let token = '';
+
+        const el = id => document.getElementById(id);
+        
+        function updateConnStatus(state, isError = false) {
+            const badge = el('conn-status');
+            badge.textContent = state;
+            badge.className = 'status-badge ' + (isError ? 'error' : (state === 'Connected' ? 'active' : ''));
+        }
+
+        async function apiCall(path, method = 'POST', body = null) {
+            try {
+                const res = await fetch(`${baseUrl}/api/v1/factory${path}`, {
+                    method,
+                    headers: {
+                        'Authorization': `Bearer ${token}`,
+                        'Content-Type': 'application/json'
+                    },
+                    body: body ? JSON.stringify(body) : null
+                });
+                if (!res.ok) throw new Error(res.statusText);
+                return await res.json();
+            } catch (err) {
+                console.error('API Error:', err);
+                alert(`API Error: ${err.message}`);
+                throw err;
+            }
+        }
+
+        el('btn-connect').onclick = () => {
+            baseUrl = el('base-url').value.replace(/\/$/, '');
+            token = el('token').value;
+            
+            if (ws) ws.close();
+            
+            updateConnStatus('Connecting...');
+            
+            // Try fetching status via REST first
+            fetch(`${baseUrl}/api/v1/factory/status`, {
+                headers: { 'Authorization': `Bearer ${token}` }
+            })
+            .then(res => res.json())
+            .then(data => {
+                el('status-json').textContent = JSON.stringify(data, null, 2);
+                updateConnStatus('Connected');
+                
+                // Try establishing WebSocket
+                const wsUrl = baseUrl.replace(/^http/, 'ws') + '/ws';
+                ws = new WebSocket(wsUrl);
+                ws.onmessage = e => {
+                    try {
+                        const state = JSON.parse(e.data);
+                        el('status-json').textContent = JSON.stringify(state, null, 2);
+                    } catch (err) {}
+                };
+                ws.onclose = () => {
+                    updateConnStatus('WS Closed - Polling');
+                    // Fallback to polling if WS closes
+                    setInterval(() => {
+                        if (ws && ws.readyState === WebSocket.OPEN) return;
+                        fetch(`${baseUrl}/api/v1/factory/status`, {
+                            headers: { 'Authorization': `Bearer ${token}` }
+                        }).then(r => r.json()).then(d => {
+                            el('status-json').textContent = JSON.stringify(d, null, 2);
+                        }).catch(e => {});
+                    }, 1000);
+                };
+            })
+            .catch(err => {
+                updateConnStatus('Connection Failed', true);
+            });
+        };
+
+        el('btn-abort').onclick = () => apiCall('/abort');
+        
+        el('btn-autoloop').onclick = () => {
+            // Read current JSON to see if loop is enabled
+            try {
+                const state = JSON.parse(el('status-json').textContent);
+                apiCall('/auto-loop', 'POST', { enabled: !state.autoLoop });
+            } catch (e) {
+                apiCall('/auto-loop', 'POST', { enabled: true });
+            }
+        };
+
+        el('btn-effect').onclick = () => {
+            apiCall('/effect', 'POST', {
+                effect: el('effect-select').value,
+                durationMs: 5000
+            });
+        };
+
+        el('btn-lane').onclick = () => {
+            const hex = el('lane-color').value;
+            apiCall('/lane', 'POST', {
+                lane: parseInt(el('lane-idx').value),
+                red: parseInt(hex.substr(1,2), 16),
+                green: parseInt(hex.substr(3,2), 16),
+                blue: parseInt(hex.substr(5,2), 16),
+                brightness: 255,
+                durationMs: 2000
+            });
+        };
+
+        el('btn-pwm').onclick = () => {
+            apiCall('/pwm', 'POST', {
+                channel: parseInt(el('pwm-idx').value),
+                duty: parseInt(el('pwm-duty').value),
+                durationMs: 2000
+            });
+        };
+    </script>
+</body>
+</html>

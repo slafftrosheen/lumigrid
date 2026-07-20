@@ -1,0 +1,9 @@
+idf_component_register(
+    SRCS
+        "ArtnetDiscovery.cpp"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        lwip
+        factory
+)
