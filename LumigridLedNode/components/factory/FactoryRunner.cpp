@@ -223,6 +223,9 @@ void FactoryRunner::apply_command(const FactoryCommand& command,
 
             if (status_callback_) status_callback_();
             return;
+        case FactoryCommandType::StreamFrame:
+            set_stream_frame(command.stream, command.brightness, command.duration_ms);
+            return;
     }
 }
 
@@ -233,6 +236,17 @@ void FactoryRunner::task() {
     bool between_loop_effects = false;
 
     blackout();
+
+    // Kick off the first loop effect immediately at boot.
+    if (status().auto_loop) {
+        start_effect(
+            kLoopEffects[loop_index],
+            kLoopEffectDurationMs,
+            LG_FACTORY_DEFAULT_BRIGHTNESS,
+            now_ms()
+        );
+        loop_started_ms = now_ms();
+    }
 
     for (;;) {
         const uint32_t current_ms = now_ms();

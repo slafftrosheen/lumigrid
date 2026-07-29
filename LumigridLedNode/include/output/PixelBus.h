@@ -1,5 +1,5 @@
 #pragma once
-#include <config/lg_config.hpp>
+#include "config/lg_config.hpp"
 #include <stdint.h>
 
 namespace output {

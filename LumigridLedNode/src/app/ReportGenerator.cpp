@@ -31,7 +31,7 @@ void ReportGenerator::generate_report(const std::string& serial_number) {
     StaticJsonDocument<512> doc;
     doc["serialNumber"] = serial_number;
     doc["timestamp"] = millis();
-    auto metrics = Metrics::metrics_snapshot();
+    auto metrics = lg::metrics_snapshot();
     doc["metrics"]["uptimeSeconds"] = metrics.uptime_ms / 1000;
     doc["metrics"]["droppedFrames"] = metrics.dropped_frames;
     doc["metrics"]["pcaFaulted"] = metrics.pca_faulted;

@@ -10,32 +10,36 @@
 #include "output/PwmBus.h"
 #include "protocols/protocol_router.hpp"
 #include "render/Renderer.h"
+#include <Arduino.h>
 
 namespace app {
 static TaskSupervisor tasks;
 static lg::ProtocolRouter router;
-static render::Renderer renderer;
-static output::PixelBus pixels;
-static output::PwmBus pwm;
+static ::render::Renderer renderer;
+static ::output::PixelBus pixels;
+static ::output::PwmBus pwm;
 static lg::ConfigStore cfgStore;
+static network::WifiManager wifi;
+static network::WsHub wsHub;
+static network::ApiServer apiServer;
 
 void setup() {
   Serial.begin(115200);
   delay(50);
 
-  Metrics::init();
+  lg::Metrics::init();
   board::safetyInit();
   board::disableOutputs();
 
   if (!pwm.probe()) {
-    Metrics::recordPcaFault();
+    lg::Metrics::recordPcaFault();
     board::safeOff();
     Serial.println("PCA9685 missing; safe-off");
     for (;;) delay(1000);
   }
 
   if (!pixels.probe()) {
-    Metrics::recordPixelFault();
+    lg::Metrics::recordPixelFault();
     board::safeOff();
     Serial.println("Pixel bus fault; safe-off");
     for (;;) delay(1000);
@@ -65,7 +69,7 @@ void loop() {
   apiServer.loop();
   wsHub.loop();
   router.loop();
-  Metrics::tick();
+  lg::Metrics::tick();
   tasks.loop();
   delay(2);
 }

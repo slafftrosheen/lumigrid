@@ -1,6 +1,9 @@
 #pragma once
-#include <protocols/lg_artnet.hpp>
-#include "lg_config.hpp"
+#include "protocols/lg_artnet.hpp"
+#include "config/lg_config.hpp"
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+#include <cstring>
 
 namespace lg {
 
@@ -13,7 +16,7 @@ public:
     void publish_frame();
 
     void set_dmx_callback(DmxCallback cb) {
-        artnet_.start(cb, [this]() { this->on_sync_(); });
+        artnet_.start(cb);
     }
 
 private:
@@ -45,7 +48,7 @@ private:
 
     FrameBuffer artnet_staging_;
     FrameBuffer live_frame_;
-    portMUX_TYPE frame_mux_;
+    SemaphoreHandle_t frame_mux_ = nullptr;
     bool dirty_ = false;
     uint32_t last_dmx_ms_ = 0;
 };

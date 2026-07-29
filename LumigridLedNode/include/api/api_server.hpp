@@ -2,7 +2,7 @@
 #include <cstdint>
 #include <WebServer.h>
 #include "config/lg_config_store.hpp"
-#include "mqtt/MqttClient.h"
+#include "mqtt/lg_mqtt.hpp"
 #include "output/PixelBus.h"
 #include "output/PwmBus.h"
 #include "diagnostics/hardware_test.hpp"
@@ -16,8 +16,7 @@ public:
                ConfigStore* config,
                MqttClient* mqtt,
                output::PixelBus* pixels,
-               output::PwmBus* pwm,
-               diagnostics::HardwareTestService* test);
+               output::PwmBus* pwm);
 
     void loop();
     bool is_started() const;
@@ -40,7 +39,6 @@ private:
     MqttClient* mqtt_ = nullptr;
     output::PixelBus* pixels_ = nullptr;
     output::PwmBus* pwm_ = nullptr;
-    diagnostics::HardwareTestService* test_ = nullptr;
 };
 
 } // namespace lg

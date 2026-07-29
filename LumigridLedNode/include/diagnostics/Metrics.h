@@ -1,5 +1,6 @@
 #pragma once
 #include "diagnostics/FaultModel.h"
+#include "diagnostics/OutputHealth.h"
 namespace lg {
 
 class OutputHealth;

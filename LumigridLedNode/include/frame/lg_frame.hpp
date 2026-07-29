@@ -2,10 +2,10 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include "config/lg_config.hpp"
 
 namespace lg {
 
-constexpr size_t kMaxPixelsPerLane = 1000;
 constexpr size_t kPixelLaneCount = 8;
 constexpr size_t kMaxLogicalPixels = kMaxPixelsPerLane * kPixelLaneCount;
 constexpr size_t kPwmChannelCount = 16;
@@ -14,6 +14,8 @@ struct Rgb {
   uint8_t r = 0;
   uint8_t g = 0;
   uint8_t b = 0;
+  Rgb() = default;
+  constexpr Rgb(uint8_t r_, uint8_t g_, uint8_t b_) : r(r_), g(g_), b(b_) {}
 };
 
 struct Rgbw {

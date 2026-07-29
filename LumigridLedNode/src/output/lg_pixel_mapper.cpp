@@ -9,10 +9,10 @@ PixelMapper::PixelMapper(const NodeConfig& config) : config_(config) {}
 void PixelMapper::update_config(const NodeConfig& config) { config_ = config; }
 
 Rgb PixelMapper::scale(Rgb c, uint8_t brightness) {
-  return {
-      .r = static_cast<uint8_t>((static_cast<uint16_t>(c.r) * brightness + 127) / 255),
-      .g = static_cast<uint8_t>((static_cast<uint16_t>(c.g) * brightness + 127) / 255),
-      .b = static_cast<uint8_t>((static_cast<uint16_t>(c.b) * brightness + 127) / 255)};
+  return Rgb{
+      static_cast<uint8_t>((static_cast<uint16_t>(c.r) * brightness + 127) / 255),
+      static_cast<uint8_t>((static_cast<uint16_t>(c.g) * brightness + 127) / 255),
+      static_cast<uint8_t>((static_cast<uint16_t>(c.b) * brightness + 127) / 255)};
 }
 
 Rgb PixelMapper::reorder(Rgb c, PixelOrder order) {
@@ -20,7 +20,7 @@ Rgb PixelMapper::reorder(Rgb c, PixelOrder order) {
     case PixelOrder::RGB:
       return c;
     case PixelOrder::GRB:
-      return {.r = c.g, .g = c.r, .b = c.b};
+      return Rgb{c.g, c.r, c.b};
     case PixelOrder::RGBW:
     case PixelOrder::GRBW:
       return c;
@@ -40,7 +40,7 @@ void PixelMapper::map(const LogicalFrame& source, PhysicalFrame& target) const {
     const auto& lane = config_.lanes[lane_index];
     if (!lane.enabled || lane.pixel_count == 0) {
       // Ensure disabled lanes are black.
-      target.lanes[lane_index].fill({0, 0, 0});
+      target.lanes[lane_index].fill(Rgb{0, 0, 0});
       continue;
     }
 
@@ -49,7 +49,7 @@ void PixelMapper::map(const LogicalFrame& source, PhysicalFrame& target) const {
           lane.logical_start + (lane.reversed ? lane.pixel_count - 1 - physical : physical);
 
       if (source_index >= source.pixel_count) {
-        target.lanes[lane_index][physical] = {0, 0, 0};
+        target.lanes[lane_index][physical] = Rgb{0, 0, 0};
         continue;
       }
 

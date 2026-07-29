@@ -16,8 +16,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-extern const uint8_t dashboard_html_start[] asm("_binary_dashboard_html_start");
-extern const uint8_t dashboard_html_end[]   asm("_binary_dashboard_html_end");
+
 
 namespace lg {
 namespace {
@@ -152,10 +151,10 @@ void build_status_json(const FactoryStatus& status, char* response, size_t max_l
     snprintf(
         response,
         max_len,
-        R"({"effect":"%s","effectStartedMs":%" PRIu32
-        R"(,"durationMs":%" PRIu32
-        R"(,"brightness":%u,"autoLoop":%s,"outputsEnabled":%s)"
-        R"(,"testActive":%s,"commandRejections":%" PRIu32 "})",
+        "{\"effect\":\"%s\",\"effectStartedMs\":%" PRIu32 
+        ",\"durationMs\":%" PRIu32 
+        ",\"brightness\":%u,\"autoLoop\":%s,\"outputsEnabled\":%s"
+        ",\"testActive\":%s,\"commandRejections\":%" PRIu32 "}",
         effect_name(status.active_effect),
         status.effect_started_ms,
         status.effect_duration_ms,
@@ -356,10 +355,11 @@ esp_err_t ws_handler(httpd_req_t* request) {
 
 } // namespace
 
+#include "dashboard.hpp"
+
 esp_err_t FactoryApi::serve_dashboard(httpd_req_t* request) {
-    const size_t len = dashboard_html_end - dashboard_html_start;
     httpd_resp_set_type(request, "text/html");
-    return httpd_resp_send(request, reinterpret_cast<const char*>(dashboard_html_start), len);
+    return httpd_resp_send(request, dashboard_html, strlen(dashboard_html));
 }
 
 FactoryApi::FactoryApi(FactoryRunner& runner) : runner_(runner) {}
@@ -379,6 +379,8 @@ esp_err_t FactoryApi::start(uint16_t port) {
 
     ESP_RETURN_ON_ERROR(httpd_start(&server_, &config), "factory-api", "start");
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
     const httpd_uri_t routes[] = {
         {
             .uri = "/api/v1/factory/status",
@@ -433,7 +435,7 @@ esp_err_t FactoryApi::start(uint16_t port) {
         }
     };
 
-    for (const auto& endpoint : endpoints) {
+    for (const auto& endpoint : routes) {
         ESP_RETURN_ON_ERROR(
             httpd_register_uri_handler(server_, &endpoint),
             "api",

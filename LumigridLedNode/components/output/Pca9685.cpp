@@ -113,24 +113,31 @@ esp_err_t Pca9685::init() {
         ESP_LOGE("pca", "Read failed! Error: %s", esp_err_to_name(err));
     }
 
-    ESP_LOGW("pca", "Test complete.");
 
 
+    ESP_LOGW("pca", "Test complete. Sending sleep command...");
     // Sleep before changing prescale.
-    ESP_RETURN_ON_ERROR(write_register(kMode1, kMode1Sleep | kMode1Ai),
-                        "pca", "sleep");
+    esp_err_t err_w = write_register(kMode1, kMode1Sleep | kMode1Ai);
+    if (err_w != ESP_OK) ESP_LOGE("pca", "Sleep write failed: %s", esp_err_to_name(err_w));
+    ESP_LOGW("pca", "Sending prescale...");
 
     // Prescale 5 ~= 1017 Hz with 25 MHz nominal oscillator:
     // 25,000,000 / (4096 * (5 + 1)) ~= 1017 Hz.
-    ESP_RETURN_ON_ERROR(write_register(kPrescale, 5), "pca", "prescale");
+    err_w = write_register(kPrescale, 5);
+    if (err_w != ESP_OK) ESP_LOGE("pca", "Prescale write failed: %s", esp_err_to_name(err_w));
+    ESP_LOGW("pca", "Sending mode2...");
 
-    ESP_RETURN_ON_ERROR(write_register(kMode2, kMode2OutDrv),
-                        "pca", "mode2");
+    err_w = write_register(kMode2, kMode2OutDrv);
+    if (err_w != ESP_OK) ESP_LOGE("pca", "Mode2 write failed: %s", esp_err_to_name(err_w));
+    ESP_LOGW("pca", "Sending wake...");
 
-    ESP_RETURN_ON_ERROR(write_register(kMode1, kMode1Ai | kMode1Restart),
-                        "pca", "wake");
+    err_w = write_register(kMode1, kMode1Ai | kMode1Restart);
+    if (err_w != ESP_OK) ESP_LOGE("pca", "Wake write failed: %s", esp_err_to_name(err_w));
+    ESP_LOGW("pca", "Clearing values...");
 
-    return clear();
+    esp_err_t res = clear();
+    ESP_LOGW("pca", "Init function returning %d", res);
+    return res;
 }
 
 esp_err_t Pca9685::set(uint8_t channel, uint16_t duty) {

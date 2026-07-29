@@ -20,7 +20,12 @@ esp_err_t WifiService::start(const WifiConfig& config,
     config_ = config;
     callback_ = std::move(callback);
 
-    ESP_RETURN_ON_ERROR(nvs_flash_init(), kTag, "nvs");
+    esp_err_t err = nvs_flash_init();
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_RETURN_ON_ERROR(nvs_flash_erase(), kTag, "nvs erase");
+        err = nvs_flash_init();
+    }
+    ESP_RETURN_ON_ERROR(err, kTag, "nvs init");
     ESP_RETURN_ON_ERROR(esp_netif_init(), kTag, "netif");
     ESP_RETURN_ON_ERROR(esp_event_loop_create_default(), kTag, "event loop");
 

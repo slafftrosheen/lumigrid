@@ -203,14 +203,15 @@
             <h2 class="card-header">Effects</h2>
             <div class="row">
                 <select id="effect-select">
-                    <option value="Blackout">Blackout</option>
-                    <option value="SolidRed">Solid Red</option>
-                    <option value="SolidGreen">Solid Green</option>
-                    <option value="SolidBlue">Solid Blue</option>
-                    <option value="SolidWhite">Solid White</option>
-                    <option value="ColorCycle">Color Cycle</option>
-                    <option value="Alternating">Alternating</option>
-                    <option value="RandomSparks">Random Sparks</option>
+                    <option value="blackout">Blackout</option>
+                    <option value="identity">Identity (Lane Colors)</option>
+                    <option value="rainbow">Rainbow</option>
+                    <option value="white_walk">White Walk</option>
+                    <option value="pwm_walk">PWM Walk</option>
+                    <option value="pwm_fade">PWM Fade</option>
+                    <option value="combined_pulse">Combined Pulse</option>
+                    <option value="pixel_chase">Pixel Chase</option>
+                    <option value="burn_in">Burn-In</option>
                 </select>
                 <button id="btn-effect" class="primary">Run Effect</button>
             </div>
@@ -337,8 +338,8 @@
                 red: parseInt(hex.substr(1,2), 16),
                 green: parseInt(hex.substr(3,2), 16),
                 blue: parseInt(hex.substr(5,2), 16),
-                brightness: 255,
-                durationMs: 2000
+                brightness: 64,
+                durationMs: 5000
             });
         };
 

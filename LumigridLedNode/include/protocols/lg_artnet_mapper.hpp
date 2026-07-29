@@ -1,6 +1,6 @@
 #pragma once
-#include <lg_config.hpp>
-#include <frame/lg_frame.hpp>
+#include "config/lg_config.hpp"
+#include "frame/lg_frame.hpp"
 #include <cstddef>
 #include <cstdint>
 

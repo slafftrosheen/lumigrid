@@ -4,7 +4,7 @@
 #include <cstdint>
 #include <functional>
 
-#include "lg_config.hpp"
+#include "config/lg_config.hpp"
 
 namespace lg {
 

@@ -1,7 +1,8 @@
 #pragma once
 #include <cstddef>
 #include <cstdint>
-#include <config/lg_config.hpp>
+#include "config/lg_config.hpp"
+#include <esp_err.h>
 
 namespace lg {
 

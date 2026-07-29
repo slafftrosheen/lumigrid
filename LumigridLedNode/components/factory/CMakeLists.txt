@@ -9,6 +9,6 @@ idf_component_register(
         output
         esp_http_server
         cjson
-    EMBED_FILES
-        "dashboard.html"
+        esp_timer
+        api
 )

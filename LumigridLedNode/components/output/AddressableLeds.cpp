@@ -1,4 +1,4 @@
-#include "../../main/FactoryApp.hpp"
+#include "FactoryApp.hpp"
 #include "AddressableLeds.hpp"
 #include "lg_board_pins.hpp"
 
@@ -9,7 +9,9 @@
 namespace lg {
 
 esp_err_t AddressableLeds::init() {
+    ESP_LOGI("aled", "Initializing AddressableLeds...");
     for (uint8_t lane = 0; lane < kLanes; ++lane) {
+        ESP_LOGI("aled", "Configuring RMT for lane %u (GPIO %d)...", lane, board::kAledPins[lane]);
         const led_strip_config_t strip_cfg = {
             .strip_gpio_num = board::kAledPins[lane],
             .max_leds = kPixels,
@@ -23,7 +25,7 @@ esp_err_t AddressableLeds::init() {
         const led_strip_rmt_config_t rmt_cfg = {
             .clk_src = RMT_CLK_SRC_DEFAULT,
             .resolution_hz = 10 * 1000 * 1000,
-            .mem_block_symbols = 0,
+            .mem_block_symbols = 64, // explicitly set this to avoid 0 default crash
             .flags = {
                 .with_dma = false
             }
@@ -35,9 +37,14 @@ esp_err_t AddressableLeds::init() {
             &strips_[lane]
         );
 
-        if (err != ESP_OK) return err;
+        if (err != ESP_OK) {
+            ESP_LOGE("aled", "Failed to init RMT for lane %u", lane);
+            return err;
+        }
+        ESP_LOGI("aled", "Lane %u initialized OK.", lane);
     }
 
+    ESP_LOGI("aled", "All lanes initialized, blacking out...");
     return blackout();
 }
 

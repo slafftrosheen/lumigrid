@@ -1,6 +1,6 @@
 #include "output/lg_render_pipeline.hpp"
-#include "../output/lg_pixel_mapper.hpp"
-#include "../../diagnostics/Metrics.h"
+#include "output/lg_pixel_mapper.hpp"
+#include "diagnostics/Metrics.h"
 
 namespace lg {
 
@@ -48,7 +48,7 @@ void RenderPipeline::output_task() {
       }
       Metrics::markLastSequence(logical.sequence);
       
-      if (auto* health = Metrics::output_health()) {
+      if (auto* health = lg::output_health()) {
         health->mark_frame_committed(logical.timestamp_ms);
       }
     }

@@ -14,8 +14,7 @@ bool ApiServer::begin(
     ConfigStore* config,
     MqttClient* mqtt,
     output::PixelBus* pixels,
-    output::PwmBus* pwm,
-    diagnostics::HardwareTestService* test) {
+    output::PwmBus* pwm) {
     
     host_ = host;
     port_ = port;
@@ -23,7 +22,6 @@ bool ApiServer::begin(
     mqtt_ = mqtt;
     pixels_ = pixels;
     pwm_ = pwm;
-    test_ = test;
 
     server_.begin(port_);
     setup_routes();
@@ -59,13 +57,13 @@ void ApiServer::setup_routes() {
 }
 
 void ApiServer::handle_metrics() {
-    auto snap = Metrics::metrics_snapshot();
+    auto snap = lg::metrics_snapshot();
     StaticJsonDocument<256> doc;
     doc["uptimeSeconds"] = snap.uptime_ms / 1000;
     doc["output"]["fps"] = 60; // Mock for now
     doc["output"]["lastSequence"] = snap.last_sequence;
     doc["output"]["droppedFrames"] = snap.dropped_frames;
-    doc["protocols"]["mqttConnected"] = mqtt_ ? mqtt_->isConnected() : false;
+    doc["protocols"]["mqttConnected"] = mqtt_ ? mqtt_->status().connected : false;
     
     String response;
     serializeJson(doc, response);
@@ -73,7 +71,7 @@ void ApiServer::handle_metrics() {
 }
 
 void ApiServer::handle_faults() {
-    auto fault = Metrics::get_latched_fault();
+    auto fault = lg::get_latched_fault();
     StaticJsonDocument<256> doc;
     JsonArray faults = doc.createNestedArray("faults");
     if (fault.latched) {
@@ -88,7 +86,7 @@ void ApiServer::handle_faults() {
 }
 
 void ApiServer::handle_faults_clear() {
-    Metrics::clear_fault();
+    lg::clear_fault();
     server_.send(200, "application/json", "{\"status\":\"cleared\"}");
 }
 

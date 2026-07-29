@@ -13,7 +13,8 @@ enum class FactoryEffect : uint8_t {
     PwmWalk,
     PwmFade,
     CombinedPulse,
-    BurnIn
+    BurnIn,
+    Manual
 };
 
 enum class FactoryCommandType : uint8_t {

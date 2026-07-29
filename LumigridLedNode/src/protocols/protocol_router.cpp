@@ -2,6 +2,7 @@
 #include "protocols/lg_artnet.hpp"
 #include "esp_log.h"
 #include "freertos/semphr.h"
+#include <Arduino.h>
 
 namespace lg {
 
