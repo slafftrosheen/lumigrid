@@ -42,7 +42,7 @@ struct EffectMetadata {
 inline const EffectMetadata& signage_effect_metadata(SignageEffect effect) {
     static constexpr EffectMetadata kMetadata[] = {
         {"solid",    "Steady color",  "A constant, even wash of color.",                         "",              "",         0,  0,   0, false},
-        {"breathe",  "Smooth pulse",  "Gently fades between a soft glow and full brightness.",    "Minimum glow",  "%",        0, 100,   4, true},
+        {"breathe",  "Smooth pulse",  "Gently fades between a soft glow and full brightness.",    "Minimum glow",  "%",        1, 100,   4, true},
         {"chase",    "Moving comet",  "A bright comet travels along the strip.",                  "Tail length",   "pixels",   1,   8,   3, true},
         {"sweep",    "Color sweep",   "Builds color across the strip from end to end.",           "",              "",         0,   0,   0, false},
         {"reveal",   "Soft reveal",   "Fades the lane in for a polished sign-on.",                "Fade length",   "%",       10,  90,  25, true},

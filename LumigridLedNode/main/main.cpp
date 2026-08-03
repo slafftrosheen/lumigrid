@@ -28,8 +28,9 @@ extern "C" void app_main(void) {
     static lg::MdnsService mdns;
     static lg::ArtnetDiscovery artnet;
     static lg::SignageEngine signage(output, config);
-    static lg::Scheduler scheduler(config, signage);
-    static lg::NodeSync node_sync(signage, config);
+    static lg::ClockDiscipline clock;
+    static lg::Scheduler scheduler(config, signage, clock);
+    static lg::NodeSync node_sync(signage, config, clock);
 
     ESP_LOGI("lumigrid", "=== BOOT START ===");
     vTaskDelay(pdMS_TO_TICKS(1000)); // Let serial console connect
@@ -103,7 +104,7 @@ extern "C" void app_main(void) {
                 std::memcpy(node.mac, mac, 6);
 
                 ESP_LOGI("lumigrid", "Step 6: api.start(80)...");
-                ESP_ERROR_CHECK(api.start(80, &config, &signage));
+                ESP_ERROR_CHECK(api.start(80, &config, &signage, &scheduler, &node_sync));
 
                 ESP_LOGI("lumigrid", "Step 7: mdns.start()...");
                 ESP_ERROR_CHECK(mdns.start(dev_cfg.device_name, "LumiGrid Signage", 80));

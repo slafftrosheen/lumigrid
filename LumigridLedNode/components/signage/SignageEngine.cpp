@@ -274,7 +274,10 @@ void SignageEngine::set_stream_override(bool active) {
 void SignageEngine::set_beat_period(uint16_t period_ms) {
     if (!mutex_) return;
     xSemaphoreTake(mutex_, portMAX_DELAY);
-    beat_period_ms_ = std::clamp<uint16_t>(period_ms, 10, 60000);
+    beat_period_ms_ = std::max<uint16_t>(
+        10,
+        std::min<uint16_t>(period_ms, 60000)
+    );
     xSemaphoreGive(mutex_);
 }
 

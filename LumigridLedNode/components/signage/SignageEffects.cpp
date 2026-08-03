@@ -256,10 +256,12 @@ bool preset_is_visible(
         const uint32_t speed = preset.overlay_speed_ms == 0
             ? std::max<uint16_t>(1, sequencer_beat_ms)
             : preset.overlay_speed_ms;
-        const uint8_t duty_cycle = std::clamp<uint8_t>(
-            preset.overlay_param == 0 ? 50 : preset.overlay_param,
+        const uint8_t duty_cycle = std::max<uint8_t>(
             5,
-            95
+            std::min<uint8_t>(
+                preset.overlay_param == 0 ? 50 : preset.overlay_param,
+                95
+            )
         );
         return (elapsed_ms % speed) < (speed * duty_cycle) / 100;
     }

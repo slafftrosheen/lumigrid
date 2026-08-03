@@ -13,6 +13,10 @@ components/
   output/         — AddressableLeds (RMT), Pca9685 (I2C), OutputController (mutex-protected)
   factory/        — FactoryRunner (effect loop task), FactoryEffects, FactoryApi (HTTP + WS)
   api/            — ApiAuth (bearer token validation)
+  config/         — NVS-backed scenes, timeline, calendar, and device configuration
+  signage/        — Persistent scene rendering, effect layers, and power management
+  scheduler/      — SNTP-backed calendar automation and beat timeline playback
+  sync/           — UDP leader/follower clock discipline and room health
   network/        — WifiService (STA/AP/fallback), MdnsService
   protocols/      — ArtnetDiscovery (UDP Art-Net + ArtPollReply)
 main/             — app_main boot sequence, dashboard.html embedded
@@ -30,11 +34,15 @@ main/             — app_main boot sequence, dashboard.html embedded
 - `WifiService` — AP-only, STA-only, or STA-with-AP-fallback modes
 - `MdnsService` — `_http._tcp` advertisement
 - `ArtnetDiscovery` — UDP listener on port 6454, ArtPoll→ArtPollReply, ArtDmx→callback
+- Consumer dashboard — semantic scene controls, effect metadata, visual timeline, calendar cues,
+  and sync topology health
+- `Scheduler` — cached timeline playback plus local-time calendar triggers
+- `NodeSync` — bounded monotonic clock discipline, packet sequencing, leader election, and peer ACKs
 
 ## Missing for milestone closure
 
 - Bind MQTT client with retained topics and `availability` LWT.
-- Complete REST endpoints: `GET/PUT/PATCH /api/v1/config`, `/api/v1/status`.
+- Validate sync timing with two or more ESP32s on representative wired and noisy Wi-Fi networks.
 - Hardware test endpoints with auth gate and 60s hard cap.
 - Build guard checks:
   - OE stays disabled until PCA probe + all-off commit succeed.
@@ -46,4 +54,6 @@ main/             — app_main boot sequence, dashboard.html embedded
 1. Auth token is hardcoded — must be provisioned from NVS before network exposure.
 2. No gamma correction applied — `tools/generate_gamma.py` generates LUT but not yet integrated.
 3. WebSocket handler is broadcast-only; no inbound command parsing.
-4. Next PR: Art-Net staging + 10ms coalesce + `pixel_bus.commit(); pwm_bus.commit();`.
+4. UDP sync is intended for trusted local networks; production deployments still need
+   measured drift/packet-loss acceptance criteria and a provisioning strategy for sync trust.
+5. Next PR: Art-Net staging + 10ms coalesce + `pixel_bus.commit(); pwm_bus.commit();`.

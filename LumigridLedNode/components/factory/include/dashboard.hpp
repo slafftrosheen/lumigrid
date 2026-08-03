@@ -174,9 +174,132 @@ static const char dashboard_html[] = R"LGHTML(<!DOCTYPE html>
         .items-center { align-items: center; }
         .justify-between { justify-content: space-between; }
         .mb-1 { margin-bottom: 1rem; }
+
+        /* Product dashboard */
+        #experience-auth, #product-app { min-height: 100vh; }
+        #experience-auth {
+            display: grid; place-items: center; padding: 1.5rem;
+            background:
+                radial-gradient(circle at 20% 15%, rgba(99,102,241,.28), transparent 32rem),
+                radial-gradient(circle at 80% 80%, rgba(16,185,129,.18), transparent 28rem);
+        }
+        .experience-login {
+            width: min(26rem, 100%); padding: 2rem; border: 1px solid var(--border);
+            border-radius: 1.25rem; background: rgba(15,16,28,.88);
+            box-shadow: 0 1.5rem 5rem rgba(0,0,0,.45);
+        }
+        .eyebrow { color: #a5b4fc; font-size: .72rem; font-weight: 800; letter-spacing: .15em; text-transform: uppercase; }
+        .experience-login h1 { font-size: clamp(2rem, 8vw, 3rem); letter-spacing: -.06em; margin: .35rem 0 .65rem; }
+        .muted { color: var(--text-muted); font-size: .9rem; }
+        .experience-login label, .field label { display: block; font-size: .78rem; font-weight: 700; letter-spacing: .04em; margin: 1.2rem 0 .4rem; }
+        #product-app { padding: 1.25rem; max-width: 90rem; margin: 0 auto; }
+        #product-app button, #product-app input, #product-app select { width: auto; margin: 0; }
+        #product-app input, #product-app select {
+            min-height: 2.5rem; padding: .55rem .7rem; background: rgba(5,6,15,.55);
+        }
+        #product-app input[type="range"] { min-height: 0; padding: 0; accent-color: #818cf8; }
+        #product-app input[type="checkbox"] { min-height: auto; accent-color: #818cf8; }
+        .app-shell { display: grid; gap: 1.25rem; }
+        .app-header {
+            display: flex; gap: 1rem; align-items: center; justify-content: space-between;
+            padding: 1rem 1.2rem; border: 1px solid var(--border); border-radius: 1rem;
+            background: rgba(16,17,31,.78); backdrop-filter: blur(1rem);
+        }
+        .brand { display: flex; align-items: center; gap: .75rem; min-width: 0; }
+        .brand-mark { width: 2.5rem; aspect-ratio: 1; display: grid; place-items: center; border-radius: .8rem; color: white; font-weight: 900; background: linear-gradient(135deg, #818cf8, #34d399); box-shadow: 0 .4rem 1.2rem rgba(99,102,241,.4); }
+        .brand h2 { margin: 0; font-size: 1rem; letter-spacing: .08em; }
+        .online-pill, .status-pill { display: inline-flex; align-items: center; gap: .4rem; font-size: .72rem; color: #bbf7d0; }
+        .online-pill::before { content: ""; width: .45rem; height: .45rem; border-radius: 50%; background: #34d399; box-shadow: 0 0 .7rem #34d399; }
+        .header-actions { display: flex; align-items: center; gap: .5rem; }
+        .header-actions button, .button-secondary, .button-danger, .button-primary {
+            border-radius: .65rem; padding: .65rem .85rem; border: 1px solid var(--border); color: var(--text); background: rgba(255,255,255,.06); cursor: pointer;
+        }
+        .button-primary { border-color: transparent; background: linear-gradient(135deg, #6366f1, #4f46e5); font-weight: 750; }
+        .button-danger { color: #fecaca; border-color: rgba(248,113,113,.45); background: rgba(127,29,29,.32); }
+        .header-actions button:hover, .button-secondary:hover { background: rgba(255,255,255,.13); }
+        .button-primary:hover { filter: brightness(1.13); }
+        .nav-rail { display: flex; flex-wrap: wrap; gap: .45rem; padding: .4rem; background: rgba(16,17,31,.62); border: 1px solid var(--border); border-radius: .9rem; }
+        .nav-rail button { border: 0; background: transparent; color: var(--text-muted); border-radius: .6rem; padding: .65rem .9rem; cursor: pointer; }
+        .nav-rail button.active { color: white; background: rgba(129,140,248,.2); box-shadow: inset 0 0 0 1px rgba(165,180,252,.25); }
+        .product-page { display: none; animation: page-in .24s ease both; }
+        .product-page.active { display: block; }
+        @keyframes page-in { from { opacity: 0; transform: translateY(.5rem); } to { opacity: 1; transform: none; } }
+        .page-heading { display: flex; justify-content: space-between; align-items: flex-end; gap: 1rem; margin: .5rem 0 1rem; flex-wrap: wrap; }
+        .page-heading h3 { margin: 0; font-size: 1.3rem; letter-spacing: -.02em; }
+        .overview-grid, .scene-grid, .zone-grid, .settings-grid, .sync-grid { display: grid; gap: 1rem; }
+        .overview-grid { grid-template-columns: 1.1fr .9fr; }
+        .scene-grid { grid-template-columns: repeat(auto-fill, minmax(14rem, 1fr)); }
+        .zone-grid { grid-template-columns: repeat(auto-fill, minmax(16rem, 1fr)); }
+        .settings-grid { grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr)); }
+        .sync-grid { grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr)); }
+        .product-card { padding: 1rem; border-radius: 1rem; border: 1px solid var(--border); background: rgba(20,21,37,.74); box-shadow: 0 .8rem 2rem rgba(0,0,0,.14); }
+        .product-card h4 { margin: 0; font-size: .95rem; }
+        .product-card p { margin: .4rem 0 0; }
+        .scene-card { display: grid; gap: .85rem; min-height: 10rem; }
+        .scene-card .scene-actions { display: flex; gap: .5rem; margin-top: auto; }
+        .scene-card .scene-actions button { flex: 1; }
+        .scene-chip { display: inline-flex; align-items: center; gap: .35rem; color: #c7d2fe; font-size: .73rem; font-weight: 700; }
+        .stat-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .65rem; margin-top: .85rem; }
+        .stat-list div { padding: .65rem; border-radius: .65rem; background: rgba(0,0,0,.18); }
+        .stat-list span { display: block; color: var(--text-muted); font-size: .68rem; text-transform: uppercase; letter-spacing: .07em; }
+        .stat-list strong { font-size: .95rem; }
+        .editor-toolbar, .timeline-toolbar, .cue-toolbar { display: flex; justify-content: space-between; align-items: center; gap: .75rem; flex-wrap: wrap; margin-bottom: 1rem; }
+        .editor-toolbar > div, .timeline-toolbar > div, .cue-toolbar > div { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
+        .range-row { display: grid; grid-template-columns: minmax(7rem, 1fr) minmax(8rem, 2fr) minmax(3.2rem, auto); gap: .65rem; align-items: center; margin-top: .8rem; }
+        .range-row label { font-size: .78rem; font-weight: 700; }
+        .range-row output { color: #c7d2fe; font-variant-numeric: tabular-nums; text-align: right; }
+        .switch-row { display: flex; align-items: center; justify-content: space-between; gap: .8rem; padding: .55rem 0; font-size: .82rem; }
+        .switch-row label { margin: 0; }
+        .zone-card { display: grid; gap: .65rem; }
+        .zone-title { display: flex; justify-content: space-between; align-items: center; }
+        .zone-title span { color: var(--text-muted); font-size: .72rem; }
+        .color-line { display: flex; justify-content: space-between; align-items: center; gap: .7rem; }
+        .color-line input { width: 3.5rem !important; padding: .15rem !important; }
+        .help { color: var(--text-muted); font-size: .72rem; line-height: 1.45; }
+        .overlay-controls { display: grid; gap: .6rem; }
+        .palette { display: flex; gap: .55rem; overflow-x: auto; padding-bottom: .3rem; }
+        .palette button { min-width: 8.5rem; text-align: left; border-radius: .7rem; padding: .65rem; border: 1px solid var(--border); background: rgba(255,255,255,.04); color: var(--text); cursor: grab; }
+        .palette button.selected { border-color: #818cf8; background: rgba(99,102,241,.2); }
+        .track { display: grid; grid-template-columns: 9rem minmax(36rem, 1fr); gap: .65rem; align-items: center; margin: .55rem 0; }
+        .track-head { display: grid; gap: .35rem; padding: .55rem; border-radius: .65rem; background: rgba(255,255,255,.04); }
+        .track-head strong { font-size: .78rem; }
+        .track-head select { width: 100% !important; min-height: 2rem !important; font-size: .72rem; }
+        .step-lane { display: grid; grid-template-columns: repeat(16, minmax(3.4rem, 1fr)); gap: .3rem; }
+        .step { min-height: 3.5rem; overflow: hidden; border-radius: .5rem; border: 1px solid rgba(255,255,255,.1); background: rgba(255,255,255,.035); color: var(--text-muted); cursor: pointer; padding: .3rem; text-align: left; }
+        .step span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .63rem; }
+        .step small { color: #a5b4fc; font-size: .57rem; }
+        .step.selected { border-color: #818cf8; box-shadow: 0 0 0 2px rgba(129,140,248,.2); }
+        .step.inactive { opacity: .34; }
+        .timeline-scroll { overflow-x: auto; padding-bottom: .5rem; }
+        .step-inspector { margin-top: 1rem; display: grid; grid-template-columns: 1fr auto; gap: 1rem; align-items: end; }
+        .beat-options { display: flex; gap: .35rem; }
+        .beat-options button { padding: .45rem .6rem; border: 1px solid var(--border); border-radius: .45rem; color: var(--text-muted); background: transparent; cursor: pointer; }
+        .beat-options button.active { color: white; background: rgba(99,102,241,.25); border-color: #818cf8; }
+        .cue-list { display: grid; gap: .65rem; }
+        .cue { display: grid; grid-template-columns: auto 7rem 1fr 1.3fr auto; align-items: center; gap: .65rem; padding: .75rem; border: 1px solid var(--border); border-radius: .75rem; background: rgba(255,255,255,.035); }
+        .days { display: flex; gap: .2rem; }
+        .days button { border: 1px solid var(--border); border-radius: .35rem; background: transparent; color: var(--text-muted); padding: .3rem .38rem; font-size: .65rem; cursor: pointer; }
+        .days button.active { color: white; background: #4f46e5; border-color: #6366f1; }
+        .node-card { min-height: 7.5rem; }
+        .node-card.primary { border-color: rgba(52,211,153,.5); background: linear-gradient(145deg, rgba(16,185,129,.14), rgba(20,21,37,.74)); }
+        .node-card .latency { color: #a7f3d0; font-size: 1.2rem; font-weight: 800; margin-top: .7rem; }
+        .empty-state { padding: 2rem; text-align: center; color: var(--text-muted); border: 1px dashed var(--border); border-radius: .9rem; }
+        #experience-toast { position: fixed; z-index: 30; right: 1rem; bottom: 1rem; max-width: min(28rem, calc(100vw - 2rem)); padding: .8rem 1rem; border-radius: .7rem; background: #1e293b; border: 1px solid #475569; color: white; transform: translateY(8rem); transition: transform .22s ease; }
+        #experience-toast.show { transform: translateY(0); }
+        #experience-toast.error { background: #450a0a; border-color: #f87171; }
+        @media (max-width: 52rem) {
+            #product-app { padding: .75rem; }
+            .overview-grid { grid-template-columns: 1fr; }
+            .app-header { align-items: flex-start; }
+            .track { grid-template-columns: 1fr; }
+            .cue { grid-template-columns: 1fr 1fr; }
+            .cue .days { grid-column: 1 / -1; }
+            .step-inspector { grid-template-columns: 1fr; }
+        }
     </style>
 </head>
 <body>
+<template id="legacy-dashboard">
 
 <div id="auth">
     <div class="auth-card">
@@ -570,6 +693,501 @@ async function saveSettings() {
         toast('Settings saved');
     } catch(e) { toast(e.message, true); }
 }
+</script>
+</template>
+
+<section id="experience-auth" aria-labelledby="login-title">
+    <div class="experience-login">
+        <p class="eyebrow">LumiGrid lighting control</p>
+        <h1 id="login-title">Make light feel alive.</h1>
+        <p class="muted">Connect securely to this node to arrange scenes, timelines, and automation.</p>
+        <label for="experience-token">Node access token</label>
+        <input id="experience-token" type="password" autocomplete="current-password" placeholder="Enter the token supplied with this node">
+        <button class="button-primary" style="width:100%;margin-top:1rem" onclick="lg.connect()">Connect</button>
+    </div>
+</section>
+
+<main id="product-app" hidden>
+    <div class="app-shell">
+        <header class="app-header">
+            <div class="brand">
+                <div class="brand-mark" aria-hidden="true">LG</div>
+                <div>
+                    <p class="eyebrow">LumiGrid OS</p>
+                    <h2 id="experience-node-name">LIGHTING NODE</h2>
+                    <span class="online-pill">Connected</span>
+                </div>
+            </div>
+            <div class="header-actions">
+                <button title="Refresh node status" onclick="lg.refresh()">Refresh</button>
+                <button title="End this browser session" onclick="lg.disconnect()">Disconnect</button>
+            </div>
+        </header>
+
+        <nav class="nav-rail" aria-label="Lighting controls">
+            <button class="active" data-page="control" onclick="lg.nav('control', this)">Control</button>
+            <button data-page="scenes" onclick="lg.nav('scenes', this)">Scenes</button>
+            <button data-page="timeline" onclick="lg.nav('timeline', this)">Timeline</button>
+            <button data-page="automation" onclick="lg.nav('automation', this)">Automation</button>
+            <button data-page="system" onclick="lg.nav('system', this)">System</button>
+        </nav>
+
+        <section id="page-control" class="product-page active">
+            <div class="page-heading">
+                <div><p class="eyebrow">Now playing</p><h3>Control room</h3></div>
+                <button class="button-danger" onclick="lg.blackout()">Emergency blackout</button>
+            </div>
+            <div class="overview-grid">
+                <article class="product-card">
+                    <h4 id="now-playing">Loading scenes…</h4>
+                    <p id="now-playing-copy" class="muted">The node is checking its playback state.</p>
+                    <div id="status-stats" class="stat-list"></div>
+                </article>
+                <article class="product-card">
+                    <h4>Sync health</h4>
+                    <p id="sync-summary" class="muted">Checking the room clock…</p>
+                    <div id="sync-stats" class="stat-list"></div>
+                </article>
+            </div>
+            <div class="page-heading" style="margin-top:1.5rem">
+                <div><p class="eyebrow">One tap scenes</p><h3>Set the mood</h3></div>
+                <button class="button-secondary" onclick="lg.nav('scenes', document.querySelector('[data-page=scenes]'))">Manage scenes</button>
+            </div>
+            <div id="control-scenes" class="scene-grid"></div>
+        </section>
+
+        <section id="page-scenes" class="product-page">
+            <div class="page-heading">
+                <div><p class="eyebrow">Scene library</p><h3>Looks, not numbers</h3></div>
+                <button class="button-secondary" onclick="lg.refresh()">Refresh library</button>
+            </div>
+            <div id="scene-library" class="scene-grid"></div>
+        </section>
+
+        <section id="page-scene-editor" class="product-page">
+            <div class="editor-toolbar">
+                <div><button class="button-secondary" onclick="lg.backToScenes()">← Scenes</button><div><p class="eyebrow">Scene designer</p><h3 id="scene-editor-title">Edit scene</h3></div></div>
+                <button class="button-primary" onclick="lg.saveScene()">Save scene</button>
+            </div>
+            <article class="product-card">
+                <div class="settings-grid">
+                    <div class="field"><label for="scene-name">Scene name</label><input id="scene-name" maxlength="23" placeholder="Store open"></div>
+                    <div>
+                        <div class="range-row">
+                            <label for="scene-brightness">Room brightness</label>
+                            <input id="scene-brightness" type="range" min="0" max="100" oninput="lg.updateText('scene-brightness-output', this.value + '%')">
+                            <output id="scene-brightness-output"></output>
+                        </div>
+                        <div class="range-row">
+                            <label for="scene-fade">Scene fade</label>
+                            <input id="scene-fade" type="range" min="0" max="5000" step="100" oninput="lg.updateText('scene-fade-output', (this.value / 1000).toFixed(1) + ' s')">
+                            <output id="scene-fade-output"></output>
+                        </div>
+                    </div>
+                </div>
+                <div class="overlay-controls" style="margin-top:1rem">
+                    <div class="field"><label for="scene-overlay">Layered finishing effect</label><select id="scene-overlay" onchange="lg.changeOverlay(this.value)"><option value="none">No overlay</option><option value="strobe">Beat strobe overlay</option></select></div>
+                    <div id="scene-overlay-options"></div>
+                </div>
+            </article>
+            <p class="help" style="margin:1rem 0">Each zone starts with a base look. Add the strobe overlay to make any scene pulse without replacing its color or motion.</p>
+            <div id="scene-zones" class="zone-grid"></div>
+        </section>
+
+        <section id="page-timeline" class="product-page">
+            <div class="page-heading">
+                <div><p class="eyebrow">Performance timeline</p><h3>Build the room’s rhythm</h3></div>
+                <button class="button-primary" onclick="lg.saveTimeline()">Save timeline</button>
+            </div>
+            <article class="product-card">
+                <div class="timeline-toolbar">
+                    <div>
+                        <strong>Tempo</strong>
+                        <input id="timeline-bpm" type="range" min="40" max="240" oninput="lg.setBpm(this.value)">
+                        <output id="timeline-bpm-output"></output>
+                    </div>
+                    <label class="switch-row"><span>Play timeline</span><input id="timeline-enabled" type="checkbox" onchange="lg.setTimelineEnabled(this.checked)"></label>
+                </div>
+                <p class="help">Pick a scene below, then click or drag it onto a step. Every one of the eight lighting zones loops its own sixteen-step lane.</p>
+                <div id="timeline-palette" class="palette" aria-label="Scene palette"></div>
+            </article>
+            <article class="product-card timeline-scroll">
+                <div id="timeline-tracks"></div>
+                <div id="step-inspector"></div>
+            </article>
+        </section>
+
+        <section id="page-automation" class="product-page">
+            <div class="page-heading">
+                <div><p class="eyebrow">Calendar automation</p><h3>Let the room run itself</h3></div>
+                <div class="cue-toolbar"><button class="button-secondary" onclick="lg.addCue()">Add cue</button><button class="button-primary" onclick="lg.saveAutomation()">Save automation</button></div>
+            </div>
+            <article class="product-card">
+                <p class="help">Schedule a scene or start the timeline at a local time. A scene cue takes over from a calendar-started timeline.</p>
+                <div id="cue-list" class="cue-list" style="margin-top:1rem"></div>
+            </article>
+        </section>
+
+        <section id="page-system" class="product-page">
+            <div class="page-heading">
+                <div><p class="eyebrow">Node and room health</p><h3>System</h3></div>
+                <button class="button-primary" onclick="lg.saveSystem()">Save settings</button>
+            </div>
+            <div class="settings-grid">
+                <article class="product-card">
+                    <h4>Node preferences</h4>
+                    <div class="field"><label for="system-name">Node name</label><input id="system-name" maxlength="31"></div>
+                    <div class="field"><label for="system-fallback">Safe fallback scene</label><select id="system-fallback"></select></div>
+                    <div class="field"><label for="system-timezone">Timezone</label><input id="system-timezone" placeholder="UTC0"></div>
+                </article>
+                <article class="product-card">
+                    <h4>Room sync</h4>
+                    <label class="switch-row"><span>Sync this node with the room</span><input id="system-sync-enabled" type="checkbox"></label>
+                    <div class="field"><label for="system-sync-role">Room role</label><select id="system-sync-role"><option value="0">Automatic leader selection</option><option value="1">Lead the room</option><option value="2">Follow the room</option></select></div>
+                    <p class="help">Role changes are applied the next time the node starts. Automatic mode elects one node instead of broadcasting from every node.</p>
+                </article>
+            </div>
+            <div class="page-heading" style="margin-top:1.5rem"><div><p class="eyebrow">Topology</p><h3>Nodes in this room</h3></div><button class="button-secondary" onclick="lg.refreshSync()">Refresh health</button></div>
+            <div id="sync-topology" class="sync-grid"></div>
+        </section>
+    </div>
+</main>
+<div id="experience-toast" role="status" aria-live="polite"></div>
+
+<script>
+window.lg = (() => {
+    const fallbackEffects = [
+        {id:'solid',label:'Steady color',description:'A constant, even wash of color.',hasParameter:false},
+        {id:'breathe',label:'Smooth pulse',description:'Gently fades between a soft glow and full brightness.',hasParameter:true,parameterLabel:'Minimum glow',parameterUnit:'%',parameterMin:1,parameterMax:100,parameterDefault:4},
+        {id:'chase',label:'Moving comet',description:'A bright comet travels along the strip.',hasParameter:true,parameterLabel:'Tail length',parameterUnit:'pixels',parameterMin:1,parameterMax:8,parameterDefault:3},
+        {id:'sweep',label:'Color sweep',description:'Builds color across the strip from end to end.',hasParameter:false},
+        {id:'reveal',label:'Soft reveal',description:'Fades the lane in for a polished sign-on.',hasParameter:true,parameterLabel:'Fade length',parameterUnit:'%',parameterMin:10,parameterMax:90,parameterDefault:25},
+        {id:'sparkle',label:'Random twinkle',description:'Adds crisp white twinkles over the base color.',hasParameter:true,parameterLabel:'Twinkles',parameterUnit:'per lane',parameterMin:1,parameterMax:12,parameterDefault:2},
+        {id:'gradient',label:'Flowing glow',description:'Moves a soft wave of light along the strip.',hasParameter:true,parameterLabel:'Wave contrast',parameterUnit:'%',parameterMin:1,parameterMax:100,parameterDefault:100},
+        {id:'strobe',label:'Beat strobe',description:'Flashes the lane with an adjustable on-time.',hasParameter:true,parameterLabel:'Flash time',parameterUnit:'%',parameterMin:5,parameterMax:95,parameterDefault:50},
+        {id:'fire',label:'Living flame',description:'Creates a flickering flame texture from the selected color.',hasParameter:true,parameterLabel:'Flame height',parameterUnit:'%',parameterMin:20,parameterMax:100,parameterDefault:70}
+    ];
+    const state = { token:'', effects:fallbackEffects, presets:[], sequence:null, schedules:null, config:null, status:null, sync:null, editing:null, selectedScene:null, selectedStep:null };
+    const byId = id => document.getElementById(id);
+    const clamp = (value, low, high) => Math.max(low, Math.min(high, Number(value) || 0));
+    const esc = value => String(value ?? '').replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
+    const clone = value => JSON.parse(JSON.stringify(value));
+
+    function toast(message, error=false) {
+        const target = byId('experience-toast');
+        target.textContent = message;
+        target.className = (error ? 'error ' : '') + 'show';
+        window.clearTimeout(toast.timeout);
+        toast.timeout = window.setTimeout(() => { target.className = ''; }, 3500);
+    }
+
+    async function api(path, method='GET', body) {
+        const headers = { Authorization: 'Bearer ' + state.token };
+        if (body !== undefined) headers['Content-Type'] = 'application/json';
+        const response = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
+        if (!response.ok) {
+            let message = `Request failed (${response.status})`;
+            try { message = (await response.json()).error || message; } catch (_) {}
+            throw new Error(message);
+        }
+        return response.json();
+    }
+
+    function blankChannel() {
+        return {r:255,g:255,b:255,pwmDuty:0,effect:'solid',effectSpeedMs:2000,paletteId:0,phaseOffset:0,fxParam:0,pixelEnabled:true,pwmEnabled:true};
+    }
+    function normalPreset(preset) {
+        const scene = {...preset};
+        scene.channels = Array.from({length:8}, (_, index) => ({...blankChannel(), ...(scene.channels?.[index] || {})}));
+        scene.brightness = clamp(scene.brightness ?? 128, 0, 255);
+        scene.transitionMs = clamp(scene.transitionMs ?? 1000, 0, 10000);
+        scene.overlayEffect = scene.overlayEffect || 'none';
+        scene.overlaySpeedMs = Number(scene.overlaySpeedMs ?? 500);
+        scene.overlayParam = clamp(scene.overlayParam ?? 50, 0, 100);
+        return scene;
+    }
+    function defaultSequence() {
+        return {bpm:120,enabled:false,tracks:Array.from({length:8}, (_, channelId) => ({channelId,enabled:false,numSteps:16,steps:Array.from({length:16}, () => ({presetIndex:0,lengthBeats:1}))}))};
+    }
+    function normalSequence(sequence) {
+        const result = sequence || defaultSequence();
+        result.bpm = clamp(result.bpm ?? 120, 10, 500);
+        result.tracks = Array.from({length:8}, (_, index) => {
+            const track = {...defaultSequence().tracks[index], ...(result.tracks?.[index] || {})};
+            track.channelId = index;
+            track.numSteps = clamp(track.numSteps ?? 16, 1, 16);
+            track.steps = Array.from({length:16}, (_, step) => ({presetIndex:0,lengthBeats:1,...(track.steps?.[step] || {})}));
+            return track;
+        });
+        return result;
+    }
+    function normalSchedules(payload) {
+        const entries = payload?.entries || [];
+        return Array.from({length:8}, (_, index) => ({hour:8,minute:0,daysOfWeek:31,action:'preset',presetIndex:0,enabled:false,...(entries[index] || {})}));
+    }
+    function effect(id) { return state.effects.find(item => item.id === id) || state.effects[0]; }
+    function sceneName(index) { return state.presets.find(scene => Number(scene.index) === Number(index))?.name || `Scene ${Number(index) + 1}`; }
+    function percentForDuty(duty) { return Math.round(clamp(duty,0,4095) * 100 / 4095); }
+    function dutyForPercent(percent) { return Math.round(clamp(percent,0,100) * 4095 / 100); }
+    function colorFor(channel) { return '#' + [channel.r,channel.g,channel.b].map(value => clamp(value,0,255).toString(16).padStart(2,'0')).join(''); }
+    function msToSpeed(ms) { return Math.round(100 - (Math.log(clamp(ms,10,60000) / 10) / Math.log(6000)) * 99); }
+    function speedToMs(value) { return Math.round(10 * Math.pow(6000, (100 - clamp(value,1,100)) / 99)); }
+    function speedName(value) { return value > 75 ? 'Fast' : value > 45 ? 'Balanced' : 'Slow'; }
+    function clockAge(value) { return value == null ? 'Waiting' : value < 1000 ? 'Just now' : `${Math.round(value / 1000)} s ago`; }
+
+    async function connect() {
+        state.token = byId('experience-token').value.trim();
+        if (!state.token) return toast('Enter the node access token first.', true);
+        try {
+            await refresh();
+            byId('experience-auth').hidden = true;
+            byId('product-app').hidden = false;
+            nav('control', document.querySelector('[data-page=control]'));
+            toast('Connected to the node.');
+        } catch (error) {
+            toast(`Could not connect: ${error.message}`, true);
+        }
+    }
+    function disconnect() {
+        state.token = '';
+        byId('experience-token').value = '';
+        byId('product-app').hidden = true;
+        byId('experience-auth').hidden = false;
+    }
+    async function refresh() {
+        const [effects, presets, status, sequence, config, schedules, sync] = await Promise.all([
+            api('/api/v1/effects').catch(() => fallbackEffects),
+            api('/api/v1/presets'),
+            api('/api/v1/status'),
+            api('/api/v1/sequence'),
+            api('/api/v1/config'),
+            api('/api/v1/schedules'),
+            api('/api/v1/sync').catch(() => null)
+        ]);
+        state.effects = Array.isArray(effects) && effects.length ? effects : fallbackEffects;
+        state.presets = presets.map(normalPreset);
+        state.status = status;
+        state.sequence = normalSequence(sequence);
+        state.config = config;
+        state.schedules = normalSchedules(schedules);
+        state.sync = sync;
+        byId('experience-node-name').textContent = (config.deviceName || 'Lighting node').toUpperCase();
+        renderControl();
+        renderScenes();
+        renderTimeline();
+        renderAutomation();
+        renderSystem();
+    }
+    function nav(page, button) {
+        document.querySelectorAll('.product-page').forEach(item => item.classList.remove('active'));
+        byId('page-' + page).classList.add('active');
+        document.querySelectorAll('.nav-rail button').forEach(item => item.classList.remove('active'));
+        if (button) button.classList.add('active');
+        if (page === 'control') renderControl();
+        if (page === 'scenes') renderScenes();
+        if (page === 'timeline') renderTimeline();
+        if (page === 'automation') renderAutomation();
+        if (page === 'system') renderSystem();
+    }
+
+    function renderControl() {
+        const active = state.status?.activePreset;
+        byId('now-playing').textContent = active === undefined ? 'No scene selected' : sceneName(active);
+        byId('now-playing-copy').textContent = state.status?.transitioning ? 'Fading into the selected scene.' : state.status?.fallbackActive ? 'The safety fallback is active.' : 'The room is ready.';
+        byId('status-stats').innerHTML = [
+            ['Scene', active === undefined ? '—' : sceneName(active)],
+            ['Clock', state.status?.timeSynced ? 'Synced' : 'Starting'],
+            ['Fade', state.status?.transitioning ? 'In progress' : 'Ready'],
+            ['Safety', state.status?.fallbackActive ? 'Fallback' : 'Normal']
+        ].map(([label,value]) => `<div><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`).join('');
+        byId('sync-summary').textContent = !state.sync ? 'Sync is not running on this node.' : state.sync.clockLocked ? `Clock locked as ${state.sync.activeRole}.` : 'Waiting for a room leader.';
+        byId('sync-stats').innerHTML = state.sync ? [
+            ['Role', state.sync.activeRole],
+            ['Peers', state.sync.peerCount],
+            ['Packet', clockAge(state.sync.lastPacketAgeMs)],
+            ['Jitter', `${state.sync.clockJitterUs || 0} μs`]
+        ].map(([label,value]) => `<div><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`).join('') : '<div><span>Room sync</span><strong>Off</strong></div>';
+        byId('control-scenes').innerHTML = state.presets.length ? state.presets.map(sceneCard).join('') : '<div class="empty-state">No scenes are stored yet.</div>';
+    }
+    function sceneCard(scene) {
+        const firstEffect = effect(scene.channels[0].effect);
+        return `<article class="product-card scene-card"><div><span class="scene-chip">● ${esc(firstEffect.label)}</span><h4>${esc(scene.name || 'Untitled scene')}</h4><p class="muted">${Math.round(scene.brightness * 100 / 255)}% brightness · ${Math.round(scene.transitionMs / 100) / 10}s fade</p></div><p class="help">${esc(firstEffect.description)}</p><div class="scene-actions"><button class="button-secondary" onclick="lg.playScene(${Number(scene.index)})">Play</button><button class="button-secondary" onclick="lg.editScene(${Number(scene.index)})">Edit</button></div></article>`;
+    }
+    function renderScenes() {
+        byId('scene-library').innerHTML = state.presets.length ? state.presets.map(sceneCard).join('') : '<div class="empty-state">No scenes are stored yet.</div>';
+    }
+    async function playScene(index) {
+        try {
+            await api('/api/v1/activate', 'POST', {preset:index});
+            state.status = {...(state.status || {}),activePreset:index,transitioning:true};
+            renderControl();
+            toast(`${sceneName(index)} is playing.`);
+        } catch (error) { toast(error.message, true); }
+    }
+    async function blackout() {
+        try { await api('/api/v1/factory/abort', 'POST'); toast('Emergency blackout requested.'); }
+        catch (error) { toast(error.message, true); }
+    }
+
+    function editScene(index) {
+        const existing = state.presets.find(scene => Number(scene.index) === Number(index));
+        if (!existing) return toast('That scene is no longer available.', true);
+        state.editing = clone(existing);
+        state.selectedStep = null;
+        document.querySelectorAll('.nav-rail button').forEach(item => item.classList.remove('active'));
+        nav('scene-editor');
+        renderSceneEditor();
+    }
+    function backToScenes() { nav('scenes', document.querySelector('[data-page=scenes]')); }
+    function readSceneEditor() {
+        const scene = state.editing;
+        if (!scene || !byId('scene-name')) return;
+        scene.name = byId('scene-name').value.trim();
+        scene.brightness = Math.round(clamp(byId('scene-brightness').value,0,100) * 255 / 100);
+        scene.transitionMs = clamp(byId('scene-fade').value,0,5000);
+        scene.overlayEffect = byId('scene-overlay').value;
+        const beatSync = byId('scene-overlay-beat');
+        scene.overlaySpeedMs = beatSync?.checked ? 0 : clamp(byId('scene-overlay-speed')?.value ?? scene.overlaySpeedMs, 0, 60000);
+        scene.overlayParam = clamp(byId('scene-overlay-strength')?.value ?? scene.overlayParam, 0, 100);
+        scene.channels.forEach((channel, index) => {
+            const hex = byId(`zone-color-${index}`)?.value || colorFor(channel);
+            channel.r = parseInt(hex.slice(1,3),16); channel.g = parseInt(hex.slice(3,5),16); channel.b = parseInt(hex.slice(5,7),16);
+            channel.effect = byId(`zone-effect-${index}`)?.value || channel.effect;
+            channel.pwmDuty = dutyForPercent(byId(`zone-white-${index}`)?.value ?? percentForDuty(channel.pwmDuty));
+            channel.effectSpeedMs = speedToMs(byId(`zone-speed-${index}`)?.value ?? msToSpeed(channel.effectSpeedMs));
+            const meta = effect(channel.effect);
+            if (meta.hasParameter) channel.fxParam = clamp(byId(`zone-parameter-${index}`)?.value ?? meta.parameterDefault, meta.parameterMin, meta.parameterMax);
+            channel.pixelEnabled = Boolean(byId(`zone-pixels-${index}`)?.checked);
+            channel.pwmEnabled = Boolean(byId(`zone-white-enabled-${index}`)?.checked);
+        });
+    }
+    function renderSceneEditor() {
+        const scene = state.editing;
+        if (!scene) return;
+        byId('scene-editor-title').textContent = scene.name || 'Untitled scene';
+        byId('scene-name').value = scene.name || '';
+        byId('scene-brightness').value = Math.round(scene.brightness * 100 / 255);
+        byId('scene-brightness-output').textContent = `${byId('scene-brightness').value}%`;
+        byId('scene-fade').value = scene.transitionMs;
+        byId('scene-fade-output').textContent = `${(scene.transitionMs / 1000).toFixed(1)} s`;
+        byId('scene-overlay').value = scene.overlayEffect || 'none';
+        const overlay = scene.overlayEffect === 'strobe';
+        byId('scene-overlay-options').innerHTML = overlay ? `<div class="range-row"><label for="scene-overlay-strength">Flash time</label><input id="scene-overlay-strength" type="range" min="5" max="95" value="${clamp(scene.overlayParam,5,95)}" oninput="lg.updateText('scene-overlay-strength-output', this.value + '%')"><output id="scene-overlay-strength-output">${clamp(scene.overlayParam,5,95)}%</output></div><label class="switch-row"><span>Lock flashes to the timeline beat</span><input id="scene-overlay-beat" type="checkbox" ${scene.overlaySpeedMs === 0 ? 'checked' : ''} onchange="lg.changeOverlayBeat(this.checked)"></label><div class="range-row" ${scene.overlaySpeedMs === 0 ? 'style="opacity:.45"' : ''}><label for="scene-overlay-speed">Flash rate</label><input id="scene-overlay-speed" type="range" min="100" max="3000" step="50" value="${scene.overlaySpeedMs || 500}" ${scene.overlaySpeedMs === 0 ? 'disabled' : ''}><output>${scene.overlaySpeedMs === 0 ? 'Timeline beat' : (scene.overlaySpeedMs / 1000).toFixed(1) + ' s'}</output></div>` : '<p class="help">Choose a strobe overlay to layer a flash over every zone in this scene.</p>';
+        byId('scene-zones').innerHTML = scene.channels.map((channel,index) => {
+            const meta = effect(channel.effect);
+            const parameter = clamp(channel.fxParam || meta.parameterDefault, meta.parameterMin || 0, meta.parameterMax || 255);
+            return `<article class="product-card zone-card"><div class="zone-title"><h4>Zone ${index + 1}</h4><span>${esc(meta.label)}</span></div><div class="field"><label for="zone-effect-${index}">Motion</label><select id="zone-effect-${index}" title="${esc(meta.description)}" onchange="lg.changeZoneEffect(${index}, this.value)">${state.effects.map(item => `<option value="${esc(item.id)}" ${item.id === channel.effect ? 'selected' : ''}>${esc(item.label)}</option>`).join('')}</select></div><div class="color-line"><label for="zone-color-${index}">Color</label><input id="zone-color-${index}" type="color" value="${colorFor(channel)}"></div><div class="range-row"><label for="zone-white-${index}">White output</label><input id="zone-white-${index}" type="range" min="0" max="100" value="${percentForDuty(channel.pwmDuty)}" oninput="lg.updateText('zone-white-output-${index}', this.value + '%')"><output id="zone-white-output-${index}">${percentForDuty(channel.pwmDuty)}%</output></div><div class="range-row"><label for="zone-speed-${index}">Motion speed</label><input id="zone-speed-${index}" type="range" min="1" max="100" value="${msToSpeed(channel.effectSpeedMs)}" oninput="lg.speedText('zone-speed-output-${index}', this.value)"><output id="zone-speed-output-${index}">${speedName(msToSpeed(channel.effectSpeedMs))}</output></div>${meta.hasParameter ? `<div class="range-row"><label for="zone-parameter-${index}">${esc(meta.parameterLabel)}</label><input id="zone-parameter-${index}" type="range" min="${meta.parameterMin}" max="${meta.parameterMax}" value="${parameter}" oninput="lg.updateText('zone-parameter-output-${index}', this.value + ' ${esc(meta.parameterUnit)}')"><output id="zone-parameter-output-${index}">${parameter} ${esc(meta.parameterUnit)}</output></div>` : `<p class="help">${esc(meta.description)}</p>`}<div><label class="switch-row"><span>Pixel strip</span><input id="zone-pixels-${index}" type="checkbox" ${channel.pixelEnabled ? 'checked' : ''}></label><label class="switch-row"><span>White output</span><input id="zone-white-enabled-${index}" type="checkbox" ${channel.pwmEnabled ? 'checked' : ''}></label></div></article>`;
+        }).join('');
+    }
+    function changeZoneEffect(index, value) {
+        readSceneEditor();
+        state.editing.channels[index].effect = value;
+        state.editing.channels[index].fxParam = effect(value).parameterDefault || 0;
+        renderSceneEditor();
+    }
+    function changeOverlay(value) {
+        readSceneEditor();
+        state.editing.overlayEffect = value;
+        if (value === 'strobe' && !state.editing.overlaySpeedMs) state.editing.overlaySpeedMs = 500;
+        renderSceneEditor();
+    }
+    function changeOverlayBeat(locked) {
+        readSceneEditor();
+        state.editing.overlaySpeedMs = locked ? 0 : 500;
+        renderSceneEditor();
+    }
+    async function saveScene() {
+        readSceneEditor();
+        if (!state.editing.name) return toast('Give the scene a name before saving.', true);
+        try {
+            await api('/api/v1/presets', 'PUT', state.editing);
+            await refresh();
+            toast('Scene saved.');
+            backToScenes();
+        } catch (error) { toast(error.message, true); }
+    }
+
+    function renderTimeline() {
+        if (!state.sequence) return;
+        byId('timeline-bpm').value = clamp(state.sequence.bpm,40,240);
+        byId('timeline-bpm-output').textContent = `${state.sequence.bpm} BPM`;
+        byId('timeline-enabled').checked = state.sequence.enabled;
+        byId('timeline-palette').innerHTML = state.presets.map(scene => `<button draggable="true" class="${state.selectedScene === scene.index ? 'selected' : ''}" ondragstart="lg.dragScene(event,${Number(scene.index)})" onclick="lg.selectPalette(${Number(scene.index)})"><strong>${esc(scene.name || 'Untitled scene')}</strong><span>${esc(effect(scene.channels[0].effect).label)}</span></button>`).join('') || '<span class="help">Create a scene first, then place it on the timeline.</span>';
+        byId('timeline-tracks').innerHTML = state.sequence.tracks.map((track,trackIndex) => `<div class="track"><div class="track-head"><strong>Zone ${trackIndex + 1}</strong><label class="help"><input type="checkbox" ${track.enabled ? 'checked' : ''} onchange="lg.toggleTrack(${trackIndex}, this.checked)"> Active</label><select onchange="lg.setLoop(${trackIndex}, this.value)" aria-label="Zone ${trackIndex + 1} loop length">${[1,2,4,8,12,16].map(length => `<option value="${length}" ${track.numSteps === length ? 'selected' : ''}>${length} steps</option>`).join('')}</select></div><div class="step-lane">${track.steps.map((step,stepIndex) => `<button class="step ${stepIndex >= track.numSteps ? 'inactive ' : ''}${state.selectedStep?.track === trackIndex && state.selectedStep?.step === stepIndex ? 'selected' : ''}" onclick="lg.selectStep(${trackIndex},${stepIndex})" ondragover="event.preventDefault()" ondrop="lg.dropScene(event,${trackIndex},${stepIndex})" title="Step ${stepIndex + 1}: ${esc(sceneName(step.presetIndex))}"><small>${stepIndex + 1}</small><span>${esc(sceneName(step.presetIndex))}</span></button>`).join('')}</div></div>`).join('');
+        renderStepInspector();
+    }
+    function renderStepInspector() {
+        const selected = state.selectedStep;
+        const holder = byId('step-inspector');
+        if (!selected) { holder.innerHTML = '<p class="help">Select a step to fine-tune its scene and hold length.</p>'; return; }
+        const step = state.sequence.tracks[selected.track].steps[selected.step];
+        holder.innerHTML = `<div class="product-card step-inspector"><div class="field"><label for="step-scene">Zone ${selected.track + 1}, step ${selected.step + 1}</label><select id="step-scene" onchange="lg.setStepScene(${selected.track},${selected.step},this.value)">${state.presets.map(scene => `<option value="${Number(scene.index)}" ${Number(scene.index) === Number(step.presetIndex) ? 'selected' : ''}>${esc(scene.name || 'Untitled scene')}</option>`).join('')}</select></div><div><p class="help">Hold for</p><div class="beat-options">${[1,2,4,8].map(beats => `<button class="${step.lengthBeats === beats ? 'active' : ''}" onclick="lg.setStepLength(${selected.track},${selected.step},${beats})">${beats} beat${beats === 1 ? '' : 's'}</button>`).join('')}</div></div></div>`;
+    }
+    function selectPalette(index) { state.selectedScene = Number(index); renderTimeline(); }
+    function dragScene(event,index) { event.dataTransfer.setData('text/plain', String(index)); event.dataTransfer.effectAllowed = 'copy'; }
+    function dropScene(event,track,step) { event.preventDefault(); const index = Number(event.dataTransfer.getData('text/plain')); if (Number.isFinite(index)) { state.sequence.tracks[track].steps[step].presetIndex = index; state.selectedStep = {track,step}; renderTimeline(); } }
+    function selectStep(track,step) { if (state.selectedScene !== null) state.sequence.tracks[track].steps[step].presetIndex = state.selectedScene; state.selectedStep = {track,step}; renderTimeline(); }
+    function setStepScene(track,step,index) { state.sequence.tracks[track].steps[step].presetIndex = Number(index); renderTimeline(); }
+    function setStepLength(track,step,length) { state.sequence.tracks[track].steps[step].lengthBeats = Number(length); renderTimeline(); }
+    function toggleTrack(track,enabled) { state.sequence.tracks[track].enabled = enabled; }
+    function setLoop(track,length) { state.sequence.tracks[track].numSteps = Number(length); renderTimeline(); }
+    function setBpm(value) { state.sequence.bpm = clamp(value,40,240); byId('timeline-bpm-output').textContent = `${state.sequence.bpm} BPM`; }
+    function setTimelineEnabled(enabled) { state.sequence.enabled = enabled; }
+    async function saveTimeline() {
+        try { await api('/api/v1/sequence','PUT',state.sequence); toast('Timeline saved.'); }
+        catch (error) { toast(error.message,true); }
+    }
+
+    function renderAutomation() {
+        byId('cue-list').innerHTML = state.schedules.map((cue,index) => `<div class="cue"><label class="switch-row"><span>On</span><input type="checkbox" ${cue.enabled ? 'checked' : ''} onchange="lg.setCue(${index},'enabled',this.checked)"></label><input type="time" value="${String(cue.hour).padStart(2,'0')}:${String(cue.minute).padStart(2,'0')}" onchange="lg.setCueTime(${index},this.value)" aria-label="Cue time"><select onchange="lg.setCue(${index},'action',this.value)"><option value="preset" ${cue.action === 'preset' ? 'selected' : ''}>Activate scene</option><option value="sequence" ${cue.action === 'sequence' ? 'selected' : ''}>Start timeline</option></select><select ${cue.action === 'sequence' ? 'disabled' : ''} onchange="lg.setCue(${index},'presetIndex',this.value)" aria-label="Cue scene">${state.presets.map(scene => `<option value="${Number(scene.index)}" ${Number(cue.presetIndex) === Number(scene.index) ? 'selected' : ''}>${esc(scene.name || 'Untitled scene')}</option>`).join('')}</select><div class="days">${['S','M','T','W','T','F','S'].map((day,bit) => `<button class="${cue.daysOfWeek & (1 << bit) ? 'active' : ''}" title="${['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'][bit]}" onclick="lg.toggleDay(${index},${bit})">${day}</button>`).join('')}</div></div>`).join('');
+    }
+    function addCue() { const empty = state.schedules.findIndex(cue => !cue.enabled); if (empty < 0) return toast('All eight calendar cues are already in use.', true); state.schedules[empty] = {...state.schedules[empty],enabled:true}; renderAutomation(); }
+    function setCue(index,key,value) { state.schedules[index][key] = key === 'presetIndex' ? Number(value) : value; renderAutomation(); }
+    function setCueTime(index,value) { const [hour,minute] = value.split(':').map(Number); state.schedules[index].hour = clamp(hour,0,23); state.schedules[index].minute = clamp(minute,0,59); }
+    function toggleDay(index,bit) { state.schedules[index].daysOfWeek ^= (1 << bit); renderAutomation(); }
+    async function saveAutomation() {
+        if (state.schedules.some(cue => cue.enabled && !cue.daysOfWeek)) return toast('Choose at least one day for every active cue.',true);
+        try { await api('/api/v1/schedules','PUT',{entries:state.schedules}); toast('Automation saved.'); }
+        catch (error) { toast(error.message,true); }
+    }
+
+    function renderSystem() {
+        if (!state.config) return;
+        byId('system-name').value = state.config.deviceName || '';
+        byId('system-timezone').value = state.config.timezone || 'UTC0';
+        byId('system-sync-enabled').checked = Boolean(state.config.syncEnabled);
+        byId('system-sync-role').value = String(state.config.syncRole ?? 0);
+        byId('system-fallback').innerHTML = state.presets.map(scene => `<option value="${Number(scene.index)}" ${Number(scene.index) === Number(state.config.fallbackPreset) ? 'selected' : ''}>${esc(scene.name || 'Untitled scene')}</option>`).join('');
+        const nodes = [];
+        if (state.sync) {
+            nodes.push(`<article class="product-card node-card primary"><span class="scene-chip">● THIS NODE</span><h4>${esc(state.config.deviceName || 'Lighting node')}</h4><p class="muted">${esc(state.sync.activeRole)} · ${state.sync.clockLocked ? 'clock locked' : 'waiting for clock'}</p><p class="latency">${state.sync.clockJitterUs || 0} μs <span class="help">jitter</span></p></article>`);
+            state.sync.peers.forEach(peer => nodes.push(`<article class="product-card node-card"><span class="scene-chip">● FOLLOWER</span><h4>${esc(peer.address)}</h4><p class="muted">Seen ${clockAge(peer.ageMs)}</p><p class="latency">${peer.latencyMs} ms</p></article>`));
+        }
+        byId('sync-topology').innerHTML = nodes.join('') || '<div class="empty-state">Sync is off or this node has not discovered any room peers yet.</div>';
+    }
+    async function saveSystem() {
+        try {
+            const config = {
+                deviceName: byId('system-name').value.trim(),
+                fallbackPreset: Number(byId('system-fallback').value),
+                timezone: byId('system-timezone').value.trim() || 'UTC0',
+                syncEnabled: byId('system-sync-enabled').checked,
+                syncRole: Number(byId('system-sync-role').value)
+            };
+            await api('/api/v1/config','PUT',config);
+            state.config = {...state.config,...config};
+            toast('System settings saved. Restart the node to apply a sync role change.');
+        } catch (error) { toast(error.message,true); }
+    }
+    async function refreshSync() {
+        try { state.sync = await api('/api/v1/sync'); renderControl(); renderSystem(); }
+        catch (error) { toast(error.message,true); }
+    }
+    function updateText(id,value) { const output = byId(id); if (output) output.textContent = value; }
+    function speedText(id,value) { updateText(id,speedName(Number(value))); }
+
+    return {connect,disconnect,refresh,nav,playScene,blackout,editScene,backToScenes,renderSceneEditor,changeZoneEffect,changeOverlay,changeOverlayBeat,saveScene,updateText,speedText,selectPalette,dragScene,dropScene,selectStep,setStepScene,setStepLength,toggleTrack,setLoop,setBpm,setTimelineEnabled,saveTimeline,addCue,setCue,setCueTime,toggleDay,saveAutomation,saveSystem,refreshSync};
+})();
 </script>
 </body>
 </html>
