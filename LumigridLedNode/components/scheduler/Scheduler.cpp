@@ -4,13 +4,17 @@
 #include "esp_sntp.h"
 #include "esp_timer.h"
 #include <ctime>
+#include <algorithm>
 
 static const char* TAG = "scheduler";
 
 namespace lg {
 
-Scheduler::Scheduler(ConfigStore& config, SignageEngine& engine)
-    : config_(config), engine_(engine) {}
+Scheduler::Scheduler(
+    ConfigStore& config,
+    SignageEngine& engine,
+    ClockDiscipline& clock
+) : config_(config), engine_(engine), clock_(clock) {}
 
 esp_err_t Scheduler::start(const char* timezone) {
     setenv("TZ", timezone, 1);
@@ -38,6 +42,10 @@ void Scheduler::task_entry(void* arg) {
 
 void Scheduler::task() {
     for (int attempt = 0; attempt < 30; ++attempt) {
+        if (clock_.has_epoch()) {
+            time_synced_ = true;
+            break;
+        }
         vTaskDelay(pdMS_TO_TICKS(2000));
         time_t now_epoch;
         time(&now_epoch);
@@ -45,6 +53,9 @@ void Scheduler::task() {
         localtime_r(&now_epoch, &now_tm);
 
         if (now_tm.tm_year > (2024 - 1900)) {
+            clock_.set_epoch(
+                uint64_t(now_epoch) * 1000ULL
+            );
             time_synced_ = true;
             break;
         }
@@ -58,25 +69,100 @@ void Scheduler::task() {
     for (;;) {
         vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(50)); // Evaluate 20x a second
 
-        Sequence seq;
-        if (config_.load_sequence(seq) != ESP_OK || !seq.enabled || seq.bpm == 0) {
+        if (!time_synced_) {
+            time_t now_epoch;
+            time(&now_epoch);
+            struct tm now_tm;
+            localtime_r(&now_epoch, &now_tm);
+            if (now_tm.tm_year > (2024 - 1900)) {
+                clock_.set_epoch(uint64_t(now_epoch) * 1000ULL);
+                time_synced_ = true;
+            } else if (clock_.has_epoch()) {
+                time_synced_ = true;
+            }
+        }
+
+        const uint64_t clock_ms = clock_.now_ms();
+        refresh_config(clock_ms);
+        evaluate_calendar(calendar_, clock_ms);
+
+        if (sequence_.bpm == 0 ||
+            (!sequence_.enabled && !calendar_sequence_active_)) {
             continue;
         }
 
-        uint64_t clock_ms = esp_timer_get_time() / 1000ULL;
-        if (time_synced_) {
-            struct timeval tv;
-            gettimeofday(&tv, nullptr);
-            clock_ms = (uint64_t(tv.tv_sec) * 1000) + (tv.tv_usec / 1000);
+        const uint64_t sequence_clock_ms =
+            calendar_sequence_active_ && clock_ms >= calendar_sequence_started_ms_
+                ? clock_ms - calendar_sequence_started_ms_
+                : calendar_sequence_active_ ? 0 : clock_ms;
+        evaluate(sequence_, sequence_clock_ms);
+    }
+}
+
+void Scheduler::refresh_config(uint64_t clock_ms) {
+    if (last_config_refresh_ms_ != 0 &&
+        clock_ms - last_config_refresh_ms_ < 1000) {
+        return;
+    }
+
+    Sequence sequence;
+    if (config_.load_sequence(sequence) == ESP_OK) {
+        sequence_ = sequence;
+    }
+
+    CalendarSchedule calendar;
+    if (config_.load_calendar_schedule(calendar) == ESP_OK) {
+        calendar_ = calendar;
+    }
+
+    last_config_refresh_ms_ = clock_ms;
+}
+
+void Scheduler::evaluate_calendar(
+    const CalendarSchedule& calendar,
+    uint64_t clock_ms
+) {
+    if (!clock_.has_epoch()) return;
+
+    const time_t epoch = static_cast<time_t>(clock_ms / 1000ULL);
+    struct tm local_time;
+    localtime_r(&epoch, &local_time);
+    const uint64_t current_minute = clock_ms / 60000ULL;
+    const uint8_t day_bit = static_cast<uint8_t>(1U << local_time.tm_wday);
+
+    for (uint8_t index = 0; index < 8; ++index) {
+        const CalendarScheduleEntry& entry = calendar.entries[index];
+        const bool matches =
+            entry.enabled &&
+            entry.hour == local_time.tm_hour &&
+            entry.minute == local_time.tm_min &&
+            (entry.days_of_week & day_bit) != 0;
+        if (!matches || last_calendar_minute_[index] == current_minute) {
+            continue;
         }
 
-        evaluate(seq, clock_ms);
+        last_calendar_minute_[index] = current_minute;
+        if (entry.action == CalendarAction::Sequence) {
+            calendar_sequence_active_ = true;
+            calendar_sequence_started_ms_ = clock_ms;
+            for (uint8_t& step_index : last_step_index_) {
+                step_index = 255;
+            }
+            ESP_LOGI(TAG, "Calendar started sequence");
+        } else {
+            calendar_sequence_active_ = false;
+            engine_.activate_preset(entry.preset_index);
+            ESP_LOGI(TAG, "Calendar activated preset %u", entry.preset_index);
+        }
     }
 }
 
 void Scheduler::evaluate(const Sequence& seq, uint64_t clock_ms) {
     const uint32_t ms_per_beat = 60000 / seq.bpm;
     const uint64_t total_beats = clock_ms / ms_per_beat;
+    engine_.set_beat_period(static_cast<uint16_t>(
+        std::min<uint32_t>(ms_per_beat, UINT16_MAX)
+    ));
 
     BrandPreset active_composite;
     // Just use a base preset name for reference
@@ -125,6 +211,10 @@ void Scheduler::evaluate(const Sequence& seq, uint64_t clock_ms) {
         BrandPreset p;
         if (config_.load_preset(preset_idx, p) == ESP_OK) {
             active_composite.channels[track.channel_id] = p.channels[track.channel_id];
+            active_composite.brightness = std::min(
+                active_composite.brightness,
+                p.brightness
+            );
         }
     }
 

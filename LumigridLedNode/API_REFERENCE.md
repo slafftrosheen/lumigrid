@@ -31,12 +31,16 @@ queue, and `503` a subsystem that has not completed initialization.
 | --- | --- | --- |
 | `GET` | `/api/v1/status` | Read signage playback state. |
 | `GET` | `/api/v1/presets` | List stored scene presets. |
-| `PUT` | `/api/v1/presets` | Save a preset in slot 0–7. |
+| `PUT` | `/api/v1/presets` | Save a scene preset in slot 0–31. |
 | `POST` | `/api/v1/activate` | Activate a preset. |
+| `GET` | `/api/v1/effects` | Read display names, descriptions, and controls for each effect. |
+| `GET` | `/api/v1/sequence` | Read the eight-zone, 16-step timeline. |
+| `PUT` | `/api/v1/sequence` | Save the timeline. |
 | `GET` | `/api/v1/config` | Read persisted node settings. |
 | `PUT` | `/api/v1/config` | Update persisted node settings. |
-| `GET` | `/api/v1/schedules` | List schedule slots. |
-| `PUT` | `/api/v1/schedules` | Save a schedule slot. |
+| `GET` | `/api/v1/schedules` | List calendar automation cues. |
+| `PUT` | `/api/v1/schedules` | Replace all calendar automation cues. |
+| `GET` | `/api/v1/sync` | Read sync role, clock health, and discovered followers. |
 
 ### Activate a preset
 
@@ -45,8 +49,39 @@ POST /api/v1/activate
 { "preset": 2 }
 ```
 
-The preset index must be between 0 and 7. A successful request returns
+The preset index must be between 0 and 31. A successful request returns
 `202 {"activated":true}`.
+
+### Scenes and effects
+
+`GET /api/v1/effects` is the canonical effect metadata source for clients. Each
+item includes an effect `id`, a human-readable `label` and `description`, and,
+where applicable, a parameter label, unit, range, and default. Clients should
+use this endpoint rather than exposing the internal `fxParam` name.
+
+`PUT /api/v1/presets` accepts a scene `index`, `name`, `brightness` (0–255),
+`transitionMs`, and up to eight channel definitions. A channel accepts `r`,
+`g`, `b`, `pwmDuty` (0–4095), `effect`, `effectSpeedMs`, `fxParam`,
+`pixelEnabled`, and `pwmEnabled`.
+
+Scenes can also add one preset-wide finishing layer:
+
+```json
+{
+  "overlayEffect": "strobe",
+  "overlaySpeedMs": 0,
+  "overlayParam": 50
+}
+```
+
+`overlayEffect` is `none` or `strobe`. `overlaySpeedMs: 0` follows the
+sequencer beat; otherwise it is the flash period in milliseconds.
+
+### Timeline
+
+The timeline contains eight independently enabled zones with up to 16 ordered
+steps per zone. A step has `presetIndex` (0–31) and `lengthBeats` (1–64).
+`bpm` is constrained to 10–500 and `enabled` controls manual playback.
 
 ### Device configuration
 
@@ -55,27 +90,42 @@ The preset index must be between 0 and 7. A successful request returns
 `timezone`, `syncEnabled`, and `syncRole`.
 
 `PUT /api/v1/config` accepts any supported subset. Limits are: preset indexes
-0–7, watchdog 0–3600 seconds, power 0–60000 mW, soft-start 0–5000 ms, and
+0–31, watchdog 0–3600 seconds, power 0–60000 mW, soft-start 0–5000 ms, and
 sync role 0–2.
 
-### Schedule slots
+### Calendar automation
 
-`PUT /api/v1/schedules` accepts:
+`PUT /api/v1/schedules` accepts up to eight entries. `daysOfWeek` is a
+7-bit mask with Sunday at bit 0 and Saturday at bit 6. A `preset` action
+activates a scene; a `sequence` action starts the saved timeline at that
+minute. A scene action stops a calendar-started timeline.
 
 ```json
 {
-  "index": 0,
-  "hourStart": 9,
-  "minuteStart": 0,
-  "hourEnd": 17,
-  "minuteEnd": 0,
-  "presetIndex": 2,
-  "daysOfWeek": 127,
-  "enabled": true
+  "entries": [
+    {
+      "hour": 9,
+      "minute": 0,
+      "daysOfWeek": 62,
+      "action": "sequence",
+      "presetIndex": 0,
+      "enabled": true
+    }
+  ]
 }
 ```
 
-There are eight slots. `daysOfWeek` is a 7-bit mask (0–127).
+### Sync health
+
+`GET /api/v1/sync` returns the configured and active role, clock lock and
+epoch state, receive/miss counts, the latest clock correction and jitter, and
+the master node's recently acknowledged followers with round-trip latency.
+`auto` nodes elect a leader using a stable MAC-address tie-breaker; only one
+node should be explicitly configured as `master`.
+
+Sync uses UDP broadcast on port 6455. Keep sync nodes on a trusted, isolated
+network. The endpoint reports measured health, but hardware deployment testing
+is still required to establish timing accuracy for a specific Wi-Fi layout.
 
 ## Factory endpoints
 

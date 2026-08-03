@@ -6,6 +6,8 @@
 #include "ConfigStore.hpp"
 #include "SignageEngine.hpp"
 #include "SignageTypes.hpp"
+#include "Scheduler.hpp"
+#include "NodeSync.hpp"
 #include "esp_check.h"
 #include <inttypes.h>
 
@@ -15,6 +17,8 @@
 #include <algorithm>
 #include <vector>
 #include <memory>
+#include <new>
+#include <limits>
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -24,7 +28,7 @@
 namespace lg {
 namespace {
 
-constexpr size_t kMaxBodyBytes = 512;
+constexpr size_t kMaxBodyBytes = 8192;
 
 
 esp_err_t send_json(httpd_req_t* request,
@@ -50,13 +54,15 @@ esp_err_t read_json(httpd_req_t* request, cJSON** out) {
         return ESP_ERR_INVALID_SIZE;
     }
 
-    char body[kMaxBodyBytes + 1] = {};
+    std::unique_ptr<char[]> body(new (std::nothrow) char[kMaxBodyBytes + 1]());
+    if (!body) return ESP_ERR_NO_MEM;
+
     int received = 0;
 
     while (received < request->content_len) {
         const int result = httpd_req_recv(
             request,
-            body + received,
+            body.get() + received,
             request->content_len - received
         );
 
@@ -67,7 +73,7 @@ esp_err_t read_json(httpd_req_t* request, cJSON** out) {
     }
 
     body[received] = '\0';
-    *out = cJSON_ParseWithLength(body, received);
+    *out = cJSON_ParseWithLength(body.get(), received);
 
     return *out != nullptr ? ESP_OK : ESP_ERR_INVALID_ARG;
 }
@@ -145,8 +151,46 @@ bool parse_effect(const char* value, FactoryEffect& effect) {
     } else {
         return false;
     }
-
     return true;
+}
+
+const char* calendar_action_name(CalendarAction action) {
+    return action == CalendarAction::Sequence ? "sequence" : "preset";
+}
+
+bool parse_calendar_action(const char* name, CalendarAction& action) {
+    if (!name) return false;
+    if (strcmp(name, "preset") == 0) {
+        action = CalendarAction::Preset;
+        return true;
+    }
+    if (strcmp(name, "sequence") == 0) {
+        action = CalendarAction::Sequence;
+        return true;
+    }
+    return false;
+}
+
+const char* node_role_name(NodeRole role) {
+    switch (role) {
+        case NodeRole::Auto:   return "auto";
+        case NodeRole::Master: return "master";
+        case NodeRole::Worker: return "worker";
+    }
+    return "unknown";
+}
+
+void format_ipv4(uint32_t address, char* output, size_t output_size) {
+    const uint8_t* octets = reinterpret_cast<const uint8_t*>(&address);
+    snprintf(
+        output,
+        output_size,
+        "%u.%u.%u.%u",
+        octets[0],
+        octets[1],
+        octets[2],
+        octets[3]
+    );
 }
 
 void build_status_json(const FactoryStatus& status, char* response, size_t max_len) {
@@ -391,6 +435,9 @@ esp_err_t get_presets(httpd_req_t* request) {
         cJSON_AddStringToObject(obj, "name", preset.name);
         cJSON_AddNumberToObject(obj, "brightness", preset.brightness);
         cJSON_AddNumberToObject(obj, "transitionMs", preset.transition_ms);
+        cJSON_AddStringToObject(obj, "overlayEffect", signage_modifier_name(preset.overlay_effect));
+        cJSON_AddNumberToObject(obj, "overlaySpeedMs", preset.overlay_speed_ms);
+        cJSON_AddNumberToObject(obj, "overlayParam", preset.overlay_param);
 
         cJSON* channels = cJSON_CreateArray();
         for (uint8_t ch = 0; ch < 8; ++ch) {
@@ -414,6 +461,9 @@ esp_err_t get_presets(httpd_req_t* request) {
 
     char* json = cJSON_PrintUnformatted(arr);
     cJSON_Delete(arr);
+    if (json == nullptr) {
+        return send_error(request, "500 Internal Server Error", "json_encode_failed");
+    }
     esp_err_t ret = send_json(request, json);
     cJSON_free(json);
     return ret;
@@ -431,7 +481,7 @@ esp_err_t put_preset(httpd_req_t* request) {
     }
 
     uint8_t index = 0;
-    if (!json_u8(root, "index", 0, 7, index)) {
+    if (!json_u8(root, "index", 0, kMaxPresets - 1, index)) {
         cJSON_Delete(root);
         return send_error(request, "400 Bad Request", "missing_index");
     }
@@ -445,6 +495,13 @@ esp_err_t put_preset(httpd_req_t* request) {
     uint16_t trans = 1000;
     json_u16(root, "transitionMs", 0, 10000, trans);
     preset.transition_ms = trans;
+
+    const cJSON* overlay = cJSON_GetObjectItemCaseSensitive(root, "overlayEffect");
+    if (cJSON_IsString(overlay)) {
+        parse_signage_modifier(overlay->valuestring, preset.overlay_effect);
+    }
+    json_u16(root, "overlaySpeedMs", 0, 60000, preset.overlay_speed_ms);
+    json_u8(root, "overlayParam", 0, 100, preset.overlay_param);
 
     const cJSON* channels = cJSON_GetObjectItemCaseSensitive(root, "channels");
     if (cJSON_IsArray(channels)) {
@@ -496,7 +553,7 @@ esp_err_t post_activate(httpd_req_t* request) {
     }
 
     uint8_t index = 0;
-    if (!json_u8(root, "preset", 0, 7, index)) {
+    if (!json_u8(root, "preset", 0, kMaxPresets - 1, index)) {
         cJSON_Delete(root);
         return send_error(request, "400 Bad Request", "missing_preset_index");
     }
@@ -561,8 +618,8 @@ esp_err_t put_device_config(httpd_req_t* request) {
         cfg.device_name[sizeof(cfg.device_name) - 1] = '\0';
     }
 
-    json_u8(root, "activePreset", 0, 7, cfg.active_preset_index);
-    json_u8(root, "fallbackPreset", 0, 7, cfg.fallback_preset_index);
+    json_u8(root, "activePreset", 0, kMaxPresets - 1, cfg.active_preset_index);
+    json_u8(root, "fallbackPreset", 0, kMaxPresets - 1, cfg.fallback_preset_index);
     json_u16(root, "watchdogTimeoutS", 0, 3600, cfg.watchdog_timeout_s);
     json_u16(root, "maxPowerMw", 0, 60000, cfg.max_power_mw);
     json_u16(root, "softStartMs", 0, 5000, cfg.soft_start_ms);
@@ -594,19 +651,40 @@ esp_err_t get_signage_status(httpd_req_t* request) {
 
     FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
 
-    char response[256];
+    cJSON* response = cJSON_CreateObject();
     if (api_ptr->signage()) {
-        snprintf(response, sizeof(response),
-            "{\"activePreset\":%u,\"fallbackActive\":%s,\"transitioning\":%s}",
-            api_ptr->signage()->active_preset_index(),
-            api_ptr->signage()->is_fallback_active() ? "true" : "false",
-            api_ptr->signage()->is_transitioning() ? "true" : "false"
+        cJSON_AddNumberToObject(
+            response,
+            "activePreset",
+            api_ptr->signage()->active_preset_index()
+        );
+        cJSON_AddBoolToObject(
+            response,
+            "fallbackActive",
+            api_ptr->signage()->is_fallback_active()
+        );
+        cJSON_AddBoolToObject(
+            response,
+            "transitioning",
+            api_ptr->signage()->is_transitioning()
         );
     } else {
-        snprintf(response, sizeof(response), R"({"signage":"not_started"})");
+        cJSON_AddStringToObject(response, "signage", "not_started");
     }
 
-    return send_json(request, response);
+    cJSON_AddBoolToObject(
+        response,
+        "timeSynced",
+        api_ptr->scheduler() && api_ptr->scheduler()->has_time()
+    );
+    char* json = cJSON_PrintUnformatted(response);
+    cJSON_Delete(response);
+    if (json == nullptr) {
+        return send_error(request, "500 Internal Server Error", "json_encode_failed");
+    }
+    const esp_err_t result = send_json(request, json);
+    cJSON_free(json);
+    return result;
 }
 
 esp_err_t get_sequence(httpd_req_t* request) {
@@ -643,6 +721,9 @@ esp_err_t get_sequence(httpd_req_t* request) {
 
     char* json = cJSON_PrintUnformatted(obj);
     cJSON_Delete(obj);
+    if (json == nullptr) {
+        return send_error(request, "500 Internal Server Error", "json_encode_failed");
+    }
     esp_err_t ret = send_json(request, json);
     cJSON_free(json);
     return ret;
@@ -700,6 +781,178 @@ esp_err_t put_sequence(httpd_req_t* request) {
     return send_json(request, R"({"saved":true})");
 }
 
+esp_err_t get_effects(httpd_req_t* request) {
+    if (!api::authorize(request)) return ESP_OK;
+
+    cJSON* effects = cJSON_CreateArray();
+    for (uint8_t index = static_cast<uint8_t>(SignageEffect::Solid);
+         index <= static_cast<uint8_t>(SignageEffect::Fire);
+         ++index) {
+        const EffectMetadata& metadata = signage_effect_metadata(
+            static_cast<SignageEffect>(index)
+        );
+        cJSON* effect = cJSON_CreateObject();
+        cJSON_AddStringToObject(effect, "id", metadata.id);
+        cJSON_AddStringToObject(effect, "label", metadata.label);
+        cJSON_AddStringToObject(effect, "description", metadata.description);
+        cJSON_AddBoolToObject(effect, "hasParameter", metadata.has_parameter);
+        if (metadata.has_parameter) {
+            cJSON_AddStringToObject(effect, "parameterLabel", metadata.parameter_label);
+            cJSON_AddStringToObject(effect, "parameterUnit", metadata.parameter_unit);
+            cJSON_AddNumberToObject(effect, "parameterMin", metadata.parameter_min);
+            cJSON_AddNumberToObject(effect, "parameterMax", metadata.parameter_max);
+            cJSON_AddNumberToObject(effect, "parameterDefault", metadata.parameter_default);
+        }
+        cJSON_AddItemToArray(effects, effect);
+    }
+
+    char* json = cJSON_PrintUnformatted(effects);
+    cJSON_Delete(effects);
+    if (json == nullptr) {
+        return send_error(request, "500 Internal Server Error", "json_encode_failed");
+    }
+    const esp_err_t result = send_json(request, json);
+    cJSON_free(json);
+    return result;
+}
+
+esp_err_t get_calendar_schedule(httpd_req_t* request) {
+    if (!api::authorize(request)) return ESP_OK;
+
+    FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+    if (!api_ptr->config()) return send_error(request, "503 Service Unavailable", "config_not_ready");
+
+    CalendarSchedule schedule{};
+    if (api_ptr->config()->load_calendar_schedule(schedule) != ESP_OK) {
+        return send_error(request, "500 Internal Server Error", "nvs_read_failed");
+    }
+
+    cJSON* response = cJSON_CreateObject();
+    cJSON* entries = cJSON_CreateArray();
+    for (uint8_t index = 0; index < 8; ++index) {
+        const CalendarScheduleEntry& entry = schedule.entries[index];
+        cJSON* item = cJSON_CreateObject();
+        cJSON_AddNumberToObject(item, "index", index);
+        cJSON_AddNumberToObject(item, "hour", entry.hour);
+        cJSON_AddNumberToObject(item, "minute", entry.minute);
+        cJSON_AddNumberToObject(item, "daysOfWeek", entry.days_of_week);
+        cJSON_AddStringToObject(item, "action", calendar_action_name(entry.action));
+        cJSON_AddNumberToObject(item, "presetIndex", entry.preset_index);
+        cJSON_AddBoolToObject(item, "enabled", entry.enabled);
+        cJSON_AddItemToArray(entries, item);
+    }
+    cJSON_AddItemToObject(response, "entries", entries);
+
+    char* json = cJSON_PrintUnformatted(response);
+    cJSON_Delete(response);
+    if (json == nullptr) {
+        return send_error(request, "500 Internal Server Error", "json_encode_failed");
+    }
+    const esp_err_t result = send_json(request, json);
+    cJSON_free(json);
+    return result;
+}
+
+esp_err_t put_calendar_schedule(httpd_req_t* request) {
+    if (!api::authorize(request)) return ESP_OK;
+
+    FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+    if (!api_ptr->config()) return send_error(request, "503 Service Unavailable", "config_not_ready");
+
+    cJSON* root = nullptr;
+    if (read_json(request, &root) != ESP_OK) {
+        return send_error(request, "400 Bad Request", "invalid_json");
+    }
+
+    const cJSON* entries = cJSON_GetObjectItemCaseSensitive(root, "entries");
+    if (!cJSON_IsArray(entries)) {
+        cJSON_Delete(root);
+        return send_error(request, "400 Bad Request", "missing_schedule_entries");
+    }
+
+    CalendarSchedule schedule{};
+    int entry_index = 0;
+    cJSON* item = nullptr;
+    cJSON_ArrayForEach(item, entries) {
+        if (entry_index >= 8) break;
+
+        CalendarScheduleEntry& entry = schedule.entries[entry_index];
+        bool valid =
+            json_u8(item, "hour", 0, 23, entry.hour) &&
+            json_u8(item, "minute", 0, 59, entry.minute) &&
+            json_u8(item, "daysOfWeek", 0, 127, entry.days_of_week) &&
+            json_u8(item, "presetIndex", 0, kMaxPresets - 1, entry.preset_index);
+
+        const cJSON* action = cJSON_GetObjectItemCaseSensitive(item, "action");
+        valid = valid && cJSON_IsString(action) &&
+            parse_calendar_action(action->valuestring, entry.action);
+
+        const cJSON* enabled = cJSON_GetObjectItemCaseSensitive(item, "enabled");
+        valid = valid && cJSON_IsBool(enabled);
+        if (cJSON_IsBool(enabled)) entry.enabled = cJSON_IsTrue(enabled);
+
+        if (!valid) {
+            cJSON_Delete(root);
+            return send_error(request, "400 Bad Request", "invalid_schedule_entry");
+        }
+        ++entry_index;
+    }
+    cJSON_Delete(root);
+
+    if (api_ptr->config()->save_calendar_schedule(schedule) != ESP_OK) {
+        return send_error(request, "500 Internal Server Error", "nvs_write_failed");
+    }
+    return send_json(request, R"({"saved":true})");
+}
+
+esp_err_t get_sync_status(httpd_req_t* request) {
+    if (!api::authorize(request)) return ESP_OK;
+
+    FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+    if (!api_ptr->node_sync()) {
+        return send_error(request, "503 Service Unavailable", "sync_not_ready");
+    }
+
+    const NodeSyncStatus status = api_ptr->node_sync()->status();
+    cJSON* response = cJSON_CreateObject();
+    cJSON_AddStringToObject(response, "configuredRole", node_role_name(status.configured_role));
+    cJSON_AddStringToObject(response, "activeRole", node_role_name(status.active_role));
+    cJSON_AddBoolToObject(response, "running", status.running);
+    cJSON_AddBoolToObject(response, "clockLocked", status.clock_locked);
+    cJSON_AddBoolToObject(response, "clockHasEpoch", status.clock_has_epoch);
+    cJSON_AddNumberToObject(response, "peerCount", status.peer_count);
+    if (status.last_packet_age_ms == std::numeric_limits<uint32_t>::max()) {
+        cJSON_AddNullToObject(response, "lastPacketAgeMs");
+    } else {
+        cJSON_AddNumberToObject(response, "lastPacketAgeMs", status.last_packet_age_ms);
+    }
+    cJSON_AddNumberToObject(response, "packetsReceived", status.packets_received);
+    cJSON_AddNumberToObject(response, "packetsMissed", status.packets_missed);
+    cJSON_AddNumberToObject(response, "clockOffsetMs", status.clock_offset_ms);
+    cJSON_AddNumberToObject(response, "clockJitterUs", status.clock_jitter_us);
+
+    cJSON* peers = cJSON_CreateArray();
+    for (uint8_t index = 0; index < status.peer_count; ++index) {
+        cJSON* peer = cJSON_CreateObject();
+        char address[16] = {};
+        format_ipv4(status.peers[index].address, address, sizeof(address));
+        cJSON_AddStringToObject(peer, "address", address);
+        cJSON_AddNumberToObject(peer, "ageMs", status.peers[index].age_ms);
+        cJSON_AddNumberToObject(peer, "latencyMs", status.peers[index].latency_ms);
+        cJSON_AddItemToArray(peers, peer);
+    }
+    cJSON_AddItemToObject(response, "peers", peers);
+
+    char* json = cJSON_PrintUnformatted(response);
+    cJSON_Delete(response);
+    if (json == nullptr) {
+        return send_error(request, "500 Internal Server Error", "json_encode_failed");
+    }
+    const esp_err_t result = send_json(request, json);
+    cJSON_free(json);
+    return result;
+}
+
 } // namespace
 
 #include "dashboard.hpp"
@@ -711,9 +964,17 @@ esp_err_t FactoryApi::serve_dashboard(httpd_req_t* request) {
 
 FactoryApi::FactoryApi(FactoryRunner& runner) : runner_(runner) {}
 
-esp_err_t FactoryApi::start(uint16_t port, ConfigStore* config, SignageEngine* signage) {
+esp_err_t FactoryApi::start(
+    uint16_t port,
+    ConfigStore* config,
+    SignageEngine* signage,
+    Scheduler* scheduler,
+    NodeSync* node_sync
+) {
     config_ = config;
     signage_ = signage;
+    scheduler_ = scheduler;
+    node_sync_ = node_sync;
 
     httpd_config_t http_config = HTTPD_DEFAULT_CONFIG();
     http_config.server_port = port;
@@ -744,8 +1005,12 @@ esp_err_t FactoryApi::start(uint16_t port, ConfigStore* config, SignageEngine* s
         { .uri = "/api/v1/config",            .method = HTTP_GET,  .handler = get_device_config, .user_ctx = this },
         { .uri = "/api/v1/config",            .method = HTTP_PUT,  .handler = put_device_config, .user_ctx = this },
         { .uri = "/api/v1/status",            .method = HTTP_GET,  .handler = get_signage_status, .user_ctx = this },
+        { .uri = "/api/v1/effects",           .method = HTTP_GET,  .handler = get_effects,        .user_ctx = this },
         { .uri = "/api/v1/sequence",          .method = HTTP_GET,  .handler = get_sequence,     .user_ctx = this },
         { .uri = "/api/v1/sequence",          .method = HTTP_PUT,  .handler = put_sequence,     .user_ctx = this },
+        { .uri = "/api/v1/schedules",         .method = HTTP_GET,  .handler = get_calendar_schedule, .user_ctx = this },
+        { .uri = "/api/v1/schedules",         .method = HTTP_PUT,  .handler = put_calendar_schedule, .user_ctx = this },
+        { .uri = "/api/v1/sync",              .method = HTTP_GET,  .handler = get_sync_status,     .user_ctx = this },
         // ── WebSocket + Dashboard ──
         { .uri = "/ws", .method = HTTP_GET, .handler = ws_handler, .user_ctx = this,
           .is_websocket = true, .handle_ws_control_frames = false, .supported_subprotocol = nullptr },

@@ -118,6 +118,26 @@ esp_err_t ConfigStore::load_sequence(Sequence& seq) {
     return err;
 }
 
+// ── Calendar scheduling ────────────────────────────────────────────────
+
+esp_err_t ConfigStore::save_calendar_schedule(const CalendarSchedule& schedule) {
+    ESP_RETURN_ON_ERROR(
+        nvs_set_blob(handle_, "calendar", &schedule, sizeof(CalendarSchedule)),
+        TAG, "save calendar"
+    );
+    return nvs_commit(handle_);
+}
+
+esp_err_t ConfigStore::load_calendar_schedule(CalendarSchedule& schedule) {
+    size_t len = sizeof(CalendarSchedule);
+    esp_err_t err = nvs_get_blob(handle_, "calendar", &schedule, &len);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        schedule = CalendarSchedule{};
+        return ESP_OK;
+    }
+    return err;
+}
+
 // ── Active state ────────────────────────────────────────────────────
 
 esp_err_t ConfigStore::save_active_state(uint8_t preset_index) {

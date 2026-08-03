@@ -47,6 +47,16 @@ uint32_t xorshift(uint32_t& state) {
     return state;
 }
 
+uint8_t effect_parameter(const ChannelConfig& channel) {
+    const EffectMetadata& metadata = signage_effect_metadata(channel.effect);
+    if (!metadata.has_parameter) return 0;
+    if (channel.fx_param < metadata.parameter_min ||
+        channel.fx_param > metadata.parameter_max) {
+        return metadata.parameter_default;
+    }
+    return channel.fx_param;
+}
+
 } // namespace
 
 void render_lane_effect(
@@ -58,6 +68,7 @@ void render_lane_effect(
 ) {
     const uint8_t b = global_brightness;
     const uint16_t speed = channel.effect_speed_ms > 0 ? channel.effect_speed_ms : 1;
+    const uint8_t parameter = effect_parameter(channel);
     // apply phase offset (0-255 mapped to full speed period)
     const uint32_t phase_time_offset = (uint32_t(channel.phase_offset) * speed) / 255;
     const uint32_t t_ms = elapsed_ms + phase_time_offset;
@@ -79,7 +90,12 @@ void render_lane_effect(
         case SignageEffect::Breathe: {
             const uint8_t phase = static_cast<uint8_t>((uint32_t(t_ms % speed) * 255) / speed);
             const uint8_t sine_val = sine8(phase);
-            const uint8_t scaled_b = static_cast<uint8_t>(10 + (uint16_t(sine_val) * (b - 10)) / 255);
+            const uint8_t min_b = static_cast<uint8_t>(
+                (uint16_t(b) * parameter) / 100
+            );
+            const uint8_t scaled_b = static_cast<uint8_t>(
+                min_b + (uint16_t(sine_val) * (b - min_b)) / 255
+            );
             
             if (channel.pixel_enabled) {
                 output.pixels().fill(lane, apply_gamma(scale_rgb(channel.pixel_color, scaled_b)));
@@ -95,10 +111,12 @@ void render_lane_effect(
             const uint16_t pixels = LG_FACTORY_PIXELS_PER_LANE;
             const uint16_t pos = static_cast<uint16_t>((uint32_t(t_ms % speed) * pixels) / speed);
 
-            for (int16_t offset = 0; offset < 3; ++offset) {
+            for (uint8_t offset = 0; offset < parameter; ++offset) {
                 const int16_t px = static_cast<int16_t>(pos) - offset;
                 if (px < 0 || px >= pixels) continue;
-                const uint8_t tail_b = static_cast<uint8_t>((uint16_t(b) * (3 - offset)) / 3);
+                const uint8_t tail_b = static_cast<uint8_t>(
+                    (uint16_t(b) * (parameter - offset)) / parameter
+                );
                 output.pixels().set(lane, px, apply_gamma(scale_rgb(channel.pixel_color, tail_b)));
             }
 
@@ -127,7 +145,10 @@ void render_lane_effect(
         case SignageEffect::Reveal: {
             // Reveal this lane based on phase time offset
             const uint32_t cycle_pos = t_ms % speed;
-            const uint32_t fade_dur = speed / 4; 
+            const uint32_t fade_dur = std::max(
+                uint32_t(1),
+                (uint32_t(speed) * parameter) / 100
+            );
             
             uint8_t fade = 0;
             if (cycle_pos < fade_dur) {
@@ -152,7 +173,7 @@ void render_lane_effect(
             if (rng == 0) rng = 1;
 
             if (channel.pixel_enabled) {
-                for (int s = 0; s < 2; ++s) { // 2 sparkles per lane
+                for (uint8_t s = 0; s < parameter; ++s) {
                     const uint32_t rv = xorshift(rng);
                     const uint16_t px = (rv >> 3) % LG_FACTORY_PIXELS_PER_LANE;
                     output.pixels().set(lane, px, {255, 255, 255});
@@ -165,10 +186,15 @@ void render_lane_effect(
             if (!channel.pixel_enabled) break;
             const uint16_t pixels = LG_FACTORY_PIXELS_PER_LANE;
             const uint8_t shift = static_cast<uint8_t>((uint32_t(t_ms % speed) * 255) / speed);
+            const uint8_t contrast = static_cast<uint8_t>(
+                (uint16_t(parameter) * 255) / 100
+            );
 
             for (uint16_t px = 0; px < pixels; ++px) {
                 const uint8_t pos_phase = static_cast<uint8_t>((uint16_t(px) * 255 / pixels) + shift);
-                const uint8_t intensity = sine8(pos_phase);
+                const uint8_t intensity = static_cast<uint8_t>(
+                    255 - ((uint16_t(255 - sine8(pos_phase)) * contrast) / 255)
+                );
                 const uint8_t pixel_b = scale8(b, intensity);
                 output.pixels().set(lane, px, apply_gamma(scale_rgb(channel.pixel_color, pixel_b)));
             }
@@ -180,9 +206,8 @@ void render_lane_effect(
         }
 
         case SignageEffect::Strobe: {
-            // Strobe on/off based on speed and fx_param
             const uint32_t cycle = t_ms % speed;
-            const uint32_t on_time = (speed * (channel.fx_param ? channel.fx_param : 50)) / 255;
+            const uint32_t on_time = (uint32_t(speed) * parameter) / 100;
             if (cycle < on_time) {
                 set_solid();
             }
@@ -194,11 +219,21 @@ void render_lane_effect(
             const uint16_t pixels = LG_FACTORY_PIXELS_PER_LANE;
             uint32_t rng = t_ms / (speed / 10 + 1); 
             if (rng == 0) rng = 1;
+            const uint8_t flame_height = static_cast<uint8_t>(
+                (uint16_t(parameter) * 255) / 100
+            );
             
             for (uint16_t px = 0; px < pixels; ++px) {
                 const uint32_t rv = xorshift(rng);
-                uint8_t heat = rv & 0xFF;
-                // Very simple heat-to-color mapping using base color
+                uint8_t heat = static_cast<uint8_t>(rv & 0xFF);
+                const uint8_t height = static_cast<uint8_t>(
+                    (uint32_t(px) * 255) / std::max<uint16_t>(1, pixels - 1)
+                );
+                if (height > flame_height && flame_height < 255) {
+                    heat = static_cast<uint8_t>(
+                        (uint16_t(heat) * (255 - height)) / (255 - flame_height)
+                    );
+                }
                 const uint8_t intensity = scale8(b, heat);
                 output.pixels().set(lane, px, apply_gamma(scale_rgb(channel.pixel_color, intensity)));
             }
@@ -208,6 +243,30 @@ void render_lane_effect(
             break;
         }
     }
+}
+
+bool preset_is_visible(
+    const BrandPreset& preset,
+    uint32_t elapsed_ms,
+    uint16_t sequencer_beat_ms
+) {
+    if (preset.overlay_effect == SignageModifier::None) return true;
+
+    if (preset.overlay_effect == SignageModifier::Strobe) {
+        const uint32_t speed = preset.overlay_speed_ms == 0
+            ? std::max<uint16_t>(1, sequencer_beat_ms)
+            : preset.overlay_speed_ms;
+        const uint8_t duty_cycle = std::max<uint8_t>(
+            5,
+            std::min<uint8_t>(
+                preset.overlay_param == 0 ? 50 : preset.overlay_param,
+                95
+            )
+        );
+        return (elapsed_ms % speed) < (speed * duty_cycle) / 100;
+    }
+
+    return true;
 }
 
 } // namespace lg

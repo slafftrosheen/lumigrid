@@ -1,5 +1,6 @@
 // components/scheduler/include/Scheduler.hpp
 #pragma once
+#include "ClockDiscipline.hpp"
 #include "ConfigStore.hpp"
 #include "SignageEngine.hpp"
 #include "esp_err.h"
@@ -9,31 +10,43 @@
 
 namespace lg {
 
-/// NTP time-sync + day-night schedule evaluator.
-///
-/// Starts an SNTP client, then periodically checks stored schedule entries
-/// against the current local time. When a matching entry is found, it
-/// activates the corresponding preset via SignageEngine.
+/// NTP time-sync, calendar trigger, and beat-sequencer evaluator.
 class Scheduler {
 public:
-    Scheduler(ConfigStore& config, SignageEngine& engine);
+    Scheduler(
+        ConfigStore& config,
+        SignageEngine& engine,
+        ClockDiscipline& clock
+    );
 
     /// Initialize SNTP and start the background evaluation task.
     esp_err_t start(const char* timezone);
 
-    /// Returns true if SNTP has obtained at least one valid time.
-    bool has_time() const { return time_synced_; }
+    /// Returns true once SNTP or a trusted sync leader has supplied an epoch.
+    bool has_time() const { return clock_.has_epoch(); }
 
 private:
     static void task_entry(void* arg);
     void task();
     void evaluate(const Sequence& seq, uint64_t clock_ms);
+    void evaluate_calendar(const CalendarSchedule& schedule, uint64_t clock_ms);
+    void refresh_config(uint64_t clock_ms);
 
     ConfigStore& config_;
     SignageEngine& engine_;
+    ClockDiscipline& clock_;
 
     bool time_synced_ = false;
     uint8_t last_step_index_[8] = {255, 255, 255, 255, 255, 255, 255, 255};
+    Sequence sequence_{};
+    CalendarSchedule calendar_{};
+    uint64_t last_config_refresh_ms_ = 0;
+    uint64_t last_calendar_minute_[8] = {
+        UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX,
+        UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX
+    };
+    bool calendar_sequence_active_ = false;
+    uint64_t calendar_sequence_started_ms_ = 0;
 
     TaskHandle_t task_handle_ = nullptr;
 };

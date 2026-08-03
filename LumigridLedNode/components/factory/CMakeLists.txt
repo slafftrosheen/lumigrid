@@ -9,6 +9,8 @@ idf_component_register(
         output
         config
         signage
+        scheduler
+        sync
         esp_http_server
         cjson
         esp_timer
