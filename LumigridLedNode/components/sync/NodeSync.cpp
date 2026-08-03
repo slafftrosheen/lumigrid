@@ -148,6 +148,9 @@ void NodeSync::master_task() {
         close(socket);
     }
     sock_ = -1;
+    portENTER_CRITICAL(&status_mutex_);
+    running_ = false;
+    portEXIT_CRITICAL(&status_mutex_);
     task_handle_ = nullptr;
 }
 
@@ -159,6 +162,9 @@ void NodeSync::worker_task() {
         close(socket);
     }
     sock_ = -1;
+    portENTER_CRITICAL(&status_mutex_);
+    running_ = false;
+    portEXIT_CRITICAL(&status_mutex_);
     task_handle_ = nullptr;
 }
 
@@ -166,14 +172,27 @@ void NodeSync::auto_task() {
     int socket = -1;
     if (open_socket(socket, true)) {
         sock_ = socket;
-        worker_loop(socket, true);
+        NodeRole next_role = NodeRole::Worker;
+        for (;;) {
+            portENTER_CRITICAL(&status_mutex_);
+            const bool running = running_;
+            portEXIT_CRITICAL(&status_mutex_);
+            if (!running) break;
+
+            next_role = next_role == NodeRole::Master
+                ? master_loop(socket, true)
+                : worker_loop(socket, true);
+        }
         close(socket);
     }
     sock_ = -1;
+    portENTER_CRITICAL(&status_mutex_);
+    running_ = false;
+    portEXIT_CRITICAL(&status_mutex_);
     task_handle_ = nullptr;
 }
 
-void NodeSync::master_loop(int socket, bool auto_mode) {
+NodeRole NodeSync::master_loop(int socket, bool auto_mode) {
     uint8_t local_mac[6] = {};
     esp_read_mac(local_mac, ESP_MAC_WIFI_STA);
 
@@ -246,17 +265,14 @@ void NodeSync::master_loop(int socket, bool auto_mode) {
             active_role_ = NodeRole::Worker;
             portEXIT_CRITICAL(&status_mutex_);
             reset_master();
-            worker_loop(socket, true);
-            return;
+            return NodeRole::Worker;
         }
     }
 
-    portENTER_CRITICAL(&status_mutex_);
-    running_ = false;
-    portEXIT_CRITICAL(&status_mutex_);
+    return NodeRole::Master;
 }
 
-void NodeSync::worker_loop(int socket, bool auto_mode) {
+NodeRole NodeSync::worker_loop(int socket, bool auto_mode) {
     uint8_t local_mac[6] = {};
     esp_read_mac(local_mac, ESP_MAC_WIFI_STA);
     const uint32_t started_ms = now_ms();
@@ -302,15 +318,12 @@ void NodeSync::worker_loop(int socket, bool auto_mode) {
                 active_role_ = NodeRole::Master;
                 portEXIT_CRITICAL(&status_mutex_);
                 reset_master();
-                master_loop(socket, true);
-                return;
+                return NodeRole::Master;
             }
         }
     }
 
-    portENTER_CRITICAL(&status_mutex_);
-    running_ = false;
-    portEXIT_CRITICAL(&status_mutex_);
+    return NodeRole::Worker;
 }
 
 bool NodeSync::handle_heartbeat(

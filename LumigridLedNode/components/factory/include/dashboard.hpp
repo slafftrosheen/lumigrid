@@ -177,6 +177,7 @@ static const char dashboard_html[] = R"LGHTML(<!DOCTYPE html>
 
         /* Product dashboard */
         #experience-auth, #product-app { min-height: 100vh; }
+        #experience-auth[hidden], #product-app[hidden] { display: none; }
         #experience-auth {
             display: grid; place-items: center; padding: 1.5rem;
             background:
@@ -698,12 +699,15 @@ async function saveSettings() {
 
 <section id="experience-auth" aria-labelledby="login-title">
     <div class="experience-login">
+        <form onsubmit="lg.connect(); return false;">
         <p class="eyebrow">LumiGrid lighting control</p>
         <h1 id="login-title">Make light feel alive.</h1>
         <p class="muted">Connect securely to this node to arrange scenes, timelines, and automation.</p>
+        <input type="text" autocomplete="username" tabindex="-1" aria-hidden="true" hidden>
         <label for="experience-token">Node access token</label>
         <input id="experience-token" type="password" autocomplete="current-password" placeholder="Enter the token supplied with this node">
-        <button class="button-primary" style="width:100%;margin-top:1rem" onclick="lg.connect()">Connect</button>
+        <button class="button-primary" type="submit" style="width:100%;margin-top:1rem">Connect</button>
+        </form>
     </div>
 </section>
 

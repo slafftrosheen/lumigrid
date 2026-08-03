@@ -42,6 +42,10 @@ void Scheduler::task_entry(void* arg) {
 
 void Scheduler::task() {
     for (int attempt = 0; attempt < 30; ++attempt) {
+        if (clock_.has_epoch()) {
+            time_synced_ = true;
+            break;
+        }
         vTaskDelay(pdMS_TO_TICKS(2000));
         time_t now_epoch;
         time(&now_epoch);

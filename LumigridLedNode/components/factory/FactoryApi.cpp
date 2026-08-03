@@ -822,8 +822,10 @@ esp_err_t get_calendar_schedule(httpd_req_t* request) {
     FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
     if (!api_ptr->config()) return send_error(request, "503 Service Unavailable", "config_not_ready");
 
-    CalendarSchedule schedule;
-    api_ptr->config()->load_calendar_schedule(schedule);
+    CalendarSchedule schedule{};
+    if (api_ptr->config()->load_calendar_schedule(schedule) != ESP_OK) {
+        return send_error(request, "500 Internal Server Error", "nvs_read_failed");
+    }
 
     cJSON* response = cJSON_CreateObject();
     cJSON* entries = cJSON_CreateArray();

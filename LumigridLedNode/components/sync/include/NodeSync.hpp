@@ -58,8 +58,8 @@ private:
     void master_task();
     void worker_task();
     void auto_task();
-    void master_loop(int socket, bool auto_mode);
-    void worker_loop(int socket, bool auto_mode);
+    NodeRole master_loop(int socket, bool auto_mode);
+    NodeRole worker_loop(int socket, bool auto_mode);
     bool open_socket(int& socket, bool broadcast);
     bool handle_heartbeat(const SyncPacket& packet, const sockaddr_in& sender);
     void send_ack(int socket, const SyncPacket& heartbeat, const sockaddr_in& sender);
