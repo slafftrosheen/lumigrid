@@ -15,4 +15,11 @@ void render_lane_effect(
     uint32_t elapsed_ms
 );
 
+/// Returns whether a preset-level modifier permits the current frame to render.
+bool preset_is_visible(
+    const BrandPreset& preset,
+    uint32_t elapsed_ms,
+    uint16_t sequencer_beat_ms
+);
+
 } // namespace lg

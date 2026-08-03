@@ -122,6 +122,7 @@ void SignageEngine::render_frame(uint32_t current_ms) {
     xSemaphoreTake(mutex_, portMAX_DELAY);
 
     BrandPreset render_preset;
+    uint16_t beat_period_ms = 500;
 
     if (transitioning_) {
         const uint32_t elapsed = current_ms - transition_start_ms_;
@@ -144,6 +145,7 @@ void SignageEngine::render_frame(uint32_t current_ms) {
     }
 
     const uint32_t effect_elapsed = current_ms - preset_started_ms_;
+    beat_period_ms = beat_period_ms_;
     xSemaphoreGive(mutex_);
 
     // Apply soft-start factor
@@ -164,8 +166,10 @@ void SignageEngine::render_frame(uint32_t current_ms) {
     // Render the effects per lane
     output_.pixels().clear();
     output_.pwm().set_all(0);
-    for (uint8_t i = 0; i < 8; ++i) {
-        render_lane_effect(i, output_, render_preset.channels[i], render_preset.brightness, effect_elapsed);
+    if (preset_is_visible(render_preset, effect_elapsed, beat_period_ms)) {
+        for (uint8_t i = 0; i < 8; ++i) {
+            render_lane_effect(i, output_, render_preset.channels[i], render_preset.brightness, effect_elapsed);
+        }
     }
     output_.commit();
 }
@@ -264,6 +268,13 @@ uint8_t SignageEngine::active_preset_index() const {
 void SignageEngine::set_stream_override(bool active) {
     xSemaphoreTake(mutex_, portMAX_DELAY);
     stream_override_ = active;
+    xSemaphoreGive(mutex_);
+}
+
+void SignageEngine::set_beat_period(uint16_t period_ms) {
+    if (!mutex_) return;
+    xSemaphoreTake(mutex_, portMAX_DELAY);
+    beat_period_ms_ = std::clamp<uint16_t>(period_ms, 10, 60000);
     xSemaphoreGive(mutex_);
 }
 

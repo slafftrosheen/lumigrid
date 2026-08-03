@@ -44,6 +44,9 @@ public:
     /// Set stream override mode (Art-Net takes over rendering).
     void set_stream_override(bool active);
 
+    /// Set the beat period used by beat-synced preset modifiers.
+    void set_beat_period(uint16_t period_ms);
+
 private:
     static void task_entry(void* arg);
     void task();
@@ -73,6 +76,7 @@ private:
 
     // Stream override (Art-Net/DMX)
     bool stream_override_ = false;
+    uint16_t beat_period_ms_ = 500;
 
     // Soft-start tracking
     uint32_t enable_ms_ = 0;

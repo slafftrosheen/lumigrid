@@ -26,6 +26,10 @@ public:
     esp_err_t save_sequence(const Sequence& seq);
     esp_err_t load_sequence(Sequence& seq);
 
+    // ── Calendar scheduling ──
+    esp_err_t save_calendar_schedule(const CalendarSchedule& schedule);
+    esp_err_t load_calendar_schedule(CalendarSchedule& schedule);
+
     // ── Active state (power-loss recovery) ──
     esp_err_t save_active_state(uint8_t preset_index);
     esp_err_t load_active_state(uint8_t& preset_index);

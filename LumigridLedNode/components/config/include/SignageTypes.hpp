@@ -27,19 +27,39 @@ enum class SignageEffect : uint8_t {
     Fire     = 8
 };
 
+struct EffectMetadata {
+    const char* id;
+    const char* label;
+    const char* description;
+    const char* parameter_label;
+    const char* parameter_unit;
+    uint8_t parameter_min;
+    uint8_t parameter_max;
+    uint8_t parameter_default;
+    bool has_parameter;
+};
+
+inline const EffectMetadata& signage_effect_metadata(SignageEffect effect) {
+    static constexpr EffectMetadata kMetadata[] = {
+        {"solid",    "Steady color",  "A constant, even wash of color.",                         "",              "",         0,  0,   0, false},
+        {"breathe",  "Smooth pulse",  "Gently fades between a soft glow and full brightness.",    "Minimum glow",  "%",        0, 100,   4, true},
+        {"chase",    "Moving comet",  "A bright comet travels along the strip.",                  "Tail length",   "pixels",   1,   8,   3, true},
+        {"sweep",    "Color sweep",   "Builds color across the strip from end to end.",           "",              "",         0,   0,   0, false},
+        {"reveal",   "Soft reveal",   "Fades the lane in for a polished sign-on.",                "Fade length",   "%",       10,  90,  25, true},
+        {"sparkle",  "Random twinkle","Adds crisp white twinkles over the base color.",           "Twinkles",      "per lane", 1,  12,   2, true},
+        {"gradient", "Flowing glow",  "Moves a soft wave of light along the strip.",              "Wave contrast", "%",        0, 100, 100, true},
+        {"strobe",   "Beat strobe",   "Flashes the lane with an adjustable on-time.",             "Flash time",    "%",        5,  95,  50, true},
+        {"fire",     "Living flame",  "Creates a flickering flame texture from the selected color.","Flame height", "%",       20, 100,  70, true},
+    };
+
+    const uint8_t index = static_cast<uint8_t>(effect);
+    return index < sizeof(kMetadata) / sizeof(kMetadata[0])
+        ? kMetadata[index]
+        : kMetadata[0];
+}
+
 inline const char* signage_effect_name(SignageEffect e) {
-    switch (e) {
-        case SignageEffect::Solid:    return "solid";
-        case SignageEffect::Breathe:  return "breathe";
-        case SignageEffect::Chase:    return "chase";
-        case SignageEffect::Sweep:    return "sweep";
-        case SignageEffect::Reveal:   return "reveal";
-        case SignageEffect::Sparkle:  return "sparkle";
-        case SignageEffect::Gradient: return "gradient";
-        case SignageEffect::Strobe:   return "strobe";
-        case SignageEffect::Fire:     return "fire";
-    }
-    return "unknown";
+    return signage_effect_metadata(e).id;
 }
 
 inline bool parse_signage_effect(const char* name, SignageEffect& out) {
@@ -53,6 +73,32 @@ inline bool parse_signage_effect(const char* name, SignageEffect& out) {
     if (strcmp(name, "gradient") == 0) { out = SignageEffect::Gradient; return true; }
     if (strcmp(name, "strobe")   == 0) { out = SignageEffect::Strobe;   return true; }
     if (strcmp(name, "fire")     == 0) { out = SignageEffect::Fire;     return true; }
+    return false;
+}
+
+enum class SignageModifier : uint8_t {
+    None   = 0,
+    Strobe = 1,
+};
+
+inline const char* signage_modifier_name(SignageModifier modifier) {
+    switch (modifier) {
+        case SignageModifier::None:   return "none";
+        case SignageModifier::Strobe: return "strobe";
+    }
+    return "none";
+}
+
+inline bool parse_signage_modifier(const char* name, SignageModifier& out) {
+    if (!name) return false;
+    if (strcmp(name, "none") == 0) {
+        out = SignageModifier::None;
+        return true;
+    }
+    if (strcmp(name, "strobe") == 0) {
+        out = SignageModifier::Strobe;
+        return true;
+    }
     return false;
 }
 
@@ -77,7 +123,9 @@ struct BrandPreset {
     ChannelConfig channels[8]    = {};  // Per-channel configuration
     uint8_t       brightness     = 128; // Global brightness (0–255)
     uint16_t      transition_ms  = 1000;   // Cross-fade duration (ms)
-    uint8_t       _reserved[4]   = {};     // Future use, keeps alignment
+    uint16_t      overlay_speed_ms = 500;  // 0 = follow sequencer beat
+    SignageModifier overlay_effect = SignageModifier::None;
+    uint8_t       overlay_param = 50;      // Modifier-specific percentage
 
     void set_name(const char* n) {
         strncpy(name, n, sizeof(name) - 1);
@@ -103,6 +151,27 @@ struct Sequence {
     SequencerTrack tracks[8] = {};
     uint16_t       bpm       = 120;
     bool           enabled   = false;
+};
+
+// ──────────────────────────── Calendar Scheduler ───────────────────────
+
+enum class CalendarAction : uint8_t {
+    Preset   = 0,
+    Sequence = 1,
+};
+
+struct CalendarScheduleEntry {
+    uint8_t        hour = 0;
+    uint8_t        minute = 0;
+    uint8_t        days_of_week = 0x7F; // Sunday bit 0 through Saturday bit 6
+    uint8_t        preset_index = 0;
+    CalendarAction action = CalendarAction::Preset;
+    bool           enabled = false;
+    uint8_t        _reserved[2] = {};
+};
+
+struct CalendarSchedule {
+    CalendarScheduleEntry entries[8] = {};
 };
 
 // ──────────────────────────── Device Config ───────────────────────────
