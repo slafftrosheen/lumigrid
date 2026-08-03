@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <atomic>
 
 #include "esp_err.h"
 #include "esp_event.h"
@@ -53,9 +54,9 @@ private:
 
     WifiConfig config_{};
     WifiStateCallback callback_{};
-    WifiState state_ = WifiState::Idle;
+    std::atomic<WifiState> state_{WifiState::Idle};
     uint8_t retries_ = 0;
-    bool has_ip_ = false;
+    std::atomic<bool> has_ip_{false};
 };
 
 } // namespace lg

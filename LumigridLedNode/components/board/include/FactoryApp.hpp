@@ -3,11 +3,21 @@
 
 #define LG_FACTORY_BUILD 1
 
-// Begin with short known-good strips only.
-constexpr uint16_t LG_FACTORY_PIXELS_PER_LANE = 30;
+namespace lg {
 
-// Never start a high-power board at 100% during initial bring-up.
-constexpr uint8_t LG_FACTORY_DEFAULT_BRIGHTNESS = 32;
+/// Pixels per addressable LED lane during factory validation.
+/// Set conservatively for short known-good strips.
+constexpr uint16_t kFactoryPixelsPerLane = 30;
 
-// A test effect automatically blackouts after this time unless loop mode is set.
-constexpr uint32_t LG_FACTORY_MAX_TEST_MS = 60000;
+/// Default brightness — never start a high-power board at 100% during bring-up.
+constexpr uint8_t kFactoryDefaultBrightness = 32;
+
+/// Maximum test duration before automatic blackout (unless loop mode is set).
+constexpr uint32_t kFactoryMaxTestMs = 60000;
+
+} // namespace lg
+
+// Legacy aliases for existing code. Prefer lg::kFactory* in new code.
+constexpr uint16_t LG_FACTORY_PIXELS_PER_LANE = lg::kFactoryPixelsPerLane;
+constexpr uint8_t  LG_FACTORY_DEFAULT_BRIGHTNESS = lg::kFactoryDefaultBrightness;
+constexpr uint32_t LG_FACTORY_MAX_TEST_MS = lg::kFactoryMaxTestMs;

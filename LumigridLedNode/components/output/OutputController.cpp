@@ -7,6 +7,9 @@
 namespace lg {
 
 esp_err_t OutputController::init() {
+    mutex_ = xSemaphoreCreateMutex();
+    if (mutex_ == nullptr) return ESP_ERR_NO_MEM;
+
     const gpio_config_t cfg = {
         .pin_bit_mask = 1ULL << board::kPcaOe,
         .mode = GPIO_MODE_OUTPUT,
@@ -27,25 +30,39 @@ esp_err_t OutputController::init() {
 }
 
 void OutputController::disable() {
+    xSemaphoreTake(mutex_, portMAX_DELAY);
     gpio_set_level(board::kPcaOe, 1);
     enabled_ = false;
+    xSemaphoreGive(mutex_);
 }
 
 void OutputController::enable() {
+    xSemaphoreTake(mutex_, portMAX_DELAY);
     gpio_set_level(board::kPcaOe, 0);
     enabled_ = true;
+    xSemaphoreGive(mutex_);
 }
 
 esp_err_t OutputController::blackout() {
-    disable();
-    ESP_RETURN_ON_ERROR(pwm_.clear(), "output", "pwm clear");
-    return pixels_.blackout();
+    xSemaphoreTake(mutex_, portMAX_DELAY);
+    gpio_set_level(board::kPcaOe, 1);
+    enabled_ = false;
+    esp_err_t err = pwm_.clear();
+    if (err == ESP_OK) {
+        err = pixels_.blackout();
+    }
+    xSemaphoreGive(mutex_);
+    return err;
 }
 
 esp_err_t OutputController::commit() {
-    ESP_RETURN_ON_ERROR(pwm_.commit(), "output", "pwm commit");
-    ESP_RETURN_ON_ERROR(pixels_.show(), "output", "pixel show");
-    return ESP_OK;
+    xSemaphoreTake(mutex_, portMAX_DELAY);
+    esp_err_t err = pwm_.commit();
+    if (err == ESP_OK) {
+        err = pixels_.show();
+    }
+    xSemaphoreGive(mutex_);
+    return err;
 }
 
 } // namespace lg

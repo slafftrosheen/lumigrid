@@ -7,6 +7,8 @@ idf_component_register(
         "include"
     REQUIRES
         output
+        config
+        signage
         esp_http_server
         cjson
         esp_timer

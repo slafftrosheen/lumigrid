@@ -22,9 +22,16 @@ constexpr uint8_t kMode2OutDrv = 0x04;
 
 i2c_master_bus_handle_t s_bus = nullptr;
 i2c_master_dev_handle_t s_dev = nullptr;
+SemaphoreHandle_t s_i2c_mutex = nullptr;
 
 esp_err_t init_i2c_once() {
     if (s_bus != nullptr) return ESP_OK;
+
+    // Create mutex to protect I2C bus from concurrent access.
+    if (s_i2c_mutex == nullptr) {
+        s_i2c_mutex = xSemaphoreCreateMutex();
+        if (s_i2c_mutex == nullptr) return ESP_ERR_NO_MEM;
+    }
 
     const i2c_master_bus_config_t bus_cfg = {
         .i2c_port = I2C_NUM_0,
@@ -53,8 +60,11 @@ esp_err_t init_i2c_once() {
 }
 
 esp_err_t Pca9685::write_register(uint8_t reg, uint8_t value) {
+    xSemaphoreTake(s_i2c_mutex, portMAX_DELAY);
     const uint8_t packet[] = {reg, value};
-    return i2c_master_transmit(s_dev, packet, sizeof(packet), 100);
+    esp_err_t ret = i2c_master_transmit(s_dev, packet, sizeof(packet), 100);
+    xSemaphoreGive(s_i2c_mutex);
+    return ret;
 }
 
 esp_err_t Pca9685::write_bytes(uint8_t start_reg,
@@ -66,21 +76,14 @@ esp_err_t Pca9685::write_bytes(uint8_t start_reg,
     if (len > sizeof(packet) - 1) return ESP_ERR_INVALID_SIZE;
 
     memcpy(packet + 1, data, len);
-    return i2c_master_transmit(s_dev, packet, len + 1, 100);
+    xSemaphoreTake(s_i2c_mutex, portMAX_DELAY);
+    esp_err_t ret = i2c_master_transmit(s_dev, packet, len + 1, 100);
+    xSemaphoreGive(s_i2c_mutex);
+    return ret;
 }
 
 esp_err_t Pca9685::init() {
     ESP_RETURN_ON_ERROR(init_i2c_once(), "pca", "i2c init");
-
-    // Initialize the PCA9685 directly without scanning
-    const i2c_device_config_t dev_cfg = {
-        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
-        .device_address = lg::board::kPcaAddress,
-        .scl_speed_hz = 100000
-    };
-    if (s_dev == nullptr) {
-        ESP_RETURN_ON_ERROR(i2c_master_bus_add_device(s_bus, &dev_cfg, &s_dev), "pca", "add dev");
-    }
 
     ESP_LOGI("pca", "Initializing PCA9685 at 0x%02X...", lg::board::kPcaAddress);
     
@@ -91,53 +94,30 @@ esp_err_t Pca9685::init() {
         return err;
     }
 
-    // Prescale 5 ~= 1017 Hz with 25 MHz nominal oscillator
-    write_register(kPrescale, 5);
-    write_register(kMode2, kMode2OutDrv);
-    write_register(kMode1, kMode1Ai | kMode1Restart);
+    // Prescale 5 ~= 1017 Hz with 25 MHz nominal oscillator.
+    // These writes are critical — propagate any failure immediately.
+    ESP_RETURN_ON_ERROR(write_register(kPrescale, 5), "pca", "prescale");
+    ESP_RETURN_ON_ERROR(write_register(kMode2, kMode2OutDrv), "pca", "mode2");
+    ESP_RETURN_ON_ERROR(write_register(kMode1, kMode1Ai | kMode1Restart), "pca", "wake");
 
-    ESP_LOGW("pca", "Testing read-back from PCA9685...");
-    
+    // Verify chip communication with a read-back.
     uint8_t reg = kMode1;
     uint8_t val = 0;
+    xSemaphoreTake(s_i2c_mutex, portMAX_DELAY);
     err = i2c_master_transmit_receive(s_dev, &reg, 1, &val, 1, 100);
-    
+    xSemaphoreGive(s_i2c_mutex);
+
     if (err == ESP_OK) {
-        ESP_LOGW("pca", ">>> READ MODE1 REGISTER: 0x%02X <<<", val);
+        ESP_LOGD("pca", "MODE1 read-back: 0x%02X", val);
         if (val == 0x00 || val == 0xFF) {
-            ESP_LOGE("pca", "WARNING: Read 0x%02X. The chip might be dead or bus is stuck!", val);
-        } else {
-            ESP_LOGW("pca", "Valid data read! The I2C bus is genuinely working!");
+            ESP_LOGE("pca", "Read 0x%02X — chip may be dead or bus stuck", val);
         }
     } else {
-        ESP_LOGE("pca", "Read failed! Error: %s", esp_err_to_name(err));
+        ESP_LOGW("pca", "Read-back failed: %s (non-fatal)", esp_err_to_name(err));
     }
 
-
-
-    ESP_LOGW("pca", "Test complete. Sending sleep command...");
-    // Sleep before changing prescale.
-    esp_err_t err_w = write_register(kMode1, kMode1Sleep | kMode1Ai);
-    if (err_w != ESP_OK) ESP_LOGE("pca", "Sleep write failed: %s", esp_err_to_name(err_w));
-    ESP_LOGW("pca", "Sending prescale...");
-
-    // Prescale 5 ~= 1017 Hz with 25 MHz nominal oscillator:
-    // 25,000,000 / (4096 * (5 + 1)) ~= 1017 Hz.
-    err_w = write_register(kPrescale, 5);
-    if (err_w != ESP_OK) ESP_LOGE("pca", "Prescale write failed: %s", esp_err_to_name(err_w));
-    ESP_LOGW("pca", "Sending mode2...");
-
-    err_w = write_register(kMode2, kMode2OutDrv);
-    if (err_w != ESP_OK) ESP_LOGE("pca", "Mode2 write failed: %s", esp_err_to_name(err_w));
-    ESP_LOGW("pca", "Sending wake...");
-
-    err_w = write_register(kMode1, kMode1Ai | kMode1Restart);
-    if (err_w != ESP_OK) ESP_LOGE("pca", "Wake write failed: %s", esp_err_to_name(err_w));
-    ESP_LOGW("pca", "Clearing values...");
-
-    esp_err_t res = clear();
-    ESP_LOGW("pca", "Init function returning %d", res);
-    return res;
+    ESP_LOGD("pca", "Clearing values...");
+    return clear();
 }
 
 esp_err_t Pca9685::set(uint8_t channel, uint16_t duty) {

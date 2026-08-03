@@ -5,9 +5,10 @@
 namespace lg::api {
 namespace {
 
-// Replace before any network exposure.
-// Prefer a 32-byte random token, provisioned into encrypted NVS for production.
-constexpr char kFactoryToken[] = "CHANGE-ME-LUMIGRID-FACTORY-TOKEN";
+// TODO(security): HARDCODED FACTORY TOKEN — MUST be replaced before any
+// production or network-exposed deployment. Provision a 32-byte random
+// token into encrypted NVS. This token is also embedded in dashboard.hpp.
+constexpr char kFactoryToken[] = "lumigrid-factory-token-v1";
 
 }
 

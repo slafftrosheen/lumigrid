@@ -7,7 +7,9 @@ namespace lg {
 
 class Pca9685 {
 public:
-    static constexpr uint8_t kChannels = 8;
+    // Note: The PCA9685 IC supports 16 channels, but only the first 8 are broken out 
+    // on the Lumigrid PCB. Therefore, we limit the driver to 8 channels.
+    static constexpr size_t kChannels = 8;
 
     esp_err_t init();
     esp_err_t set(uint8_t channel, uint16_t duty);

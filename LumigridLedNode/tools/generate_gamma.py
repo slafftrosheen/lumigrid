@@ -16,6 +16,6 @@ def generate_gamma_lut(output_path: Path, gamma: float = 2.2) -> None:
 
 
 if __name__ == "__main__":
-    path = Path(__file__).resolve().parents[1] / "include" / "frame" / "lg_gamma_lut.hpp"
+    path = Path(__file__).resolve().parents[1] / "components" / "output" / "include" / "lg_gamma_lut.hpp"
     generate_gamma_lut(path)
     print(f"Gamma LUT written to {path}")

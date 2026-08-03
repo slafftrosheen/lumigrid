@@ -4,6 +4,7 @@
 #include <arpa/inet.h>
 #include <cstring>
 #include <sys/socket.h>
+#include "esp_netif.h"
 
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -145,57 +146,92 @@ bool ArtnetDiscovery::handle_dmx(const uint8_t* packet, size_t length) {
 
 void ArtnetDiscovery::send_poll_reply(const sockaddr_in& destination, int sock) {
     uint8_t reply[239] = {};
-    std::memcpy(reply, "Art-Net\0", 8);
-    write_le16(reply + 8, kOpPollReply);
 
-    reply[10] = info_.ip[0];
-    reply[11] = info_.ip[1];
-    reply[12] = info_.ip[2];
-    reply[13] = info_.ip[3];
+    // --- Header (0-9) ---
+    std::memcpy(reply, "Art-Net\0", 8);         // 0-7:   ID
+    write_le16(reply + 8, kOpPollReply);         // 8-9:   OpCode 0x2100 LE
 
-    reply[14] = 0x36;
+    // --- IP Address (10-13) ---
+    esp_netif_ip_info_t ip_info = {};
+    esp_netif_t* netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    if (!netif || esp_netif_get_ip_info(netif, &ip_info) != ESP_OK || ip_info.ip.addr == 0) {
+        netif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
+        if (netif) esp_netif_get_ip_info(netif, &ip_info);
+    }
+
+    if (netif) {
+        const uint8_t* ip_bytes = reinterpret_cast<const uint8_t*>(&ip_info.ip.addr);
+        reply[10] = ip_bytes[0];                 // 10-13: IP (network byte order)
+        reply[11] = ip_bytes[1];
+        reply[12] = ip_bytes[2];
+        reply[13] = ip_bytes[3];
+    } else {
+        reply[10] = info_.ip[0];
+        reply[11] = info_.ip[1];
+        reply[12] = info_.ip[2];
+        reply[13] = info_.ip[3];
+    }
+
+    // --- Port (14-15) ---
+    reply[14] = 0x36;                            // 14-15: Port 0x1936 LE
     reply[15] = 0x19;
 
-    reply[16] = static_cast<uint8_t>((info_.version >> 8) & 0xFF);
-    reply[17] = static_cast<uint8_t>(info_.version & 0xFF);
+    // --- Firmware Version (16-17, big-endian) ---
+    reply[16] = static_cast<uint8_t>((info_.version >> 8) & 0xFF); // 16: VersInfoH
+    reply[17] = static_cast<uint8_t>(info_.version & 0xFF);        // 17: VersInfoL
 
-    reply[18] = info_.net;
-    reply[19] = 0x00;
-    write_le16(reply + 20, info_.oem);
-    reply[23] = 0x00;
-    write_le16(reply + 24, info_.esta);
+    // --- Net/Sub/OEM (18-21) ---
+    reply[18] = info_.net;                       // 18: NetSwitch
+    reply[19] = info_.subnet;                    // 19: SubSwitch
+    reply[20] = static_cast<uint8_t>((info_.oem >> 8) & 0xFF); // 20: OemHi (big-endian)
+    reply[21] = static_cast<uint8_t>(info_.oem & 0xFF);        // 21: OemLo
 
-    copy_padded(reply + 26, 18, info_.short_name);
-    copy_padded(reply + 44, 64, info_.long_name);
-    copy_padded(reply + 108, 64, info_.report);
+    // --- Status/ESTA (22-25) ---
+    reply[22] = 0x00;                            // 22: UbeaVersion
+    reply[23] = info_.status1;                   // 23: Status1
+    write_le16(reply + 24, info_.esta);          // 24-25: EstaMan (little-endian per spec)
 
-    reply[172] = 0x00;
-    reply[173] = 0x01; // NumPorts
+    // --- Names & Report (26-171) ---
+    copy_padded(reply + 26, 18, info_.short_name);  // 26-43:   ShortName[18]
+    copy_padded(reply + 44, 64, info_.long_name);   // 44-107:  LongName[64]
+    copy_padded(reply + 108, 64, info_.report);      // 108-171: NodeReport[64]
 
-    reply[174] = 0x80; // Port 1 type: output data
-    reply[175] = 0x00;
-    reply[176] = 0x80;
-    reply[177] = 0x00;
+    // --- Port Info (172-177) ---
+    reply[172] = 0x00;                           // 172: NumPortsHi
+    reply[173] = 0x01;                           // 173: NumPortsLo = 1
+    reply[174] = 0x80;                           // 174: PortTypes[0] = output
+    // 175-177: PortTypes[1-3] = 0 (unused ports)
 
-    reply[178] = 0x00; // GoodInput
-    reply[179] = info_.universe;
-    reply[180] = 0x00;
-    reply[181] = 0x00;
+    // --- Good Input/Output (178-185) ---
+    // 178-181: GoodInput[0-3] = 0 (no input ports)
+    reply[182] = 0x80;                           // 182: GoodOutputA[0] = data transmitting
+    // 183-185: GoodOutputA[1-3] = 0 (unused ports)
 
-    reply[182] = 0x00;
-    reply[183] = 0x80; // GoodOutput (data is being transmitted)
-    reply[184] = 0x00;
-    reply[185] = 0x00;
+    // --- SwIn/SwOut (186-193) ---
+    // 186-189: SwIn[0-3] = 0 (no input ports)
+    reply[190] = info_.universe;                 // 190: SwOut[0] = output universe
+    // 191-193: SwOut[1-3] = 0 (unused ports)
 
-    reply[186] = 0x00;
-    reply[187] = 0x00;
+    // --- Misc (194-199) ---
+    // 194: AcnPriority = 0
+    // 195: SwMacro = 0 (deprecated)
+    // 196: SwRemote = 0 (deprecated)
+    // 197-199: Spare[3] = 0
 
-    reply[188] = info_.style;
+    // --- Style (200) ---
+    reply[200] = info_.style;                    // 200: Style
 
-    for (int i = 0; i < 6; ++i) reply[201 + i] = info_.mac[i];
+    // --- MAC (201-206) ---
+    for (int i = 0; i < 6; ++i) {
+        reply[201 + i] = info_.mac[i];           // 201-206: MAC[6]
+    }
 
-    reply[212] = info_.status1;
-    reply[213] = info_.status2;
+    // --- Bind/Status2 (207-212) ---
+    // 207-210: BindIp[4] = 0 (same as node IP, already reported)
+    reply[211] = 1;                              // 211: BindIndex (1 = root device)
+    reply[212] = info_.status2;                  // 212: Status2
+
+    // 213-238: Art-Net 4 extended fields default to 0
 
     sockaddr_in dest = destination;
     dest.sin_port = htons(kArtnetPort);

@@ -11,45 +11,69 @@
 #include "ArtnetDiscovery.hpp"
 #include "FactoryTypes.hpp"
 
+// Signage components
+#include "ConfigStore.hpp"
+#include "SignageEngine.hpp"
+#include "Scheduler.hpp"
+#include "NodeSync.hpp"
+
 extern "C" void app_main(void) {
+    // All service objects are static so they survive app_main() return
+    // and remain valid for the WiFi callback lambda that captures them by reference.
     static lg::OutputController output;
+    static lg::ConfigStore config;
     static lg::FactoryRunner runner(output);
     static lg::FactoryApi api(runner);
     static lg::WifiService wifi;
     static lg::MdnsService mdns;
     static lg::ArtnetDiscovery artnet;
+    static lg::SignageEngine signage(output, config);
+    static lg::Scheduler scheduler(config, signage);
+    static lg::NodeSync node_sync(signage);
 
-    ESP_LOGI("lumigrid-factory", "=== BOOT START ===");
+    ESP_LOGI("lumigrid", "=== BOOT START ===");
     vTaskDelay(pdMS_TO_TICKS(1000)); // Let serial console connect
 
-    ESP_LOGI("lumigrid-factory", "Step 1: output.init()...");
-    esp_err_t err = output.init();
-    if (err != ESP_OK) ESP_LOGE("lumigrid-factory", "output.init() FAILED: %s", esp_err_to_name(err));
-    else ESP_LOGI("lumigrid-factory", "output.init() OK");
+    // Step 1: NVS config store — must come before output to load power settings
+    ESP_LOGI("lumigrid", "Step 1: config.init()...");
+    esp_err_t err = config.init();
+    if (err != ESP_OK) ESP_LOGE("lumigrid", "config.init() FAILED: %s", esp_err_to_name(err));
+    else ESP_LOGI("lumigrid", "config.init() OK");
+
+    // Step 2: Hardware output
+    ESP_LOGI("lumigrid", "Step 2: output.init()...");
+    err = output.init();
+    if (err != ESP_OK) ESP_LOGE("lumigrid", "output.init() FAILED: %s", esp_err_to_name(err));
+    else ESP_LOGI("lumigrid", "output.init() OK");
     vTaskDelay(pdMS_TO_TICKS(500));
 
-    ESP_LOGI("lumigrid-factory", "Step 2: output.blackout()...");
-    err = output.blackout();
-    if (err != ESP_OK) ESP_LOGE("lumigrid-factory", "output.blackout() FAILED: %s", esp_err_to_name(err));
-    else ESP_LOGI("lumigrid-factory", "output.blackout() OK");
-    vTaskDelay(pdMS_TO_TICKS(500));
+    // Step 3: Signage engine — renders active preset IMMEDIATELY (before network)
+    ESP_LOGI("lumigrid", "Step 3: signage.start() (renders from NVS preset before network)...");
+    err = signage.start();
+    if (err != ESP_OK) ESP_LOGE("lumigrid", "signage.start() FAILED: %s", esp_err_to_name(err));
+    else ESP_LOGI("lumigrid", "signage.start() OK — sign is lit");
 
-    ESP_LOGI("lumigrid-factory", "Step 3: runner.start()...");
+    // Step 4: Factory test runner (coexists with signage engine)
+    ESP_LOGI("lumigrid", "Step 4: runner.start()...");
     err = runner.start();
-    if (err != ESP_OK) ESP_LOGE("lumigrid-factory", "runner.start() FAILED: %s", esp_err_to_name(err));
-    else ESP_LOGI("lumigrid-factory", "runner.start() OK — auto-loop should be driving LEDs now");
+    if (err != ESP_OK) ESP_LOGE("lumigrid", "runner.start() FAILED: %s", esp_err_to_name(err));
+    else ESP_LOGI("lumigrid", "runner.start() OK");
     vTaskDelay(pdMS_TO_TICKS(500));
+
+    // Load device config for WiFi and service settings
+    lg::DeviceConfig dev_cfg;
+    config.load_config(dev_cfg);
 
     lg::WifiConfig wifi_cfg{
         .mode = lg::WifiMode::ApOnly,
-        .sta_ssid = "YOUR_WIFI",
-        .sta_password = "YOUR_PASS",
+        .sta_ssid = "",
+        .sta_password = "",
         .ap_ssid = "LumiGrid-Factory",
         .ap_password = "lumigrid123",
         .max_retry = 1
     };
 
-    ESP_LOGI("lumigrid-factory", "Step 4: wifi.start() (AP: LumiGrid-Factory / lumigrid123)...");
+    ESP_LOGI("lumigrid", "Step 5: wifi.start() (AP: LumiGrid-Factory / lumigrid123)...");
     ESP_ERROR_CHECK(wifi.start(
         wifi_cfg,
         [&](lg::WifiState state) {
@@ -63,7 +87,7 @@ extern "C" void app_main(void) {
                 if (ap_netif) {
                     esp_netif_ip_info_t ip_info;
                     if (esp_netif_get_ip_info(ap_netif, &ip_info) == ESP_OK) {
-                        ESP_LOGI("lumigrid-factory",
+                        ESP_LOGI("lumigrid",
                             "=== UI READY === Connect to 'LumiGrid-Factory' then open http://" IPSTR " ===",
                             IP2STR(&ip_info.ip));
                     }
@@ -78,16 +102,20 @@ extern "C" void app_main(void) {
                 node.report = "#0001 [0000] LumiGrid ready";
                 std::memcpy(node.mac, mac, 6);
 
-                ESP_LOGI("lumigrid-factory", "Step 5: api.start(80)...");
-                ESP_ERROR_CHECK(api.start(80));
-                ESP_LOGI("lumigrid-factory", "Step 6: mdns.start()...");
-                ESP_ERROR_CHECK(mdns.start("lumigrid-factory", "LumiGrid Factory", 80));
+                ESP_LOGI("lumigrid", "Step 6: api.start(80)...");
+                ESP_ERROR_CHECK(api.start(80, &config, &signage));
 
-                ESP_LOGI("lumigrid-factory", "Step 7: artnet.start()...");
+                ESP_LOGI("lumigrid", "Step 7: mdns.start()...");
+                ESP_ERROR_CHECK(mdns.start(dev_cfg.device_name, "LumiGrid Signage", 80));
+
+                ESP_LOGI("lumigrid", "Step 8: artnet.start()...");
                 ESP_ERROR_CHECK(artnet.start(
                     node,
                     [&](const lg::ArtnetDmxPacket& packet) {
                         if (packet.universe != 0) return;
+
+                        signage.feed_watchdog();
+                        signage.set_stream_override(true);
 
                         lg::FactoryCommand command{};
                         command.type = lg::FactoryCommandType::StreamFrame;
@@ -107,10 +135,20 @@ extern "C" void app_main(void) {
                     }
                 ));
 
-                ESP_LOGI("lumigrid-factory", "=== ALL SERVICES UP ===");
+                // Step 9: NTP scheduler
+                ESP_LOGI("lumigrid", "Step 9: scheduler.start()...");
+                scheduler.start(dev_cfg.timezone);
+
+                // Step 10: Multi-node sync (if enabled)
+                if (dev_cfg.sync_enabled) {
+                    ESP_LOGI("lumigrid", "Step 10: node_sync.start()...");
+                    node_sync.start(static_cast<lg::NodeRole>(dev_cfg.sync_role));
+                }
+
+                ESP_LOGI("lumigrid", "=== ALL SERVICES UP ===");
             }
         }
     ));
 
-    ESP_LOGI("lumigrid-factory", "Boot complete, waiting for network events");
+    ESP_LOGI("lumigrid", "Boot complete, sign is running");
 }

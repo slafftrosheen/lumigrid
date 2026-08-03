@@ -144,10 +144,9 @@ void FactoryRunner::set_stream_frame(const StreamFramePayload& payload,
                                      uint32_t duration_ms) {
     const uint32_t current_ms = now_ms();
 
-    output_.blackout();
-    output_.enable();
-
     xSemaphoreTake(status_mutex_, portMAX_DELAY);
+    // Only set flags here — output_.enable() happens in the task loop
+    // to keep all OutputController operations on a single task.
     stream_frame_.stream = payload;
     stream_frame_.brightness = brightness;
     stream_active_ = true;
@@ -258,29 +257,45 @@ void FactoryRunner::task() {
             between_loop_effects = false;
         }
 
-        const FactoryStatus current = status();
+        // --- Streaming path: read stream state under mutex ---
+        bool is_streaming = false;
+        bool stream_needs_enable = false;
+        StreamFramePayload local_stream;
+        uint32_t local_stream_last_ms = 0;
+        uint8_t local_stream_brightness = 0;
 
+        xSemaphoreTake(status_mutex_, portMAX_DELAY);
         if (stream_active_) {
-            output_.pixels().clear();
-            output_.pwm().set_all(0);
+            is_streaming = true;
+            stream_needs_enable = !output_.enabled();
+            local_stream = stream_frame_.stream;
+            local_stream_last_ms = stream_last_ms_;
+            local_stream_brightness = stream_frame_.brightness;
+        }
+        xSemaphoreGive(status_mutex_);
 
-            const uint8_t b = current.brightness;
+        if (is_streaming) {
+            if (stream_needs_enable) {
+                output_.enable();
+            }
+
+            const uint8_t b = local_stream_brightness;
 
             for (uint8_t lane = 0; lane < 8; ++lane) {
                 output_.pixels().fill(
                     lane,
                     {
-                        static_cast<uint8_t>((uint16_t(stream_frame_.stream.lane_rgb[lane][0]) * b) / 255),
-                        static_cast<uint8_t>((uint16_t(stream_frame_.stream.lane_rgb[lane][1]) * b) / 255),
-                        static_cast<uint8_t>((uint16_t(stream_frame_.stream.lane_rgb[lane][2]) * b) / 255)
+                        static_cast<uint8_t>((uint16_t(local_stream.lane_rgb[lane][0]) * b) / 255),
+                        static_cast<uint8_t>((uint16_t(local_stream.lane_rgb[lane][1]) * b) / 255),
+                        static_cast<uint8_t>((uint16_t(local_stream.lane_rgb[lane][2]) * b) / 255)
                     }
                 );
 
                 const uint16_t duty =
                     static_cast<uint16_t>(
-                        (uint32_t(stream_frame_.stream.lane_rgb[lane][0] +
-                                  stream_frame_.stream.lane_rgb[lane][1] +
-                                  stream_frame_.stream.lane_rgb[lane][2]) * 4095) / (255 * 3)
+                        (uint32_t(local_stream.lane_rgb[lane][0] +
+                                  local_stream.lane_rgb[lane][1] +
+                                  local_stream.lane_rgb[lane][2]) * 4095) / (255 * 3)
                     );
 
                 output_.pwm().set(lane, duty);
@@ -288,14 +303,19 @@ void FactoryRunner::task() {
 
             output_.commit();
 
-            if (current_ms - stream_last_ms_ > 1000) {
+            if (current_ms - local_stream_last_ms > 1000) {
+                xSemaphoreTake(status_mutex_, portMAX_DELAY);
                 stream_active_ = false;
+                xSemaphoreGive(status_mutex_);
                 blackout();
             }
 
             vTaskDelay(pdMS_TO_TICKS(kFramePeriodMs));
             continue;
         }
+
+        // --- Non-streaming paths: snapshot status once per frame ---
+        const FactoryStatus current = status();
 
         if (direct_test_active_) {
             const uint32_t elapsed = current_ms - current.effect_started_ms;
@@ -359,8 +379,9 @@ void FactoryRunner::task() {
                 output_.blackout();
                 between_loop_effects = true;
                 blackout_started_ms = current_ms;
-                
+
                 if (status_callback_) status_callback_();
+                vTaskDelay(pdMS_TO_TICKS(kFramePeriodMs));
                 continue;
             }
         } else if (current.test_active &&
