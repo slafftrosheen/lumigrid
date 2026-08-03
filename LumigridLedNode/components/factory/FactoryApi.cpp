@@ -514,19 +514,28 @@ esp_err_t get_device_config(httpd_req_t* request) {
     DeviceConfig cfg;
     api_ptr->config()->load_config(cfg);
 
-    char response[512];
-    snprintf(response, sizeof(response),
-        "{\"deviceName\":\"%s\",\"activePreset\":%u,\"fallbackPreset\":%u"
-        ",\"watchdogTimeoutS\":%u,\"maxPowerMw\":%u,\"gamma\":%.1f"
-        ",\"softStart\":%s,\"softStartMs\":%u"
-        ",\"timezone\":\"%s\",\"syncEnabled\":%s,\"syncRole\":%u}",
-        cfg.device_name, cfg.active_preset_index, cfg.fallback_preset_index,
-        cfg.watchdog_timeout_s, cfg.max_power_mw, cfg.gamma_x10 / 10.0f,
-        cfg.soft_start_enabled ? "true" : "false", cfg.soft_start_ms,
-        cfg.timezone, cfg.sync_enabled ? "true" : "false", cfg.sync_role
-    );
+    cJSON* response = cJSON_CreateObject();
+    cJSON_AddStringToObject(response, "deviceName", cfg.device_name);
+    cJSON_AddNumberToObject(response, "activePreset", cfg.active_preset_index);
+    cJSON_AddNumberToObject(response, "fallbackPreset", cfg.fallback_preset_index);
+    cJSON_AddNumberToObject(response, "watchdogTimeoutS", cfg.watchdog_timeout_s);
+    cJSON_AddNumberToObject(response, "maxPowerMw", cfg.max_power_mw);
+    cJSON_AddNumberToObject(response, "gamma", cfg.gamma_x10 / 10.0f);
+    cJSON_AddBoolToObject(response, "softStart", cfg.soft_start_enabled);
+    cJSON_AddNumberToObject(response, "softStartMs", cfg.soft_start_ms);
+    cJSON_AddStringToObject(response, "timezone", cfg.timezone);
+    cJSON_AddBoolToObject(response, "syncEnabled", cfg.sync_enabled);
+    cJSON_AddNumberToObject(response, "syncRole", cfg.sync_role);
 
-    return send_json(request, response);
+    char* json = cJSON_PrintUnformatted(response);
+    cJSON_Delete(response);
+    if (json == nullptr) {
+        return send_error(request, "500 Internal Server Error", "json_encode_failed");
+    }
+
+    const esp_err_t result = send_json(request, json);
+    cJSON_free(json);
+    return result;
 }
 
 esp_err_t put_device_config(httpd_req_t* request) {
@@ -546,6 +555,7 @@ esp_err_t put_device_config(httpd_req_t* request) {
     const cJSON* dn = cJSON_GetObjectItemCaseSensitive(root, "deviceName");
     if (cJSON_IsString(dn)) {
         strncpy(cfg.device_name, dn->valuestring, sizeof(cfg.device_name) - 1);
+        cfg.device_name[sizeof(cfg.device_name) - 1] = '\0';
     }
 
     json_u8(root, "activePreset", 0, 7, cfg.active_preset_index);
@@ -560,6 +570,7 @@ esp_err_t put_device_config(httpd_req_t* request) {
     const cJSON* tz = cJSON_GetObjectItemCaseSensitive(root, "timezone");
     if (cJSON_IsString(tz)) {
         strncpy(cfg.timezone, tz->valuestring, sizeof(cfg.timezone) - 1);
+        cfg.timezone[sizeof(cfg.timezone) - 1] = '\0';
     }
 
     const cJSON* se = cJSON_GetObjectItemCaseSensitive(root, "syncEnabled");
@@ -569,7 +580,9 @@ esp_err_t put_device_config(httpd_req_t* request) {
 
     cJSON_Delete(root);
 
-    api_ptr->config()->save_config(cfg);
+    if (api_ptr->config()->save_config(cfg) != ESP_OK) {
+        return send_error(request, "500 Internal Server Error", "nvs_write_failed");
+    }
     return send_json(request, R"({"saved":true})");
 }
 
@@ -653,7 +666,9 @@ esp_err_t put_schedule(httpd_req_t* request) {
 
     cJSON_Delete(root);
 
-    api_ptr->config()->save_schedule(index, entry);
+    if (api_ptr->config()->save_schedule(index, entry) != ESP_OK) {
+        return send_error(request, "500 Internal Server Error", "nvs_write_failed");
+    }
     return send_json(request, R"({"saved":true})");
 }
 
