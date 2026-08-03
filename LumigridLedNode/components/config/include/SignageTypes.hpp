@@ -24,7 +24,10 @@ enum class SignageEffect : uint8_t {
     Sparkle  = 5,   // Random pixel twinkle over base color
     Gradient = 6,   // Smooth gradient across strip length
     Strobe   = 7,
-    Fire     = 8
+    Fire     = 8,
+    Aurora   = 9,
+    ColorWave = 10,
+    StaticPulse = 11
 };
 
 struct EffectMetadata {
@@ -50,6 +53,9 @@ inline const EffectMetadata& signage_effect_metadata(SignageEffect effect) {
         {"gradient", "Flowing glow",  "Moves a soft wave of light along the strip.",              "Wave contrast", "%",        0, 100, 100, true},
         {"strobe",   "Beat strobe",   "Flashes the lane with an adjustable on-time.",             "Flash time",    "%",        5,  95,  50, true},
         {"fire",     "Living flame",  "Creates a flickering flame texture from the selected color.","Flame height", "%",       20, 100,  70, true},
+        {"aurora",   "Aurora glow",   "Gentle shifting colors across the strip.",                 "Hue shift",     "deg",      1, 255, 120, true},
+        {"colorwave","Color wave",    "Smooth sine wave color interpolation.",                    "Wave length",   "px",       10, 255,  50, true},
+        {"staticpulse","Static pulse", "Slow dimmer pulse for main/ambiance lights.",             "Min dim",       "%",        0, 100,  20, true},
     };
 
     const uint8_t index = static_cast<uint8_t>(effect);
@@ -73,6 +79,9 @@ inline bool parse_signage_effect(const char* name, SignageEffect& out) {
     if (strcmp(name, "gradient") == 0) { out = SignageEffect::Gradient; return true; }
     if (strcmp(name, "strobe")   == 0) { out = SignageEffect::Strobe;   return true; }
     if (strcmp(name, "fire")     == 0) { out = SignageEffect::Fire;     return true; }
+    if (strcmp(name, "aurora")   == 0) { out = SignageEffect::Aurora;   return true; }
+    if (strcmp(name, "colorwave")== 0) { out = SignageEffect::ColorWave;return true; }
+    if (strcmp(name, "staticpulse")== 0) { out = SignageEffect::StaticPulse; return true; }
     return false;
 }
 
@@ -176,6 +185,39 @@ struct CalendarSchedule {
 
 // ──────────────────────────── Device Config ───────────────────────────
 
+enum class ZoneRole : uint8_t {
+    Unassigned = 0,
+    Sign = 1,
+    SignElement = 2,
+    AmbianceLight = 3,
+    MainLight = 4
+};
+
+inline const char* zone_role_name(ZoneRole role) {
+    switch(role) {
+        case ZoneRole::Sign: return "Sign";
+        case ZoneRole::SignElement: return "Sign Element";
+        case ZoneRole::AmbianceLight: return "Ambiance Light";
+        case ZoneRole::MainLight: return "Main Light";
+        default: return "Unassigned";
+    }
+}
+
+inline bool parse_zone_role(const char* name, ZoneRole& out) {
+    if(!name) return false;
+    if(strcmp(name, "Sign") == 0) { out = ZoneRole::Sign; return true; }
+    if(strcmp(name, "Sign Element") == 0) { out = ZoneRole::SignElement; return true; }
+    if(strcmp(name, "Ambiance Light") == 0) { out = ZoneRole::AmbianceLight; return true; }
+    if(strcmp(name, "Main Light") == 0) { out = ZoneRole::MainLight; return true; }
+    out = ZoneRole::Unassigned;
+    return true;
+}
+
+struct ZoneConfig {
+    char name[24] = "";
+    ZoneRole role = ZoneRole::Unassigned;
+};
+
 struct DeviceConfig {
     char     device_name[32]        = "lumigrid";
     uint8_t  active_preset_index    = 0;
@@ -191,7 +233,7 @@ struct DeviceConfig {
     char     timezone[48]           = "UTC0";
     bool     sync_enabled           = false;
     uint8_t  sync_role              = 0;    // 0=Auto, 1=Master, 2=Worker
-    uint8_t  _reserved[8]           = {};
+    ZoneConfig zones[8]             = {};
 };
 
 // ──────────────────────────── Sync Protocol ──────────────────────────

@@ -87,7 +87,7 @@ steps per zone. A step has `presetIndex` (0–31) and `lengthBeats` (1–64).
 
 `GET /api/v1/config` returns `deviceName`, `activePreset`, `fallbackPreset`,
 `watchdogTimeoutS`, `maxPowerMw`, `gamma`, `softStart`, `softStartMs`,
-`timezone`, `syncEnabled`, and `syncRole`.
+`timezone`, `syncEnabled`, `syncRole`, and a `zones` array containing up to eight objects with `name` and `role` (e.g. `"Sign"`, `"Sign Element"`, `"Ambiance Light"`, `"Main Light"`, or `"Unassigned"`).
 
 `PUT /api/v1/config` accepts any supported subset. Limits are: preset indexes
 0–31, watchdog 0–3600 seconds, power 0–60000 mW, soft-start 0–5000 ms, and

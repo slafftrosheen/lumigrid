@@ -242,6 +242,66 @@ void render_lane_effect(
             }
             break;
         }
+
+        case SignageEffect::Aurora: {
+            if (!channel.pixel_enabled && !channel.pwm_enabled) break;
+            const uint32_t phase = (t_ms * 255) / speed;
+            const uint8_t shift = parameter;
+            
+            uint8_t r_b = static_cast<uint8_t>(255 - ((255 - sine8(phase & 0xFF)) * shift / 255));
+            uint8_t g_b = static_cast<uint8_t>(255 - ((255 - sine8((phase + 85) & 0xFF)) * shift / 255));
+            uint8_t b_b = static_cast<uint8_t>(255 - ((255 - sine8((phase + 170) & 0xFF)) * shift / 255));
+            
+            BrandColor aurora_col = channel.pixel_color;
+            aurora_col.r = scale8(aurora_col.r, r_b);
+            aurora_col.g = scale8(aurora_col.g, g_b);
+            aurora_col.b = scale8(aurora_col.b, b_b);
+            
+            if (channel.pixel_enabled) {
+                output.pixels().fill(lane, apply_gamma(scale_rgb(aurora_col, b)));
+            }
+            if (channel.pwm_enabled) {
+                output.pwm().set(lane, scale_pwm(channel.pwm_duty, scale8(b, r_b)));
+            }
+            break;
+        }
+
+        case SignageEffect::ColorWave: {
+            if (!channel.pixel_enabled) break;
+            const uint16_t pixels = LG_FACTORY_PIXELS_PER_LANE;
+            const uint8_t wave_length = parameter > 0 ? parameter : 50;
+            const uint32_t shift = (t_ms * 255) / speed;
+            
+            for (uint16_t px = 0; px < pixels; ++px) {
+                const uint8_t phase = static_cast<uint8_t>(((px * 255) / wave_length) + shift);
+                const uint8_t val = sine8(phase);
+                const uint8_t pixel_b = scale8(b, val);
+                output.pixels().set(lane, px, apply_gamma(scale_rgb(channel.pixel_color, pixel_b)));
+            }
+            if (channel.pwm_enabled) {
+                const uint8_t pwm_phase = static_cast<uint8_t>(shift & 0xFF);
+                output.pwm().set(lane, scale_pwm(channel.pwm_duty, scale8(b, sine8(pwm_phase))));
+            }
+            break;
+        }
+
+        case SignageEffect::StaticPulse: {
+            const uint8_t phase = static_cast<uint8_t>((uint32_t(t_ms % speed) * 255) / speed);
+            const uint8_t sine_val = sine8(phase);
+            const uint8_t min_b = static_cast<uint8_t>((uint16_t(b) * parameter) / 100);
+            
+            const uint8_t scaled_b = static_cast<uint8_t>(
+                min_b + (uint16_t(sine_val) * (b - min_b)) / 255
+            );
+            
+            if (channel.pixel_enabled) {
+                output.pixels().fill(lane, apply_gamma(scale_rgb(channel.pixel_color, scaled_b)));
+            }
+            if (channel.pwm_enabled) {
+                output.pwm().set(lane, scale_pwm(channel.pwm_duty, scaled_b));
+            }
+            break;
+        }
     }
 }
 

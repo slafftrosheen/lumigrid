@@ -848,6 +848,11 @@ async function saveSettings() {
                     <div class="field"><label for="system-sync-role">Room role</label><select id="system-sync-role"><option value="0">Automatic leader selection</option><option value="1">Lead the room</option><option value="2">Follow the room</option></select></div>
                     <p class="help">Role changes are applied the next time the node starts. Automatic mode elects one node instead of broadcasting from every node.</p>
                 </article>
+                <article class="product-card" style="grid-column: 1 / -1;">
+                    <h4>Physical Zones</h4>
+                    <p class="help">Map your 8 physical outputs to room features.</p>
+                    <div id="system-zones" class="zone-grid" style="margin-top:1rem"></div>
+                </article>
             </div>
             <div class="page-heading" style="margin-top:1.5rem"><div><p class="eyebrow">Topology</p><h3>Nodes in this room</h3></div><button class="button-secondary" onclick="lg.refreshSync()">Refresh health</button></div>
             <div id="sync-topology" class="sync-grid"></div>
@@ -867,7 +872,10 @@ window.lg = (() => {
         {id:'sparkle',label:'Random twinkle',description:'Adds crisp white twinkles over the base color.',hasParameter:true,parameterLabel:'Twinkles',parameterUnit:'per lane',parameterMin:1,parameterMax:12,parameterDefault:2},
         {id:'gradient',label:'Flowing glow',description:'Moves a soft wave of light along the strip.',hasParameter:true,parameterLabel:'Wave contrast',parameterUnit:'%',parameterMin:1,parameterMax:100,parameterDefault:100},
         {id:'strobe',label:'Beat strobe',description:'Flashes the lane with an adjustable on-time.',hasParameter:true,parameterLabel:'Flash time',parameterUnit:'%',parameterMin:5,parameterMax:95,parameterDefault:50},
-        {id:'fire',label:'Living flame',description:'Creates a flickering flame texture from the selected color.',hasParameter:true,parameterLabel:'Flame height',parameterUnit:'%',parameterMin:20,parameterMax:100,parameterDefault:70}
+        {id:'fire',label:'Living flame',description:'Creates a flickering flame texture from the selected color.',hasParameter:true,parameterLabel:'Flame height',parameterUnit:'%',parameterMin:20,parameterMax:100,parameterDefault:70},
+        {id:'aurora',label:'Aurora glow',description:'Gentle shifting colors across the strip.',hasParameter:true,parameterLabel:'Hue shift',parameterUnit:'deg',parameterMin:1,parameterMax:360,parameterDefault:120},
+        {id:'colorwave',label:'Color wave',description:'Smooth sine wave color interpolation.',hasParameter:true,parameterLabel:'Wave length',parameterUnit:'px',parameterMin:10,parameterMax:255,parameterDefault:50},
+        {id:'staticpulse',label:'Static pulse',description:'Slow dimmer pulse for main/ambiance lights.',hasParameter:true,parameterLabel:'Min dim',parameterUnit:'%',parameterMin:0,parameterMax:100,parameterDefault:20}
     ];
     const state = { token:'', effects:fallbackEffects, presets:[], sequence:null, schedules:null, config:null, status:null, sync:null, editing:null, selectedScene:null, selectedStep:null };
     const byId = id => document.getElementById(id);
@@ -1078,7 +1086,10 @@ window.lg = (() => {
         byId('scene-zones').innerHTML = scene.channels.map((channel,index) => {
             const meta = effect(channel.effect);
             const parameter = clamp(channel.fxParam || meta.parameterDefault, meta.parameterMin || 0, meta.parameterMax || 255);
-            return `<article class="product-card zone-card"><div class="zone-title"><h4>Zone ${index + 1}</h4><span>${esc(meta.label)}</span></div><div class="field"><label for="zone-effect-${index}">Motion</label><select id="zone-effect-${index}" title="${esc(meta.description)}" onchange="lg.changeZoneEffect(${index}, this.value)">${state.effects.map(item => `<option value="${esc(item.id)}" ${item.id === channel.effect ? 'selected' : ''}>${esc(item.label)}</option>`).join('')}</select></div><div class="color-line"><label for="zone-color-${index}">Color</label><input id="zone-color-${index}" type="color" value="${colorFor(channel)}"></div><div class="range-row"><label for="zone-white-${index}">White output</label><input id="zone-white-${index}" type="range" min="0" max="100" value="${percentForDuty(channel.pwmDuty)}" oninput="lg.updateText('zone-white-output-${index}', this.value + '%')"><output id="zone-white-output-${index}">${percentForDuty(channel.pwmDuty)}%</output></div><div class="range-row"><label for="zone-speed-${index}">Motion speed</label><input id="zone-speed-${index}" type="range" min="1" max="100" value="${msToSpeed(channel.effectSpeedMs)}" oninput="lg.speedText('zone-speed-output-${index}', this.value)"><output id="zone-speed-output-${index}">${speedName(msToSpeed(channel.effectSpeedMs))}</output></div>${meta.hasParameter ? `<div class="range-row"><label for="zone-parameter-${index}">${esc(meta.parameterLabel)}</label><input id="zone-parameter-${index}" type="range" min="${meta.parameterMin}" max="${meta.parameterMax}" value="${parameter}" oninput="lg.updateText('zone-parameter-output-${index}', this.value + ' ${esc(meta.parameterUnit)}')"><output id="zone-parameter-output-${index}">${parameter} ${esc(meta.parameterUnit)}</output></div>` : `<p class="help">${esc(meta.description)}</p>`}<div><label class="switch-row"><span>Pixel strip</span><input id="zone-pixels-${index}" type="checkbox" ${channel.pixelEnabled ? 'checked' : ''}></label><label class="switch-row"><span>White output</span><input id="zone-white-enabled-${index}" type="checkbox" ${channel.pwmEnabled ? 'checked' : ''}></label></div></article>`;
+            const zName = state.config?.zones?.[index]?.name || `Zone ${index + 1}`;
+            const zRole = state.config?.zones?.[index]?.role || 'Unassigned';
+            const roleHtml = zRole !== 'Unassigned' ? ` <span style="font-weight:normal;opacity:0.6">(${esc(zRole)})</span>` : '';
+            return `<article class="product-card zone-card"><div class="zone-title"><h4>${esc(zName)}${roleHtml}</h4><span>${esc(meta.label)}</span></div><div class="field"><label for="zone-effect-${index}">Motion</label><select id="zone-effect-${index}" title="${esc(meta.description)}" onchange="lg.changeZoneEffect(${index}, this.value)">${state.effects.map(item => `<option value="${esc(item.id)}" ${item.id === channel.effect ? 'selected' : ''}>${esc(item.label)}</option>`).join('')}</select></div><div class="color-line"><label for="zone-color-${index}">Color</label><input id="zone-color-${index}" type="color" value="${colorFor(channel)}"></div><div class="range-row"><label for="zone-white-${index}">White output</label><input id="zone-white-${index}" type="range" min="0" max="100" value="${percentForDuty(channel.pwmDuty)}" oninput="lg.updateText('zone-white-output-${index}', this.value + '%')"><output id="zone-white-output-${index}">${percentForDuty(channel.pwmDuty)}%</output></div><div class="range-row"><label for="zone-speed-${index}">Motion speed</label><input id="zone-speed-${index}" type="range" min="1" max="100" value="${msToSpeed(channel.effectSpeedMs)}" oninput="lg.speedText('zone-speed-output-${index}', this.value)"><output id="zone-speed-output-${index}">${speedName(msToSpeed(channel.effectSpeedMs))}</output></div>${meta.hasParameter ? `<div class="range-row"><label for="zone-parameter-${index}">${esc(meta.parameterLabel)}</label><input id="zone-parameter-${index}" type="range" min="${meta.parameterMin}" max="${meta.parameterMax}" value="${parameter}" oninput="lg.updateText('zone-parameter-output-${index}', this.value + ' ${esc(meta.parameterUnit)}')"><output id="zone-parameter-output-${index}">${parameter} ${esc(meta.parameterUnit)}</output></div>` : `<p class="help">${esc(meta.description)}</p>`}<div><label class="switch-row"><span>Pixel strip</span><input id="zone-pixels-${index}" type="checkbox" ${channel.pixelEnabled ? 'checked' : ''}></label><label class="switch-row"><span>White output</span><input id="zone-white-enabled-${index}" type="checkbox" ${channel.pwmEnabled ? 'checked' : ''}></label></div></article>`;
         }).join('');
     }
     function changeZoneEffect(index, value) {
@@ -1160,6 +1171,19 @@ window.lg = (() => {
         byId('system-sync-enabled').checked = Boolean(state.config.syncEnabled);
         byId('system-sync-role').value = String(state.config.syncRole ?? 0);
         byId('system-fallback').innerHTML = state.presets.map(scene => `<option value="${Number(scene.index)}" ${Number(scene.index) === Number(state.config.fallbackPreset) ? 'selected' : ''}>${esc(scene.name || 'Untitled scene')}</option>`).join('');
+        
+        const roles = ['Unassigned', 'Sign', 'Sign Element', 'Ambiance Light', 'Main Light'];
+        let zonesHtml = '';
+        for (let i = 0; i < 8; ++i) {
+            const z = state.config.zones?.[i] || {name: '', role: 'Unassigned'};
+            zonesHtml += `<div class="field" style="margin-bottom:0.5rem;padding:0.5rem;background:rgba(0,0,0,0.2);border-radius:8px;">
+                <div style="font-weight:bold;margin-bottom:0.5rem;">CH ${i}</div>
+                <label>Name</label><input id="sys-zname-${i}" value="${esc(z.name)}" maxlength="23" placeholder="Zone ${i+1}">
+                <label>Role</label><select id="sys-zrole-${i}">${roles.map(r => `<option value="${r}" ${z.role === r ? 'selected' : ''}>${r}</option>`).join('')}</select>
+            </div>`;
+        }
+        byId('system-zones').innerHTML = zonesHtml;
+        
         const nodes = [];
         if (state.sync) {
             nodes.push(`<article class="product-card node-card primary"><span class="scene-chip">● THIS NODE</span><h4>${esc(state.config.deviceName || 'Lighting node')}</h4><p class="muted">${esc(state.sync.activeRole)} · ${state.sync.clockLocked ? 'clock locked' : 'waiting for clock'}</p><p class="latency">${state.sync.clockJitterUs || 0} μs <span class="help">jitter</span></p></article>`);
@@ -1174,8 +1198,15 @@ window.lg = (() => {
                 fallbackPreset: Number(byId('system-fallback').value),
                 timezone: byId('system-timezone').value.trim() || 'UTC0',
                 syncEnabled: byId('system-sync-enabled').checked,
-                syncRole: Number(byId('system-sync-role').value)
+                syncRole: Number(byId('system-sync-role').value),
+                zones: []
             };
+            for (let i = 0; i < 8; ++i) {
+                config.zones.push({
+                    name: byId(`sys-zname-${i}`)?.value.trim() || '',
+                    role: byId(`sys-zrole-${i}`)?.value || 'Unassigned'
+                });
+            }
             await api('/api/v1/config','PUT',config);
             state.config = {...state.config,...config};
             toast('System settings saved. Restart the node to apply a sync role change.');

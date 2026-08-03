@@ -587,6 +587,15 @@ esp_err_t get_device_config(httpd_req_t* request) {
     cJSON_AddBoolToObject(response, "syncEnabled", cfg.sync_enabled);
     cJSON_AddNumberToObject(response, "syncRole", cfg.sync_role);
 
+    cJSON* zones = cJSON_CreateArray();
+    for (uint8_t i = 0; i < 8; ++i) {
+        cJSON* z = cJSON_CreateObject();
+        cJSON_AddStringToObject(z, "name", cfg.zones[i].name);
+        cJSON_AddStringToObject(z, "role", zone_role_name(cfg.zones[i].role));
+        cJSON_AddItemToArray(zones, z);
+    }
+    cJSON_AddItemToObject(response, "zones", zones);
+
     char* json = cJSON_PrintUnformatted(response);
     cJSON_Delete(response);
     if (json == nullptr) {
@@ -637,6 +646,25 @@ esp_err_t put_device_config(httpd_req_t* request) {
     if (cJSON_IsBool(se)) cfg.sync_enabled = cJSON_IsTrue(se);
 
     json_u8(root, "syncRole", 0, 2, cfg.sync_role);
+
+    const cJSON* zones_arr = cJSON_GetObjectItemCaseSensitive(root, "zones");
+    if (cJSON_IsArray(zones_arr)) {
+        int z_idx = 0;
+        cJSON* z_item = nullptr;
+        cJSON_ArrayForEach(z_item, zones_arr) {
+            if (z_idx >= 8) break;
+            const cJSON* z_name = cJSON_GetObjectItemCaseSensitive(z_item, "name");
+            if (cJSON_IsString(z_name)) {
+                strncpy(cfg.zones[z_idx].name, z_name->valuestring, sizeof(cfg.zones[z_idx].name) - 1);
+                cfg.zones[z_idx].name[sizeof(cfg.zones[z_idx].name) - 1] = '\0';
+            }
+            const cJSON* z_role = cJSON_GetObjectItemCaseSensitive(z_item, "role");
+            if (cJSON_IsString(z_role)) {
+                parse_zone_role(z_role->valuestring, cfg.zones[z_idx].role);
+            }
+            ++z_idx;
+        }
+    }
 
     cJSON_Delete(root);
 
@@ -786,7 +814,7 @@ esp_err_t get_effects(httpd_req_t* request) {
 
     cJSON* effects = cJSON_CreateArray();
     for (uint8_t index = static_cast<uint8_t>(SignageEffect::Solid);
-         index <= static_cast<uint8_t>(SignageEffect::Fire);
+         index <= static_cast<uint8_t>(SignageEffect::StaticPulse);
          ++index) {
         const EffectMetadata& metadata = signage_effect_metadata(
             static_cast<SignageEffect>(index)

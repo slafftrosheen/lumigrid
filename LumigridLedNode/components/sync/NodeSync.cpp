@@ -55,7 +55,7 @@ esp_err_t NodeSync::start(NodeRole role) {
     has_sequence_ = false;
     packets_received_ = 0;
     packets_missed_ = 0;
-    std::memset(peers_, 0, sizeof(peers_));
+    for (auto& peer : peers_) peer = Peer{};
     running_ = true;
     portEXIT_CRITICAL(&status_mutex_);
 
@@ -280,7 +280,6 @@ NodeRole NodeSync::worker_loop(int socket, bool auto_mode) {
     for (;;) {
         portENTER_CRITICAL(&status_mutex_);
         const bool running = running_;
-        const uint32_t last_packet_ms = last_packet_ms_;
         portEXIT_CRITICAL(&status_mutex_);
         if (!running) break;
 
