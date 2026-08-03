@@ -7,7 +7,7 @@ namespace {
 
 // TODO(security): HARDCODED FACTORY TOKEN — MUST be replaced before any
 // production or network-exposed deployment. Provision a 32-byte random
-// token into encrypted NVS. This token is also embedded in dashboard.hpp.
+// token into encrypted NVS.
 constexpr char kFactoryToken[] = "lumigrid-factory-token-v1";
 
 }
