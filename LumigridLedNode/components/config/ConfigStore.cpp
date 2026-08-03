@@ -98,29 +98,24 @@ esp_err_t ConfigStore::load_config(DeviceConfig& config) {
     return err;
 }
 
-// ── Schedules ───────────────────────────────────────────────────────
+// ── Sequences ───────────────────────────────────────────────────────
 
-esp_err_t ConfigStore::save_schedule(uint8_t index, const ScheduleEntry& entry) {
-    if (index >= kMaxSchedules) return ESP_ERR_INVALID_ARG;
-
-    char key[12];
-    make_key(key, sizeof(key), "sched", index);
-
+esp_err_t ConfigStore::save_sequence(const Sequence& seq) {
     ESP_RETURN_ON_ERROR(
-        nvs_set_blob(handle_, key, &entry, sizeof(ScheduleEntry)),
-        TAG, "save sched"
+        nvs_set_blob(handle_, "seq_main", &seq, sizeof(Sequence)),
+        TAG, "save seq"
     );
     return nvs_commit(handle_);
 }
 
-esp_err_t ConfigStore::load_schedule(uint8_t index, ScheduleEntry& entry) {
-    if (index >= kMaxSchedules) return ESP_ERR_INVALID_ARG;
-
-    char key[12];
-    make_key(key, sizeof(key), "sched", index);
-
-    size_t len = sizeof(ScheduleEntry);
-    return nvs_get_blob(handle_, key, &entry, &len);
+esp_err_t ConfigStore::load_sequence(Sequence& seq) {
+    size_t len = sizeof(Sequence);
+    esp_err_t err = nvs_get_blob(handle_, "seq_main", &seq, &len);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        seq = Sequence{};
+        return ESP_OK;
+    }
+    return err;
 }
 
 // ── Active state ────────────────────────────────────────────────────
@@ -154,11 +149,12 @@ void ConfigStore::ensure_defaults() {
     BrandPreset open{};
     open.set_name("Store Open");
     open.brightness = 180;
-    open.effect = SignageEffect::Solid;
     open.transition_ms = 1500;
     for (uint8_t i = 0; i < 8; ++i) {
         open.channels[i].pixel_color = {255, 200, 150}; // Warm white
         open.channels[i].pwm_duty = 3000;
+        open.channels[i].effect = SignageEffect::Solid;
+        open.channels[i].effect_speed_ms = 2000;
         open.channels[i].pixel_enabled = true;
         open.channels[i].pwm_enabled = true;
     }
@@ -168,12 +164,12 @@ void ConfigStore::ensure_defaults() {
     BrandPreset night{};
     night.set_name("Night Mode");
     night.brightness = 40;
-    night.effect = SignageEffect::Breathe;
-    night.effect_speed_ms = 4000;
     night.transition_ms = 3000;
     for (uint8_t i = 0; i < 8; ++i) {
         night.channels[i].pixel_color = {20, 40, 120};
         night.channels[i].pwm_duty = 400;
+        night.channels[i].effect = SignageEffect::Breathe;
+        night.channels[i].effect_speed_ms = 4000;
         night.channels[i].pixel_enabled = true;
         night.channels[i].pwm_enabled = true;
     }
@@ -183,7 +179,9 @@ void ConfigStore::ensure_defaults() {
     BrandPreset blackout{};
     blackout.set_name("Closed");
     blackout.brightness = 0;
-    blackout.effect = SignageEffect::Solid;
+    for (uint8_t i = 0; i < 8; ++i) {
+        blackout.channels[i].effect = SignageEffect::Solid;
+    }
     save_preset(2, blackout);
 }
 

@@ -390,8 +390,6 @@ esp_err_t get_presets(httpd_req_t* request) {
         cJSON_AddNumberToObject(obj, "index", i);
         cJSON_AddStringToObject(obj, "name", preset.name);
         cJSON_AddNumberToObject(obj, "brightness", preset.brightness);
-        cJSON_AddStringToObject(obj, "effect", signage_effect_name(preset.effect));
-        cJSON_AddNumberToObject(obj, "effectSpeedMs", preset.effect_speed_ms);
         cJSON_AddNumberToObject(obj, "transitionMs", preset.transition_ms);
 
         cJSON* channels = cJSON_CreateArray();
@@ -401,6 +399,11 @@ esp_err_t get_presets(httpd_req_t* request) {
             cJSON_AddNumberToObject(c, "g", preset.channels[ch].pixel_color.g);
             cJSON_AddNumberToObject(c, "b", preset.channels[ch].pixel_color.b);
             cJSON_AddNumberToObject(c, "pwmDuty", preset.channels[ch].pwm_duty);
+            cJSON_AddStringToObject(c, "effect", signage_effect_name(preset.channels[ch].effect));
+            cJSON_AddNumberToObject(c, "effectSpeedMs", preset.channels[ch].effect_speed_ms);
+            cJSON_AddNumberToObject(c, "paletteId", preset.channels[ch].palette_id);
+            cJSON_AddNumberToObject(c, "phaseOffset", preset.channels[ch].phase_offset);
+            cJSON_AddNumberToObject(c, "fxParam", preset.channels[ch].fx_param);
             cJSON_AddBoolToObject(c, "pixelEnabled", preset.channels[ch].pixel_enabled);
             cJSON_AddBoolToObject(c, "pwmEnabled", preset.channels[ch].pwm_enabled);
             cJSON_AddItemToArray(channels, c);
@@ -439,13 +442,6 @@ esp_err_t put_preset(httpd_req_t* request) {
 
     json_u8(root, "brightness", 0, 255, preset.brightness);
 
-    const cJSON* effect_j = cJSON_GetObjectItemCaseSensitive(root, "effect");
-    if (cJSON_IsString(effect_j)) parse_signage_effect(effect_j->valuestring, preset.effect);
-
-    uint16_t speed = 2000;
-    json_u16(root, "effectSpeedMs", 100, 30000, speed);
-    preset.effect_speed_ms = speed;
-
     uint16_t trans = 1000;
     json_u16(root, "transitionMs", 0, 10000, trans);
     preset.transition_ms = trans;
@@ -460,6 +456,13 @@ esp_err_t put_preset(httpd_req_t* request) {
             json_u8(ch_item, "g", 0, 255, preset.channels[ch_idx].pixel_color.g);
             json_u8(ch_item, "b", 0, 255, preset.channels[ch_idx].pixel_color.b);
             json_u16(ch_item, "pwmDuty", 0, 4095, preset.channels[ch_idx].pwm_duty);
+
+            const cJSON* effect_j = cJSON_GetObjectItemCaseSensitive(ch_item, "effect");
+            if (cJSON_IsString(effect_j)) parse_signage_effect(effect_j->valuestring, preset.channels[ch_idx].effect);
+            json_u16(ch_item, "effectSpeedMs", 10, 60000, preset.channels[ch_idx].effect_speed_ms);
+            json_u8(ch_item, "paletteId", 0, 255, preset.channels[ch_idx].palette_id);
+            json_u8(ch_item, "phaseOffset", 0, 255, preset.channels[ch_idx].phase_offset);
+            json_u8(ch_item, "fxParam", 0, 255, preset.channels[ch_idx].fx_param);
 
             const cJSON* pe = cJSON_GetObjectItemCaseSensitive(ch_item, "pixelEnabled");
             if (cJSON_IsBool(pe)) preset.channels[ch_idx].pixel_enabled = cJSON_IsTrue(pe);
@@ -606,37 +609,46 @@ esp_err_t get_signage_status(httpd_req_t* request) {
     return send_json(request, response);
 }
 
-esp_err_t get_schedules(httpd_req_t* request) {
+esp_err_t get_sequence(httpd_req_t* request) {
     if (!api::authorize(request)) return ESP_OK;
 
     FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
     if (!api_ptr->config()) return send_error(request, "503 Service Unavailable", "config_not_ready");
 
-    cJSON* arr = cJSON_CreateArray();
-    for (uint8_t i = 0; i < kMaxSchedules; ++i) {
-        ScheduleEntry entry;
-        if (api_ptr->config()->load_schedule(i, entry) != ESP_OK) continue;
+    Sequence seq;
+    api_ptr->config()->load_sequence(seq);
 
-        cJSON* obj = cJSON_CreateObject();
-        cJSON_AddNumberToObject(obj, "index", i);
-        cJSON_AddNumberToObject(obj, "hourStart", entry.hour_start);
-        cJSON_AddNumberToObject(obj, "minuteStart", entry.minute_start);
-        cJSON_AddNumberToObject(obj, "hourEnd", entry.hour_end);
-        cJSON_AddNumberToObject(obj, "minuteEnd", entry.minute_end);
-        cJSON_AddNumberToObject(obj, "presetIndex", entry.preset_index);
-        cJSON_AddNumberToObject(obj, "daysOfWeek", entry.days_of_week);
-        cJSON_AddBoolToObject(obj, "enabled", entry.enabled);
-        cJSON_AddItemToArray(arr, obj);
+    cJSON* obj = cJSON_CreateObject();
+    cJSON_AddNumberToObject(obj, "bpm", seq.bpm);
+    cJSON_AddBoolToObject(obj, "enabled", seq.enabled);
+
+    cJSON* tracks = cJSON_CreateArray();
+    for (uint8_t i = 0; i < 8; ++i) {
+        cJSON* trk = cJSON_CreateObject();
+        cJSON_AddNumberToObject(trk, "channelId", seq.tracks[i].channel_id);
+        cJSON_AddNumberToObject(trk, "numSteps", seq.tracks[i].num_steps);
+        cJSON_AddBoolToObject(trk, "enabled", seq.tracks[i].enabled);
+
+        cJSON* steps = cJSON_CreateArray();
+        for (uint8_t s = 0; s < 16; ++s) {
+            cJSON* stp = cJSON_CreateObject();
+            cJSON_AddNumberToObject(stp, "presetIndex", seq.tracks[i].steps[s].preset_index);
+            cJSON_AddNumberToObject(stp, "lengthBeats", seq.tracks[i].steps[s].length_beats);
+            cJSON_AddItemToArray(steps, stp);
+        }
+        cJSON_AddItemToObject(trk, "steps", steps);
+        cJSON_AddItemToArray(tracks, trk);
     }
+    cJSON_AddItemToObject(obj, "tracks", tracks);
 
-    char* json = cJSON_PrintUnformatted(arr);
-    cJSON_Delete(arr);
+    char* json = cJSON_PrintUnformatted(obj);
+    cJSON_Delete(obj);
     esp_err_t ret = send_json(request, json);
     cJSON_free(json);
     return ret;
 }
 
-esp_err_t put_schedule(httpd_req_t* request) {
+esp_err_t put_sequence(httpd_req_t* request) {
     if (!api::authorize(request)) return ESP_OK;
 
     FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
@@ -647,26 +659,42 @@ esp_err_t put_schedule(httpd_req_t* request) {
         return send_error(request, "400 Bad Request", "invalid_json");
     }
 
-    uint8_t index = 0;
-    if (!json_u8(root, "index", 0, 7, index)) {
-        cJSON_Delete(root);
-        return send_error(request, "400 Bad Request", "missing_index");
-    }
-
-    ScheduleEntry entry{};
-    json_u8(root, "hourStart", 0, 23, entry.hour_start);
-    json_u8(root, "minuteStart", 0, 59, entry.minute_start);
-    json_u8(root, "hourEnd", 0, 23, entry.hour_end);
-    json_u8(root, "minuteEnd", 0, 59, entry.minute_end);
-    json_u8(root, "presetIndex", 0, 7, entry.preset_index);
-    json_u8(root, "daysOfWeek", 0, 127, entry.days_of_week);
+    Sequence seq{};
+    json_u16(root, "bpm", 10, 500, seq.bpm);
 
     const cJSON* en = cJSON_GetObjectItemCaseSensitive(root, "enabled");
-    if (cJSON_IsBool(en)) entry.enabled = cJSON_IsTrue(en);
+    if (cJSON_IsBool(en)) seq.enabled = cJSON_IsTrue(en);
+
+    const cJSON* tracks = cJSON_GetObjectItemCaseSensitive(root, "tracks");
+    if (cJSON_IsArray(tracks)) {
+        int trk_idx = 0;
+        cJSON* trk_item = nullptr;
+        cJSON_ArrayForEach(trk_item, tracks) {
+            if (trk_idx >= 8) break;
+            json_u8(trk_item, "channelId", 0, 7, seq.tracks[trk_idx].channel_id);
+            json_u8(trk_item, "numSteps", 1, 16, seq.tracks[trk_idx].num_steps);
+
+            const cJSON* trk_en = cJSON_GetObjectItemCaseSensitive(trk_item, "enabled");
+            if (cJSON_IsBool(trk_en)) seq.tracks[trk_idx].enabled = cJSON_IsTrue(trk_en);
+
+            const cJSON* steps = cJSON_GetObjectItemCaseSensitive(trk_item, "steps");
+            if (cJSON_IsArray(steps)) {
+                int stp_idx = 0;
+                cJSON* stp_item = nullptr;
+                cJSON_ArrayForEach(stp_item, steps) {
+                    if (stp_idx >= 16) break;
+                    json_u8(stp_item, "presetIndex", 0, kMaxPresets - 1, seq.tracks[trk_idx].steps[stp_idx].preset_index);
+                    json_u8(stp_item, "lengthBeats", 1, 64, seq.tracks[trk_idx].steps[stp_idx].length_beats);
+                    ++stp_idx;
+                }
+            }
+            ++trk_idx;
+        }
+    }
 
     cJSON_Delete(root);
 
-    if (api_ptr->config()->save_schedule(index, entry) != ESP_OK) {
+    if (api_ptr->config()->save_sequence(seq) != ESP_OK) {
         return send_error(request, "500 Internal Server Error", "nvs_write_failed");
     }
     return send_json(request, R"({"saved":true})");
@@ -716,8 +744,8 @@ esp_err_t FactoryApi::start(uint16_t port, ConfigStore* config, SignageEngine* s
         { .uri = "/api/v1/config",            .method = HTTP_GET,  .handler = get_device_config, .user_ctx = this },
         { .uri = "/api/v1/config",            .method = HTTP_PUT,  .handler = put_device_config, .user_ctx = this },
         { .uri = "/api/v1/status",            .method = HTTP_GET,  .handler = get_signage_status, .user_ctx = this },
-        { .uri = "/api/v1/schedules",         .method = HTTP_GET,  .handler = get_schedules,    .user_ctx = this },
-        { .uri = "/api/v1/schedules",         .method = HTTP_PUT,  .handler = put_schedule,     .user_ctx = this },
+        { .uri = "/api/v1/sequence",          .method = HTTP_GET,  .handler = get_sequence,     .user_ctx = this },
+        { .uri = "/api/v1/sequence",          .method = HTTP_PUT,  .handler = put_sequence,     .user_ctx = this },
         // ── WebSocket + Dashboard ──
         { .uri = "/ws", .method = HTTP_GET, .handler = ws_handler, .user_ctx = this,
           .is_websocket = true, .handle_ws_control_frames = false, .supported_subprotocol = nullptr },

@@ -6,13 +6,12 @@
 
 namespace lg {
 
-/// Renders a single frame of a signage effect using the given preset's
-/// channel configuration. Both pixel strips and PWM channels are driven
-/// simultaneously for synchronized halo + contour animation.
-void render_signage_effect(
-    SignageEffect effect,
+/// Renders a single lane's effect using the given channel configuration.
+void render_lane_effect(
+    uint8_t lane,
     OutputController& output,
-    const BrandPreset& preset,
+    const ChannelConfig& channel,
+    uint8_t global_brightness,
     uint32_t elapsed_ms
 );
 

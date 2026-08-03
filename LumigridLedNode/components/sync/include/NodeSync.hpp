@@ -6,17 +6,19 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "ConfigStore.hpp"
+
 namespace lg {
 
 /// Multi-node synchronization over UDP broadcast.
 ///
-/// A Master node broadcasts its current preset index and elapsed time
+/// A Master node broadcasts its current sequence state
 /// at 10 Hz on port 6455. Worker nodes receive these packets and snap
 /// their SignageEngine to the master's timeline, achieving pixel-perfect
 /// synchronized animations across multiple sign segments.
 class NodeSync {
 public:
-    explicit NodeSync(SignageEngine& engine);
+    NodeSync(SignageEngine& engine, ConfigStore& config);
 
     esp_err_t start(NodeRole role);
     void stop();
@@ -32,6 +34,7 @@ private:
     void worker_task();
 
     SignageEngine& engine_;
+    ConfigStore&   config_;
     NodeRole role_ = NodeRole::Auto;
     int sock_ = -1;
     uint8_t peer_count_ = 0;
@@ -47,12 +50,12 @@ private:
         uint32_t magic;
         uint8_t  version;
         uint32_t sequence;
-        uint8_t  preset_index;
-        uint32_t elapsed_ms;
-        uint8_t  brightness;
+        uint16_t bpm;
+        uint8_t  sequence_enabled;
+        uint32_t global_clock_ms;
     };
 
-    static_assert(sizeof(SyncPacket) == 15, "SyncPacket must be 15 bytes");
+    static_assert(sizeof(SyncPacket) == 16, "SyncPacket must be 16 bytes");
 };
 
 } // namespace lg

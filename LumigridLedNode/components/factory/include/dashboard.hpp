@@ -1,64 +1,576 @@
 #pragma once
 
-static const char dashboard_html[] = R"LGHTML(<!doctype html>
+static const char dashboard_html[] = R"LGHTML(<!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>LumiGrid Operator</title>
-<style>
-:root{color-scheme:dark;--bg:#050505;--surface:rgba(29,29,31,.78);--line:rgba(255,255,255,.1);--ink:#f5f5f7;--muted:#a1a1a6;--pink:#ff2d55;--cyan:#00d4ff;--amber:#ff9500;--danger:#ff453a;--ok:#34c759;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text",Inter,system-ui,sans-serif}
-*{box-sizing:border-box}body{margin:0;min-height:100vh;background:radial-gradient(circle at 15% 0,rgba(255,45,85,.16),transparent 34rem),radial-gradient(circle at 95% 100%,rgba(0,212,255,.1),transparent 36rem),var(--bg);color:var(--ink)}button,input,select{font:inherit}button{cursor:pointer}.app{max-width:1440px;margin:auto;padding:24px}.top{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:24px}.brand{display:flex;gap:10px;align-items:center;font-weight:700;font-size:18px}.mark{font-size:28px;background:linear-gradient(135deg,var(--pink),var(--cyan));background-clip:text;color:transparent}.sub,.label{color:var(--muted);font-size:12px;letter-spacing:.08em;text-transform:uppercase}.connection{display:flex;align-items:center;gap:8px}.dot{width:9px;height:9px;border-radius:50%;background:var(--muted)}.dot.online{background:var(--ok);box-shadow:0 0 12px var(--ok)}.nav{display:flex;gap:6px;overflow:auto;padding-bottom:4px;margin-bottom:24px}.nav button,.button{border:1px solid var(--line);background:rgba(255,255,255,.06);color:var(--ink);border-radius:999px;padding:9px 14px;white-space:nowrap}.nav button.active,.button.primary{background:var(--pink);border-color:var(--pink);color:#fff}.button.danger{border-color:rgba(255,69,58,.55);color:var(--danger)}.button:disabled{opacity:.45;cursor:not-allowed}.page{display:none}.page.active{display:block}.grid{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:16px}.card{grid-column:span 4;background:var(--surface);backdrop-filter:blur(20px);border:1px solid var(--line);border-radius:18px;padding:18px;box-shadow:0 16px 40px rgba(0,0,0,.18)}.card.wide{grid-column:span 8}.card.full{grid-column:1/-1}.card h2{font-size:15px;margin:0 0 16px}.metric{font-size:32px;font-weight:700;margin-top:7px}.metric small{font-size:14px;color:var(--muted);font-weight:500}.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.spread{justify-content:space-between}.field{display:grid;gap:6px;flex:1;min-width:130px;color:var(--muted);font-size:13px}.field input,.field select{width:100%;border:1px solid var(--line);background:rgba(0,0,0,.22);color:var(--ink);border-radius:10px;padding:10px}.channels{display:grid;grid-template-columns:repeat(4,1fr);gap:9px}.channel{border:1px solid var(--line);border-radius:12px;padding:10px;background:rgba(0,0,0,.12)}.channel strong{font-size:12px}.channel input{width:100%;margin:9px 0;accent-color:var(--pink)}.channel output{font:12px ui-monospace,SFMono-Regular,monospace;color:var(--muted)}.preset-list,.schedule-list{display:grid;gap:9px}.item{display:flex;align-items:center;justify-content:space-between;gap:10px;border:1px solid var(--line);padding:12px;border-radius:12px;background:rgba(0,0,0,.12)}.item strong{font-size:14px}.item span{display:block;color:var(--muted);font-size:12px;margin-top:3px}.empty{color:var(--muted);padding:28px;text-align:center}.toast{position:fixed;right:20px;bottom:20px;max-width:360px;padding:12px 15px;border:1px solid var(--line);border-radius:12px;background:#242426;box-shadow:0 12px 30px #0008;opacity:0;transform:translateY(10px);transition:.2s;pointer-events:none}.toast.show{opacity:1;transform:none}.toast.error{border-color:var(--danger);color:#ffd7d2}.auth{max-width:440px;margin:11vh auto}.auth .card{display:grid;gap:14px}.divider{height:1px;background:var(--line);margin:4px 0}.status{font:12px ui-monospace,SFMono-Regular,monospace;white-space:pre-wrap;color:var(--muted)}@media(max-width:820px){.app{padding:16px}.top{align-items:flex-start}.connection{font-size:12px}.card,.card.wide{grid-column:1/-1}.channels{grid-template-columns:repeat(2,1fr)}}
-</style>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lumigrid OS</title>
+    <style>
+        :root {
+            --bg: #0a0a0f;
+            --surface: rgba(25, 25, 35, 0.7);
+            --surface-hover: rgba(35, 35, 50, 0.9);
+            --border: rgba(255, 255, 255, 0.1);
+            --text: #f0f0f5;
+            --text-muted: #9ba1a6;
+            --primary: #6366f1;
+            --primary-glow: rgba(99, 102, 241, 0.4);
+            --success: #10b981;
+            --danger: #ef4444;
+            --radius: 12px;
+            --font: 'Inter', system-ui, sans-serif;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: var(--font);
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.5;
+            min-height: 100vh;
+            background-image: 
+                radial-gradient(circle at 15% 50%, rgba(99, 102, 241, 0.1), transparent 25%),
+                radial-gradient(circle at 85% 30%, rgba(16, 185, 129, 0.1), transparent 25%);
+        }
+
+        .container { max-width: 1200px; margin: 0 auto; padding: 2rem; }
+        
+        /* Auth Screen */
+        #auth {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+        }
+        .auth-card {
+            background: var(--surface);
+            backdrop-filter: blur(16px);
+            padding: 3rem;
+            border-radius: var(--radius);
+            border: 1px solid var(--border);
+            text-align: center;
+            width: 100%;
+            max-width: 400px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+        }
+
+        h1, h2, h3 { margin-bottom: 1rem; font-weight: 600; }
+        
+        input, select, button {
+            font-family: inherit;
+            font-size: 1rem;
+            border-radius: 8px;
+            border: 1px solid var(--border);
+            background: rgba(0,0,0,0.3);
+            color: var(--text);
+            padding: 0.75rem 1rem;
+            width: 100%;
+            margin-bottom: 1rem;
+            transition: all 0.2s;
+        }
+        
+        input:focus, select:focus {
+            outline: none;
+            border-color: var(--primary);
+            box-shadow: 0 0 0 3px var(--primary-glow);
+        }
+
+        button {
+            background: var(--surface);
+            cursor: pointer;
+            font-weight: 500;
+        }
+        button:hover { background: var(--surface-hover); }
+        button.primary { background: var(--primary); border-color: var(--primary); }
+        button.primary:hover { background: #4f46e5; box-shadow: 0 0 15px var(--primary-glow); }
+        button.danger { background: var(--danger); border-color: var(--danger); }
+
+        /* Dashboard Layout */
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding-bottom: 2rem;
+            border-bottom: 1px solid var(--border);
+            margin-bottom: 2rem;
+        }
+        
+        .nav-tabs { display: flex; gap: 1rem; margin-bottom: 2rem; }
+        .nav-tabs button { width: auto; margin: 0; background: transparent; border-color: transparent; }
+        .nav-tabs button.active { background: var(--surface); border-color: var(--border); }
+
+        .page { display: none; animation: fadeIn 0.3s; }
+        .page.active { display: block; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+
+        .card {
+            background: var(--surface);
+            backdrop-filter: blur(12px);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 1.5rem;
+            margin-bottom: 1.5rem;
+        }
+
+        /* Preset Editor Grid */
+        .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; }
+        .grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; }
+        
+        .channel-editor {
+            background: rgba(0,0,0,0.2);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1rem;
+        }
+
+        /* Sequencer Grid */
+        .seq-track {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            margin-bottom: 0.5rem;
+            background: rgba(0,0,0,0.2);
+            padding: 0.5rem;
+            border-radius: 8px;
+            overflow-x: auto;
+        }
+        .seq-step {
+            min-width: 60px;
+            height: 60px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.75rem;
+            cursor: pointer;
+        }
+        .seq-step.active {
+            border-color: var(--primary);
+            background: rgba(99, 102, 241, 0.2);
+        }
+        .seq-step input {
+            width: 40px; padding: 2px; margin: 2px; text-align: center;
+            font-size: 0.75rem; background: transparent; border: 1px solid transparent;
+        }
+        .seq-step input:focus { background: rgba(0,0,0,0.5); border-color: var(--primary); }
+
+        .toast {
+            position: fixed; bottom: 2rem; right: 2rem;
+            background: var(--surface); padding: 1rem 2rem;
+            border-radius: 8px; border-left: 4px solid var(--primary);
+            box-shadow: 0 10px 25px rgba(0,0,0,0.5);
+            transform: translateY(150%); transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            z-index: 1000;
+        }
+        .toast.show { transform: translateY(0); }
+        .toast.error { border-left-color: var(--danger); }
+        
+        /* Flex Utils */
+        .flex { display: flex; gap: 1rem; }
+        .items-center { align-items: center; }
+        .justify-between { justify-content: space-between; }
+        .mb-1 { margin-bottom: 1rem; }
+    </style>
 </head>
 <body>
-<main class="app">
-  <section id="auth" class="auth">
-    <div class="card full"><div class="mark">⬡</div><div><h1>LumiGrid Operator</h1><p class="sub">Secure LED node management</p></div>
-      <label class="field">Access token<input id="token" type="password" autocomplete="current-password" placeholder="******"></label>
-      <button class="button primary" id="connect">Connect to this node</button><p class="sub">The token is held only in this browser session.</p>
+
+<div id="auth">
+    <div class="auth-card">
+        <h1>LUMIGRID OS</h1>
+        <p class="text-muted mb-1">Enter access token</p>
+        <input type="password" id="token" placeholder="Bearer Token">
+        <button class="primary" onclick="connect()">Connect to Node</button>
     </div>
-  </section>
-  <section id="operator" hidden>
-    <header class="top"><div class="brand"><span class="mark">⬡</span><span>LumiGrid <small id="device-name" class="sub">LED NODE</small></span></div><div class="connection"><span id="dot" class="dot"></span><span id="connection">Connecting</span><button class="button" id="lock">Lock</button></div></header>
-    <nav class="nav" aria-label="Operator sections">
-      <button data-page="overview" class="active">Overview</button><button data-page="control">Live control</button><button data-page="presets">Presets</button><button data-page="schedule">Schedule</button><button data-page="settings">Settings</button><button data-page="factory">Factory</button>
-    </nav>
-    <section id="overview" class="page active"><div class="grid">
-      <article class="card"><span class="label">Active preset</span><div class="metric" id="active-preset">—</div><p class="sub" id="playback-state">Loading playback state</p></article>
-      <article class="card"><span class="label">Output state</span><div class="metric" id="output-state">—</div><p class="sub" id="effect-state">Loading factory state</p></article>
-      <article class="card"><span class="label">System guard</span><div class="metric" id="guard-state">—</div><p class="sub" id="guard-detail">Checking command queue</p></article>
-      <article class="card wide"><div class="row spread"><h2>Quick actions</h2><span class="sub">Commands apply immediately</span></div><div class="row"><button class="button primary" id="resume-preset">Reapply active preset</button><button class="button danger" id="blackout">Emergency blackout</button><button class="button" id="refresh">Refresh status</button></div></article>
-      <article class="card"><h2>Node health</h2><div class="status" id="health">Waiting for status…</div></article>
-    </div></section>
-    <section id="control" class="page"><div class="grid">
-      <article class="card wide"><div class="row spread"><h2>Addressable LED lanes</h2><span class="sub">Timed test output</span></div><div id="lanes" class="channels"></div></article>
-      <article class="card"><h2>Test duration</h2><label class="field">Seconds<input id="test-duration" type="number" min="1" max="60" value="10"></label><p class="sub">Safety limit: 60 seconds</p></article>
-      <article class="card wide"><div class="row spread"><h2>PWM channels</h2><span class="sub">12-bit output</span></div><div id="pwms" class="channels"></div></article>
-      <article class="card"><h2>Effect runner</h2><label class="field">Effect<select id="effect"><option value="rainbow">Rainbow</option><option value="pixel_chase">Pixel chase</option><option value="white_walk">White walk</option><option value="pwm_walk">PWM walk</option><option value="pwm_fade">PWM fade</option><option value="combined_pulse">Combined pulse</option><option value="identity">Identity</option><option value="burn_in">Burn-in</option></select></label><label class="field">Brightness (0–96)<input id="effect-brightness" type="number" min="0" max="96" value="64"></label><button class="button primary" id="run-effect">Run timed effect</button></article>
-    </div></section>
-    <section id="presets" class="page"><div class="grid"><article class="card wide"><div class="row spread"><h2>Saved scenes</h2><button class="button" id="load-presets">Refresh</button></div><div id="preset-list" class="preset-list empty">Load presets to start.</div></article><article class="card"><h2>Scene workflow</h2><p class="sub">Activate a saved scene from the list. Presets are managed through the protected API and persist in NVS.</p></article></div></section>
-    <section id="schedule" class="page"><div class="grid"><article class="card wide"><div class="row spread"><h2>Scheduled scenes</h2><button class="button" id="load-schedules">Refresh</button></div><div id="schedule-list" class="schedule-list empty">Load schedules to start.</div></article><article class="card"><h2>Schedule slot</h2><label class="field">Slot (0–7)<input id="schedule-index" type="number" min="0" max="7" value="0"></label><label class="field">Preset (0–7)<input id="schedule-preset" type="number" min="0" max="7" value="0"></label><div class="row"><label class="field">Start<input id="schedule-start" type="time" value="09:00"></label><label class="field">End<input id="schedule-end" type="time" value="17:00"></label></div><label class="field">Days bitmask<input id="schedule-days" type="number" min="0" max="127" value="127"></label><button class="button primary" id="save-schedule">Save schedule slot</button></article></div></section>
-    <section id="settings" class="page"><div class="grid"><article class="card wide"><h2>Node settings</h2><div class="row"><label class="field">Device name<input id="cfg-name"></label><label class="field">Active preset<input id="cfg-active" type="number" min="0" max="7"></label><label class="field">Fallback preset<input id="cfg-fallback" type="number" min="0" max="7"></label></div><div class="row"><label class="field">Power budget (mW)<input id="cfg-power" type="number" min="0" max="60000"></label><label class="field">Watchdog (seconds)<input id="cfg-watchdog" type="number" min="0" max="3600"></label><label class="field">Soft start (ms)<input id="cfg-softstart" type="number" min="0" max="5000"></label></div><div class="row"><label class="field">Timezone<input id="cfg-timezone"></label><label class="field">Sync role<select id="cfg-role"><option value="0">Standalone</option><option value="1">Master</option><option value="2">Participant</option></select></label></div><label class="row"><input id="cfg-softstart-enabled" type="checkbox"> Enable soft start</label><label class="row"><input id="cfg-sync-enabled" type="checkbox"> Enable synchronization</label><div><button class="button primary" id="save-config">Save settings</button></div></article><article class="card"><h2>Power & safety</h2><p class="sub">Changes are validated by the firmware before being committed to NVS. Use emergency blackout when physical output must stop now.</p></article></div></section>
-    <section id="factory" class="page"><div class="grid"><article class="card wide"><div class="row spread"><h2>Factory diagnostics</h2><button class="button" id="toggle-loop">Toggle auto-loop</button></div><div id="factory-status" class="status">Loading…</div></article><article class="card"><h2>Safety stop</h2><p class="sub">Stops current test work and turns every output off.</p><button class="button danger" id="factory-abort">Abort & blackout</button></article></div></section>
-  </section>
-</main><div id="toast" class="toast" role="status"></div>
+</div>
+
+<div id="app" class="container" style="display:none;">
+    <header>
+        <div>
+            <h2>LUMIGRID <span id="node-name" style="font-weight:300;color:var(--primary)">NODE</span></h2>
+            <div style="font-size:0.875rem;color:var(--success)">● Online</div>
+        </div>
+        <button style="width:auto;margin:0" onclick="disconnect()">Disconnect</button>
+    </header>
+
+    <div class="nav-tabs">
+        <button class="active" onclick="nav('overview')">Overview</button>
+        <button onclick="nav('presets'); loadPresets()">Presets</button>
+        <button onclick="nav('sequencer'); loadSequencer()">Sequencer</button>
+        <button onclick="nav('settings'); loadSettings()">Settings</button>
+    </div>
+
+    <!-- OVERVIEW -->
+    <div id="page-overview" class="page active">
+        <div class="grid-2">
+            <div class="card">
+                <h3>Quick Actions</h3>
+                <button class="danger" onclick="api('/api/v1/factory/abort', 'POST')">Emergency Blackout</button>
+                <button onclick="api('/api/v1/activate', 'POST', {preset: 0})">Load Default Preset</button>
+            </div>
+            <div class="card">
+                <h3>System Status</h3>
+                <pre id="status-json" style="font-size:0.8rem;overflow:auto;background:rgba(0,0,0,0.3);padding:1rem;border-radius:8px;"></pre>
+                <button class="mb-1" onclick="loadStatus()">Refresh Status</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- PRESETS -->
+    <div id="page-presets" class="page">
+        <div class="flex justify-between items-center mb-1">
+            <h3>Brand Presets</h3>
+            <button style="width:auto;margin:0" onclick="loadPresets()">Refresh</button>
+        </div>
+        <div id="preset-list" class="grid-2"></div>
+    </div>
+
+    <!-- PRESET EDITOR MODAL (Inline Page) -->
+    <div id="page-preset-edit" class="page">
+        <div class="flex justify-between items-center mb-1">
+            <h3 id="edit-preset-title">Edit Preset</h3>
+            <div>
+                <button style="width:auto;margin:0" onclick="nav('presets')">Cancel</button>
+                <button class="primary" style="width:auto;margin:0" onclick="savePreset()">Save Changes</button>
+            </div>
+        </div>
+        
+        <div class="card grid-2">
+            <div>
+                <label>Preset Name</label>
+                <input type="text" id="pe-name">
+            </div>
+            <div>
+                <label>Global Brightness (0-255)</label>
+                <input type="number" id="pe-brightness" min="0" max="255">
+            </div>
+            <div>
+                <label>Crossfade Transition (ms)</label>
+                <input type="number" id="pe-transition" min="0" max="10000">
+            </div>
+        </div>
+
+        <div id="pe-channels" class="grid-4">
+            <!-- Populated via JS -->
+        </div>
+    </div>
+
+    <!-- SEQUENCER -->
+    <div id="page-sequencer" class="page">
+        <div class="card flex justify-between items-center">
+            <div class="flex items-center">
+                <label style="margin-right:1rem">Global BPM</label>
+                <input type="number" id="seq-bpm" style="width:100px;margin:0">
+            </div>
+            <div class="flex items-center">
+                <input type="checkbox" id="seq-enabled" style="width:auto;margin:0;margin-right:0.5rem">
+                <label>Sequencer Enabled</label>
+            </div>
+            <button class="primary" style="width:auto;margin:0" onclick="saveSequencer()">Save Sequencer</button>
+        </div>
+        <div class="card">
+            <h3>16-Step Tracks (Per Channel)</h3>
+            <p class="text-muted mb-1">Enter the Preset Index (0-31) and Length in Beats. Click a step to enable/disable it.</p>
+            <div id="seq-tracks"></div>
+        </div>
+    </div>
+
+    <!-- SETTINGS -->
+    <div id="page-settings" class="page">
+        <div class="card grid-2">
+            <div>
+                <label>Device Name</label><input type="text" id="cfg-name">
+                <label>Active Preset Index</label><input type="number" id="cfg-active">
+                <label>Fallback Preset Index</label><input type="number" id="cfg-fallback">
+                <label>Timezone String</label><input type="text" id="cfg-timezone">
+            </div>
+            <div>
+                <label>Max Power (mW, 0=off)</label><input type="number" id="cfg-power">
+                <label>Watchdog Timeout (s)</label><input type="number" id="cfg-watchdog">
+                <label>Soft Start (ms)</label><input type="number" id="cfg-softstart">
+                <label>Sync Role (0=Auto, 1=Master, 2=Worker)</label><input type="number" id="cfg-role">
+                <div class="flex items-center mt-1">
+                    <input type="checkbox" id="cfg-softstart-enabled" style="width:auto"><label>Soft Start Enabled</label>
+                </div>
+                <div class="flex items-center">
+                    <input type="checkbox" id="cfg-sync-enabled" style="width:auto"><label>Sync Enabled</label>
+                </div>
+            </div>
+        </div>
+        <button class="primary" onclick="saveSettings()">Save Settings</button>
+    </div>
+</div>
+
+<div id="toast" class="toast">Message</div>
+
 <script>
-const $=id=>document.getElementById(id), state={token:'',factory:null,signage:null,config:null};
-const toast=(message,error=false)=>{const e=$('toast');e.textContent=message;e.className='toast show'+(error?' error':'');setTimeout(()=>e.className='toast',3500)};
-async function api(path,method='GET',body){const r=await fetch(path,{method,headers:{Authorization:'Bearer '+state.token,'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});if(!r.ok){let m='HTTP '+r.status;try{m=(await r.json()).error||m}catch(_){}throw Error(m)}return r.json()}
-const duration=()=>Math.min(60000,Math.max(1000,Number($('test-duration').value||10)*1000));
-async function loadStatus(){[state.factory,state.signage]=await Promise.all([api('/api/v1/factory/status'),api('/api/v1/status')]);const f=state.factory,s=state.signage;$('active-preset').textContent=s.activePreset??'—';$('playback-state').textContent=s.transitioning?'Transitioning':s.fallbackActive?'Fallback scene active':'Scene active';$('output-state').textContent=f.outputsEnabled?'Enabled':'Disabled';$('effect-state').textContent=(f.effect||'idle').replaceAll('_',' ');$('guard-state').textContent=f.testActive?'Test active':'Ready';$('guard-detail').textContent=(f.commandRejections||0)+' rejected commands · auto-loop '+(f.autoLoop?'on':'off');$('health').textContent=JSON.stringify({brightness:f.brightness,effectStartedMs:f.effectStartedMs,durationMs:f.durationMs,commandRejections:f.commandRejections},null,2);$('factory-status').textContent=JSON.stringify(f,null,2);$('dot').className='dot online';$('connection').textContent='Connected'}
-async function loadConfig(){state.config=await api('/api/v1/config');const c=state.config;$('device-name').textContent=(c.deviceName||'LED NODE').toUpperCase();$('cfg-name').value=c.deviceName||'';$('cfg-active').value=c.activePreset??0;$('cfg-fallback').value=c.fallbackPreset??0;$('cfg-power').value=c.maxPowerMw??0;$('cfg-watchdog').value=c.watchdogTimeoutS??0;$('cfg-softstart').value=c.softStartMs??0;$('cfg-timezone').value=c.timezone||'';$('cfg-role').value=c.syncRole??0;$('cfg-softstart-enabled').checked=!!c.softStart;$('cfg-sync-enabled').checked=!!c.syncEnabled}
-function laneControls(){const root=$('lanes');root.innerHTML='';for(let i=0;i<8;i++){const box=document.createElement('div');box.className='channel';box.innerHTML='<strong>LANE '+(i+1)+'</strong><input type="color" value="#ff2d55"><input type="range" min="0" max="96" value="64"><output>64%</output><button class="button">Test</button>';const inputs=box.querySelectorAll('input'),color=inputs[0],brightness=inputs[1],button=box.querySelector('button');brightness.oninput=()=>box.querySelector('output').textContent=brightness.value+'%';button.onclick=async()=>{const h=color.value;await command('/api/v1/factory/lane',{lane:i,red:parseInt(h.slice(1,3),16),green:parseInt(h.slice(3,5),16),blue:parseInt(h.slice(5,7),16),brightness:Number(brightness.value),durationMs:duration()})};root.append(box)}}
-function pwmControls(){const root=$('pwms');root.innerHTML='';for(let i=0;i<8;i++){const box=document.createElement('div');box.className='channel';box.innerHTML='<strong>PWM '+(i+1)+'</strong><input type="range" min="0" max="4095" value="2048"><output>2048</output><button class="button">Apply</button>';const duty=box.querySelector('input'),button=box.querySelector('button');duty.oninput=()=>box.querySelector('output').textContent=duty.value;button.onclick=()=>command('/api/v1/factory/pwm',{channel:i,duty:Number(duty.value),durationMs:duration()});root.append(box)}}
-async function command(path,data){try{await api(path,'POST',data);toast('Command accepted');setTimeout(loadStatus,250)}catch(e){toast(e.message,true)}}
-async function loadPresets(){try{const presets=await api('/api/v1/presets');const root=$('preset-list');root.className='preset-list';root.innerHTML=presets.length?presets.map(p=>'<div class="item"><div><strong>'+escapeHtml(p.name||'Untitled preset')+'</strong><span>'+escapeHtml(p.effect||'static')+' · '+p.brightness+'</span></div><button class="button" data-preset="'+p.index+'">Activate</button></div>').join(''):'<div class="empty">No presets saved.</div>';root.querySelectorAll('[data-preset]').forEach(b=>b.onclick=()=>command('/api/v1/activate',{preset:Number(b.dataset.preset)}))}catch(e){toast(e.message,true)}}
-async function loadSchedules(){try{const rows=await api('/api/v1/schedules'),root=$('schedule-list');root.className='schedule-list';root.innerHTML=rows.length?rows.map(s=>'<div class="item"><div><strong>Preset '+s.presetIndex+'</strong><span>'+String(s.hourStart).padStart(2,'0')+':'+String(s.minuteStart).padStart(2,'0')+' – '+String(s.hourEnd).padStart(2,'0')+':'+String(s.minuteEnd).padStart(2,'0')+' · days '+s.daysOfWeek+'</span></div><span>'+ (s.enabled?'Enabled':'Disabled')+'</span></div>').join(''):'<div class="empty">No schedules saved.</div>'}catch(e){toast(e.message,true)}}
-const escapeHtml=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-document.querySelectorAll('.nav button').forEach(b=>b.onclick=()=>{document.querySelectorAll('.nav button,.page').forEach(e=>e.classList.remove('active'));b.classList.add('active');$(b.dataset.page).classList.add('active');if(b.dataset.page==='presets')loadPresets();if(b.dataset.page==='schedule')loadSchedules()});
-$('connect').onclick=async()=>{state.token=$('token').value.trim();if(!state.token)return toast('Enter an access token',true);try{await Promise.all([loadStatus(),loadConfig()]);$('auth').hidden=true;$('operator').hidden=false;toast('Node connected')}catch(e){$('dot').className='dot';$('connection').textContent='Connection failed';toast(e.message,true)}};
-$('lock').onclick=()=>{state.token='';$('operator').hidden=true;$('auth').hidden=false;$('token').value=''};$('refresh').onclick=()=>loadStatus().catch(e=>toast(e.message,true));$('blackout').onclick=() => command('/api/v1/factory/abort');$('factory-abort').onclick=() => command('/api/v1/factory/abort');$('resume-preset').onclick=()=>command('/api/v1/activate',{preset:state.signage?.activePreset??0});$('run-effect').onclick=()=>command('/api/v1/factory/effect',{effect:$('effect').value,brightness:Number($('effect-brightness').value),durationMs:duration()});$('toggle-loop').onclick=()=>command('/api/v1/factory/auto-loop',{enabled:!state.factory?.autoLoop});$('load-presets').onclick=loadPresets;$('load-schedules').onclick=loadSchedules;
-$('save-schedule').onclick=()=>{const[start,end]=[$('schedule-start').value,$('schedule-end').value].map(v=>v.split(':').map(Number));return api('/api/v1/schedules','PUT',{index:Number($('schedule-index').value),presetIndex:Number($('schedule-preset').value),hourStart:start[0],minuteStart:start[1],hourEnd:end[0],minuteEnd:end[1],daysOfWeek:Number($('schedule-days').value),enabled:true}).then(()=>{toast('Schedule saved');loadSchedules()}).catch(e=>toast(e.message,true))};
-$('save-config').onclick=()=>api('/api/v1/config','PUT',{deviceName:$('cfg-name').value,activePreset:Number($('cfg-active').value),fallbackPreset:Number($('cfg-fallback').value),maxPowerMw:Number($('cfg-power').value),watchdogTimeoutS:Number($('cfg-watchdog').value),softStartMs:Number($('cfg-softstart').value),timezone:$('cfg-timezone').value,syncRole:Number($('cfg-role').value),softStart:$('cfg-softstart-enabled').checked,syncEnabled:$('cfg-sync-enabled').checked}).then(()=>{toast('Settings saved');loadConfig()}).catch(e=>toast(e.message,true));
-laneControls();pwmControls();
-</script></body></html>)LGHTML";
+const $ = id => document.getElementById(id);
+let token = '', currentPresetEditIndex = 0, currentPresetData = null;
+
+const toast = (msg, err=false) => {
+    const e = $('toast');
+    e.textContent = msg;
+    e.className = 'toast show' + (err ? ' error' : '');
+    setTimeout(() => e.className = 'toast', 3000);
+};
+
+async function api(path, method='GET', body) {
+    const res = await fetch(path, {
+        method,
+        headers: {
+            'Authorization': 'Bearer ' + token,
+            'Content-Type': 'application/json'
+        },
+        body: body ? JSON.stringify(body) : undefined
+    });
+    if(!res.ok) {
+        let m = `HTTP ${res.status}`;
+        try { m = (await res.json()).error || m; } catch(e){}
+        throw Error(m);
+    }
+    return res.json();
+}
+
+async function connect() {
+    token = $('token').value;
+    try {
+        await loadStatus();
+        $('auth').style.display = 'none';
+        $('app').style.display = 'block';
+        toast('Connected successfully');
+    } catch(e) {
+        toast('Connection failed: ' + e.message, true);
+    }
+}
+
+function disconnect() {
+    token = '';
+    $('app').style.display = 'none';
+    $('auth').style.display = 'flex';
+}
+
+function nav(page) {
+    document.querySelectorAll('.nav-tabs button').forEach(b => b.classList.remove('active'));
+    event.target.classList.add('active');
+    document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+    $('page-' + page).classList.add('active');
+}
+
+// Overview
+async function loadStatus() {
+    try {
+        const [fac, sig] = await Promise.all([
+            api('/api/v1/factory/status'),
+            api('/api/v1/status')
+        ]);
+        $('status-json').textContent = JSON.stringify({factory: fac, signage: sig}, null, 2);
+    } catch(e) { toast(e.message, true); }
+}
+
+// Presets
+async function loadPresets() {
+    try {
+        const presets = await api('/api/v1/presets');
+        const list = $('preset-list');
+        list.innerHTML = '';
+        presets.forEach(p => {
+            const el = document.createElement('div');
+            el.className = 'card';
+            el.innerHTML = `
+                <div class="flex justify-between items-center">
+                    <div>
+                        <h4 style="color:var(--primary)">[${p.index}] ${p.name || 'Untitled'}</h4>
+                        <div style="font-size:0.8rem;color:var(--text-muted)">Brightness: ${p.brightness}</div>
+                    </div>
+                    <div>
+                        <button style="padding:0.5rem;font-size:0.8rem" onclick="api('/api/v1/activate','POST',{preset:${p.index}}).then(()=>toast('Activated'))">Play</button>
+                        <button style="padding:0.5rem;font-size:0.8rem" onclick="openPresetEditor(${p.index})">Edit</button>
+                    </div>
+                </div>
+            `;
+            list.appendChild(el);
+        });
+    } catch(e) { toast(e.message, true); }
+}
+
+async function openPresetEditor(index) {
+    currentPresetEditIndex = index;
+    try {
+        const presets = await api('/api/v1/presets');
+        currentPresetData = presets.find(p => p.index === index);
+        if(!currentPresetData) throw Error("Preset not found");
+        
+        $('edit-preset-title').textContent = `Edit Preset [${index}]`;
+        $('pe-name').value = currentPresetData.name;
+        $('pe-brightness').value = currentPresetData.brightness;
+        $('pe-transition').value = currentPresetData.transitionMs;
+
+        const chCont = $('pe-channels');
+        chCont.innerHTML = '';
+        const fxOpts = ['solid','breathe','chase','sweep','reveal','sparkle','gradient','strobe','fire'];
+        
+        currentPresetData.channels.forEach((c, i) => {
+            const hex = '#' + [c.r, c.g, c.b].map(x => x.toString(16).padStart(2,'0')).join('');
+            chCont.innerHTML += `
+                <div class="channel-editor">
+                    <h4>CH ${i}</h4>
+                    <label>Effect</label>
+                    <select id="pe-fx-${i}">${fxOpts.map(f => `<option value="${f}" ${c.effect===f?'selected':''}>${f}</option>`).join('')}</select>
+                    <label>Color</label>
+                    <input type="color" id="pe-col-${i}" value="${hex}">
+                    <label>PWM (0-4095)</label>
+                    <input type="number" id="pe-pwm-${i}" value="${c.pwmDuty}">
+                    <label>Speed (ms)</label>
+                    <input type="number" id="pe-spd-${i}" value="${c.effectSpeedMs}">
+                    <label>Offset</label>
+                    <input type="number" id="pe-off-${i}" value="${c.phaseOffset}">
+                    <div style="display:flex;gap:1rem;margin-top:0.5rem;">
+                        <label><input type="checkbox" id="pe-en-px-${i}" ${c.pixelEnabled?'checked':''}> Pixels</label>
+                        <label><input type="checkbox" id="pe-en-pwm-${i}" ${c.pwmEnabled?'checked':''}> PWM</label>
+                    </div>
+                </div>
+            `;
+        });
+        nav('preset-edit');
+    } catch(e) { toast(e.message, true); }
+}
+
+async function savePreset() {
+    const payload = {
+        index: currentPresetEditIndex,
+        name: $('pe-name').value,
+        brightness: Number($('pe-brightness').value),
+        transitionMs: Number($('pe-transition').value),
+        channels: []
+    };
+    for(let i=0; i<8; i++) {
+        const hex = $(`pe-col-${i}`).value;
+        payload.channels.push({
+            effect: $(`pe-fx-${i}`).value,
+            r: parseInt(hex.slice(1,3), 16),
+            g: parseInt(hex.slice(3,5), 16),
+            b: parseInt(hex.slice(5,7), 16),
+            pwmDuty: Number($(`pe-pwm-${i}`).value),
+            effectSpeedMs: Number($(`pe-spd-${i}`).value),
+            phaseOffset: Number($(`pe-off-${i}`).value),
+            paletteId: 0, fxParam: 0,
+            pixelEnabled: $(`pe-en-px-${i}`).checked,
+            pwmEnabled: $(`pe-en-pwm-${i}`).checked
+        });
+    }
+    try {
+        await api('/api/v1/presets', 'PUT', payload);
+        toast('Preset saved');
+        nav('presets');
+        loadPresets();
+    } catch(e) { toast(e.message, true); }
+}
+
+// Sequencer
+async function loadSequencer() {
+    try {
+        const seq = await api('/api/v1/sequence');
+        $('seq-bpm').value = seq.bpm;
+        $('seq-enabled').checked = seq.enabled;
+        const cont = $('seq-tracks');
+        cont.innerHTML = '';
+        seq.tracks.forEach((t, i) => {
+            let stepsHtml = '';
+            for(let s=0; s<16; s++) {
+                const step = t.steps[s] || {presetIndex:0, lengthBeats:1};
+                const isActive = s < t.numSteps;
+                stepsHtml += `
+                    <div class="seq-step ${isActive?'active':''}" onclick="this.classList.toggle('active'); updateNumSteps(${i})">
+                        <input type="number" id="sq-p-${i}-${s}" value="${step.presetIndex}" title="Preset Index" onclick="event.stopPropagation()">
+                        <input type="number" id="sq-l-${i}-${s}" value="${step.lengthBeats}" title="Beats Length" onclick="event.stopPropagation()">
+                    </div>
+                `;
+            }
+            cont.innerHTML += `
+                <div class="seq-track" id="track-${i}" data-steps="${t.numSteps}">
+                    <div style="width:100px;">
+                        <label><input type="checkbox" id="sq-en-${i}" ${t.enabled?'checked':''}> TRK ${i}</label>
+                    </div>
+                    ${stepsHtml}
+                </div>
+            `;
+        });
+    } catch(e) { toast(e.message, true); }
+}
+
+function updateNumSteps(trackIdx) {
+    const track = $(`track-${trackIdx}`);
+    const steps = track.querySelectorAll('.seq-step');
+    let count = 0;
+    steps.forEach(s => { if(s.classList.contains('active')) count++; });
+    track.dataset.steps = count || 1; // min 1
+}
+
+async function saveSequencer() {
+    const seq = {
+        bpm: Number($('seq-bpm').value),
+        enabled: $('seq-enabled').checked,
+        tracks: []
+    };
+    for(let i=0; i<8; i++) {
+        const trk = {
+            channelId: i,
+            enabled: $(`sq-en-${i}`).checked,
+            numSteps: Number($(`track-${i}`).dataset.steps) || 1,
+            steps: []
+        };
+        for(let s=0; s<16; s++) {
+            trk.steps.push({
+                presetIndex: Number($(`sq-p-${i}-${s}`).value),
+                lengthBeats: Number($(`sq-l-${i}-${s}`).value)
+            });
+        }
+        seq.tracks.push(trk);
+    }
+    try {
+        await api('/api/v1/sequence', 'PUT', seq);
+        toast('Sequence saved');
+    } catch(e) { toast(e.message, true); }
+}
+
+// Settings
+async function loadSettings() {
+    try {
+        const c = await api('/api/v1/config');
+        $('cfg-name').value = c.deviceName;
+        $('cfg-active').value = c.activePreset;
+        $('cfg-fallback').value = c.fallbackPreset;
+        $('cfg-power').value = c.maxPowerMw;
+        $('cfg-watchdog').value = c.watchdogTimeoutS;
+        $('cfg-softstart').value = c.softStartMs;
+        $('cfg-timezone').value = c.timezone;
+        $('cfg-role').value = c.syncRole;
+        $('cfg-softstart-enabled').checked = c.softStart;
+        $('cfg-sync-enabled').checked = c.syncEnabled;
+    } catch(e) { toast(e.message, true); }
+}
+
+async function saveSettings() {
+    try {
+        await api('/api/v1/config', 'PUT', {
+            deviceName: $('cfg-name').value,
+            activePreset: Number($('cfg-active').value),
+            fallbackPreset: Number($('cfg-fallback').value),
+            maxPowerMw: Number($('cfg-power').value),
+            watchdogTimeoutS: Number($('cfg-watchdog').value),
+            softStartMs: Number($('cfg-softstart').value),
+            timezone: $('cfg-timezone').value,
+            syncRole: Number($('cfg-role').value),
+            softStart: $('cfg-softstart-enabled').checked,
+            syncEnabled: $('cfg-sync-enabled').checked
+        });
+        toast('Settings saved');
+    } catch(e) { toast(e.message, true); }
+}
+</script>
+</body>
+</html>
+)LGHTML";

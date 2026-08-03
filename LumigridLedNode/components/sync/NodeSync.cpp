@@ -2,7 +2,7 @@
 #include "NodeSync.hpp"
 #include "esp_log.h"
 #include "esp_timer.h"
-
+#include <sys/time.h>
 #include "lwip/sockets.h"
 #include "lwip/netdb.h"
 
@@ -19,20 +19,21 @@ uint32_t now_ms() {
 
 } // namespace
 
-NodeSync::NodeSync(SignageEngine& engine) : engine_(engine) {}
+NodeSync::NodeSync(SignageEngine& engine, ConfigStore& config) 
+    : engine_(engine), config_(config) {}
 
 esp_err_t NodeSync::start(NodeRole role) {
     role_ = role;
 
     if (role_ == NodeRole::Auto || role_ == NodeRole::Master) {
         const BaseType_t ok = xTaskCreatePinnedToCore(
-            master_task_entry, "sync_master", 3072, this, 3, &task_handle_, 0
+            master_task_entry, "sync_master", 4096, this, 3, &task_handle_, 0
         );
         if (ok != pdPASS) return ESP_ERR_NO_MEM;
         ESP_LOGI(TAG, "Started as Master (broadcast on port %u)", kSyncPort);
     } else {
         const BaseType_t ok = xTaskCreatePinnedToCore(
-            worker_task_entry, "sync_worker", 3072, this, 3, &task_handle_, 0
+            worker_task_entry, "sync_worker", 4096, this, 3, &task_handle_, 0
         );
         if (ok != pdPASS) return ESP_ERR_NO_MEM;
         ESP_LOGI(TAG, "Started as Worker (listening on port %u)", kSyncPort);
@@ -75,17 +76,22 @@ void NodeSync::master_task() {
     dest.sin_port = htons(kSyncPort);
     dest.sin_addr.s_addr = htonl(INADDR_BROADCAST);
 
-    uint32_t seq = 0;
-    const uint32_t start_ms = now_ms();
+    uint32_t seq_id = 0;
 
     for (;;) {
+        Sequence seq;
+        config_.load_sequence(seq);
+
         SyncPacket pkt{};
         pkt.magic = kMagic;
-        pkt.version = 1;
-        pkt.sequence = seq++;
-        pkt.preset_index = engine_.active_preset_index();
-        pkt.elapsed_ms = now_ms() - start_ms;
-        pkt.brightness = 255; // Full, let worker apply its own budget
+        pkt.version = 2;
+        pkt.sequence = seq_id++;
+        pkt.bpm = seq.bpm;
+        pkt.sequence_enabled = seq.enabled;
+
+        struct timeval tv;
+        gettimeofday(&tv, nullptr);
+        pkt.global_clock_ms = (uint32_t)(uint64_t(tv.tv_sec) * 1000 + tv.tv_usec / 1000);
 
         sendto(sock_, &pkt, sizeof(pkt), 0,
                reinterpret_cast<const sockaddr*>(&dest), sizeof(dest));
@@ -120,33 +126,30 @@ void NodeSync::worker_task() {
         return;
     }
 
-    // Set receive timeout
     struct timeval tv = { .tv_sec = 2, .tv_usec = 0 };
     setsockopt(sock_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-
-    uint8_t last_preset = 0xFF;
 
     for (;;) {
         SyncPacket pkt{};
         const int received = recv(sock_, &pkt, sizeof(pkt), 0);
 
         if (received != sizeof(SyncPacket)) {
-            continue; // Timeout or wrong size
+            continue;
         }
 
-        if (pkt.magic != kMagic || pkt.version != 1) {
-            continue; // Not our protocol
+        if (pkt.magic != kMagic || pkt.version != 2) {
+            continue;
         }
 
-        // Track that we have a master
         peer_count_ = 1;
         engine_.feed_watchdog();
-
-        // Activate preset if changed
-        if (pkt.preset_index != last_preset) {
-            engine_.activate_preset(pkt.preset_index);
-            last_preset = pkt.preset_index;
-        }
+        
+        // For now, workers just sync their system time to the master's time so the 
+        // sequencer (which runs locally) stays perfectly in sync
+        struct timeval new_tv;
+        new_tv.tv_sec = pkt.global_clock_ms / 1000;
+        new_tv.tv_usec = (pkt.global_clock_ms % 1000) * 1000;
+        settimeofday(&new_tv, nullptr);
     }
 }
 

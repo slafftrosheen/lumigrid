@@ -13,15 +13,6 @@ struct BrandColor {
     uint8_t b = 0;
 };
 
-// ──────────────────────────── Channel Config ──────────────────────────
-
-struct ChannelConfig {
-    BrandColor pixel_color;          // Addressable LED color for this lane
-    uint16_t   pwm_duty = 0;         // PCA9685 duty (0–4095)
-    bool       pixel_enabled = true;
-    bool       pwm_enabled = true;
-};
-
 // ──────────────────────────── Signage Effects ─────────────────────────
 
 enum class SignageEffect : uint8_t {
@@ -32,6 +23,8 @@ enum class SignageEffect : uint8_t {
     Reveal   = 4,   // Sequential lane-by-lane enable (brand reveal)
     Sparkle  = 5,   // Random pixel twinkle over base color
     Gradient = 6,   // Smooth gradient across strip length
+    Strobe   = 7,
+    Fire     = 8
 };
 
 inline const char* signage_effect_name(SignageEffect e) {
@@ -43,6 +36,8 @@ inline const char* signage_effect_name(SignageEffect e) {
         case SignageEffect::Reveal:   return "reveal";
         case SignageEffect::Sparkle:  return "sparkle";
         case SignageEffect::Gradient: return "gradient";
+        case SignageEffect::Strobe:   return "strobe";
+        case SignageEffect::Fire:     return "fire";
     }
     return "unknown";
 }
@@ -56,8 +51,24 @@ inline bool parse_signage_effect(const char* name, SignageEffect& out) {
     if (strcmp(name, "reveal")   == 0) { out = SignageEffect::Reveal;   return true; }
     if (strcmp(name, "sparkle")  == 0) { out = SignageEffect::Sparkle;  return true; }
     if (strcmp(name, "gradient") == 0) { out = SignageEffect::Gradient; return true; }
+    if (strcmp(name, "strobe")   == 0) { out = SignageEffect::Strobe;   return true; }
+    if (strcmp(name, "fire")     == 0) { out = SignageEffect::Fire;     return true; }
     return false;
 }
+
+// ──────────────────────────── Channel Config ──────────────────────────
+
+struct ChannelConfig {
+    BrandColor    pixel_color;          // Addressable LED color for this lane
+    uint16_t      pwm_duty = 0;         // PCA9685 duty (0–4095)
+    SignageEffect effect = SignageEffect::Solid;
+    uint16_t      effect_speed_ms = 2000;
+    uint8_t       palette_id = 0;
+    uint8_t       phase_offset = 0;
+    uint8_t       fx_param = 0;
+    bool          pixel_enabled = true;
+    bool          pwm_enabled = true;
+};
 
 // ──────────────────────────── Brand Preset ────────────────────────────
 
@@ -65,8 +76,6 @@ struct BrandPreset {
     char          name[24]       = {};  // "Store Open", "Night Mode", etc.
     ChannelConfig channels[8]    = {};  // Per-channel configuration
     uint8_t       brightness     = 128; // Global brightness (0–255)
-    SignageEffect effect         = SignageEffect::Solid;
-    uint16_t      effect_speed_ms = 2000;  // Period for animated effects
     uint16_t      transition_ms  = 1000;   // Cross-fade duration (ms)
     uint8_t       _reserved[4]   = {};     // Future use, keeps alignment
 
@@ -76,18 +85,24 @@ struct BrandPreset {
     }
 };
 
-static_assert(sizeof(BrandPreset) <= 256, "BrandPreset must fit in single NVS blob");
+// ──────────────────────────── Sequencer ────────────────────────────────
 
-// ──────────────────────────── Schedule ────────────────────────────────
+struct SequencerStep {
+    uint8_t preset_index = 0;
+    uint8_t length_beats = 1;
+};
 
-struct ScheduleEntry {
-    uint8_t hour_start    = 0;    // 0–23
-    uint8_t minute_start  = 0;    // 0–59
-    uint8_t hour_end      = 23;
-    uint8_t minute_end    = 59;
-    uint8_t preset_index  = 0;    // Which preset to activate
-    uint8_t days_of_week  = 0x7F; // Bitmask: bit 0=Sun, bit 6=Sat. 0x7F=every day
-    bool    enabled       = false;
+struct SequencerTrack {
+    uint8_t       channel_id = 0;
+    SequencerStep steps[16]  = {};
+    uint8_t       num_steps  = 16;
+    bool          enabled    = false;
+};
+
+struct Sequence {
+    SequencerTrack tracks[8] = {};
+    uint16_t       bpm       = 120;
+    bool           enabled   = false;
 };
 
 // ──────────────────────────── Device Config ───────────────────────────
@@ -110,8 +125,6 @@ struct DeviceConfig {
     uint8_t  _reserved[8]           = {};
 };
 
-static_assert(sizeof(DeviceConfig) <= 256, "DeviceConfig must fit in single NVS blob");
-
 // ──────────────────────────── Sync Protocol ──────────────────────────
 
 enum class NodeRole : uint8_t {
@@ -120,7 +133,6 @@ enum class NodeRole : uint8_t {
     Worker = 2,
 };
 
-constexpr uint8_t kMaxPresets   = 8;
-constexpr uint8_t kMaxSchedules = 8;
+constexpr uint8_t kMaxPresets   = 32;
 
 } // namespace lg

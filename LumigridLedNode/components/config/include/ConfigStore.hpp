@@ -22,9 +22,9 @@ public:
     esp_err_t save_config(const DeviceConfig& config);
     esp_err_t load_config(DeviceConfig& config);
 
-    // ── Schedules ──
-    esp_err_t save_schedule(uint8_t index, const ScheduleEntry& entry);
-    esp_err_t load_schedule(uint8_t index, ScheduleEntry& entry);
+    // ── Sequences ──
+    esp_err_t save_sequence(const Sequence& seq);
+    esp_err_t load_sequence(Sequence& seq);
 
     // ── Active state (power-loss recovery) ──
     esp_err_t save_active_state(uint8_t preset_index);

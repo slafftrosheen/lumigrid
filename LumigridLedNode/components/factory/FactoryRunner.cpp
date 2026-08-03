@@ -59,7 +59,7 @@ esp_err_t FactoryRunner::start() {
 
     status_.active_effect = FactoryEffect::SafeBlackout;
     status_.brightness = LG_FACTORY_DEFAULT_BRIGHTNESS;
-    status_.auto_loop = true;
+    status_.auto_loop = false; // Disabled by default to prevent flicker with SignageEngine
     status_.outputs_enabled = false;
 
     const BaseType_t created = xTaskCreatePinnedToCore(
@@ -247,6 +247,7 @@ void FactoryRunner::task() {
         loop_started_ms = now_ms();
     }
 
+    TickType_t xLastWakeTime = xTaskGetTickCount();
     for (;;) {
         const uint32_t current_ms = now_ms();
 
@@ -310,7 +311,7 @@ void FactoryRunner::task() {
                 blackout();
             }
 
-            vTaskDelay(pdMS_TO_TICKS(kFramePeriodMs));
+            vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(kFramePeriodMs));
             continue;
         }
 
@@ -350,7 +351,7 @@ void FactoryRunner::task() {
                 blackout();
             }
 
-            vTaskDelay(pdMS_TO_TICKS(kFramePeriodMs));
+            vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(kFramePeriodMs));
             continue;
         }
 
@@ -371,7 +372,7 @@ void FactoryRunner::task() {
                     loop_started_ms = current_ms;
                 }
 
-                vTaskDelay(pdMS_TO_TICKS(kFramePeriodMs));
+                vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(kFramePeriodMs));
                 continue;
             }
 
@@ -381,14 +382,14 @@ void FactoryRunner::task() {
                 blackout_started_ms = current_ms;
 
                 if (status_callback_) status_callback_();
-                vTaskDelay(pdMS_TO_TICKS(kFramePeriodMs));
+                vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(kFramePeriodMs));
                 continue;
             }
         } else if (current.test_active &&
                    current_ms - current.effect_started_ms >=
                    current.effect_duration_ms) {
             blackout();
-            vTaskDelay(pdMS_TO_TICKS(kFramePeriodMs));
+            vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(kFramePeriodMs));
             continue;
         }
 
@@ -405,7 +406,7 @@ void FactoryRunner::task() {
             output_.commit();
         }
 
-        vTaskDelay(pdMS_TO_TICKS(kFramePeriodMs));
+        vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(kFramePeriodMs));
     }
 }
 

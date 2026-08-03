@@ -27,13 +27,13 @@ public:
 private:
     static void task_entry(void* arg);
     void task();
-    void evaluate(const ::tm& now);
+    void evaluate(const Sequence& seq, uint64_t clock_ms);
 
     ConfigStore& config_;
     SignageEngine& engine_;
 
     bool time_synced_ = false;
-    int8_t last_activated_ = -1; // Prevent re-triggering the same entry
+    uint8_t last_step_index_[8] = {255, 255, 255, 255, 255, 255, 255, 255};
 
     TaskHandle_t task_handle_ = nullptr;
 };

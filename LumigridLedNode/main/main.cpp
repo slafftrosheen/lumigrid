@@ -29,7 +29,7 @@ extern "C" void app_main(void) {
     static lg::ArtnetDiscovery artnet;
     static lg::SignageEngine signage(output, config);
     static lg::Scheduler scheduler(config, signage);
-    static lg::NodeSync node_sync(signage);
+    static lg::NodeSync node_sync(signage, config);
 
     ESP_LOGI("lumigrid", "=== BOOT START ===");
     vTaskDelay(pdMS_TO_TICKS(1000)); // Let serial console connect

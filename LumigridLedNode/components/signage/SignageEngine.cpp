@@ -101,6 +101,7 @@ void SignageEngine::task() {
     output_.enable();
     power_budget_.on_enable();
 
+    TickType_t xLastWakeTime = xTaskGetTickCount();
     for (;;) {
         const uint32_t current_ms = now_ms();
 
@@ -113,7 +114,7 @@ void SignageEngine::task() {
             check_watchdog(current_ms);
         }
 
-        vTaskDelay(pdMS_TO_TICKS(kFramePeriodMs));
+        vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(kFramePeriodMs));
     }
 }
 
@@ -160,8 +161,12 @@ void SignageEngine::render_frame(uint32_t current_ms) {
     // Apply power budget
     power_budget_.enforce(output_.pixels(), output_.pwm(), render_preset.brightness);
 
-    // Render the effect
-    render_signage_effect(render_preset.effect, output_, render_preset, effect_elapsed);
+    // Render the effects per lane
+    output_.pixels().clear();
+    output_.pwm().set_all(0);
+    for (uint8_t i = 0; i < 8; ++i) {
+        render_lane_effect(i, output_, render_preset.channels[i], render_preset.brightness, effect_elapsed);
+    }
     output_.commit();
 }
 
