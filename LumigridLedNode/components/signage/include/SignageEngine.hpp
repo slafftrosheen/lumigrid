@@ -1,6 +1,6 @@
 // components/signage/include/SignageEngine.hpp
 #pragma once
-#include "OutputController.hpp"
+#include "OutputArbitrator.hpp"
 #include "ConfigStore.hpp"
 #include "SignageTypes.hpp"
 #include "PowerBudget.hpp"
@@ -20,7 +20,7 @@ namespace lg {
 /// SignageEngine handles persistent preset rendering.
 class SignageEngine {
 public:
-    SignageEngine(OutputController& output, ConfigStore& config);
+    SignageEngine(OutputArbitrator& output, ConfigStore& config);
 
     esp_err_t start();
 
@@ -41,9 +41,6 @@ public:
     /// Access power budget for configuration.
     PowerBudget& power_budget() { return power_budget_; }
 
-    /// Set stream override mode (Art-Net takes over rendering).
-    void set_stream_override(bool active);
-
     /// Set the beat period used by beat-synced preset modifiers.
     void set_beat_period(uint16_t period_ms);
 
@@ -54,7 +51,7 @@ private:
     void render_frame(uint32_t now_ms);
     void check_watchdog(uint32_t now_ms);
 
-    OutputController& output_;
+    OutputArbitrator& output_;
     ConfigStore& config_;
     PowerBudget power_budget_;
 
@@ -74,8 +71,6 @@ private:
     bool watchdog_enabled_ = false;
     uint16_t watchdog_timeout_s_ = 60;
 
-    // Stream override (Art-Net/DMX)
-    bool stream_override_ = false;
     uint16_t beat_period_ms_ = 500;
 
     // Soft-start tracking

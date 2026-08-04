@@ -25,6 +25,8 @@ public:
     void fill(uint8_t lane, Rgb color);
     void fill_all(Rgb color);
 
+    const std::array<std::array<Rgb, kPixels>, kLanes>& buffer() const { return buffer_; }
+
     esp_err_t show();
     esp_err_t blackout();
 

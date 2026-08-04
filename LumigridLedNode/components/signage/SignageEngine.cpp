@@ -43,7 +43,7 @@ BrandPreset blend_presets(const BrandPreset& from, const BrandPreset& to, uint8_
 
 } // namespace
 
-SignageEngine::SignageEngine(OutputController& output, ConfigStore& config)
+SignageEngine::SignageEngine(OutputArbitrator& output, ConfigStore& config)
     : output_(output), config_(config) {}
 
 esp_err_t SignageEngine::start() {
@@ -85,6 +85,8 @@ esp_err_t SignageEngine::start() {
 
     ESP_LOGI(TAG, "Starting with preset %u: \"%s\"", active_idx, preset.name);
 
+    output_.acquire(OutputPriority::Signage); // Acquire indefinite lease
+
     const BaseType_t created = xTaskCreatePinnedToCore(
         task_entry, "signage", 4096, this, 4, &task_handle_, 1
     );
@@ -98,22 +100,13 @@ void SignageEngine::task_entry(void* arg) {
 }
 
 void SignageEngine::task() {
-    output_.enable();
     power_budget_.on_enable();
 
     TickType_t xLastWakeTime = xTaskGetTickCount();
     for (;;) {
         const uint32_t current_ms = now_ms();
-
-        xSemaphoreTake(mutex_, portMAX_DELAY);
-        const bool stream = stream_override_;
-        xSemaphoreGive(mutex_);
-
-        if (!stream) {
-            render_frame(current_ms);
-            check_watchdog(current_ms);
-        }
-
+        render_frame(current_ms);
+        check_watchdog(current_ms);
         vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(kFramePeriodMs));
     }
 }
@@ -164,14 +157,16 @@ void SignageEngine::render_frame(uint32_t current_ms) {
     power_budget_.enforce(output_.pixels(), output_.pwm(), render_preset.brightness);
 
     // Render the effects per lane
-    output_.pixels().clear();
-    output_.pwm().set_all(0);
-    if (preset_is_visible(render_preset, effect_elapsed, beat_period_ms)) {
-        for (uint8_t i = 0; i < 8; ++i) {
-            render_lane_effect(i, output_, render_preset.channels[i], render_preset.brightness, effect_elapsed);
+    if (output_.begin_frame(OutputPriority::Signage)) {
+        output_.pixels().clear();
+        output_.pwm().set_all(0);
+        if (preset_is_visible(render_preset, effect_elapsed, beat_period_ms)) {
+            for (uint8_t i = 0; i < 8; ++i) {
+                render_lane_effect(i, output_.controller(), render_preset.channels[i], render_preset.brightness, effect_elapsed);
+            }
         }
+        output_.commit_frame(OutputPriority::Signage);
     }
-    output_.commit();
 }
 
 void SignageEngine::check_watchdog(uint32_t current_ms) {
@@ -182,19 +177,37 @@ void SignageEngine::check_watchdog(uint32_t current_ms) {
     xSemaphoreGive(mutex_);
 
     if (elapsed_s > watchdog_timeout_s_) {
-        ESP_LOGW(TAG, "Watchdog: no commands for %lu s, activating fallback", (unsigned long)elapsed_s);
-
         DeviceConfig cfg;
         config_.load_config(cfg);
+        
+        xSemaphoreTake(mutex_, portMAX_DELAY);
+        const uint8_t current_idx = active_index_;
+        xSemaphoreGive(mutex_);
+
+        if (current_idx == cfg.fallback_preset_index) {
+            // Already on fallback, don't trigger watchdog. Reset timer.
+            xSemaphoreTake(mutex_, portMAX_DELAY);
+            last_command_ms_ = current_ms;
+            xSemaphoreGive(mutex_);
+            return;
+        }
+
+        ESP_LOGW(TAG, "Watchdog: no commands for %lu s, activating fallback %u", (unsigned long)elapsed_s, cfg.fallback_preset_index);
 
         BrandPreset fallback;
         if (config_.load_preset(cfg.fallback_preset_index, fallback) == ESP_OK) {
             xSemaphoreTake(mutex_, portMAX_DELAY);
             target_preset_ = fallback;
             transition_start_ms_ = current_ms;
-            transition_duration_ms_ = fallback.transition_ms;
+            transition_duration_ms_ = std::max<uint32_t>(1, fallback.transition_ms);
             transitioning_ = true;
             fallback_active_ = true;
+            active_index_ = cfg.fallback_preset_index;
+            xSemaphoreGive(mutex_);
+        } else {
+            ESP_LOGE(TAG, "Watchdog fallback preset %u not found", cfg.fallback_preset_index);
+            xSemaphoreTake(mutex_, portMAX_DELAY);
+            fallback_active_ = true; // Prevent retry loop
             xSemaphoreGive(mutex_);
         }
     }
@@ -220,7 +233,7 @@ void SignageEngine::activate_preset(uint8_t index) {
 
     target_preset_ = preset;
     transition_start_ms_ = current_ms;
-    transition_duration_ms_ = preset.transition_ms;
+    transition_duration_ms_ = std::max<uint32_t>(1, preset.transition_ms);
     transitioning_ = true;
     active_index_ = index;
     fallback_active_ = false;
@@ -244,7 +257,7 @@ void SignageEngine::activate_preset_direct(const BrandPreset& preset, bool immed
     } else {
         target_preset_ = preset;
         transition_start_ms_ = current_ms;
-        transition_duration_ms_ = preset.transition_ms;
+        transition_duration_ms_ = std::max<uint32_t>(1, preset.transition_ms);
         transitioning_ = true;
     }
     fallback_active_ = false;
@@ -263,12 +276,6 @@ void SignageEngine::feed_watchdog() {
 
 uint8_t SignageEngine::active_preset_index() const {
     return active_index_;
-}
-
-void SignageEngine::set_stream_override(bool active) {
-    xSemaphoreTake(mutex_, portMAX_DELAY);
-    stream_override_ = active;
-    xSemaphoreGive(mutex_);
 }
 
 void SignageEngine::set_beat_period(uint16_t period_ms) {

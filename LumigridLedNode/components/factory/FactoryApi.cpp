@@ -405,6 +405,10 @@ esp_err_t ws_handler(httpd_req_t* request) {
     // Read and discard to prevent state leak
     httpd_ws_frame_t ws_pkt = {};
     if (httpd_ws_recv_frame(request, &ws_pkt, 0) == ESP_OK && ws_pkt.len > 0) {
+        // DoS protection: cap frame size to avoid OOM
+        if (ws_pkt.len > 1024) {
+            return ESP_FAIL;
+        }
         uint8_t* buf = (uint8_t*)calloc(1, ws_pkt.len + 1);
         if (buf) {
             ws_pkt.payload = buf;
@@ -993,7 +997,8 @@ esp_err_t FactoryApi::serve_dashboard(httpd_req_t* request) {
 FactoryApi::FactoryApi(FactoryRunner& runner) : runner_(runner) {}
 
 esp_err_t FactoryApi::start(
-    uint16_t port,
+    uint16_t signage_port,
+    uint16_t factory_port,
     ConfigStore* config,
     SignageEngine* signage,
     Scheduler* scheduler,
@@ -1005,20 +1010,15 @@ esp_err_t FactoryApi::start(
     node_sync_ = node_sync;
 
     httpd_config_t http_config = HTTPD_DEFAULT_CONFIG();
-    http_config.server_port = port;
-    http_config.max_uri_handlers = 20;
-    http_config.stack_size = 6144;
-    http_config.lru_purge_enable = true;
-    http_config.recv_wait_timeout = 5;
-    http_config.send_wait_timeout = 5;
+    http_config.server_port = signage_port;
+    ESP_RETURN_ON_ERROR(httpd_start(&signage_server_, &http_config), "factory-api", "start signage");
 
-    max_open_sockets_ = http_config.max_open_sockets;
-
-    ESP_RETURN_ON_ERROR(httpd_start(&server_, &http_config), "factory-api", "start");
+    http_config.server_port = factory_port;
+    ESP_RETURN_ON_ERROR(httpd_start(&factory_server_, &http_config), "factory-api", "start factory");
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wmissing-field-initializers"
-    const httpd_uri_t routes[] = {
+    const httpd_uri_t factory_routes[] = {
         // ── Factory test endpoints ──
         { .uri = "/api/v1/factory/status",    .method = HTTP_GET,  .handler = get_status,     .user_ctx = this },
         { .uri = "/api/v1/factory/effect",    .method = HTTP_POST, .handler = post_effect,    .user_ctx = this },
@@ -1026,6 +1026,13 @@ esp_err_t FactoryApi::start(
         { .uri = "/api/v1/factory/pwm",       .method = HTTP_POST, .handler = post_pwm,       .user_ctx = this },
         { .uri = "/api/v1/factory/abort",     .method = HTTP_POST, .handler = post_abort,     .user_ctx = this },
         { .uri = "/api/v1/factory/auto-loop", .method = HTTP_POST, .handler = post_auto_loop, .user_ctx = this },
+        // ── WebSocket + Dashboard ──
+        { .uri = "/ws", .method = HTTP_GET, .handler = ws_handler, .user_ctx = this,
+          .is_websocket = true, .handle_ws_control_frames = false, .supported_subprotocol = nullptr },
+        { .uri = "/",   .method = HTTP_GET, .handler = serve_dashboard, .user_ctx = this },
+    };
+
+    const httpd_uri_t signage_routes[] = {
         // ── Signage endpoints ──
         { .uri = "/api/v1/presets",           .method = HTTP_GET,  .handler = get_presets,      .user_ctx = this },
         { .uri = "/api/v1/presets",           .method = HTTP_PUT,  .handler = put_preset,       .user_ctx = this },
@@ -1039,15 +1046,24 @@ esp_err_t FactoryApi::start(
         { .uri = "/api/v1/schedules",         .method = HTTP_GET,  .handler = get_calendar_schedule, .user_ctx = this },
         { .uri = "/api/v1/schedules",         .method = HTTP_PUT,  .handler = put_calendar_schedule, .user_ctx = this },
         { .uri = "/api/v1/sync",              .method = HTTP_GET,  .handler = get_sync_status,     .user_ctx = this },
-        // ── WebSocket + Dashboard ──
-        { .uri = "/ws", .method = HTTP_GET, .handler = ws_handler, .user_ctx = this,
-          .is_websocket = true, .handle_ws_control_frames = false, .supported_subprotocol = nullptr },
-        { .uri = "/",   .method = HTTP_GET, .handler = serve_dashboard, .user_ctx = this },
     };
 
-    for (const auto& endpoint : routes) {
+    for (const auto& endpoint : factory_routes) {
         ESP_RETURN_ON_ERROR(
-            httpd_register_uri_handler(server_, &endpoint),
+            httpd_register_uri_handler(factory_server_, &endpoint),
+            "api",
+            "register uri"
+        );
+    }
+    for (const auto& endpoint : signage_routes) {
+        ESP_RETURN_ON_ERROR(
+            httpd_register_uri_handler(signage_server_, &endpoint),
+            "api",
+            "register uri"
+        );
+        // Bind signage routes to factory server too, so the dashboard can access them
+        ESP_RETURN_ON_ERROR(
+            httpd_register_uri_handler(factory_server_, &endpoint),
             "api",
             "register uri"
         );
@@ -1069,7 +1085,7 @@ void FactoryApi::ws_broadcast_work(void* arg) {
     std::vector<int> client_fds(msg->api->max_open_sockets_);
     size_t clients = client_fds.size();
 
-    if (httpd_get_client_list(msg->api->server_, &clients, client_fds.data()) != ESP_OK) {
+    if (httpd_get_client_list(msg->api->factory_server_, &clients, client_fds.data()) != ESP_OK) {
         return;
     }
 
@@ -1079,28 +1095,32 @@ void FactoryApi::ws_broadcast_work(void* arg) {
     frame.len = strlen(msg->payload);
 
     for (size_t i = 0; i < clients; ++i) {
-        if (httpd_ws_get_fd_info(msg->api->server_, client_fds[i]) == HTTPD_WS_CLIENT_WEBSOCKET) {
-            httpd_ws_send_frame_async(msg->api->server_, client_fds[i], &frame);
+        if (httpd_ws_get_fd_info(msg->api->factory_server_, client_fds[i]) == HTTPD_WS_CLIENT_WEBSOCKET) {
+            httpd_ws_send_frame_async(msg->api->factory_server_, client_fds[i], &frame);
         }
     }
 }
 
 void FactoryApi::notify_status_async() {
-    if (server_ == nullptr) return;
+    if (factory_server_ == nullptr) return;
 
     auto* arg = new WsBroadcastArg{};
     arg->api = this;
     build_status_json(runner_.status(), arg->payload, sizeof(arg->payload));
 
-    if (httpd_queue_work(server_, ws_broadcast_work, arg) != ESP_OK) {
+    if (httpd_queue_work(factory_server_, ws_broadcast_work, arg) != ESP_OK) {
         delete arg;
     }
 }
 
 void FactoryApi::stop() {
-    if (server_ != nullptr) {
-        httpd_stop(server_);
-        server_ = nullptr;
+    if (signage_server_ != nullptr) {
+        httpd_stop(signage_server_);
+        signage_server_ = nullptr;
+    }
+    if (factory_server_ != nullptr) {
+        httpd_stop(factory_server_);
+        factory_server_ = nullptr;
     }
 }
 

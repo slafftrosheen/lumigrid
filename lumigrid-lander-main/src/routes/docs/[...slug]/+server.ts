@@ -7,6 +7,11 @@ const ROOT_DOCS = new Set(['README', 'StyleSystem', 'CONTRIBUTING']);
 /** @type {import('./$types').RequestHandler} */
 export async function GET({ params }) {
 	const { slug } = params;
+	
+	if (!slug || slug.includes('..') || slug.startsWith('/')) {
+		throw error(400, 'Invalid slug');
+	}
+
 	let filePath = '';
 
 	if (ROOT_DOCS.has(slug)) {

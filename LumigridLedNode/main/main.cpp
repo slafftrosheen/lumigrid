@@ -11,7 +11,7 @@
 #include "ArtnetDiscovery.hpp"
 #include "FactoryTypes.hpp"
 
-// Signage components
+#include "OutputArbitrator.hpp"
 #include "ConfigStore.hpp"
 #include "SignageEngine.hpp"
 #include "Scheduler.hpp"
@@ -21,13 +21,14 @@ extern "C" void app_main(void) {
     // All service objects are static so they survive app_main() return
     // and remain valid for the WiFi callback lambda that captures them by reference.
     static lg::OutputController output;
+    static lg::OutputArbitrator arbitrator(output);
     static lg::ConfigStore config;
-    static lg::FactoryRunner runner(output);
+    static lg::FactoryRunner runner(arbitrator);
     static lg::FactoryApi api(runner);
     static lg::WifiService wifi;
     static lg::MdnsService mdns;
     static lg::ArtnetDiscovery artnet;
-    static lg::SignageEngine signage(output, config);
+    static lg::SignageEngine signage(arbitrator, config);
     static lg::ClockDiscipline clock;
     static lg::Scheduler scheduler(config, signage, clock);
     static lg::NodeSync node_sync(signage, config, clock);
@@ -46,6 +47,11 @@ extern "C" void app_main(void) {
     err = output.init();
     if (err != ESP_OK) ESP_LOGE("lumigrid", "output.init() FAILED: %s", esp_err_to_name(err));
     else ESP_LOGI("lumigrid", "output.init() OK");
+    
+    ESP_LOGI("lumigrid", "Step 2.1: arbitrator.init()...");
+    err = arbitrator.init();
+    if (err != ESP_OK) ESP_LOGE("lumigrid", "arbitrator.init() FAILED: %s", esp_err_to_name(err));
+    else ESP_LOGI("lumigrid", "arbitrator.init() OK");
     vTaskDelay(pdMS_TO_TICKS(500));
 
     // Step 3: Signage engine — renders active preset IMMEDIATELY (before network)
@@ -103,8 +109,8 @@ extern "C" void app_main(void) {
                 node.report = "#0001 [0000] LumiGrid ready";
                 std::memcpy(node.mac, mac, 6);
 
-                ESP_LOGI("lumigrid", "Step 6: api.start(80)...");
-                ESP_ERROR_CHECK(api.start(80, &config, &signage, &scheduler, &node_sync));
+                ESP_LOGI("lumigrid", "Step 6: api.start(80, 8080)...");
+                ESP_ERROR_CHECK(api.start(80, 8080, &config, &signage, &scheduler, &node_sync));
 
                 ESP_LOGI("lumigrid", "Step 7: mdns.start()...");
                 ESP_ERROR_CHECK(mdns.start(dev_cfg.device_name, "LumiGrid Signage", 80));
@@ -116,7 +122,6 @@ extern "C" void app_main(void) {
                         if (packet.universe != 0) return;
 
                         signage.feed_watchdog();
-                        signage.set_stream_override(true);
 
                         lg::FactoryCommand command{};
                         command.type = lg::FactoryCommandType::StreamFrame;

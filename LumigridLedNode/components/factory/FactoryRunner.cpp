@@ -48,7 +48,7 @@ uint32_t clamp_duration(uint32_t duration_ms) {
 
 } // namespace
 
-FactoryRunner::FactoryRunner(OutputController& output) : output_(output) {}
+FactoryRunner::FactoryRunner(OutputArbitrator& output) : output_(output) {}
 
 esp_err_t FactoryRunner::start() {
     queue_ = xQueueCreate(kQueueDepth, sizeof(FactoryCommand));
@@ -108,7 +108,8 @@ void FactoryRunner::task_entry(void* argument) {
 }
 
 void FactoryRunner::blackout() {
-    output_.blackout();
+    output_.release(OutputPriority::Factory);
+    output_.release(OutputPriority::ArtNet);
 
     xSemaphoreTake(status_mutex_, portMAX_DELAY);
     status_.active_effect = FactoryEffect::SafeBlackout;
@@ -124,8 +125,7 @@ void FactoryRunner::start_effect(FactoryEffect effect,
                                  uint32_t duration_ms,
                                  uint8_t brightness,
                                  uint32_t started_ms) {
-    output_.blackout();
-    output_.enable();
+    output_.acquire(OutputPriority::Factory);
 
     xSemaphoreTake(status_mutex_, portMAX_DELAY);
     status_.active_effect = effect;
@@ -167,14 +167,16 @@ void FactoryRunner::set_stream_frame(const StreamFramePayload& payload,
 
 void FactoryRunner::apply_command(const FactoryCommand& command,
                                   uint32_t current_ms) {
-    switch (command.type) {
         case FactoryCommandType::Abort:
             direct_test_active_ = false;
+            xSemaphoreTake(status_mutex_, portMAX_DELAY);
+            stream_active_ = false;
+            xSemaphoreGive(status_mutex_);
             blackout();
             return;
 
         case FactoryCommandType::SetAutoLoop:
-            output_.blackout();
+            output_.release(OutputPriority::Factory);
 
             xSemaphoreTake(status_mutex_, portMAX_DELAY);
             status_.auto_loop = command.enabled;
@@ -204,8 +206,7 @@ void FactoryRunner::apply_command(const FactoryCommand& command,
 
         case FactoryCommandType::PixelLaneSolid:
         case FactoryCommandType::PwmChannelLevel:
-            output_.blackout();
-            output_.enable();
+            output_.acquire(OutputPriority::Factory);
 
             direct_test_ = command;
             direct_test_active_ = true;
@@ -238,6 +239,7 @@ void FactoryRunner::task() {
 
     // Kick off the first loop effect immediately at boot.
     if (status().auto_loop) {
+        output_.acquire(OutputPriority::Factory);
         start_effect(
             kLoopEffects[loop_index],
             kLoopEffectDurationMs,
@@ -260,7 +262,6 @@ void FactoryRunner::task() {
 
         // --- Streaming path: read stream state under mutex ---
         bool is_streaming = false;
-        bool stream_needs_enable = false;
         StreamFramePayload local_stream;
         uint32_t local_stream_last_ms = 0;
         uint8_t local_stream_brightness = 0;
@@ -268,7 +269,6 @@ void FactoryRunner::task() {
         xSemaphoreTake(status_mutex_, portMAX_DELAY);
         if (stream_active_) {
             is_streaming = true;
-            stream_needs_enable = !output_.enabled();
             local_stream = stream_frame_.stream;
             local_stream_last_ms = stream_last_ms_;
             local_stream_brightness = stream_frame_.brightness;
@@ -276,33 +276,33 @@ void FactoryRunner::task() {
         xSemaphoreGive(status_mutex_);
 
         if (is_streaming) {
-            if (stream_needs_enable) {
-                output_.enable();
-            }
+            output_.acquire(OutputPriority::ArtNet, 1000); // Re-acquire lease for 1 second
 
-            const uint8_t b = local_stream_brightness;
+            if (output_.begin_frame(OutputPriority::ArtNet)) {
+                const uint8_t b = local_stream_brightness;
 
-            for (uint8_t lane = 0; lane < 8; ++lane) {
-                output_.pixels().fill(
-                    lane,
-                    {
-                        static_cast<uint8_t>((uint16_t(local_stream.lane_rgb[lane][0]) * b) / 255),
-                        static_cast<uint8_t>((uint16_t(local_stream.lane_rgb[lane][1]) * b) / 255),
-                        static_cast<uint8_t>((uint16_t(local_stream.lane_rgb[lane][2]) * b) / 255)
-                    }
-                );
-
-                const uint16_t duty =
-                    static_cast<uint16_t>(
-                        (uint32_t(local_stream.lane_rgb[lane][0] +
-                                  local_stream.lane_rgb[lane][1] +
-                                  local_stream.lane_rgb[lane][2]) * 4095) / (255 * 3)
+                for (uint8_t lane = 0; lane < 8; ++lane) {
+                    output_.pixels().fill(
+                        lane,
+                        {
+                            static_cast<uint8_t>((uint16_t(local_stream.lane_rgb[lane][0]) * b) / 255),
+                            static_cast<uint8_t>((uint16_t(local_stream.lane_rgb[lane][1]) * b) / 255),
+                            static_cast<uint8_t>((uint16_t(local_stream.lane_rgb[lane][2]) * b) / 255)
+                        }
                     );
 
-                output_.pwm().set(lane, duty);
-            }
+                    const uint16_t duty =
+                        static_cast<uint16_t>(
+                            (uint32_t(local_stream.lane_rgb[lane][0] +
+                                      local_stream.lane_rgb[lane][1] +
+                                      local_stream.lane_rgb[lane][2]) * 4095) / (255 * 3)
+                        );
 
-            output_.commit();
+                    output_.pwm().set(lane, duty);
+                }
+
+                output_.commit_frame(OutputPriority::ArtNet);
+            }
 
             if (current_ms - local_stream_last_ms > 1000) {
                 xSemaphoreTake(status_mutex_, portMAX_DELAY);
@@ -321,30 +321,32 @@ void FactoryRunner::task() {
         if (direct_test_active_) {
             const uint32_t elapsed = current_ms - current.effect_started_ms;
 
-            output_.pixels().clear();
-            output_.pwm().set_all(0);
+            if (output_.begin_frame(OutputPriority::Factory)) {
+                output_.pixels().clear();
+                output_.pwm().set_all(0);
 
-            if (direct_test_.type == FactoryCommandType::PixelLaneSolid) {
-                const uint8_t b = current.brightness;
+                if (direct_test_.type == FactoryCommandType::PixelLaneSolid) {
+                    const uint8_t b = current.brightness;
 
-                output_.pixels().fill(
-                    direct_test_.lane_or_channel,
-                    {
-                        static_cast<uint8_t>((uint16_t(direct_test_.red) * b) / 255),
-                        static_cast<uint8_t>((uint16_t(direct_test_.green) * b) / 255),
-                        static_cast<uint8_t>((uint16_t(direct_test_.blue) * b) / 255)
-                    }
-                );
+                    output_.pixels().fill(
+                        direct_test_.lane_or_channel,
+                        {
+                            static_cast<uint8_t>((uint16_t(direct_test_.red) * b) / 255),
+                            static_cast<uint8_t>((uint16_t(direct_test_.green) * b) / 255),
+                            static_cast<uint8_t>((uint16_t(direct_test_.blue) * b) / 255)
+                        }
+                    );
+                }
+
+                if (direct_test_.type == FactoryCommandType::PwmChannelLevel) {
+                    output_.pwm().set(
+                        direct_test_.lane_or_channel,
+                        direct_test_.pwm_duty
+                    );
+                }
+
+                output_.commit_frame(OutputPriority::Factory);
             }
-
-            if (direct_test_.type == FactoryCommandType::PwmChannelLevel) {
-                output_.pwm().set(
-                    direct_test_.lane_or_channel,
-                    direct_test_.pwm_duty
-                );
-            }
-
-            output_.commit();
 
             if (elapsed >= current.effect_duration_ms) {
                 direct_test_active_ = false;
@@ -377,7 +379,7 @@ void FactoryRunner::task() {
             }
 
             if (current_ms - loop_started_ms >= kLoopEffectDurationMs) {
-                output_.blackout();
+                output_.release(OutputPriority::Factory);
                 between_loop_effects = true;
                 blackout_started_ms = current_ms;
 
@@ -396,14 +398,16 @@ void FactoryRunner::task() {
         if (current.test_active) {
             const uint32_t elapsed = current_ms - current.effect_started_ms;
 
-            render_effect(
-                current.active_effect,
-                output_,
-                elapsed,
-                current.brightness
-            );
+            if (output_.begin_frame(OutputPriority::Factory)) {
+                render_effect(
+                    current.active_effect,
+                    output_.controller(),
+                    elapsed,
+                    current.brightness
+                );
 
-            output_.commit();
+                output_.commit_frame(OutputPriority::Factory);
+            }
         }
 
         vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(kFramePeriodMs));

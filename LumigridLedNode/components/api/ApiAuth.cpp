@@ -1,14 +1,37 @@
 // components/api/ApiAuth.cpp
 #include "ApiAuth.hpp"
 #include <cstring>
+#include "nvs_flash.h"
+#include "nvs.h"
+#include "esp_log.h"
 
 namespace lg::api {
 namespace {
 
-// TODO(security): HARDCODED FACTORY TOKEN — MUST be replaced before any
-// production or network-exposed deployment. Provision a 32-byte random
-// token into encrypted NVS.
-constexpr char kFactoryToken[] = "lumigrid-factory-token-v1";
+static const char* TAG = "api_auth";
+static char s_api_token[64] = {0};
+static bool s_token_loaded = false;
+
+bool load_token() {
+    if (s_token_loaded) return true;
+
+    nvs_handle_t handle = 0;
+    if (nvs_open("lumigrid", NVS_READONLY, &handle) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to open NVS for API token");
+        return false;
+    }
+
+    size_t len = sizeof(s_api_token);
+    if (nvs_get_str(handle, "api_token", s_api_token, &len) != ESP_OK) {
+        ESP_LOGE(TAG, "No api_token found in NVS. Device is locked down.");
+        nvs_close(handle);
+        return false;
+    }
+
+    nvs_close(handle);
+    s_token_loaded = true;
+    return true;
+}
 
 }
 
@@ -40,10 +63,19 @@ bool authorize(httpd_req_t* request) {
         return false;
     }
 
+    if (!load_token()) {
+        httpd_resp_send_err(
+            request,
+            HTTPD_403_FORBIDDEN,
+            "Server not provisioned"
+        );
+        return false;
+    }
+
     constexpr char prefix[] = "Bearer ";
     const bool valid =
         std::strncmp(header, prefix, sizeof(prefix) - 1) == 0 &&
-        std::strcmp(header + sizeof(prefix) - 1, kFactoryToken) == 0;
+        std::strcmp(header + sizeof(prefix) - 1, s_api_token) == 0;
 
     if (!valid) {
         httpd_resp_send_err(

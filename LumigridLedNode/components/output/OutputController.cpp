@@ -61,6 +61,11 @@ esp_err_t OutputController::commit() {
     if (err == ESP_OK) {
         err = pixels_.show();
     }
+    if (err != ESP_OK) {
+        gpio_set_level(board::kPcaOe, 1);
+        enabled_ = false;
+        ESP_LOGE("output", "Hardware commit failed (%s), disabling output safety interlock", esp_err_to_name(err));
+    }
     xSemaphoreGive(mutex_);
     return err;
 }

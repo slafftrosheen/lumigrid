@@ -233,6 +233,7 @@ struct DeviceConfig {
     char     timezone[48]           = "UTC0";
     bool     sync_enabled           = false;
     uint8_t  sync_role              = 0;    // 0=Auto, 1=Master, 2=Worker
+    uint32_t sync_token             = 0;
     ZoneConfig zones[8]             = {};
 };
 

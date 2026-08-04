@@ -214,6 +214,8 @@ NodeRole NodeSync::master_loop(int socket, bool auto_mode) {
         if (static_cast<int32_t>(now - next_heartbeat_ms) >= 0) {
             Sequence sequence_state{};
             config_.load_sequence(sequence_state);
+            DeviceConfig cfg{};
+            config_.load_config(cfg);
 
             SyncPacket packet{};
             packet.magic = kMagic;
@@ -225,6 +227,7 @@ NodeRole NodeSync::master_loop(int socket, bool auto_mode) {
             packet.flags = clock_.has_epoch() ? 0x01 : 0x00;
             packet.global_clock_ms = clock_.now_ms();
             packet.sent_monotonic_ms = now;
+            packet.token = cfg.sync_token;
             std::memcpy(packet.sender_mac, local_mac, sizeof(local_mac));
 
             sendto(socket, &packet, sizeof(packet), 0,
@@ -246,6 +249,12 @@ NodeRole NodeSync::master_loop(int socket, bool auto_mode) {
         if (received != sizeof(SyncPacket) ||
             packet.magic != kMagic ||
             packet.version != kPacketVersion) {
+            continue;
+        }
+
+        DeviceConfig cfg{};
+        config_.load_config(cfg);
+        if (packet.token != cfg.sync_token) {
             continue;
         }
 
@@ -298,9 +307,13 @@ NodeRole NodeSync::worker_loop(int socket, bool auto_mode) {
             packet.magic == kMagic &&
             packet.version == kPacketVersion &&
             packet.type == PacketType::Heartbeat &&
-            std::memcmp(packet.sender_mac, local_mac, sizeof(local_mac)) != 0 &&
-            handle_heartbeat(packet, sender)) {
-            send_ack(socket, packet, sender);
+            std::memcmp(packet.sender_mac, local_mac, sizeof(local_mac)) != 0) {
+            
+            DeviceConfig cfg{};
+            config_.load_config(cfg);
+            if (packet.token == cfg.sync_token && handle_heartbeat(packet, sender)) {
+                send_ack(socket, packet, sender, cfg.sync_token);
+            }
         }
 
         if (auto_mode) {
@@ -372,7 +385,8 @@ bool NodeSync::handle_heartbeat(
 void NodeSync::send_ack(
     int socket,
     const SyncPacket& heartbeat,
-    const sockaddr_in& sender
+    const sockaddr_in& sender,
+    uint32_t token
 ) {
     uint8_t local_mac[6] = {};
     esp_read_mac(local_mac, ESP_MAC_WIFI_STA);
@@ -385,6 +399,7 @@ void NodeSync::send_ack(
     acknowledgement.flags = clock_.has_epoch() ? 0x01 : 0x00;
     acknowledgement.global_clock_ms = clock_.now_ms();
     acknowledgement.sent_monotonic_ms = heartbeat.sent_monotonic_ms;
+    acknowledgement.token = token;
     std::memcpy(acknowledgement.sender_mac, local_mac, sizeof(local_mac));
 
     sendto(socket, &acknowledgement, sizeof(acknowledgement), 0,

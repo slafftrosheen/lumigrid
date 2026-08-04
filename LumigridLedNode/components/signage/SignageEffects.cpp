@@ -4,6 +4,7 @@
 #include "FactoryApp.hpp"
 #include <cstdlib>
 #include <algorithm>
+#include <cmath>
 
 namespace lg {
 namespace {
@@ -26,18 +27,9 @@ uint16_t scale_pwm(uint16_t duty, uint8_t brightness) {
 
 // Sine approximation for breathe effect (0–255 input → 0–255 output).
 uint8_t sine8(uint8_t phase) {
-    const uint8_t quarter = phase & 0x3F;
-    const uint8_t half    = phase & 0x7F;
-    uint8_t val;
-
-    if (half < 64) {
-        val = static_cast<uint8_t>((uint16_t(quarter) * quarter * 4) >> 8);
-    } else {
-        const uint8_t inv = 63 - quarter;
-        val = static_cast<uint8_t>(255 - ((uint16_t(inv) * inv * 4) >> 8));
-    }
-
-    return (phase & 0x80) ? (255 - val) : val;
+    // Maps phase 0..255 to a smooth 0..255..0 wave
+    const float x = phase * (3.14159265359f / 128.0f);
+    return static_cast<uint8_t>(127.5f - 127.5f * std::cos(x));
 }
 
 uint32_t xorshift(uint32_t& state) {
@@ -176,7 +168,7 @@ void render_lane_effect(
                 for (uint8_t s = 0; s < parameter; ++s) {
                     const uint32_t rv = xorshift(rng);
                     const uint16_t px = (rv >> 3) % LG_FACTORY_PIXELS_PER_LANE;
-                    output.pixels().set(lane, px, {255, 255, 255});
+                    output.pixels().set(lane, px, {b, b, b});
                 }
             }
             break;

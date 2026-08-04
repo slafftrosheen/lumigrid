@@ -62,7 +62,7 @@ private:
     NodeRole worker_loop(int socket, bool auto_mode);
     bool open_socket(int& socket, bool broadcast);
     bool handle_heartbeat(const SyncPacket& packet, const sockaddr_in& sender);
-    void send_ack(int socket, const SyncPacket& heartbeat, const sockaddr_in& sender);
+    void send_ack(int socket, const SyncPacket& heartbeat, const sockaddr_in& sender, uint32_t token);
     void update_peer(const sockaddr_in& sender, uint16_t latency_ms);
     void reset_master();
 
@@ -116,9 +116,10 @@ private:
         uint64_t global_clock_ms;
         uint32_t sent_monotonic_ms;
         uint8_t  sender_mac[6];
+        uint32_t token;
     };
 
-    static_assert(sizeof(SyncPacket) == 32, "SyncPacket must be 32 bytes");
+    static_assert(sizeof(SyncPacket) == 36, "SyncPacket must be 36 bytes");
 };
 
 } // namespace lg

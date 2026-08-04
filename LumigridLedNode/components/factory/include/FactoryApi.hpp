@@ -18,8 +18,9 @@ class FactoryApi {
 public:
     explicit FactoryApi(FactoryRunner& runner);
 
-    /// Start HTTP server. Pass signage pointers (nullable) for signage REST endpoints.
-    esp_err_t start(uint16_t port = 80,
+    /// Start HTTP servers. Separate signage and factory APIs by port.
+    esp_err_t start(uint16_t signage_port = 80,
+                    uint16_t factory_port = 8080,
                     ConfigStore* config = nullptr,
                     SignageEngine* signage = nullptr,
                     Scheduler* scheduler = nullptr,
@@ -43,7 +44,8 @@ private:
     SignageEngine* signage_ = nullptr;
     Scheduler* scheduler_ = nullptr;
     NodeSync* node_sync_ = nullptr;
-    httpd_handle_t server_ = nullptr;
+    httpd_handle_t signage_server_ = nullptr;
+    httpd_handle_t factory_server_ = nullptr;
     size_t max_open_sockets_ = 0;
 };
 

@@ -12,7 +12,7 @@ namespace lg {
 
 class FactoryRunner {
 public:
-    explicit FactoryRunner(OutputController& output);
+    explicit FactoryRunner(OutputArbitrator& output);
 
     esp_err_t start();
     bool enqueue(const FactoryCommand& command);
@@ -35,7 +35,7 @@ private:
     );
     void blackout();
 
-    OutputController& output_;
+    OutputArbitrator& output_;
 
     QueueHandle_t queue_ = nullptr;
     SemaphoreHandle_t status_mutex_ = nullptr;

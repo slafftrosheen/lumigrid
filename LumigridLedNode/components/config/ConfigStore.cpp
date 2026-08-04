@@ -52,8 +52,18 @@ esp_err_t ConfigStore::load_preset(uint8_t index, BrandPreset& preset) {
     char key[12];
     make_key(key, sizeof(key), "preset", index);
 
-    size_t len = sizeof(BrandPreset);
-    return nvs_get_blob(handle_, key, &preset, &len);
+    size_t len = 0;
+    esp_err_t err = nvs_get_blob(handle_, key, nullptr, &len);
+    if (err == ESP_OK && len > 0) {
+        if (len <= sizeof(BrandPreset)) {
+            BrandPreset temp{};
+            err = nvs_get_blob(handle_, key, &temp, &len);
+            if (err == ESP_OK) preset = temp;
+        } else {
+            err = ESP_ERR_NVS_INVALID_LENGTH;
+        }
+    }
+    return err;
 }
 
 esp_err_t ConfigStore::delete_preset(uint8_t index) {
@@ -88,10 +98,18 @@ esp_err_t ConfigStore::save_config(const DeviceConfig& config) {
 }
 
 esp_err_t ConfigStore::load_config(DeviceConfig& config) {
-    size_t len = sizeof(DeviceConfig);
-    esp_err_t err = nvs_get_blob(handle_, "device_cfg", &config, &len);
+    size_t len = 0;
+    esp_err_t err = nvs_get_blob(handle_, "device_cfg", nullptr, &len);
+    if (err == ESP_OK && len > 0) {
+        if (len <= sizeof(DeviceConfig)) {
+            DeviceConfig temp{};
+            err = nvs_get_blob(handle_, "device_cfg", &temp, &len);
+            if (err == ESP_OK) config = temp;
+        } else {
+            err = ESP_ERR_NVS_INVALID_LENGTH;
+        }
+    }
     if (err == ESP_ERR_NVS_NOT_FOUND) {
-        // Return defaults
         config = DeviceConfig{};
         return ESP_OK;
     }
@@ -109,8 +127,17 @@ esp_err_t ConfigStore::save_sequence(const Sequence& seq) {
 }
 
 esp_err_t ConfigStore::load_sequence(Sequence& seq) {
-    size_t len = sizeof(Sequence);
-    esp_err_t err = nvs_get_blob(handle_, "seq_main", &seq, &len);
+    size_t len = 0;
+    esp_err_t err = nvs_get_blob(handle_, "seq_main", nullptr, &len);
+    if (err == ESP_OK && len > 0) {
+        if (len <= sizeof(Sequence)) {
+            Sequence temp{};
+            err = nvs_get_blob(handle_, "seq_main", &temp, &len);
+            if (err == ESP_OK) seq = temp;
+        } else {
+            err = ESP_ERR_NVS_INVALID_LENGTH;
+        }
+    }
     if (err == ESP_ERR_NVS_NOT_FOUND) {
         seq = Sequence{};
         return ESP_OK;
@@ -129,8 +156,17 @@ esp_err_t ConfigStore::save_calendar_schedule(const CalendarSchedule& schedule) 
 }
 
 esp_err_t ConfigStore::load_calendar_schedule(CalendarSchedule& schedule) {
-    size_t len = sizeof(CalendarSchedule);
-    esp_err_t err = nvs_get_blob(handle_, "calendar", &schedule, &len);
+    size_t len = 0;
+    esp_err_t err = nvs_get_blob(handle_, "calendar", nullptr, &len);
+    if (err == ESP_OK && len > 0) {
+        if (len <= sizeof(CalendarSchedule)) {
+            CalendarSchedule temp{};
+            err = nvs_get_blob(handle_, "calendar", &temp, &len);
+            if (err == ESP_OK) schedule = temp;
+        } else {
+            err = ESP_ERR_NVS_INVALID_LENGTH;
+        }
+    }
     if (err == ESP_ERR_NVS_NOT_FOUND) {
         schedule = CalendarSchedule{};
         return ESP_OK;

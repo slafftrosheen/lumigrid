@@ -26,16 +26,14 @@ uint32_t PowerBudget::enforce(const AddressableLeds& pixels,
                               uint8_t& brightness) {
     if (limit_mw_ == 0) return 0; // No limit set
 
-    // Estimate pixel power: sum of (R+G+B) across all pixels
-    // Power per pixel = (R+G+B) / 765 * 60mA * 5V = (R+G+B) * 300 / 765
-    // We use the brightness-scaled value since that's what actually gets sent.
     uint32_t total_pixel_mw = 0;
-    // Since we can't access the raw buffer from the const interface,
-    // approximate from brightness: average full-on pixel is ~180/255 duty.
-    // Total pixels = 8 lanes * 30 pixels = 240 pixels.
-    // Worst case per pixel at current brightness:
-    const uint32_t pixel_fraction = (uint32_t(brightness) * 3 * kPixelMaxMw) / (255 * 3);
-    total_pixel_mw = pixel_fraction * 240; // 8 lanes × 30 pixels
+    const auto& buffer = pixels.buffer();
+    for (const auto& lane : buffer) {
+        for (const auto& pixel : lane) {
+            const uint32_t rgb_sum = uint32_t(pixel.r) + pixel.g + pixel.b;
+            total_pixel_mw += (rgb_sum * kPixelMaxMw) / 765;
+        }
+    }
 
     // Estimate PWM power from current duty values
     uint32_t total_pwm_mw = 0;
