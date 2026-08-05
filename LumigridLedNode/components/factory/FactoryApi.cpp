@@ -498,6 +498,7 @@ esp_err_t post_auth_update(httpd_req_t* request) {
     const cJSON* admin = cJSON_GetObjectItemCaseSensitive(root, "adminToken");
     const cJSON* installer = cJSON_GetObjectItemCaseSensitive(root, "installerToken");
     const cJSON* op = cJSON_GetObjectItemCaseSensitive(root, "operatorToken");
+    const cJSON* new_tok = cJSON_GetObjectItemCaseSensitive(root, "newToken");
 
     auto validate_and_copy = [](const cJSON* item, char* dest, size_t max_len) {
         if (cJSON_IsString(item) && strlen(item->valuestring) >= 4 && strlen(item->valuestring) < max_len) {
@@ -509,6 +510,7 @@ esp_err_t post_auth_update(httpd_req_t* request) {
     };
 
     bool updated = false;
+    if (new_tok && validate_and_copy(new_tok, cfg.admin_token, sizeof(cfg.admin_token))) updated = true;
     if (admin && validate_and_copy(admin, cfg.admin_token, sizeof(cfg.admin_token))) updated = true;
     if (installer && validate_and_copy(installer, cfg.installer_token, sizeof(cfg.installer_token))) updated = true;
     if (op && validate_and_copy(op, cfg.operator_token, sizeof(cfg.operator_token))) updated = true;
@@ -1351,19 +1353,52 @@ esp_err_t get_backup(httpd_req_t* request) {
     }
 
     cJSON* root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "version", 2);
     
     // Config
     DeviceConfig cfg;
     api_ptr->config()->load_config(cfg);
     cJSON* cfg_json = cJSON_CreateObject();
     cJSON_AddStringToObject(cfg_json, "deviceName", cfg.device_name);
+    cJSON_AddNumberToObject(cfg_json, "activePresetIndex", cfg.active_preset_index);
+    cJSON_AddNumberToObject(cfg_json, "fallbackPresetIndex", cfg.fallback_preset_index);
+    cJSON_AddNumberToObject(cfg_json, "watchdogTimeoutS", cfg.watchdog_timeout_s);
     cJSON_AddNumberToObject(cfg_json, "maxPowerMw", cfg.max_power_mw);
     cJSON_AddNumberToObject(cfg_json, "gammaX10", cfg.gamma_x10);
+    cJSON_AddBoolToObject(cfg_json, "softStartEnabled", cfg.soft_start_enabled);
+    cJSON_AddNumberToObject(cfg_json, "softStartMs", cfg.soft_start_ms);
     cJSON_AddBoolToObject(cfg_json, "mqttEnabled", cfg.mqtt_enabled);
     cJSON_AddStringToObject(cfg_json, "mqttBroker", cfg.mqtt_broker);
     cJSON_AddNumberToObject(cfg_json, "mqttPort", cfg.mqtt_port);
     cJSON_AddBoolToObject(cfg_json, "syncEnabled", cfg.sync_enabled);
     cJSON_AddNumberToObject(cfg_json, "syncRole", cfg.sync_role);
+
+    // Protocol config
+    cJSON* prot_json = cJSON_CreateObject();
+    cJSON_AddBoolToObject(prot_json, "artnetEnabled", cfg.protocol.artnet_enabled);
+    cJSON_AddBoolToObject(prot_json, "sacnEnabled", cfg.protocol.sacn_enabled);
+    cJSON_AddNumberToObject(prot_json, "universeStart", cfg.protocol.universe_start);
+    cJSON_AddNumberToObject(prot_json, "liveStreamLayer", cfg.protocol.live_stream_layer);
+    cJSON_AddItemToObject(cfg_json, "protocol", prot_json);
+
+    // Tokens
+    cJSON* auth_json = cJSON_CreateObject();
+    cJSON_AddStringToObject(auth_json, "adminToken", cfg.admin_token);
+    cJSON_AddStringToObject(auth_json, "installerToken", cfg.installer_token);
+    cJSON_AddStringToObject(auth_json, "operatorToken", cfg.operator_token);
+    cJSON_AddItemToObject(cfg_json, "auth", auth_json);
+
+    // Zones
+    cJSON* zones_arr = cJSON_CreateArray();
+    for (uint8_t z = 0; z < lg::kMaxZones; ++z) {
+        cJSON* zj = cJSON_CreateObject();
+        cJSON_AddStringToObject(zj, "name", cfg.zones[z].name);
+        cJSON_AddStringToObject(zj, "role", cfg.zones[z].role);
+        cJSON_AddNumberToObject(zj, "fixtureMask", cfg.zones[z].fixture_mask);
+        cJSON_AddItemToArray(zones_arr, zj);
+    }
+    cJSON_AddItemToObject(cfg_json, "zones", zones_arr);
+
     cJSON_AddItemToObject(root, "config", cfg_json);
 
     // Presets
@@ -1376,8 +1411,44 @@ esp_err_t get_backup(httpd_req_t* request) {
             cJSON_AddStringToObject(s, "name", sc.name);
             cJSON_AddNumberToObject(s, "globalBrightness", sc.global_brightness);
             cJSON_AddNumberToObject(s, "transitionMs", sc.transition_ms);
-            
-            // Serialize layer 0 of zone 0 as a rough proxy for old base_effect
+            cJSON_AddNumberToObject(s, "overlayEffect", static_cast<int>(sc.overlay_effect));
+            cJSON_AddNumberToObject(s, "overlaySpeedMs", sc.overlay_speed_ms);
+            cJSON_AddNumberToObject(s, "overlayParam", sc.overlay_param);
+
+            cJSON* z_arr = cJSON_CreateArray();
+            for (uint8_t z = 0; z < lg::kMaxZones; ++z) {
+                cJSON* z_obj = cJSON_CreateObject();
+                cJSON* l_arr = cJSON_CreateArray();
+                for (uint8_t l = 0; l < 3; ++l) {
+                    const auto& layer = sc.zones[z].layers[l];
+                    cJSON* l_obj = cJSON_CreateObject();
+                    cJSON_AddBoolToObject(l_obj, "enabled", layer.enabled);
+                    cJSON_AddNumberToObject(l_obj, "effect", static_cast<int>(layer.effect));
+                    cJSON_AddNumberToObject(l_obj, "speedMs", layer.speed_ms);
+                    
+                    cJSON* pcol = cJSON_CreateObject();
+                    cJSON_AddNumberToObject(pcol, "r", layer.primary_color.r);
+                    cJSON_AddNumberToObject(pcol, "g", layer.primary_color.g);
+                    cJSON_AddNumberToObject(pcol, "b", layer.primary_color.b);
+                    cJSON_AddItemToObject(l_obj, "primaryColor", pcol);
+
+                    cJSON* scol = cJSON_CreateObject();
+                    cJSON_AddNumberToObject(scol, "r", layer.secondary_color.r);
+                    cJSON_AddNumberToObject(scol, "g", layer.secondary_color.g);
+                    cJSON_AddNumberToObject(scol, "b", layer.secondary_color.b);
+                    cJSON_AddItemToObject(l_obj, "secondaryColor", scol);
+
+                    cJSON_AddNumberToObject(l_obj, "opacity", layer.opacity);
+                    cJSON_AddNumberToObject(l_obj, "blendMode", static_cast<int>(layer.blend_mode));
+                    cJSON_AddNumberToObject(l_obj, "parameter", layer.parameter);
+                    cJSON_AddItemToArray(l_arr, l_obj);
+                }
+                cJSON_AddItemToObject(z_obj, "layers", l_arr);
+                cJSON_AddItemToArray(z_arr, z_obj);
+            }
+            cJSON_AddItemToObject(s, "zones", z_arr);
+
+            // Legacy v1 proxy fields
             cJSON_AddNumberToObject(s, "effect", sc.zones[0].layers[0].effect);
             cJSON_AddNumberToObject(s, "speedMs", sc.zones[0].layers[0].speed_ms);
             
@@ -1436,8 +1507,37 @@ esp_err_t post_restore(httpd_req_t* request) {
         item = cJSON_GetObjectItem(cfg_json, "mqttPort"); if (item) cfg.mqtt_port = item->valueint;
         item = cJSON_GetObjectItem(cfg_json, "syncEnabled"); if (item) cfg.sync_enabled = item->valueint;
         item = cJSON_GetObjectItem(cfg_json, "syncRole"); if (item) cfg.sync_role = item->valueint;
+
+        cJSON* prot = cJSON_GetObjectItem(cfg_json, "protocol");
+        if (prot) {
+            item = cJSON_GetObjectItem(prot, "artnetEnabled"); if (item) cfg.protocol.artnet_enabled = cJSON_IsTrue(item);
+            item = cJSON_GetObjectItem(prot, "sacnEnabled"); if (item) cfg.protocol.sacn_enabled = cJSON_IsTrue(item);
+            item = cJSON_GetObjectItem(prot, "universeStart"); if (item) cfg.protocol.universe_start = item->valueint;
+            item = cJSON_GetObjectItem(prot, "liveStreamLayer"); if (item) cfg.protocol.live_stream_layer = item->valueint;
+        }
+
+        cJSON* auth = cJSON_GetObjectItem(cfg_json, "auth");
+        if (auth) {
+            item = cJSON_GetObjectItem(auth, "adminToken"); if (item && item->valuestring) strncpy(cfg.admin_token, item->valuestring, sizeof(cfg.admin_token));
+            item = cJSON_GetObjectItem(auth, "installerToken"); if (item && item->valuestring) strncpy(cfg.installer_token, item->valuestring, sizeof(cfg.installer_token));
+            item = cJSON_GetObjectItem(auth, "operatorToken"); if (item && item->valuestring) strncpy(cfg.operator_token, item->valuestring, sizeof(cfg.operator_token));
+        }
+
+        cJSON* z_arr = cJSON_GetObjectItem(cfg_json, "zones");
+        if (z_arr && cJSON_IsArray(z_arr)) {
+            int z_idx = 0;
+            cJSON* zj;
+            cJSON_ArrayForEach(zj, z_arr) {
+                if (z_idx >= lg::kMaxZones) break;
+                item = cJSON_GetObjectItem(zj, "name"); if (item && item->valuestring) strncpy(cfg.zones[z_idx].name, item->valuestring, sizeof(cfg.zones[z_idx].name));
+                item = cJSON_GetObjectItem(zj, "role"); if (item && item->valuestring) strncpy(cfg.zones[z_idx].role, item->valuestring, sizeof(cfg.zones[z_idx].role));
+                item = cJSON_GetObjectItem(zj, "fixtureMask"); if (item) cfg.zones[z_idx].fixture_mask = item->valueint;
+                z_idx++;
+            }
+        }
         
         api_ptr->config()->save_config(cfg);
+        api::update_tokens(cfg.admin_token, cfg.installer_token, cfg.operator_token);
     }
 
     // Presets
@@ -1452,9 +1552,52 @@ esp_err_t post_restore(httpd_req_t* request) {
                 item = cJSON_GetObjectItem(p, "name"); if (item && item->valuestring) strncpy(sc.name, item->valuestring, sizeof(sc.name));
                 item = cJSON_GetObjectItem(p, "globalBrightness"); if (item) sc.global_brightness = item->valueint;
                 item = cJSON_GetObjectItem(p, "transitionMs"); if (item) sc.transition_ms = item->valueint;
-                
-                item = cJSON_GetObjectItem(p, "effect"); if (item) sc.zones[0].layers[0].effect = item->valueint;
-                item = cJSON_GetObjectItem(p, "speedMs"); if (item) sc.zones[0].layers[0].speed_ms = item->valueint;
+                item = cJSON_GetObjectItem(p, "overlayEffect"); if (item) sc.overlay_effect = static_cast<SignageModifier>(item->valueint);
+                item = cJSON_GetObjectItem(p, "overlaySpeedMs"); if (item) sc.overlay_speed_ms = item->valueint;
+                item = cJSON_GetObjectItem(p, "overlayParam"); if (item) sc.overlay_param = item->valueint;
+
+                cJSON* z_arr = cJSON_GetObjectItem(p, "zones");
+                if (z_arr && cJSON_IsArray(z_arr)) {
+                    int z_idx = 0;
+                    cJSON* zj;
+                    cJSON_ArrayForEach(zj, z_arr) {
+                        if (z_idx >= lg::kMaxZones) break;
+                        cJSON* l_arr = cJSON_GetObjectItem(zj, "layers");
+                        if (l_arr && cJSON_IsArray(l_arr)) {
+                            int l_idx = 0;
+                            cJSON* lj;
+                            cJSON_ArrayForEach(lj, l_arr) {
+                                if (l_idx >= 3) break;
+                                auto& layer = sc.zones[z_idx].layers[l_idx];
+                                item = cJSON_GetObjectItem(lj, "enabled"); if (item) layer.enabled = cJSON_IsTrue(item);
+                                item = cJSON_GetObjectItem(lj, "effect"); if (item) layer.effect = static_cast<SignageEffect>(item->valueint);
+                                item = cJSON_GetObjectItem(lj, "speedMs"); if (item) layer.speed_ms = item->valueint;
+                                item = cJSON_GetObjectItem(lj, "opacity"); if (item) layer.opacity = item->valueint;
+                                item = cJSON_GetObjectItem(lj, "blendMode"); if (item) layer.blend_mode = static_cast<BlendMode>(item->valueint);
+                                item = cJSON_GetObjectItem(lj, "parameter"); if (item) layer.parameter = item->valueint;
+
+                                cJSON* pcol = cJSON_GetObjectItem(lj, "primaryColor");
+                                if (pcol) {
+                                    cJSON* r = cJSON_GetObjectItem(pcol, "r"); if (r) layer.primary_color.r = r->valueint;
+                                    cJSON* g = cJSON_GetObjectItem(pcol, "g"); if (g) layer.primary_color.g = g->valueint;
+                                    cJSON* b = cJSON_GetObjectItem(pcol, "b"); if (b) layer.primary_color.b = b->valueint;
+                                }
+                                cJSON* scol = cJSON_GetObjectItem(lj, "secondaryColor");
+                                if (scol) {
+                                    cJSON* r = cJSON_GetObjectItem(scol, "r"); if (r) layer.secondary_color.r = r->valueint;
+                                    cJSON* g = cJSON_GetObjectItem(scol, "g"); if (g) layer.secondary_color.g = g->valueint;
+                                    cJSON* b = cJSON_GetObjectItem(scol, "b"); if (b) layer.secondary_color.b = b->valueint;
+                                }
+                                l_idx++;
+                            }
+                        }
+                        z_idx++;
+                    }
+                } else {
+                    // Fallback for v1 legacy backups
+                    item = cJSON_GetObjectItem(p, "effect"); if (item) sc.zones[0].layers[0].effect = static_cast<SignageEffect>(item->valueint);
+                    item = cJSON_GetObjectItem(p, "speedMs"); if (item) sc.zones[0].layers[0].speed_ms = item->valueint;
+                }
                 
                 api_ptr->config()->save_scene(idx->valueint, sc);
             }

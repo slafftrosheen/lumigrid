@@ -279,6 +279,7 @@ struct ProtocolConfig {
     uint16_t universe_start       = 0;
     MergeMode merge_mode          = MergeMode::HTP;
     uint16_t stream_timeout_ms    = 2000;
+    uint8_t  live_stream_layer    = 2;
 };
 
 struct DeviceConfig {

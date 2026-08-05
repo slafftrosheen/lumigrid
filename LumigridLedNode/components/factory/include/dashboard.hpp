@@ -1373,7 +1373,64 @@ window.lg = (() => {
         } catch (e) { toast('Restore failed: ' + e.message, true); }
     }
 
-    return {connect,disconnect,refresh,nav,playScene,blackout,editScene,backToScenes,renderSceneEditor,changeZoneEffect,changeOverlay,changeOverlayBeat,saveScene,updateText,speedText,selectPalette,dragScene,dropScene,selectStep,setStepScene,setStepLength,toggleTrack,setLoop,setBpm,setTimelineEnabled,saveTimeline,addCue,setCue,setCueTime,toggleDay,saveAutomation,saveSystem,refreshSync,uploadOta,downloadBackup,uploadRestore};
+    async function loadCommissioning() {
+        try {
+            const health = await api('/api/v1/health');
+            const stats = byId('health-stats');
+            if (stats) {
+                stats.textContent = `Uptime: ${health.uptime_s || 0}s\nFree Heap: ${health.free_heap || 0} B\nMin Free Heap: ${health.min_free_heap || 0} B`;
+            }
+            await loadLogs();
+        } catch(e) { toast('Health check failed: ' + e.message, true); }
+    }
+
+    async function runTestSequence(type) {
+        try {
+            if (type === 'lane') {
+                await api('/api/v1/factory/effect', 'POST', { effect: 'pixel_chase', durationMs: 5000 });
+                toast('Running lane test sequence...');
+            } else if (type === 'color') {
+                await api('/api/v1/factory/effect', 'POST', { effect: 'rainbow', durationMs: 5000 });
+                toast('Running color test sequence...');
+            }
+        } catch(e) { toast('Test sequence failed: ' + e.message, true); }
+    }
+
+    async function generateAcceptanceReport() {
+        try {
+            const health = await api('/api/v1/health');
+            const status = await api('/api/v1/status');
+            const report = {
+                timestamp: new Date().toISOString(),
+                health,
+                status,
+                commissioned: true
+            };
+            const blob = new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' });
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'acceptance_report.json';
+            document.body.appendChild(a);
+            a.click();
+            window.URL.revokeObjectURL(url);
+            toast('Acceptance report generated.');
+        } catch(e) { toast('Report generation failed: ' + e.message, true); }
+    }
+
+    async function loadLogs() {
+        try {
+            const response = await fetch('/api/v1/logs', {
+                headers: { 'Authorization': 'Bearer ' + state.token }
+            });
+            if (!response.ok) throw new Error('Failed to fetch logs');
+            const text = await response.text();
+            const logsEl = byId('sys-logs');
+            if (logsEl) logsEl.textContent = text || 'No logs recorded.';
+        } catch(e) { toast('Failed to load logs: ' + e.message, true); }
+    }
+
+    return {connect,disconnect,refresh,nav,playScene,blackout,editScene,backToScenes,renderSceneEditor,changeZoneEffect,changeOverlay,changeOverlayBeat,saveScene,updateText,speedText,selectPalette,dragScene,dropScene,selectStep,setStepScene,setStepLength,toggleTrack,setLoop,setBpm,setTimelineEnabled,saveTimeline,addCue,setCue,setCueTime,toggleDay,saveAutomation,saveSystem,refreshSync,uploadOta,downloadBackup,uploadRestore,loadCommissioning,runTestSequence,generateAcceptanceReport,loadLogs};
 })();
 </script>
 </body>

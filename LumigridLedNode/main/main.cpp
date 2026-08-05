@@ -186,8 +186,8 @@ extern "C" void app_main(void) {
                         if (!cfg.protocol.artnet_enabled) return;
                         if (packet.universe != cfg.protocol.universe_start) return;
 
-                        // Map 3 DMX channels (RGB) per zone to Layer 2
-                        // Layer 2 is typically used for overlays/live stream
+                        // Map 3 DMX channels (RGB) per zone to live stream layer
+                        uint8_t live_layer = cfg.protocol.live_stream_layer < 3 ? cfg.protocol.live_stream_layer : 2;
                         for (uint8_t zone = 0; zone < 8; ++zone) {
                             const size_t offset = zone * 3;
                             if (offset + 2 >= packet.length) break;
@@ -198,8 +198,7 @@ extern "C" void app_main(void) {
                                 packet.data[offset + 2]
                             };
                             
-                            // Send to SignageEngine layer 2 (live layer) with full opacity
-                            signage.inject_live_data(zone, 2, color, 255);
+                            signage.inject_live_data(zone, live_layer, color, 255);
                         }
                     }
                 ));
@@ -213,6 +212,7 @@ extern "C" void app_main(void) {
                         if (!cfg.protocol.sacn_enabled) return;
                         if (packet.universe != cfg.protocol.universe_start) return;
 
+                        uint8_t live_layer = cfg.protocol.live_stream_layer < 3 ? cfg.protocol.live_stream_layer : 2;
                         for (uint8_t zone = 0; zone < 8; ++zone) {
                             const size_t offset = zone * 3;
                             if (offset + 2 >= packet.length) break;
@@ -223,7 +223,7 @@ extern "C" void app_main(void) {
                                 packet.data[offset + 2]
                             };
                             
-                            signage.inject_live_data(zone, 2, color, 255);
+                            signage.inject_live_data(zone, live_layer, color, 255);
                         }
                     }
                 ));

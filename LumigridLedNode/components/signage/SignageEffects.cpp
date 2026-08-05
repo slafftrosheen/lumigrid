@@ -160,8 +160,15 @@ void render_fixture_layer(
             const uint8_t scaled_b = static_cast<uint8_t>(
                 min_b + (uint16_t(sine_val) * (b - min_b)) / 255
             );
+
+            // Interpolate between primary and secondary color based on breath phase
+            BrandColor blended_col{
+                static_cast<uint8_t>((layer.primary_color.r * sine_val + layer.secondary_color.r * (255 - sine_val)) / 255),
+                static_cast<uint8_t>((layer.primary_color.g * sine_val + layer.secondary_color.g * (255 - sine_val)) / 255),
+                static_cast<uint8_t>((layer.primary_color.b * sine_val + layer.secondary_color.b * (255 - sine_val)) / 255)
+            };
             
-            fill_pixels(scale_rgb(layer.primary_color, scaled_b));
+            fill_pixels(scale_rgb(blended_col, scaled_b));
             set_pwm(scale_pwm(4095, scaled_b));
             break;
         }
@@ -177,7 +184,13 @@ void render_fixture_layer(
                 const uint8_t tail_b = static_cast<uint8_t>(
                     (uint16_t(b) * (parameter - offset)) / parameter
                 );
-                apply_color_to_pixels(px, scale_rgb(layer.primary_color, tail_b));
+                // Head is primary color, trailing tail shifts towards secondary color
+                BrandColor px_col{
+                    static_cast<uint8_t>((layer.primary_color.r * (parameter - offset) + layer.secondary_color.r * offset) / parameter),
+                    static_cast<uint8_t>((layer.primary_color.g * (parameter - offset) + layer.secondary_color.g * offset) / parameter),
+                    static_cast<uint8_t>((layer.primary_color.b * (parameter - offset) + layer.secondary_color.b * offset) / parameter)
+                };
+                apply_color_to_pixels(px, scale_rgb(px_col, tail_b));
             }
 
             set_pwm(scale_pwm(4095, b));
@@ -347,8 +360,8 @@ void render_fixture_zone(
     uint8_t global_brightness,
     uint32_t elapsed_ms
 ) {
-    if (fixture.num_pixels == 0 && fixture.profile != FixtureProfile::PWM_Single &&
-        fixture.profile != FixtureProfile::PWM_RGB && fixture.profile != FixtureProfile::PWM_RGBW) {
+    bool is_pwm = (fixture.profile == FixtureProfile::PWM_Single || fixture.profile == FixtureProfile::PWM_RGB || fixture.profile == FixtureProfile::PWM_RGBW);
+    if (fixture.num_pixels == 0 && !is_pwm) {
         return;
     }
 
@@ -356,7 +369,7 @@ void render_fixture_zone(
     static Rgb layer_pixels[1024];
     uint16_t final_pwm = 0;
 
-    const uint16_t pcount = std::min<uint16_t>(fixture.num_pixels, 1024);
+    const uint16_t pcount = is_pwm ? std::max<uint16_t>(1, std::min<uint16_t>(fixture.num_pixels, 1024)) : std::min<uint16_t>(fixture.num_pixels, 1024);
     for (uint16_t i = 0; i < pcount; ++i) final_pixels[i] = {0, 0, 0};
 
     for (uint8_t l = 0; l < 3; ++l) {
@@ -394,7 +407,19 @@ void render_fixture_zone(
                 output.pixels().set(phys.hardware_id, px, fixture.gamma_correction ? apply_gamma(c) : c);
             }
         } else if (phys.type == OutputType::PWM) {
-            output.pwm().set(phys.hardware_id, final_pwm);
+            uint16_t duty = final_pwm;
+            if (fixture.profile == FixtureProfile::PWM_RGB || fixture.profile == FixtureProfile::PWM_RGBW) {
+                Rgb c = final_pixels[0];
+                if (fixture.gamma_correction) c = apply_gamma(c);
+                if (i == 0) duty = (static_cast<uint32_t>(c.r) * 4095) / 255;
+                else if (i == 1) duty = (static_cast<uint32_t>(c.g) * 4095) / 255;
+                else if (i == 2) duty = (static_cast<uint32_t>(c.b) * 4095) / 255;
+                else if (i == 3 && fixture.profile == FixtureProfile::PWM_RGBW) {
+                    uint8_t w = std::min({c.r, c.g, c.b});
+                    duty = (static_cast<uint32_t>(w) * 4095) / 255;
+                }
+            }
+            output.pwm().set(phys.hardware_id, duty);
         }
     }
 }
@@ -404,7 +429,14 @@ bool scene_is_visible(
     uint32_t elapsed_ms,
     uint16_t sequencer_beat_ms
 ) {
-    return true; // Overlay strobe logic removed for Phase 2
+    if (scene.overlay_effect == SignageModifier::Strobe) {
+        uint32_t period = scene.overlay_speed_ms > 0 ? scene.overlay_speed_ms : sequencer_beat_ms;
+        if (period == 0) period = 100;
+        uint32_t phase = elapsed_ms % period;
+        uint8_t duty = scene.overlay_param > 0 ? scene.overlay_param : 50;
+        return ((phase * 100) / period) < duty;
+    }
+    return true;
 }
 
 } // namespace lg

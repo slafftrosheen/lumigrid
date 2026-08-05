@@ -143,11 +143,22 @@ is still required to establish timing accuracy for a specific Wi-Fi layout.
 
 ### Firmware & Configuration Management
 
-`GET /api/v1/backup` aggregates the current `DeviceConfig` and all 32 `SceneConfig` presets into a single JSON file downloaded as an attachment.
+`GET /api/v1/backup` aggregates the current `DeviceConfig` (including network, tokens, physical outputs, and zones) and all 32 `SceneConfig` presets (including all 8 zones and 3 layers per zone) into a v2 JSON file downloaded as an attachment.
 
-`POST /api/v1/restore` accepts a JSON payload in the same format as the backup endpoint. It parses the JSON, updates the configuration, logs an `Audit` event, and automatically restarts the node.
+`POST /api/v1/restore` accepts a JSON payload in v2 or v1 format. It parses the JSON, updates the configuration and presets, logs an `Audit` event, and automatically restarts the node.
 
 `POST /api/v1/ota` accepts a signed `.bin` firmware file via multipart or raw binary stream. The firmware is written to the alternate OTA partition. If successful, the node reboots into the new firmware. Note that the node will attempt to validate the new firmware upon boot and rollback if a crash occurs during early initialization.
+
+### Protocol Configuration
+
+The node supports incoming DMX streams via Art-Net and sACN.
+`liveStreamLayer` in `protocol` configuration determines which layer (0–2, default: 2) incoming DMX color data is injected into across all 8 zones.
+
+## Factory vs Signage Effects Boundary
+
+The system operates two separate effect engines:
+1. **Signage Effects (`/api/v1/effects`, `/api/v1/presets`)**: Production signage pipeline supporting multi-zone multi-layer blending (Solid, Breathe, Chase, Sweep, Reveal, Sparkle, Gradient, Fire, Aurora, ColorWave, StaticPulse).
+2. **Factory Effects (`/api/v1/factory/effect`)**: Hardware diagnostic test routines time-bounded by the firmware for factory quality control and wiring validation (`identity`, `pixel_chase`, `rainbow`, `white_walk`, `pwm_walk`, `pwm_fade`, `combined_pulse`, `burn_in`, `blackout`).
 
 ## Factory endpoints
 
