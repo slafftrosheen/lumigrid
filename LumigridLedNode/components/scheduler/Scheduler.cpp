@@ -151,7 +151,7 @@ void Scheduler::evaluate_calendar(
             ESP_LOGI(TAG, "Calendar started sequence");
         } else {
             calendar_sequence_active_ = false;
-            engine_.activate_preset(entry.preset_index);
+            engine_.activate_scene(entry.preset_index);
             ESP_LOGI(TAG, "Calendar activated preset %u", entry.preset_index);
         }
     }
@@ -164,10 +164,10 @@ void Scheduler::evaluate(const Sequence& seq, uint64_t clock_ms) {
         std::min<uint32_t>(ms_per_beat, UINT16_MAX)
     ));
 
-    BrandPreset active_composite;
+    SceneConfig active_composite;
     // Just use a base preset name for reference
-    active_composite.set_name("Sequenced");
-    active_composite.brightness = 255;
+    strncpy(active_composite.name, "Sequenced", sizeof(active_composite.name));
+    active_composite.global_brightness = 255;
     active_composite.transition_ms = 0;
 
     bool any_track_enabled = false;
@@ -208,18 +208,18 @@ void Scheduler::evaluate(const Sequence& seq, uint64_t clock_ms) {
         }
 
         uint8_t preset_idx = track.steps[current_step].preset_index;
-        BrandPreset p;
-        if (config_.load_preset(preset_idx, p) == ESP_OK) {
-            active_composite.channels[track.channel_id] = p.channels[track.channel_id];
-            active_composite.brightness = std::min(
-                active_composite.brightness,
-                p.brightness
+        SceneConfig p;
+        if (config_.load_scene(preset_idx, p) == ESP_OK) {
+            active_composite.zones[track.channel_id] = p.zones[track.channel_id];
+            active_composite.global_brightness = std::min(
+                active_composite.global_brightness,
+                p.global_brightness
             );
         }
     }
 
     if (any_track_enabled && state_changed) {
-        engine_.activate_preset_direct(active_composite, true);
+        engine_.activate_scene_direct(active_composite, true);
     }
 }
 

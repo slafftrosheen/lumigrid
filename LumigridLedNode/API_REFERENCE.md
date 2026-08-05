@@ -41,6 +41,12 @@ queue, and `503` a subsystem that has not completed initialization.
 | `GET` | `/api/v1/schedules` | List calendar automation cues. |
 | `PUT` | `/api/v1/schedules` | Replace all calendar automation cues. |
 | `GET` | `/api/v1/sync` | Read sync role, clock health, and discovered followers. |
+| `GET` | `/api/v1/health` | Read system memory, uptime, and telemetry. |
+| `GET` | `/api/v1/logs` | Read recent diagnostic logs. |
+| `GET` | `/api/v1/audit` | Read recent security and configuration events. |
+| `GET` | `/api/v1/backup` | Export node configuration and presets as JSON. |
+| `POST` | `/api/v1/restore` | Import configuration from JSON and reboot. |
+| `POST` | `/api/v1/ota` | Upload new firmware binary and reboot. |
 
 ### Activate a preset
 
@@ -126,6 +132,22 @@ node should be explicitly configured as `master`.
 Sync uses UDP broadcast on port 6455. Keep sync nodes on a trusted, isolated
 network. The endpoint reports measured health, but hardware deployment testing
 is still required to establish timing accuracy for a specific Wi-Fi layout.
+
+### Diagnostics and Logs
+
+`GET /api/v1/health` returns system telemetry including uptime, free heap memory, minimum free heap memory, tasks statistics, and other diagnostic data useful for monitoring node stability.
+
+`GET /api/v1/logs` streams the last N lines of system logs (if the RAM-based log sink is enabled). It is useful for debugging connection or sync issues without attaching a serial monitor.
+
+`GET /api/v1/audit` returns the ring-buffer of security and configuration changes. It includes timestamps, roles (e.g. `Admin`), event types (e.g. `ConfigUpdate`, `AuthFailure`), and descriptive messages.
+
+### Firmware & Configuration Management
+
+`GET /api/v1/backup` aggregates the current `DeviceConfig` and all 32 `SceneConfig` presets into a single JSON file downloaded as an attachment.
+
+`POST /api/v1/restore` accepts a JSON payload in the same format as the backup endpoint. It parses the JSON, updates the configuration, logs an `Audit` event, and automatically restarts the node.
+
+`POST /api/v1/ota` accepts a signed `.bin` firmware file via multipart or raw binary stream. The firmware is written to the alternate OTA partition. If successful, the node reboots into the new firmware. Note that the node will attempt to validate the new firmware upon boot and rollback if a crash occurs during early initialization.
 
 ## Factory endpoints
 

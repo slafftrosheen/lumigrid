@@ -47,27 +47,24 @@ esp_err_t OutputController::blackout() {
     xSemaphoreTake(mutex_, portMAX_DELAY);
     gpio_set_level(board::kPcaOe, 1);
     enabled_ = false;
-    esp_err_t err = pwm_.clear();
-    if (err == ESP_OK) {
-        err = pixels_.blackout();
-    }
+    esp_err_t err_pwm = pwm_.clear();
+    esp_err_t err_pixels = pixels_.blackout();
     xSemaphoreGive(mutex_);
-    return err;
+    return (err_pixels != ESP_OK) ? err_pixels : err_pwm;
 }
 
 esp_err_t OutputController::commit() {
     xSemaphoreTake(mutex_, portMAX_DELAY);
-    esp_err_t err = pwm_.commit();
-    if (err == ESP_OK) {
-        err = pixels_.show();
-    }
-    if (err != ESP_OK) {
+    esp_err_t err_pwm = pwm_.commit();
+    esp_err_t err_pixels = pixels_.show();
+    
+    if (err_pixels != ESP_OK) {
         gpio_set_level(board::kPcaOe, 1);
         enabled_ = false;
-        ESP_LOGE("output", "Hardware commit failed (%s), disabling output safety interlock", esp_err_to_name(err));
+        ESP_LOGE("output", "Pixels hardware commit failed (%s), disabling output safety interlock", esp_err_to_name(err_pixels));
     }
     xSemaphoreGive(mutex_);
-    return err;
+    return (err_pixels != ESP_OK) ? err_pixels : err_pwm;
 }
 
 } // namespace lg

@@ -3,6 +3,7 @@ idf_component_register(
         "FactoryEffects.cpp"
         "FactoryRunner.cpp"
         "FactoryApi.cpp"
+        "DiagnosticLog.cpp"
     INCLUDE_DIRS
         "include"
     REQUIRES
@@ -15,4 +16,7 @@ idf_component_register(
         cjson
         esp_timer
         api
+        esp_wifi
+        nvs_flash
+        app_update
 )

@@ -12,11 +12,12 @@ class ConfigStore {
 public:
     esp_err_t init();
 
-    // ── Presets ──
-    esp_err_t save_preset(uint8_t index, const BrandPreset& preset);
-    esp_err_t load_preset(uint8_t index, BrandPreset& preset);
-    esp_err_t delete_preset(uint8_t index);
-    uint8_t   preset_count();
+
+    // ── Scenes (Product Grade) ──
+    esp_err_t save_scene(uint8_t index, const SceneConfig& scene);
+    esp_err_t load_scene(uint8_t index, SceneConfig& scene);
+    esp_err_t delete_scene(uint8_t index);
+    uint8_t   scene_count();
 
     // ── Device config ──
     esp_err_t save_config(const DeviceConfig& config);

@@ -1,6 +1,7 @@
 idf_component_register(
     SRCS
         "ArtnetDiscovery.cpp"
+        "SacnReceiver.cpp"
     INCLUDE_DIRS
         "include"
     REQUIRES

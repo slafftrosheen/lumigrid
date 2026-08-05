@@ -39,42 +39,114 @@ uint32_t xorshift(uint32_t& state) {
     return state;
 }
 
-uint8_t effect_parameter(const ChannelConfig& channel) {
-    const EffectMetadata& metadata = signage_effect_metadata(channel.effect);
+uint8_t effect_parameter(const LayerConfig& layer) {
+    const EffectMetadata& metadata = signage_effect_metadata(static_cast<SignageEffect>(layer.effect));
     if (!metadata.has_parameter) return 0;
-    if (channel.fx_param < metadata.parameter_min ||
-        channel.fx_param > metadata.parameter_max) {
+    if (layer.fx_param < metadata.parameter_min ||
+        layer.fx_param > metadata.parameter_max) {
         return metadata.parameter_default;
     }
-    return channel.fx_param;
+    return layer.fx_param;
+}
+
+static Rgb blend_rgb(const Rgb& bg, const Rgb& fg, BlendMode mode, uint8_t fg_opacity) {
+    if (fg_opacity == 0) return bg;
+    
+    Rgb blended = fg;
+    switch (mode) {
+        case BlendMode::Normal: {
+            if (fg_opacity == 255) return fg;
+            blended.r = bg.r + (((fg.r - bg.r) * fg_opacity) >> 8);
+            blended.g = bg.g + (((fg.g - bg.g) * fg_opacity) >> 8);
+            blended.b = bg.b + (((fg.b - bg.b) * fg_opacity) >> 8);
+            break;
+        }
+        case BlendMode::Add: {
+            uint16_t r = bg.r + ((fg.r * fg_opacity) >> 8);
+            uint16_t g = bg.g + ((fg.g * fg_opacity) >> 8);
+            uint16_t b = bg.b + ((fg.b * fg_opacity) >> 8);
+            blended.r = r > 255 ? 255 : r;
+            blended.g = g > 255 ? 255 : g;
+            blended.b = b > 255 ? 255 : b;
+            break;
+        }
+        case BlendMode::Multiply: {
+            uint16_t mr = (bg.r * fg.r) >> 8;
+            uint16_t mg = (bg.g * fg.g) >> 8;
+            uint16_t mb = (bg.b * fg.b) >> 8;
+            blended.r = bg.r + (((mr - bg.r) * fg_opacity) >> 8);
+            blended.g = bg.g + (((mg - bg.g) * fg_opacity) >> 8);
+            blended.b = bg.b + (((mb - bg.b) * fg_opacity) >> 8);
+            break;
+        }
+        case BlendMode::Screen: {
+            uint16_t sr = 255 - (((255 - bg.r) * (255 - fg.r)) >> 8);
+            uint16_t sg = 255 - (((255 - bg.g) * (255 - fg.g)) >> 8);
+            uint16_t sb = 255 - (((255 - bg.b) * (255 - fg.b)) >> 8);
+            blended.r = bg.r + (((sr - bg.r) * fg_opacity) >> 8);
+            blended.g = bg.g + (((sg - bg.g) * fg_opacity) >> 8);
+            blended.b = bg.b + (((sb - bg.b) * fg_opacity) >> 8);
+            break;
+        }
+    }
+    return blended;
+}
+
+static uint16_t blend_pwm(uint16_t bg, uint16_t fg, BlendMode mode, uint8_t fg_opacity) {
+    if (fg_opacity == 0) return bg;
+    
+    switch (mode) {
+        case BlendMode::Normal:
+            if (fg_opacity == 255) return fg;
+            return bg + (((fg - bg) * fg_opacity) >> 8);
+        case BlendMode::Add: {
+            uint32_t a = bg + ((fg * fg_opacity) >> 8);
+            return a > 4095 ? 4095 : a;
+        }
+        case BlendMode::Multiply: {
+            uint16_t m = (uint32_t(bg) * fg) / 4095;
+            return bg + (((m - bg) * fg_opacity) >> 8);
+        }
+        case BlendMode::Screen: {
+            uint32_t s = 4095 - (((4095 - bg) * (4095 - fg)) / 4095);
+            return bg + (((s - bg) * fg_opacity) >> 8);
+        }
+    }
+    return fg;
 }
 
 } // namespace
 
-void render_lane_effect(
-    uint8_t lane,
-    OutputController& output,
-    const ChannelConfig& channel,
+void render_fixture_layer(
+    Rgb* pixel_buf,
+    uint16_t& pwm_buf,
+    const FixtureConfig& fixture,
+    const LayerConfig& layer,
     uint8_t global_brightness,
     uint32_t elapsed_ms
 ) {
     const uint8_t b = global_brightness;
-    const uint16_t speed = channel.effect_speed_ms > 0 ? channel.effect_speed_ms : 1;
-    const uint8_t parameter = effect_parameter(channel);
-    // apply phase offset (0-255 mapped to full speed period)
-    const uint32_t phase_time_offset = (uint32_t(channel.phase_offset) * speed) / 255;
-    const uint32_t t_ms = elapsed_ms + phase_time_offset;
+    const uint16_t speed = layer.speed_ms > 0 ? layer.speed_ms : 1;
+    const uint8_t parameter = effect_parameter(layer);
+    const uint32_t t_ms = elapsed_ms;
 
-    auto set_solid = [&]() {
-        if (channel.pixel_enabled) {
-            output.pixels().fill(lane, apply_gamma(scale_rgb(channel.pixel_color, b)));
-        }
-        if (channel.pwm_enabled) {
-            output.pwm().set(lane, scale_pwm(channel.pwm_duty, b));
+    auto apply_color_to_pixels = [&](uint16_t px, const Rgb& color) {
+        if (px < fixture.num_pixels) {
+            pixel_buf[px] = color;
         }
     };
+    auto fill_pixels = [&](const Rgb& color) {
+        for (uint16_t px = 0; px < fixture.num_pixels; ++px) apply_color_to_pixels(px, color);
+    };
+    auto set_pwm = [&](uint16_t duty) {
+        pwm_buf = duty;
+    };
+    auto set_solid = [&]() {
+        fill_pixels(scale_rgb(layer.primary_color, b));
+        set_pwm(scale_pwm(4095, b));
+    };
 
-    switch (channel.effect) {
+    switch (static_cast<SignageEffect>(layer.effect)) {
         case SignageEffect::Solid:
             set_solid();
             break;
@@ -89,18 +161,14 @@ void render_lane_effect(
                 min_b + (uint16_t(sine_val) * (b - min_b)) / 255
             );
             
-            if (channel.pixel_enabled) {
-                output.pixels().fill(lane, apply_gamma(scale_rgb(channel.pixel_color, scaled_b)));
-            }
-            if (channel.pwm_enabled) {
-                output.pwm().set(lane, scale_pwm(channel.pwm_duty, scaled_b));
-            }
+            fill_pixels(scale_rgb(layer.primary_color, scaled_b));
+            set_pwm(scale_pwm(4095, scaled_b));
             break;
         }
 
         case SignageEffect::Chase: {
-            if (!channel.pixel_enabled) break;
-            const uint16_t pixels = LG_FACTORY_PIXELS_PER_LANE;
+            const uint16_t pixels = fixture.num_pixels;
+            if (pixels == 0) break;
             const uint16_t pos = static_cast<uint16_t>((uint32_t(t_ms % speed) * pixels) / speed);
 
             for (uint8_t offset = 0; offset < parameter; ++offset) {
@@ -109,33 +177,27 @@ void render_lane_effect(
                 const uint8_t tail_b = static_cast<uint8_t>(
                     (uint16_t(b) * (parameter - offset)) / parameter
                 );
-                output.pixels().set(lane, px, apply_gamma(scale_rgb(channel.pixel_color, tail_b)));
+                apply_color_to_pixels(px, scale_rgb(layer.primary_color, tail_b));
             }
 
-            if (channel.pwm_enabled) {
-                output.pwm().set(lane, scale_pwm(channel.pwm_duty, b));
-            }
+            set_pwm(scale_pwm(4095, b));
             break;
         }
 
         case SignageEffect::Sweep: {
-            // Wipe across a single lane
-            if (!channel.pixel_enabled) break;
-            const uint16_t pixels = LG_FACTORY_PIXELS_PER_LANE;
+            const uint16_t pixels = fixture.num_pixels;
+            if (pixels == 0) break;
             const uint16_t pos = static_cast<uint16_t>((uint32_t(t_ms % speed) * pixels) / speed);
             for (uint16_t px = 0; px <= pos; ++px) {
                 if (px < pixels) {
-                    output.pixels().set(lane, px, apply_gamma(scale_rgb(channel.pixel_color, b)));
+                    apply_color_to_pixels(px, scale_rgb(layer.primary_color, b));
                 }
             }
-            if (channel.pwm_enabled) {
-                output.pwm().set(lane, scale_pwm(channel.pwm_duty, b));
-            }
+            set_pwm(scale_pwm(4095, b));
             break;
         }
 
         case SignageEffect::Reveal: {
-            // Reveal this lane based on phase time offset
             const uint32_t cycle_pos = t_ms % speed;
             const uint32_t fade_dur = std::max(
                 uint32_t(1),
@@ -149,34 +211,30 @@ void render_lane_effect(
                 fade = b;
             }
 
-            if (channel.pixel_enabled) {
-                output.pixels().fill(lane, apply_gamma(scale_rgb(channel.pixel_color, fade)));
-            }
-            if (channel.pwm_enabled) {
-                output.pwm().set(lane, scale_pwm(channel.pwm_duty, fade));
-            }
+            fill_pixels(scale_rgb(layer.primary_color, fade));
+            set_pwm(scale_pwm(4095, fade));
             break;
         }
 
         case SignageEffect::Sparkle: {
-            set_solid(); // Base color
+            set_solid(); 
 
             uint32_t rng = t_ms / 50; 
             if (rng == 0) rng = 1;
 
-            if (channel.pixel_enabled) {
-                for (uint8_t s = 0; s < parameter; ++s) {
-                    const uint32_t rv = xorshift(rng);
-                    const uint16_t px = (rv >> 3) % LG_FACTORY_PIXELS_PER_LANE;
-                    output.pixels().set(lane, px, {b, b, b});
+            for (uint8_t s = 0; s < parameter; ++s) {
+                const uint32_t rv = xorshift(rng);
+                if (fixture.num_pixels > 0) {
+                    const uint16_t px = (rv >> 3) % fixture.num_pixels;
+                    apply_color_to_pixels(px, {b, b, b});
                 }
             }
             break;
         }
 
         case SignageEffect::Gradient: {
-            if (!channel.pixel_enabled) break;
-            const uint16_t pixels = LG_FACTORY_PIXELS_PER_LANE;
+            const uint16_t pixels = fixture.num_pixels;
+            if (pixels == 0) break;
             const uint8_t shift = static_cast<uint8_t>((uint32_t(t_ms % speed) * 255) / speed);
             const uint8_t contrast = static_cast<uint8_t>(
                 (uint16_t(parameter) * 255) / 100
@@ -188,12 +246,9 @@ void render_lane_effect(
                     255 - ((uint16_t(255 - sine8(pos_phase)) * contrast) / 255)
                 );
                 const uint8_t pixel_b = scale8(b, intensity);
-                output.pixels().set(lane, px, apply_gamma(scale_rgb(channel.pixel_color, pixel_b)));
+                apply_color_to_pixels(px, scale_rgb(layer.primary_color, pixel_b));
             }
-
-            if (channel.pwm_enabled) {
-                output.pwm().set(lane, scale_pwm(channel.pwm_duty, b));
-            }
+            set_pwm(scale_pwm(4095, b));
             break;
         }
 
@@ -207,8 +262,8 @@ void render_lane_effect(
         }
 
         case SignageEffect::Fire: {
-            if (!channel.pixel_enabled) break;
-            const uint16_t pixels = LG_FACTORY_PIXELS_PER_LANE;
+            const uint16_t pixels = fixture.num_pixels;
+            if (pixels == 0) break;
             uint32_t rng = t_ms / (speed / 10 + 1); 
             if (rng == 0) rng = 1;
             const uint8_t flame_height = static_cast<uint8_t>(
@@ -227,16 +282,13 @@ void render_lane_effect(
                     );
                 }
                 const uint8_t intensity = scale8(b, heat);
-                output.pixels().set(lane, px, apply_gamma(scale_rgb(channel.pixel_color, intensity)));
+                apply_color_to_pixels(px, scale_rgb(layer.primary_color, intensity));
             }
-            if (channel.pwm_enabled) {
-                output.pwm().set(lane, scale_pwm(channel.pwm_duty, b));
-            }
+            set_pwm(scale_pwm(4095, b));
             break;
         }
 
         case SignageEffect::Aurora: {
-            if (!channel.pixel_enabled && !channel.pwm_enabled) break;
             const uint32_t phase = (t_ms * 255) / speed;
             const uint8_t shift = parameter;
             
@@ -244,23 +296,19 @@ void render_lane_effect(
             uint8_t g_b = static_cast<uint8_t>(255 - ((255 - sine8((phase + 85) & 0xFF)) * shift / 255));
             uint8_t b_b = static_cast<uint8_t>(255 - ((255 - sine8((phase + 170) & 0xFF)) * shift / 255));
             
-            BrandColor aurora_col = channel.pixel_color;
+            BrandColor aurora_col = layer.primary_color;
             aurora_col.r = scale8(aurora_col.r, r_b);
             aurora_col.g = scale8(aurora_col.g, g_b);
             aurora_col.b = scale8(aurora_col.b, b_b);
             
-            if (channel.pixel_enabled) {
-                output.pixels().fill(lane, apply_gamma(scale_rgb(aurora_col, b)));
-            }
-            if (channel.pwm_enabled) {
-                output.pwm().set(lane, scale_pwm(channel.pwm_duty, scale8(b, r_b)));
-            }
+            fill_pixels(scale_rgb(aurora_col, b));
+            set_pwm(scale_pwm(4095, scale8(b, r_b)));
             break;
         }
 
         case SignageEffect::ColorWave: {
-            if (!channel.pixel_enabled) break;
-            const uint16_t pixels = LG_FACTORY_PIXELS_PER_LANE;
+            const uint16_t pixels = fixture.num_pixels;
+            if (pixels == 0) break;
             const uint8_t wave_length = parameter > 0 ? parameter : 50;
             const uint32_t shift = (t_ms * 255) / speed;
             
@@ -268,12 +316,10 @@ void render_lane_effect(
                 const uint8_t phase = static_cast<uint8_t>(((px * 255) / wave_length) + shift);
                 const uint8_t val = sine8(phase);
                 const uint8_t pixel_b = scale8(b, val);
-                output.pixels().set(lane, px, apply_gamma(scale_rgb(channel.pixel_color, pixel_b)));
+                apply_color_to_pixels(px, scale_rgb(layer.primary_color, pixel_b));
             }
-            if (channel.pwm_enabled) {
-                const uint8_t pwm_phase = static_cast<uint8_t>(shift & 0xFF);
-                output.pwm().set(lane, scale_pwm(channel.pwm_duty, scale8(b, sine8(pwm_phase))));
-            }
+            const uint8_t pwm_phase = static_cast<uint8_t>(shift & 0xFF);
+            set_pwm(scale_pwm(4095, scale8(b, sine8(pwm_phase))));
             break;
         }
 
@@ -286,39 +332,79 @@ void render_lane_effect(
                 min_b + (uint16_t(sine_val) * (b - min_b)) / 255
             );
             
-            if (channel.pixel_enabled) {
-                output.pixels().fill(lane, apply_gamma(scale_rgb(channel.pixel_color, scaled_b)));
-            }
-            if (channel.pwm_enabled) {
-                output.pwm().set(lane, scale_pwm(channel.pwm_duty, scaled_b));
-            }
+            fill_pixels(scale_rgb(layer.primary_color, scaled_b));
+            set_pwm(scale_pwm(4095, scaled_b));
             break;
         }
     }
 }
 
-bool preset_is_visible(
-    const BrandPreset& preset,
+void render_fixture_zone(
+    OutputController& output,
+    const FixtureConfig& fixture,
+    const PhysicalOutput* physical_outputs,
+    const ZoneContent& zone,
+    uint8_t global_brightness,
+    uint32_t elapsed_ms
+) {
+    if (fixture.num_pixels == 0 && fixture.profile != FixtureProfile::PWM_Single &&
+        fixture.profile != FixtureProfile::PWM_RGB && fixture.profile != FixtureProfile::PWM_RGBW) {
+        return;
+    }
+
+    static Rgb final_pixels[1024];
+    static Rgb layer_pixels[1024];
+    uint16_t final_pwm = 0;
+
+    const uint16_t pcount = std::min<uint16_t>(fixture.num_pixels, 1024);
+    for (uint16_t i = 0; i < pcount; ++i) final_pixels[i] = {0, 0, 0};
+
+    for (uint8_t l = 0; l < 3; ++l) {
+        const LayerConfig& layer = zone.layers[l];
+        if (!layer.enabled || layer.opacity == 0) continue;
+
+        for (uint16_t i = 0; i < pcount; ++i) layer_pixels[i] = {0, 0, 0};
+        uint16_t layer_pwm = 0;
+
+        render_fixture_layer(layer_pixels, layer_pwm, fixture, layer, global_brightness, elapsed_ms);
+
+        for (uint16_t i = 0; i < pcount; ++i) {
+            final_pixels[i] = blend_rgb(final_pixels[i], layer_pixels[i], layer.blend_mode, layer.opacity);
+        }
+        final_pwm = blend_pwm(final_pwm, layer_pwm, layer.blend_mode, layer.opacity);
+    }
+
+    for (uint8_t i = 0; i < 4; ++i) {
+        uint8_t p_idx = fixture.physical_output_index[i];
+        if (p_idx >= 16) continue;
+        const auto& phys = physical_outputs[p_idx];
+        if (!phys.enabled) continue;
+
+        if (phys.type == OutputType::RMT) {
+            for (uint16_t px = 0; px < pcount; ++px) {
+                Rgb c = final_pixels[px];
+                // Apply white balance
+                c.r = scale8(c.r, fixture.white_balance[0]);
+                c.g = scale8(c.g, fixture.white_balance[1]);
+                c.b = scale8(c.b, fixture.white_balance[2]);
+                
+                // Color order swap could happen here based on fixture.pixel_order,
+                // but AddressableLeds handles GRB natively for now.
+                
+                output.pixels().set(phys.hardware_id, px, fixture.gamma_correction ? apply_gamma(c) : c);
+            }
+        } else if (phys.type == OutputType::PWM) {
+            output.pwm().set(phys.hardware_id, final_pwm);
+        }
+    }
+}
+
+bool scene_is_visible(
+    const SceneConfig& scene,
     uint32_t elapsed_ms,
     uint16_t sequencer_beat_ms
 ) {
-    if (preset.overlay_effect == SignageModifier::None) return true;
-
-    if (preset.overlay_effect == SignageModifier::Strobe) {
-        const uint32_t speed = preset.overlay_speed_ms == 0
-            ? std::max<uint16_t>(1, sequencer_beat_ms)
-            : preset.overlay_speed_ms;
-        const uint8_t duty_cycle = std::max<uint8_t>(
-            5,
-            std::min<uint8_t>(
-                preset.overlay_param == 0 ? 50 : preset.overlay_param,
-                95
-            )
-        );
-        return (elapsed_ms % speed) < (speed * duty_cycle) / 100;
-    }
-
-    return true;
+    return true; // Overlay strobe logic removed for Phase 2
 }
 
 } // namespace lg

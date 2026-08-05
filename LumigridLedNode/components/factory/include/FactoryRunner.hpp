@@ -3,6 +3,7 @@
 #include "FactoryEffects.hpp"
 #include "FactoryTypes.hpp"
 #include <functional>
+#include "OutputArbitrator.hpp"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"

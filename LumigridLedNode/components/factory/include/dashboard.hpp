@@ -320,11 +320,13 @@ static const char dashboard_html[] = R"LGHTML(<!DOCTYPE html>
         <button style="width:auto;margin:0" onclick="disconnect()">Disconnect</button>
     </header>
 
-    <div class="nav-tabs">
+        <div class="nav-tabs">
         <button class="active" onclick="nav('overview')">Overview</button>
         <button onclick="nav('presets'); loadPresets()">Presets</button>
         <button onclick="nav('sequencer'); loadSequencer()">Sequencer</button>
+        <button onclick="nav('commissioning'); loadCommissioning()">Commissioning</button>
         <button onclick="nav('settings'); loadSettings()">Settings</button>
+        <button onclick="nav('system')">System</button>
     </div>
 
     <!-- OVERVIEW -->
@@ -339,6 +341,38 @@ static const char dashboard_html[] = R"LGHTML(<!DOCTYPE html>
                 <h3>System Status</h3>
                 <pre id="status-json" style="font-size:0.8rem;overflow:auto;background:rgba(0,0,0,0.3);padding:1rem;border-radius:8px;"></pre>
                 <button class="mb-1" onclick="loadStatus()">Refresh Status</button>
+            </div>
+        </div>
+    </div>
+
+    
+    <!-- COMMISSIONING -->
+    <div id="page-commissioning" class="page">
+        <div class="flex justify-between items-center mb-1">
+            <h3>Commissioning Wizard</h3>
+            <button style="width:auto;margin:0" onclick="generateAcceptanceReport()">Generate Report</button>
+        </div>
+        
+        <div class="grid-2">
+            <div class="card">
+                <h4>1. Network Health</h4>
+                <div id="health-stats" style="margin: 1rem 0; font-family: monospace;">Loading...</div>
+                <button onclick="loadCommissioning()">Refresh Health</button>
+            </div>
+            
+            <div class="card">
+                <h4>2. Wiring & Lane Test</h4>
+                <p class="muted">Runs diagnostic sequence across all lanes to verify data integrity.</p>
+                <div class="flex" style="margin-top:1rem;">
+                    <button onclick="runTestSequence('lane')">Test Lanes</button>
+                    <button onclick="runTestSequence('color')">Color Order Test</button>
+                </div>
+            </div>
+            
+            <div class="card" style="grid-column: 1 / -1;">
+                <h4>3. System Logs</h4>
+                <pre id="sys-logs" style="height:200px; overflow-y:auto; background:rgba(0,0,0,0.3); padding:1rem; border-radius:8px; font-size:0.8rem;"></pre>
+                <button onclick="loadLogs()" style="margin-top:1rem;">Refresh Logs</button>
             </div>
         </div>
     </div>
@@ -424,7 +458,14 @@ static const char dashboard_html[] = R"LGHTML(<!DOCTYPE html>
                 </div>
             </div>
         </div>
-        <button class="primary" onclick="saveSettings()">Save Settings</button>
+        <div class="card mt-2">
+            <h4>Security</h4>
+            <div style="display:flex;gap:1rem;margin-top:0.5rem">
+                <input type="password" id="cfg-new-token" placeholder="New API Token (min 4 chars)">
+                <button class="primary" onclick="updateAuthToken()">Update Token</button>
+            </div>
+        </div>
+        <button class="primary mt-2" onclick="saveSettings()">Save Settings</button>
     </div>
 </div>
 
@@ -491,6 +532,18 @@ async function loadStatus() {
             api('/api/v1/status')
         ]);
         $('status-json').textContent = JSON.stringify({factory: fac, signage: sig}, null, 2);
+    } catch(e) { toast(e.message, true); }
+}
+
+async function updateAuthToken() {
+    const newToken = $('cfg-new-token').value;
+    if (newToken.length < 4) return toast('Token must be at least 4 characters', true);
+    
+    try {
+        await api('/api/v1/auth/update', 'POST', { newToken });
+        toast('Token updated successfully. Re-authenticating...');
+        token = newToken; // Use new token immediately
+        $('cfg-new-token').value = '';
     } catch(e) { toast(e.message, true); }
 }
 
@@ -850,6 +903,13 @@ async function saveSettings() {
                     <div class="field"><label for="system-sync-role">Room role</label><select id="system-sync-role"><option value="0">Automatic leader selection</option><option value="1">Lead the room</option><option value="2">Follow the room</option></select></div>
                     <p class="help">Role changes are applied the next time the node starts. Automatic mode elects one node instead of broadcasting from every node.</p>
                 </article>
+                <article class="product-card">
+                    <h4>MQTT Configuration</h4>
+                    <label class="switch-row"><span>Enable MQTT</span><input id="system-mqtt-enabled" type="checkbox"></label>
+                    <div class="field"><label for="system-mqtt-broker">MQTT Broker Address</label><input id="system-mqtt-broker" placeholder="192.168.1.100" maxlength="63"></div>
+                    <div class="field"><label for="system-mqtt-port">MQTT Port</label><input id="system-mqtt-port" type="number" value="1883" min="1" max="65535"></div>
+                    <p class="help">When enabled, the node will publish telemetry and respond to commands via MQTT.</p>
+                </article>
                 <article class="product-card" style="grid-column: 1 / -1;">
                     <h4>Physical Zones</h4>
                     <p class="help">Map your 8 physical outputs to room features.</p>
@@ -858,6 +918,25 @@ async function saveSettings() {
             </div>
             <div class="page-heading" style="margin-top:1.5rem"><div><p class="eyebrow">Topology</p><h3>Nodes in this room</h3></div><button class="button-secondary" onclick="lg.refreshSync()">Refresh health</button></div>
             <div id="sync-topology" class="sync-grid"></div>
+            
+            <div class="page-heading" style="margin-top:2.5rem"><div><p class="eyebrow">Maintenance</p><h3>Firmware & Config</h3></div></div>
+            <div class="settings-grid">
+                <article class="product-card">
+                    <h4>Over-The-Air Update (OTA)</h4>
+                    <p class="help mb-1">Upload a signed firmware binary to update the node.</p>
+                    <input type="file" id="ota-file" accept=".bin" style="width: 100%; margin-bottom: 1rem;">
+                    <button class="button-primary" style="width: 100%" onclick="lg.uploadOta()">Update Firmware</button>
+                    <div id="ota-status" class="help" style="margin-top: 1rem;"></div>
+                </article>
+                <article class="product-card">
+                    <h4>Configuration Export & Import</h4>
+                    <p class="help mb-1">Backup or restore device settings and presets.</p>
+                    <button class="button-secondary" style="width: 100%" onclick="lg.downloadBackup()">Export Configuration</button>
+                    <hr style="border: 0; border-top: 1px solid var(--border); margin: 1.5rem 0;">
+                    <input type="file" id="restore-file" accept=".json" style="width: 100%; margin-bottom: 1rem;">
+                    <button class="button-primary" style="width: 100%" onclick="lg.uploadRestore()">Restore Configuration</button>
+                </article>
+            </div>
         </section>
     </div>
 </main>
@@ -905,17 +984,25 @@ window.lg = (() => {
         return response.json();
     }
 
-    function blankChannel() {
-        return {r:255,g:255,b:255,pwmDuty:0,effect:'solid',effectSpeedMs:2000,paletteId:0,phaseOffset:0,fxParam:0,pixelEnabled:true,pwmEnabled:true};
+    function blankLayer() {
+        return {effect:'solid',blendMode:'normal',primaryColor:{r:255,g:255,b:255},secondaryColor:{r:0,g:0,b:0},speedMs:2000,fxParam:0,paletteId:0,opacity:255,enabled:false};
+    }
+    function blankZone() {
+        return {layers: [blankLayer(), blankLayer(), blankLayer()]};
     }
     function normalPreset(preset) {
         const scene = {...preset};
-        scene.channels = Array.from({length:8}, (_, index) => ({...blankChannel(), ...(scene.channels?.[index] || {})}));
-        scene.brightness = clamp(scene.brightness ?? 128, 0, 255);
+        scene.zones = Array.from({length:8}, (_, z) => {
+            const srcZone = scene.zones?.[z] || {};
+            return {
+                layers: Array.from({length:3}, (_, l) => ({
+                    ...blankLayer(),
+                    ...(srcZone.layers?.[l] || {})
+                }))
+            };
+        });
+        scene.globalBrightness = clamp(scene.globalBrightness ?? 128, 0, 255);
         scene.transitionMs = clamp(scene.transitionMs ?? 1000, 0, 10000);
-        scene.overlayEffect = scene.overlayEffect || 'none';
-        scene.overlaySpeedMs = Number(scene.overlaySpeedMs ?? 500);
-        scene.overlayParam = clamp(scene.overlayParam ?? 50, 0, 100);
         return scene;
     }
     function defaultSequence() {
@@ -967,15 +1054,13 @@ window.lg = (() => {
         byId('experience-auth').hidden = false;
     }
     async function refresh() {
-        const [effects, presets, status, sequence, config, schedules, sync] = await Promise.all([
-            api('/api/v1/effects').catch(() => fallbackEffects),
-            api('/api/v1/presets'),
-            api('/api/v1/status'),
-            api('/api/v1/sequence'),
-            api('/api/v1/config'),
-            api('/api/v1/schedules'),
-            api('/api/v1/sync').catch(() => null)
-        ]);
+        const effects = await api('/api/v1/effects').catch(() => fallbackEffects);
+        const presets = await api('/api/v1/presets');
+        const status = await api('/api/v1/status');
+        const sequence = await api('/api/v1/sequence');
+        const config = await api('/api/v1/config');
+        const schedules = await api('/api/v1/schedules');
+        const sync = await api('/api/v1/sync').catch(() => null);
         state.effects = Array.isArray(effects) && effects.length ? effects : fallbackEffects;
         state.presets = presets.map(normalPreset);
         state.status = status;
@@ -1022,8 +1107,8 @@ window.lg = (() => {
         byId('control-scenes').innerHTML = state.presets.length ? state.presets.map(sceneCard).join('') : '<div class="empty-state">No scenes are stored yet.</div>';
     }
     function sceneCard(scene) {
-        const firstEffect = effect(scene.channels[0].effect);
-        return `<article class="product-card scene-card"><div><span class="scene-chip">● ${esc(firstEffect.label)}</span><h4>${esc(scene.name || 'Untitled scene')}</h4><p class="muted">${Math.round(scene.brightness * 100 / 255)}% brightness · ${Math.round(scene.transitionMs / 100) / 10}s fade</p></div><p class="help">${esc(firstEffect.description)}</p><div class="scene-actions"><button class="button-secondary" onclick="lg.playScene(${Number(scene.index)})">Play</button><button class="button-secondary" onclick="lg.editScene(${Number(scene.index)})">Edit</button></div></article>`;
+        const firstEffect = effect(scene.zones[0].layers[0].effect);
+        return `<article class="product-card scene-card"><div><span class="scene-chip">● ${esc(firstEffect.label)}</span><h4>${esc(scene.name || 'Untitled scene')}</h4><p class="muted">${Math.round(scene.globalBrightness * 100 / 255)}% brightness · ${Math.round(scene.transitionMs / 100) / 10}s fade</p></div><p class="help">${esc(firstEffect.description)}</p><div class="scene-actions"><button class="button-secondary" onclick="lg.playScene(${Number(scene.index)})">Play</button><button class="button-secondary" onclick="lg.editScene(${Number(scene.index)})">Edit</button></div></article>`;
     }
     function renderScenes() {
         byId('scene-library').innerHTML = state.presets.length ? state.presets.map(sceneCard).join('') : '<div class="empty-state">No scenes are stored yet.</div>';
@@ -1055,22 +1140,22 @@ window.lg = (() => {
         const scene = state.editing;
         if (!scene || !byId('scene-name')) return;
         scene.name = byId('scene-name').value.trim();
-        scene.brightness = Math.round(clamp(byId('scene-brightness').value,0,100) * 255 / 100);
+        scene.globalBrightness = Math.round(clamp(byId('scene-brightness').value,0,100) * 255 / 100);
         scene.transitionMs = clamp(byId('scene-fade').value,0,5000);
-        scene.overlayEffect = byId('scene-overlay').value;
-        const beatSync = byId('scene-overlay-beat');
-        scene.overlaySpeedMs = beatSync?.checked ? 0 : clamp(byId('scene-overlay-speed')?.value ?? scene.overlaySpeedMs, 0, 60000);
-        scene.overlayParam = clamp(byId('scene-overlay-strength')?.value ?? scene.overlayParam, 0, 100);
-        scene.channels.forEach((channel, index) => {
-            const hex = byId(`zone-color-${index}`)?.value || colorFor(channel);
-            channel.r = parseInt(hex.slice(1,3),16); channel.g = parseInt(hex.slice(3,5),16); channel.b = parseInt(hex.slice(5,7),16);
-            channel.effect = byId(`zone-effect-${index}`)?.value || channel.effect;
-            channel.pwmDuty = dutyForPercent(byId(`zone-white-${index}`)?.value ?? percentForDuty(channel.pwmDuty));
-            channel.effectSpeedMs = speedToMs(byId(`zone-speed-${index}`)?.value ?? msToSpeed(channel.effectSpeedMs));
-            const meta = effect(channel.effect);
-            if (meta.hasParameter) channel.fxParam = clamp(byId(`zone-parameter-${index}`)?.value ?? meta.parameterDefault, meta.parameterMin, meta.parameterMax);
-            channel.pixelEnabled = Boolean(byId(`zone-pixels-${index}`)?.checked);
-            channel.pwmEnabled = Boolean(byId(`zone-white-enabled-${index}`)?.checked);
+        scene.zones.forEach((zone, z) => {
+            zone.layers.forEach((layer, l) => {
+                layer.effect = byId(`z${z}-l${l}-effect`)?.value || layer.effect;
+                layer.blendMode = byId(`z${z}-l${l}-blend`)?.value || layer.blendMode;
+                const phex = byId(`z${z}-l${l}-pcolor`)?.value || colorFor(layer.primaryColor);
+                layer.primaryColor.r = parseInt(phex.slice(1,3),16); layer.primaryColor.g = parseInt(phex.slice(3,5),16); layer.primaryColor.b = parseInt(phex.slice(5,7),16);
+                const shex = byId(`z${z}-l${l}-scolor`)?.value || colorFor(layer.secondaryColor);
+                layer.secondaryColor.r = parseInt(shex.slice(1,3),16); layer.secondaryColor.g = parseInt(shex.slice(3,5),16); layer.secondaryColor.b = parseInt(shex.slice(5,7),16);
+                layer.speedMs = speedToMs(byId(`z${z}-l${l}-speed`)?.value ?? msToSpeed(layer.speedMs));
+                const meta = effect(layer.effect);
+                if (meta.hasParameter) layer.fxParam = clamp(byId(`z${z}-l${l}-param`)?.value ?? meta.parameterDefault, meta.parameterMin, meta.parameterMax);
+                layer.opacity = Math.round(clamp(byId(`z${z}-l${l}-opacity`)?.value ?? (layer.opacity * 100 / 255), 0, 100) * 255 / 100);
+                layer.enabled = Boolean(byId(`z${z}-l${l}-enabled`)?.checked);
+            });
         });
     }
     function renderSceneEditor() {
@@ -1078,37 +1163,43 @@ window.lg = (() => {
         if (!scene) return;
         byId('scene-editor-title').textContent = scene.name || 'Untitled scene';
         byId('scene-name').value = scene.name || '';
-        byId('scene-brightness').value = Math.round(scene.brightness * 100 / 255);
+        byId('scene-brightness').value = Math.round(scene.globalBrightness * 100 / 255);
         byId('scene-brightness-output').textContent = `${byId('scene-brightness').value}%`;
         byId('scene-fade').value = scene.transitionMs;
         byId('scene-fade-output').textContent = `${(scene.transitionMs / 1000).toFixed(1)} s`;
-        byId('scene-overlay').value = scene.overlayEffect || 'none';
-        const overlay = scene.overlayEffect === 'strobe';
-        byId('scene-overlay-options').innerHTML = overlay ? `<div class="range-row"><label for="scene-overlay-strength">Flash time</label><input id="scene-overlay-strength" type="range" min="5" max="95" value="${clamp(scene.overlayParam,5,95)}" oninput="lg.updateText('scene-overlay-strength-output', this.value + '%')"><output id="scene-overlay-strength-output">${clamp(scene.overlayParam,5,95)}%</output></div><label class="switch-row"><span>Lock flashes to the timeline beat</span><input id="scene-overlay-beat" type="checkbox" ${scene.overlaySpeedMs === 0 ? 'checked' : ''} onchange="lg.changeOverlayBeat(this.checked)"></label><div class="range-row" ${scene.overlaySpeedMs === 0 ? 'style="opacity:.45"' : ''}><label for="scene-overlay-speed">Flash rate</label><input id="scene-overlay-speed" type="range" min="100" max="3000" step="50" value="${scene.overlaySpeedMs || 500}" ${scene.overlaySpeedMs === 0 ? 'disabled' : ''}><output>${scene.overlaySpeedMs === 0 ? 'Timeline beat' : (scene.overlaySpeedMs / 1000).toFixed(1) + ' s'}</output></div>` : '<p class="help">Choose a strobe overlay to layer a flash over every zone in this scene.</p>';
-        byId('scene-zones').innerHTML = scene.channels.map((channel,index) => {
-            const meta = effect(channel.effect);
-            const parameter = clamp(channel.fxParam || meta.parameterDefault, meta.parameterMin || 0, meta.parameterMax || 255);
-            const zName = state.config?.zones?.[index]?.name || `Zone ${index + 1}`;
-            const zRole = state.config?.zones?.[index]?.role || 'Unassigned';
-            const roleHtml = zRole !== 'Unassigned' ? ` <span style="font-weight:normal;opacity:0.6">(${esc(zRole)})</span>` : '';
-            return `<article class="product-card zone-card"><div class="zone-title"><h4>${esc(zName)}${roleHtml}</h4><span>${esc(meta.label)}</span></div><div class="field"><label for="zone-effect-${index}">Motion</label><select id="zone-effect-${index}" title="${esc(meta.description)}" onchange="lg.changeZoneEffect(${index}, this.value)">${state.effects.map(item => `<option value="${esc(item.id)}" ${item.id === channel.effect ? 'selected' : ''}>${esc(item.label)}</option>`).join('')}</select></div><div class="color-line"><label for="zone-color-${index}">Color</label><input id="zone-color-${index}" type="color" value="${colorFor(channel)}"></div><div class="range-row"><label for="zone-white-${index}">White output</label><input id="zone-white-${index}" type="range" min="0" max="100" value="${percentForDuty(channel.pwmDuty)}" oninput="lg.updateText('zone-white-output-${index}', this.value + '%')"><output id="zone-white-output-${index}">${percentForDuty(channel.pwmDuty)}%</output></div><div class="range-row"><label for="zone-speed-${index}">Motion speed</label><input id="zone-speed-${index}" type="range" min="1" max="100" value="${msToSpeed(channel.effectSpeedMs)}" oninput="lg.speedText('zone-speed-output-${index}', this.value)"><output id="zone-speed-output-${index}">${speedName(msToSpeed(channel.effectSpeedMs))}</output></div>${meta.hasParameter ? `<div class="range-row"><label for="zone-parameter-${index}">${esc(meta.parameterLabel)}</label><input id="zone-parameter-${index}" type="range" min="${meta.parameterMin}" max="${meta.parameterMax}" value="${parameter}" oninput="lg.updateText('zone-parameter-output-${index}', this.value + ' ${esc(meta.parameterUnit)}')"><output id="zone-parameter-output-${index}">${parameter} ${esc(meta.parameterUnit)}</output></div>` : `<p class="help">${esc(meta.description)}</p>`}<div><label class="switch-row"><span>Pixel strip</span><input id="zone-pixels-${index}" type="checkbox" ${channel.pixelEnabled ? 'checked' : ''}></label><label class="switch-row"><span>White output</span><input id="zone-white-enabled-${index}" type="checkbox" ${channel.pwmEnabled ? 'checked' : ''}></label></div></article>`;
+        byId('scene-zones').innerHTML = scene.zones.map((zone, z) => {
+            const zName = state.config?.zones?.[z]?.name || `Zone ${z + 1}`;
+            const layersHtml = zone.layers.map((layer, l) => {
+                const meta = effect(layer.effect);
+                const parameter = clamp(layer.fxParam || meta.parameterDefault, meta.parameterMin || 0, meta.parameterMax || 255);
+                return `<div class="layer-editor" style="margin-top:1rem; border-top:1px solid var(--border); padding-top:1rem;">
+                    <h5>Layer ${l + 1}</h5>
+                    <div class="field"><label>Effect</label><select id="z${z}-l${l}-effect" onchange="lg.changeZoneEffect(${z}, ${l}, this.value)">
+                        ${state.effects.map(item => `<option value="${esc(item.id)}" ${item.id === layer.effect ? 'selected' : ''}>${esc(item.label)}</option>`).join('')}
+                    </select></div>
+                    <div class="field"><label>Blend Mode</label><select id="z${z}-l${l}-blend">
+                        <option value="normal" ${layer.blendMode==='normal'?'selected':''}>Normal</option>
+                        <option value="add" ${layer.blendMode==='add'?'selected':''}>Add</option>
+                        <option value="multiply" ${layer.blendMode==='multiply'?'selected':''}>Multiply</option>
+                        <option value="screen" ${layer.blendMode==='screen'?'selected':''}>Screen</option>
+                    </select></div>
+                    <div class="color-line">
+                        <label>Primary</label><input id="z${z}-l${l}-pcolor" type="color" value="${colorFor(layer.primaryColor)}">
+                        <label style="margin-left:1rem">Secondary</label><input id="z${z}-l${l}-scolor" type="color" value="${colorFor(layer.secondaryColor)}">
+                    </div>
+                    <div class="range-row"><label>Opacity</label><input id="z${z}-l${l}-opacity" type="range" min="0" max="100" value="${Math.round(layer.opacity * 100 / 255)}" oninput="lg.updateText('z${z}-l${l}-opacity-out', this.value + '%')"><output id="z${z}-l${l}-opacity-out">${Math.round(layer.opacity * 100 / 255)}%</output></div>
+                    <div class="range-row"><label>Speed</label><input id="z${z}-l${l}-speed" type="range" min="1" max="100" value="${msToSpeed(layer.speedMs)}" oninput="lg.speedText('z${z}-l${l}-speed-out', this.value)"><output id="z${z}-l${l}-speed-out">${speedName(msToSpeed(layer.speedMs))}</output></div>
+                    ${meta.hasParameter ? `<div class="range-row"><label>${esc(meta.parameterLabel)}</label><input id="z${z}-l${l}-param" type="range" min="${meta.parameterMin}" max="${meta.parameterMax}" value="${parameter}" oninput="lg.updateText('z${z}-l${l}-param-out', this.value + ' ${esc(meta.parameterUnit)}')"><output id="z${z}-l${l}-param-out">${parameter} ${esc(meta.parameterUnit)}</output></div>` : `<p class="help">${esc(meta.description)}</p>`}
+                    <div><label class="switch-row"><span>Layer Enabled</span><input id="z${z}-l${l}-enabled" type="checkbox" ${layer.enabled ? 'checked' : ''}></label></div>
+                </div>`;
+            }).join('');
+            return `<article class="product-card zone-card"><div class="zone-title"><h4>${esc(zName)}</h4></div>${layersHtml}</article>`;
         }).join('');
     }
-    function changeZoneEffect(index, value) {
+    function changeZoneEffect(z, l, value) {
         readSceneEditor();
-        state.editing.channels[index].effect = value;
-        state.editing.channels[index].fxParam = effect(value).parameterDefault || 0;
-        renderSceneEditor();
-    }
-    function changeOverlay(value) {
-        readSceneEditor();
-        state.editing.overlayEffect = value;
-        if (value === 'strobe' && !state.editing.overlaySpeedMs) state.editing.overlaySpeedMs = 500;
-        renderSceneEditor();
-    }
-    function changeOverlayBeat(locked) {
-        readSceneEditor();
-        state.editing.overlaySpeedMs = locked ? 0 : 500;
+        state.editing.zones[z].layers[l].effect = value;
+        state.editing.zones[z].layers[l].fxParam = effect(value).parameterDefault || 0;
         renderSceneEditor();
     }
     async function saveScene() {
@@ -1127,7 +1218,7 @@ window.lg = (() => {
         byId('timeline-bpm').value = clamp(state.sequence.bpm,40,240);
         byId('timeline-bpm-output').textContent = `${state.sequence.bpm} BPM`;
         byId('timeline-enabled').checked = state.sequence.enabled;
-        byId('timeline-palette').innerHTML = state.presets.map(scene => `<button draggable="true" class="${state.selectedScene === scene.index ? 'selected' : ''}" ondragstart="lg.dragScene(event,${Number(scene.index)})" onclick="lg.selectPalette(${Number(scene.index)})"><strong>${esc(scene.name || 'Untitled scene')}</strong><span>${esc(effect(scene.channels[0].effect).label)}</span></button>`).join('') || '<span class="help">Create a scene first, then place it on the timeline.</span>';
+        byId('timeline-palette').innerHTML = state.presets.map(scene => `<button draggable="true" class="${state.selectedScene === scene.index ? 'selected' : ''}" ondragstart="lg.dragScene(event,${Number(scene.index)})" onclick="lg.selectPalette(${Number(scene.index)})"><strong>${esc(scene.name || 'Untitled scene')}</strong><span>${esc(effect(scene.zones[0].layers[0].effect).label)}</span></button>`).join('') || '<span class="help">Create a scene first, then place it on the timeline.</span>';
         byId('timeline-tracks').innerHTML = state.sequence.tracks.map((track,trackIndex) => `<div class="track"><div class="track-head"><strong>Zone ${trackIndex + 1}</strong><label class="help"><input type="checkbox" ${track.enabled ? 'checked' : ''} onchange="lg.toggleTrack(${trackIndex}, this.checked)"> Active</label><select onchange="lg.setLoop(${trackIndex}, this.value)" aria-label="Zone ${trackIndex + 1} loop length">${[1,2,4,8,12,16].map(length => `<option value="${length}" ${track.numSteps === length ? 'selected' : ''}>${length} steps</option>`).join('')}</select></div><div class="step-lane">${track.steps.map((step,stepIndex) => `<button class="step ${stepIndex >= track.numSteps ? 'inactive ' : ''}${state.selectedStep?.track === trackIndex && state.selectedStep?.step === stepIndex ? 'selected' : ''}" onclick="lg.selectStep(${trackIndex},${stepIndex})" ondragover="event.preventDefault()" ondrop="lg.dropScene(event,${trackIndex},${stepIndex})" title="Step ${stepIndex + 1}: ${esc(sceneName(step.presetIndex))}"><small>${stepIndex + 1}</small><span>${esc(sceneName(step.presetIndex))}</span></button>`).join('')}</div></div>`).join('');
         renderStepInspector();
     }
@@ -1172,6 +1263,9 @@ window.lg = (() => {
         byId('system-timezone').value = state.config.timezone || 'UTC0';
         byId('system-sync-enabled').checked = Boolean(state.config.syncEnabled);
         byId('system-sync-role').value = String(state.config.syncRole ?? 0);
+        byId('system-mqtt-enabled').checked = Boolean(state.config.mqttEnabled);
+        byId('system-mqtt-broker').value = state.config.mqttBroker || '';
+        byId('system-mqtt-port').value = state.config.mqttPort || 1883;
         byId('system-fallback').innerHTML = state.presets.map(scene => `<option value="${Number(scene.index)}" ${Number(scene.index) === Number(state.config.fallbackPreset) ? 'selected' : ''}>${esc(scene.name || 'Untitled scene')}</option>`).join('');
         
         const roles = ['Unassigned', 'Sign', 'Sign Element', 'Ambiance Light', 'Main Light'];
@@ -1201,6 +1295,9 @@ window.lg = (() => {
                 timezone: byId('system-timezone').value.trim() || 'UTC0',
                 syncEnabled: byId('system-sync-enabled').checked,
                 syncRole: Number(byId('system-sync-role').value),
+                mqttEnabled: byId('system-mqtt-enabled').checked,
+                mqttBroker: byId('system-mqtt-broker').value.trim(),
+                mqttPort: Number(byId('system-mqtt-port').value),
                 zones: []
             };
             for (let i = 0; i < 8; ++i) {
@@ -1220,8 +1317,63 @@ window.lg = (() => {
     }
     function updateText(id,value) { const output = byId(id); if (output) output.textContent = value; }
     function speedText(id,value) { updateText(id,speedName(Number(value))); }
+    function changeOverlay(value) {}
+    function changeOverlayBeat(value) {}
+    async function uploadOta() {
+        const fileInput = byId('ota-file');
+        const file = fileInput.files[0];
+        if (!file) return toast('Please select a firmware binary first.', true);
+        
+        const statusEl = byId('ota-status');
+        statusEl.textContent = 'Uploading firmware... please wait.';
+        try {
+            const response = await fetch('/api/v1/ota', {
+                method: 'POST',
+                headers: { 'Authorization': 'Bearer ' + state.token },
+                body: file
+            });
+            if (!response.ok) throw new Error(`Upload failed: ${response.statusText}`);
+            statusEl.textContent = 'Upload successful! Rebooting node...';
+            toast('OTA successful. Node is restarting.');
+            setTimeout(() => window.location.reload(), 5000);
+        } catch(e) {
+            statusEl.textContent = 'Error: ' + e.message;
+            toast('OTA failed: ' + e.message, true);
+        }
+    }
 
-    return {connect,disconnect,refresh,nav,playScene,blackout,editScene,backToScenes,renderSceneEditor,changeZoneEffect,changeOverlay,changeOverlayBeat,saveScene,updateText,speedText,selectPalette,dragScene,dropScene,selectStep,setStepScene,setStepLength,toggleTrack,setLoop,setBpm,setTimelineEnabled,saveTimeline,addCue,setCue,setCueTime,toggleDay,saveAutomation,saveSystem,refreshSync};
+    async function downloadBackup() {
+        try {
+            const response = await fetch('/api/v1/backup', {
+                headers: { 'Authorization': 'Bearer ' + state.token }
+            });
+            if (!response.ok) throw new Error('Backup failed');
+            const blob = await response.blob();
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.style.display = 'none';
+            a.href = url;
+            a.download = 'lumigrid_backup.json';
+            document.body.appendChild(a);
+            a.click();
+            window.URL.revokeObjectURL(url);
+            toast('Configuration exported successfully.');
+        } catch (e) { toast('Export failed: ' + e.message, true); }
+    }
+
+    async function uploadRestore() {
+        const fileInput = byId('restore-file');
+        const file = fileInput.files[0];
+        if (!file) return toast('Please select a backup JSON file first.', true);
+        try {
+            const payload = await file.text();
+            await api('/api/v1/restore', 'POST', JSON.parse(payload));
+            toast('Restore successful. Node is restarting.');
+            setTimeout(() => window.location.reload(), 3000);
+        } catch (e) { toast('Restore failed: ' + e.message, true); }
+    }
+
+    return {connect,disconnect,refresh,nav,playScene,blackout,editScene,backToScenes,renderSceneEditor,changeZoneEffect,changeOverlay,changeOverlayBeat,saveScene,updateText,speedText,selectPalette,dragScene,dropScene,selectStep,setStepScene,setStepLength,toggleTrack,setLoop,setBpm,setTimelineEnabled,saveTimeline,addCue,setCue,setCueTime,toggleDay,saveAutomation,saveSystem,refreshSync,uploadOta,downloadBackup,uploadRestore};
 })();
 </script>
 </body>

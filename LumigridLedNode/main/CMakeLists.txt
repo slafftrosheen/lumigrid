@@ -15,6 +15,8 @@ idf_component_register(
         esp_http_server
         network
         protocols
+        mqtt
+        app_update
 )
 
 # LittleFS image: enable when web/dist frontend build exists.

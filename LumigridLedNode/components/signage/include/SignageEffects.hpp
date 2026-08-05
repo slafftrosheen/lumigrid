@@ -6,18 +6,19 @@
 
 namespace lg {
 
-/// Renders a single lane's effect using the given channel configuration.
-void render_lane_effect(
-    uint8_t lane,
+/// Renders a fixture's zone content, evaluating layers bottom-up and applying blend modes.
+void render_fixture_zone(
     OutputController& output,
-    const ChannelConfig& channel,
+    const FixtureConfig& fixture,
+    const PhysicalOutput* physical_outputs,
+    const ZoneContent& zone,
     uint8_t global_brightness,
     uint32_t elapsed_ms
 );
 
-/// Returns whether a preset-level modifier permits the current frame to render.
-bool preset_is_visible(
-    const BrandPreset& preset,
+/// Returns whether a scene-level modifier permits the current frame to render.
+bool scene_is_visible(
+    const SceneConfig& scene,
     uint32_t elapsed_ms,
     uint16_t sequencer_beat_ms
 );

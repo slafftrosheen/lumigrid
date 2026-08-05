@@ -1,41 +1,34 @@
 // components/api/ApiAuth.cpp
 #include "ApiAuth.hpp"
 #include <cstring>
-#include "nvs_flash.h"
-#include "nvs.h"
 #include "esp_log.h"
 
 namespace lg::api {
 namespace {
 
 static const char* TAG = "api_auth";
-static char s_api_token[64] = {0};
-static bool s_token_loaded = false;
-
-bool load_token() {
-    if (s_token_loaded) return true;
-
-    nvs_handle_t handle = 0;
-    if (nvs_open("lumigrid", NVS_READONLY, &handle) != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to open NVS for API token");
-        return false;
-    }
-
-    size_t len = sizeof(s_api_token);
-    if (nvs_get_str(handle, "api_token", s_api_token, &len) != ESP_OK) {
-        ESP_LOGE(TAG, "No api_token found in NVS. Device is locked down.");
-        nvs_close(handle);
-        return false;
-    }
-
-    nvs_close(handle);
-    s_token_loaded = true;
-    return true;
-}
+static char s_admin_token[32] = "lumigrid_admin";
+static char s_installer_token[32] = "lumigrid_install";
+static char s_operator_token[32] = "lumigrid_op";
 
 }
 
-bool authorize(httpd_req_t* request) {
+void update_tokens(const char* admin, const char* installer, const char* op) {
+    if (admin) {
+        std::strncpy(s_admin_token, admin, sizeof(s_admin_token) - 1);
+        s_admin_token[sizeof(s_admin_token) - 1] = '\0';
+    }
+    if (installer) {
+        std::strncpy(s_installer_token, installer, sizeof(s_installer_token) - 1);
+        s_installer_token[sizeof(s_installer_token) - 1] = '\0';
+    }
+    if (op) {
+        std::strncpy(s_operator_token, op, sizeof(s_operator_token) - 1);
+        s_operator_token[sizeof(s_operator_token) - 1] = '\0';
+    }
+}
+
+bool authorize(httpd_req_t* request, ApiRole minimum_role) {
     char header[128] = {};
     const size_t required = httpd_req_get_hdr_value_len(
         request,
@@ -63,29 +56,42 @@ bool authorize(httpd_req_t* request) {
         return false;
     }
 
-    if (!load_token()) {
-        httpd_resp_send_err(
-            request,
-            HTTPD_403_FORBIDDEN,
-            "Server not provisioned"
-        );
+    constexpr char prefix[] = "Bearer ";
+    if (std::strncmp(header, prefix, sizeof(prefix) - 1) != 0) {
+        httpd_resp_send_err(request, HTTPD_403_FORBIDDEN, "Invalid factory token");
         return false;
     }
 
-    constexpr char prefix[] = "Bearer ";
-    const bool valid =
-        std::strncmp(header, prefix, sizeof(prefix) - 1) == 0 &&
-        std::strcmp(header + sizeof(prefix) - 1, s_api_token) == 0;
-
-    if (!valid) {
-        httpd_resp_send_err(
-            request,
-            HTTPD_403_FORBIDDEN,
-            "Invalid factory token"
-        );
+    char* provided_token = header + sizeof(prefix) - 1;
+    
+    // Trim trailing whitespace/newlines
+    size_t len = std::strlen(provided_token);
+    while (len > 0 && (provided_token[len - 1] == ' ' || provided_token[len - 1] == '\r' || provided_token[len - 1] == '\n')) {
+        provided_token[len - 1] = '\0';
+        len--;
     }
 
-    return valid;
+    ApiRole provided_role;
+
+    if (std::strcmp(provided_token, s_admin_token) == 0) {
+        provided_role = ApiRole::Admin;
+    } else if (std::strcmp(provided_token, s_installer_token) == 0) {
+        provided_role = ApiRole::Installer;
+    } else if (std::strcmp(provided_token, s_operator_token) == 0) {
+        provided_role = ApiRole::Operator;
+    } else {
+        ESP_LOGW(TAG, "Auth failed! Received invalid token.");
+        httpd_resp_send_err(request, HTTPD_403_FORBIDDEN, "Invalid factory token");
+        return false;
+    }
+
+    if (static_cast<uint8_t>(provided_role) < static_cast<uint8_t>(minimum_role)) {
+        ESP_LOGW(TAG, "Auth failed! Insufficient role.");
+        httpd_resp_send_err(request, HTTPD_403_FORBIDDEN, "Insufficient permissions");
+        return false;
+    }
+
+    return true;
 }
 
 } // namespace lg::api

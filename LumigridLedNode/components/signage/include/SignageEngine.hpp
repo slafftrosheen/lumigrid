@@ -24,25 +24,31 @@ public:
 
     esp_err_t start();
 
-    /// Activate a preset by index with smooth cross-fade transition.
-    void activate_preset(uint8_t index);
+    /// Activate a scene by index with smooth cross-fade transition.
+    void activate_scene(uint8_t index);
 
-    /// Activate a preset directly (no NVS lookup, immediate or with transition).
-    void activate_preset_direct(const BrandPreset& preset, bool immediate = false);
+    /// Activate a scene directly (no NVS lookup, immediate or with transition).
+    void activate_scene_direct(const SceneConfig& scene, bool immediate = false);
 
-    /// Feed the network watchdog. Call on every external command (REST, Art-Net, MQTT).
+    /// Inject live streaming data (Art-Net/sACN) directly into the current scene.
+    void inject_live_data(uint8_t zone_idx, uint8_t layer_idx, const BrandColor& color, uint8_t opacity);
+
+    /// Feed the system watchdog (REST/MQTT/etc).
     void feed_watchdog();
-
-    /// Query the active state.
-    uint8_t active_preset_index() const;
+    uint8_t active_scene_index() const;
     bool is_fallback_active() const { return fallback_active_; }
     bool is_transitioning() const { return transitioning_; }
 
     /// Access power budget for configuration.
     PowerBudget& power_budget() { return power_budget_; }
 
+    float get_fps() const { return current_fps_; }
+
     /// Set the beat period used by beat-synced preset modifiers.
     void set_beat_period(uint16_t period_ms);
+
+    /// Call when DeviceConfig changes to update mapping
+    void reload_device_config();
 
 private:
     static void task_entry(void* arg);
@@ -55,10 +61,11 @@ private:
     ConfigStore& config_;
     PowerBudget power_budget_;
 
-    BrandPreset current_preset_{};
-    BrandPreset target_preset_{};
+    DeviceConfig device_cfg_{};
+    SceneConfig current_scene_{};
+    SceneConfig target_scene_{};
     uint8_t active_index_ = 0;
-    uint32_t preset_started_ms_ = 0;
+    uint32_t scene_started_ms_ = 0;
 
     // Transition state
     uint32_t transition_start_ms_ = 0;
@@ -70,6 +77,10 @@ private:
     bool fallback_active_ = false;
     bool watchdog_enabled_ = false;
     uint16_t watchdog_timeout_s_ = 60;
+    
+    // Live stream watchdog state
+    uint32_t last_live_stream_ms_ = 0;
+    bool live_stream_active_ = false;
 
     uint16_t beat_period_ms_ = 500;
 
@@ -79,6 +90,10 @@ private:
 
     SemaphoreHandle_t mutex_ = nullptr;
     TaskHandle_t task_handle_ = nullptr;
+
+    uint32_t frame_count_ = 0;
+    uint32_t last_fps_time_ms_ = 0;
+    float current_fps_ = 0.0f;
 
     static constexpr uint32_t kFramePeriodMs = 25; // 40 FPS
 };

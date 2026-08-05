@@ -167,6 +167,7 @@ void FactoryRunner::set_stream_frame(const StreamFramePayload& payload,
 
 void FactoryRunner::apply_command(const FactoryCommand& command,
                                   uint32_t current_ms) {
+    switch (command.type) {
         case FactoryCommandType::Abort:
             direct_test_active_ = false;
             xSemaphoreTake(status_mutex_, portMAX_DELAY);

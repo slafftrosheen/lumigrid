@@ -1,6 +1,13 @@
 // components/factory/FactoryApi.cpp
 #include "FactoryApi.hpp"
+#include "esp_ota_ops.h"
+#include "esp_app_format.h"
 #include "ApiAuth.hpp"
+#include "AuditLog.hpp"
+#include "DiagnosticLog.hpp"
+#include "esp_system.h"
+#include "esp_wifi.h"
+#include "nvs_flash.h"
 
 #include "FactoryApp.hpp"
 #include "ConfigStore.hpp"
@@ -213,7 +220,7 @@ void build_status_json(const FactoryStatus& status, char* response, size_t max_l
 }
 
 esp_err_t get_status(httpd_req_t* request) {
-    if (!api::authorize(request)) return ESP_OK;
+    if (!api::authorize(request, api::ApiRole::Installer)) return ESP_OK;
 
     FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
     const FactoryStatus status = api_ptr->runner().status();
@@ -225,7 +232,7 @@ esp_err_t get_status(httpd_req_t* request) {
 }
 
 esp_err_t post_effect(httpd_req_t* request) {
-    if (!api::authorize(request)) return ESP_OK;
+    if (!api::authorize(request, api::ApiRole::Installer)) return ESP_OK;
 
     cJSON* root = nullptr;
     if (read_json(request, &root) != ESP_OK) {
@@ -269,7 +276,7 @@ esp_err_t post_effect(httpd_req_t* request) {
 }
 
 esp_err_t post_lane(httpd_req_t* request) {
-    if (!api::authorize(request)) return ESP_OK;
+    if (!api::authorize(request, api::ApiRole::Installer)) return ESP_OK;
 
     cJSON* root = nullptr;
     if (read_json(request, &root) != ESP_OK) {
@@ -318,7 +325,7 @@ esp_err_t post_lane(httpd_req_t* request) {
 }
 
 esp_err_t post_pwm(httpd_req_t* request) {
-    if (!api::authorize(request)) return ESP_OK;
+    if (!api::authorize(request, api::ApiRole::Installer)) return ESP_OK;
 
     cJSON* root = nullptr;
     if (read_json(request, &root) != ESP_OK) {
@@ -357,7 +364,7 @@ esp_err_t post_pwm(httpd_req_t* request) {
 }
 
 esp_err_t post_abort(httpd_req_t* request) {
-    if (!api::authorize(request)) return ESP_OK;
+    if (!api::authorize(request, api::ApiRole::Installer)) return ESP_OK;
 
     FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
     if (!api_ptr->runner().enqueue({
@@ -370,7 +377,7 @@ esp_err_t post_abort(httpd_req_t* request) {
 }
 
 esp_err_t post_auto_loop(httpd_req_t* request) {
-    if (!api::authorize(request)) return ESP_OK;
+    if (!api::authorize(request, api::ApiRole::Installer)) return ESP_OK;
 
     cJSON* root = nullptr;
     if (read_json(request, &root) != ESP_OK) {
@@ -419,47 +426,162 @@ esp_err_t ws_handler(httpd_req_t* request) {
     return ESP_OK;
 }
 
+esp_err_t get_health(httpd_req_t* request) {
+    if (!api::authorize(request, api::ApiRole::Installer)) return ESP_OK;
+    
+    FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+    
+    char body[512];
+    
+    wifi_ap_record_t ap_info;
+    int rssi = 0;
+    if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) {
+        rssi = ap_info.rssi;
+    }
+
+    nvs_stats_t nvs_stats;
+    nvs_get_stats(NULL, &nvs_stats);
+    
+    float fps = 0.0f;
+    uint16_t active_preset = 0;
+    if (api_ptr->signage()) {
+        fps = api_ptr->signage()->get_fps();
+        active_preset = api_ptr->signage()->active_scene_index();
+    }
+
+    snprintf(body, sizeof(body),
+        "{\"uptime_s\":%lu,\"free_heap\":%lu,\"min_free_heap\":%lu,\"reset_reason\":%d,\"wifi_rssi\":%d,\"nvs_used\":%d,\"nvs_free\":%d,\"fps\":%.1f,\"active_preset\":%u,\"packet_loss_count\":0,\"clipping_events\":0,\"wifi_disconnects\":0}",
+        (unsigned long)(esp_timer_get_time() / 1000000ULL),
+        (unsigned long)esp_get_free_heap_size(),
+        (unsigned long)esp_get_minimum_free_heap_size(),
+        (int)esp_reset_reason(),
+        rssi,
+        (int)nvs_stats.used_entries,
+        (int)nvs_stats.free_entries,
+        fps,
+        active_preset);
+
+    return send_json(request, body);
+}
+
+esp_err_t get_logs(httpd_req_t* request) {
+    if (!api::authorize(request, api::ApiRole::Installer)) return ESP_OK;
+
+    char* logs = new (std::nothrow) char[DiagnosticLog::kBufferSize + 1];
+    if (!logs) return send_error(request, "500 Internal Server Error", "Out of Memory");
+    
+    DiagnosticLog::instance().copy_logs(logs, DiagnosticLog::kBufferSize + 1);
+    
+    httpd_resp_set_status(request, "200 OK");
+    httpd_resp_set_type(request, "text/plain");
+    httpd_resp_set_hdr(request, "Cache-Control", "no-store");
+    esp_err_t err = httpd_resp_sendstr(request, logs);
+    
+    delete[] logs;
+    return err;
+}
+
+esp_err_t post_auth_update(httpd_req_t* request) {
+    if (!api::authorize(request, api::ApiRole::Admin)) return ESP_OK;
+
+    FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+    if (!api_ptr->config()) return send_error(request, "503 Service Unavailable", "config_not_ready");
+
+    cJSON* root = nullptr;
+    if (read_json(request, &root) != ESP_OK) {
+        return send_error(request, "400 Bad Request", "invalid_json");
+    }
+
+    DeviceConfig cfg;
+    api_ptr->config()->load_config(cfg);
+
+    const cJSON* admin = cJSON_GetObjectItemCaseSensitive(root, "adminToken");
+    const cJSON* installer = cJSON_GetObjectItemCaseSensitive(root, "installerToken");
+    const cJSON* op = cJSON_GetObjectItemCaseSensitive(root, "operatorToken");
+
+    auto validate_and_copy = [](const cJSON* item, char* dest, size_t max_len) {
+        if (cJSON_IsString(item) && strlen(item->valuestring) >= 4 && strlen(item->valuestring) < max_len) {
+            strncpy(dest, item->valuestring, max_len - 1);
+            dest[max_len - 1] = '\0';
+            return true;
+        }
+        return false;
+    };
+
+    bool updated = false;
+    if (admin && validate_and_copy(admin, cfg.admin_token, sizeof(cfg.admin_token))) updated = true;
+    if (installer && validate_and_copy(installer, cfg.installer_token, sizeof(cfg.installer_token))) updated = true;
+    if (op && validate_and_copy(op, cfg.operator_token, sizeof(cfg.operator_token))) updated = true;
+
+    if (!updated) {
+        cJSON_Delete(root);
+        return send_error(request, "400 Bad Request", "invalid_token_format");
+    }
+
+    if (api_ptr->config()->save_config(cfg) == ESP_OK) {
+        api::update_tokens(cfg.admin_token, cfg.installer_token, cfg.operator_token);
+        api::AuditLog::instance().log(api::ApiRole::Admin, "auth_update", "Tokens updated");
+        cJSON_Delete(root);
+        return send_json(request, R"({"updated":true})", "200 OK");
+    }
+
+    cJSON_Delete(root);
+    return send_error(request, "500 Internal Server Error", "nvs_write_failed");
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // Signage REST Endpoints
 // ═══════════════════════════════════════════════════════════════════
 
 esp_err_t get_presets(httpd_req_t* request) {
-    if (!api::authorize(request)) return ESP_OK;
+    if (!api::authorize(request, api::ApiRole::Operator)) return ESP_OK;
 
     FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
     if (!api_ptr->config()) return send_error(request, "503 Service Unavailable", "config_not_ready");
 
     cJSON* arr = cJSON_CreateArray();
     for (uint8_t i = 0; i < kMaxPresets; ++i) {
-        BrandPreset preset;
-        if (api_ptr->config()->load_preset(i, preset) != ESP_OK) continue;
+        SceneConfig scene;
+        if (api_ptr->config()->load_scene(i, scene) != ESP_OK) continue;
 
         cJSON* obj = cJSON_CreateObject();
         cJSON_AddNumberToObject(obj, "index", i);
-        cJSON_AddStringToObject(obj, "name", preset.name);
-        cJSON_AddNumberToObject(obj, "brightness", preset.brightness);
-        cJSON_AddNumberToObject(obj, "transitionMs", preset.transition_ms);
-        cJSON_AddStringToObject(obj, "overlayEffect", signage_modifier_name(preset.overlay_effect));
-        cJSON_AddNumberToObject(obj, "overlaySpeedMs", preset.overlay_speed_ms);
-        cJSON_AddNumberToObject(obj, "overlayParam", preset.overlay_param);
+        cJSON_AddStringToObject(obj, "name", scene.name);
+        cJSON_AddNumberToObject(obj, "globalBrightness", scene.global_brightness);
+        cJSON_AddNumberToObject(obj, "transitionMs", scene.transition_ms);
 
-        cJSON* channels = cJSON_CreateArray();
-        for (uint8_t ch = 0; ch < 8; ++ch) {
-            cJSON* c = cJSON_CreateObject();
-            cJSON_AddNumberToObject(c, "r", preset.channels[ch].pixel_color.r);
-            cJSON_AddNumberToObject(c, "g", preset.channels[ch].pixel_color.g);
-            cJSON_AddNumberToObject(c, "b", preset.channels[ch].pixel_color.b);
-            cJSON_AddNumberToObject(c, "pwmDuty", preset.channels[ch].pwm_duty);
-            cJSON_AddStringToObject(c, "effect", signage_effect_name(preset.channels[ch].effect));
-            cJSON_AddNumberToObject(c, "effectSpeedMs", preset.channels[ch].effect_speed_ms);
-            cJSON_AddNumberToObject(c, "paletteId", preset.channels[ch].palette_id);
-            cJSON_AddNumberToObject(c, "phaseOffset", preset.channels[ch].phase_offset);
-            cJSON_AddNumberToObject(c, "fxParam", preset.channels[ch].fx_param);
-            cJSON_AddBoolToObject(c, "pixelEnabled", preset.channels[ch].pixel_enabled);
-            cJSON_AddBoolToObject(c, "pwmEnabled", preset.channels[ch].pwm_enabled);
-            cJSON_AddItemToArray(channels, c);
+        cJSON* zones = cJSON_CreateArray();
+        for (uint8_t z = 0; z < 8; ++z) {
+            cJSON* zone_obj = cJSON_CreateObject();
+            cJSON* layers = cJSON_CreateArray();
+            for (uint8_t l = 0; l < 3; ++l) {
+                cJSON* layer = cJSON_CreateObject();
+                cJSON_AddStringToObject(layer, "effect", signage_effect_name(static_cast<SignageEffect>(scene.zones[z].layers[l].effect)));
+                cJSON_AddStringToObject(layer, "blendMode", blend_mode_name(scene.zones[z].layers[l].blend_mode));
+                
+                cJSON* pcolor = cJSON_CreateObject();
+                cJSON_AddNumberToObject(pcolor, "r", scene.zones[z].layers[l].primary_color.r);
+                cJSON_AddNumberToObject(pcolor, "g", scene.zones[z].layers[l].primary_color.g);
+                cJSON_AddNumberToObject(pcolor, "b", scene.zones[z].layers[l].primary_color.b);
+                cJSON_AddItemToObject(layer, "primaryColor", pcolor);
+                
+                cJSON* scolor = cJSON_CreateObject();
+                cJSON_AddNumberToObject(scolor, "r", scene.zones[z].layers[l].secondary_color.r);
+                cJSON_AddNumberToObject(scolor, "g", scene.zones[z].layers[l].secondary_color.g);
+                cJSON_AddNumberToObject(scolor, "b", scene.zones[z].layers[l].secondary_color.b);
+                cJSON_AddItemToObject(layer, "secondaryColor", scolor);
+
+                cJSON_AddNumberToObject(layer, "speedMs", scene.zones[z].layers[l].speed_ms);
+                cJSON_AddNumberToObject(layer, "fxParam", scene.zones[z].layers[l].fx_param);
+                cJSON_AddNumberToObject(layer, "paletteId", scene.zones[z].layers[l].palette_id);
+                cJSON_AddNumberToObject(layer, "opacity", scene.zones[z].layers[l].opacity);
+                cJSON_AddBoolToObject(layer, "enabled", scene.zones[z].layers[l].enabled);
+                cJSON_AddItemToArray(layers, layer);
+            }
+            cJSON_AddItemToObject(zone_obj, "layers", layers);
+            cJSON_AddItemToArray(zones, zone_obj);
         }
-        cJSON_AddItemToObject(obj, "channels", channels);
+        cJSON_AddItemToObject(obj, "zones", zones);
         cJSON_AddItemToArray(arr, obj);
     }
 
@@ -474,7 +596,7 @@ esp_err_t get_presets(httpd_req_t* request) {
 }
 
 esp_err_t put_preset(httpd_req_t* request) {
-    if (!api::authorize(request)) return ESP_OK;
+    if (!api::authorize(request, api::ApiRole::Operator)) return ESP_OK;
 
     FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
     if (!api_ptr->config()) return send_error(request, "503 Service Unavailable", "config_not_ready");
@@ -490,63 +612,114 @@ esp_err_t put_preset(httpd_req_t* request) {
         return send_error(request, "400 Bad Request", "missing_index");
     }
 
-    BrandPreset preset{};
+#define P_VALIDATE_U8(obj, field, min, max, target)     do {         const cJSON* v = cJSON_GetObjectItemCaseSensitive(obj, field);         if (v) {             if (!cJSON_IsNumber(v) || v->valuedouble < (min) || v->valuedouble > (max)) {                 cJSON_Delete(root);                 return send_error(request, "400 Bad Request", "invalid_field_" field);             }             target = static_cast<uint8_t>(v->valueint);         }     } while(0)
+
+#define P_VALIDATE_U16(obj, field, min, max, target)     do {         const cJSON* v = cJSON_GetObjectItemCaseSensitive(obj, field);         if (v) {             if (!cJSON_IsNumber(v) || v->valuedouble < (min) || v->valuedouble > (max)) {                 cJSON_Delete(root);                 return send_error(request, "400 Bad Request", "invalid_field_" field);             }             target = static_cast<uint16_t>(v->valueint);         }     } while(0)
+
+    SceneConfig scene{};
     const cJSON* name_j = cJSON_GetObjectItemCaseSensitive(root, "name");
-    if (cJSON_IsString(name_j)) preset.set_name(name_j->valuestring);
-
-    json_u8(root, "brightness", 0, 255, preset.brightness);
-
-    uint16_t trans = 1000;
-    json_u16(root, "transitionMs", 0, 10000, trans);
-    preset.transition_ms = trans;
-
-    const cJSON* overlay = cJSON_GetObjectItemCaseSensitive(root, "overlayEffect");
-    if (cJSON_IsString(overlay)) {
-        parse_signage_modifier(overlay->valuestring, preset.overlay_effect);
+    if (name_j) {
+        if (!cJSON_IsString(name_j) || strlen(name_j->valuestring) >= sizeof(scene.name)) {
+            cJSON_Delete(root);
+            return send_error(request, "400 Bad Request", "invalid_field_name");
+        }
+        strncpy(scene.name, name_j->valuestring, sizeof(scene.name) - 1);
+        scene.name[sizeof(scene.name) - 1] = '\0';
     }
-    json_u16(root, "overlaySpeedMs", 0, 60000, preset.overlay_speed_ms);
-    json_u8(root, "overlayParam", 0, 100, preset.overlay_param);
 
-    const cJSON* channels = cJSON_GetObjectItemCaseSensitive(root, "channels");
-    if (cJSON_IsArray(channels)) {
-        int ch_idx = 0;
-        cJSON* ch_item = nullptr;
-        cJSON_ArrayForEach(ch_item, channels) {
-            if (ch_idx >= 8) break;
-            json_u8(ch_item, "r", 0, 255, preset.channels[ch_idx].pixel_color.r);
-            json_u8(ch_item, "g", 0, 255, preset.channels[ch_idx].pixel_color.g);
-            json_u8(ch_item, "b", 0, 255, preset.channels[ch_idx].pixel_color.b);
-            json_u16(ch_item, "pwmDuty", 0, 4095, preset.channels[ch_idx].pwm_duty);
+    P_VALIDATE_U8(root, "globalBrightness", 0, 255, scene.global_brightness);
+    P_VALIDATE_U16(root, "transitionMs", 0, 10000, scene.transition_ms);
 
-            const cJSON* effect_j = cJSON_GetObjectItemCaseSensitive(ch_item, "effect");
-            if (cJSON_IsString(effect_j)) parse_signage_effect(effect_j->valuestring, preset.channels[ch_idx].effect);
-            json_u16(ch_item, "effectSpeedMs", 10, 60000, preset.channels[ch_idx].effect_speed_ms);
-            json_u8(ch_item, "paletteId", 0, 255, preset.channels[ch_idx].palette_id);
-            json_u8(ch_item, "phaseOffset", 0, 255, preset.channels[ch_idx].phase_offset);
-            json_u8(ch_item, "fxParam", 0, 255, preset.channels[ch_idx].fx_param);
-
-            const cJSON* pe = cJSON_GetObjectItemCaseSensitive(ch_item, "pixelEnabled");
-            if (cJSON_IsBool(pe)) preset.channels[ch_idx].pixel_enabled = cJSON_IsTrue(pe);
-
-            const cJSON* pwe = cJSON_GetObjectItemCaseSensitive(ch_item, "pwmEnabled");
-            if (cJSON_IsBool(pwe)) preset.channels[ch_idx].pwm_enabled = cJSON_IsTrue(pwe);
-
-            ++ch_idx;
+    const cJSON* zones = cJSON_GetObjectItemCaseSensitive(root, "zones");
+    if (zones) {
+        if (!cJSON_IsArray(zones) || cJSON_GetArraySize(zones) > 8) {
+            cJSON_Delete(root);
+            return send_error(request, "400 Bad Request", "invalid_field_zones");
+        }
+        int z_idx = 0;
+        cJSON* z_item = nullptr;
+        cJSON_ArrayForEach(z_item, zones) {
+            if (z_idx >= 8) break;
+            
+            const cJSON* layers = cJSON_GetObjectItemCaseSensitive(z_item, "layers");
+            if (layers) {
+                if (!cJSON_IsArray(layers) || cJSON_GetArraySize(layers) > 3) {
+                    cJSON_Delete(root);
+                    return send_error(request, "400 Bad Request", "invalid_field_layers");
+                }
+                int l_idx = 0;
+                cJSON* l_item = nullptr;
+                cJSON_ArrayForEach(l_item, layers) {
+                    if (l_idx >= 3) break;
+                    
+                    const cJSON* effect_j = cJSON_GetObjectItemCaseSensitive(l_item, "effect");
+                    if (effect_j) {
+                        SignageEffect eff = SignageEffect::Solid;
+                        if (!cJSON_IsString(effect_j) || !parse_signage_effect(effect_j->valuestring, eff)) {
+                            cJSON_Delete(root);
+                            return send_error(request, "400 Bad Request", "invalid_field_effect");
+                        }
+                        scene.zones[z_idx].layers[l_idx].effect = static_cast<uint8_t>(eff);
+                    }
+                    
+                    const cJSON* blend_j = cJSON_GetObjectItemCaseSensitive(l_item, "blendMode");
+                    if (blend_j) {
+                        if (!cJSON_IsString(blend_j) || !parse_blend_mode(blend_j->valuestring, scene.zones[z_idx].layers[l_idx].blend_mode)) {
+                            cJSON_Delete(root);
+                            return send_error(request, "400 Bad Request", "invalid_field_blendMode");
+                        }
+                    }
+                    
+                    const cJSON* pc = cJSON_GetObjectItemCaseSensitive(l_item, "primaryColor");
+                    if (pc) {
+                        P_VALIDATE_U8(pc, "r", 0, 255, scene.zones[z_idx].layers[l_idx].primary_color.r);
+                        P_VALIDATE_U8(pc, "g", 0, 255, scene.zones[z_idx].layers[l_idx].primary_color.g);
+                        P_VALIDATE_U8(pc, "b", 0, 255, scene.zones[z_idx].layers[l_idx].primary_color.b);
+                    }
+                    
+                    const cJSON* sc = cJSON_GetObjectItemCaseSensitive(l_item, "secondaryColor");
+                    if (sc) {
+                        P_VALIDATE_U8(sc, "r", 0, 255, scene.zones[z_idx].layers[l_idx].secondary_color.r);
+                        P_VALIDATE_U8(sc, "g", 0, 255, scene.zones[z_idx].layers[l_idx].secondary_color.g);
+                        P_VALIDATE_U8(sc, "b", 0, 255, scene.zones[z_idx].layers[l_idx].secondary_color.b);
+                    }
+                    
+                    P_VALIDATE_U16(l_item, "speedMs", 10, 60000, scene.zones[z_idx].layers[l_idx].speed_ms);
+                    P_VALIDATE_U8(l_item, "fxParam", 0, 255, scene.zones[z_idx].layers[l_idx].fx_param);
+                    P_VALIDATE_U8(l_item, "paletteId", 0, 255, scene.zones[z_idx].layers[l_idx].palette_id);
+                    P_VALIDATE_U8(l_item, "opacity", 0, 255, scene.zones[z_idx].layers[l_idx].opacity);
+                    
+                    const cJSON* en = cJSON_GetObjectItemCaseSensitive(l_item, "enabled");
+                    if (en) {
+                        if (!cJSON_IsBool(en)) { cJSON_Delete(root); return send_error(request, "400 Bad Request", "invalid_field_enabled"); }
+                        scene.zones[z_idx].layers[l_idx].enabled = cJSON_IsTrue(en);
+                    }
+                    
+                    l_idx++;
+                }
+            }
+            z_idx++;
         }
     }
+#undef P_VALIDATE_U8
+#undef P_VALIDATE_U16
 
     cJSON_Delete(root);
 
-    esp_err_t err = api_ptr->config()->save_preset(index, preset);
+    esp_err_t err = api_ptr->config()->save_scene(index, scene);
     if (err != ESP_OK) {
         return send_error(request, "500 Internal Server Error", "nvs_write_failed");
     }
+
+    char detail[64];
+    snprintf(detail, sizeof(detail), "Preset %d updated", index);
+    api::AuditLog::instance().log(api::ApiRole::Operator, "preset_update", detail);
 
     return send_json(request, R"({"saved":true})", "200 OK");
 }
 
 esp_err_t post_activate(httpd_req_t* request) {
-    if (!api::authorize(request)) return ESP_OK;
+    if (!api::authorize(request, api::ApiRole::Operator)) return ESP_OK;
 
     FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
     if (!api_ptr->signage()) return send_error(request, "503 Service Unavailable", "signage_not_ready");
@@ -564,13 +737,13 @@ esp_err_t post_activate(httpd_req_t* request) {
     cJSON_Delete(root);
 
     api_ptr->signage()->feed_watchdog();
-    api_ptr->signage()->activate_preset(index);
+    api_ptr->signage()->activate_scene(index);
 
     return send_json(request, R"({"activated":true})", "202 Accepted");
 }
 
 esp_err_t get_device_config(httpd_req_t* request) {
-    if (!api::authorize(request)) return ESP_OK;
+    if (!api::authorize(request, api::ApiRole::Operator)) return ESP_OK;
 
     FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
     if (!api_ptr->config()) return send_error(request, "503 Service Unavailable", "config_not_ready");
@@ -580,6 +753,11 @@ esp_err_t get_device_config(httpd_req_t* request) {
 
     cJSON* response = cJSON_CreateObject();
     cJSON_AddStringToObject(response, "deviceName", cfg.device_name);
+    cJSON_AddStringToObject(response, "serialNumber", cfg.serial_number);
+    cJSON_AddStringToObject(response, "hardwareRevision", cfg.hardware_revision);
+    cJSON_AddStringToObject(response, "siteLabel", cfg.site_label);
+    cJSON_AddStringToObject(response, "groupLabel", cfg.group_label);
+    
     cJSON_AddNumberToObject(response, "activePreset", cfg.active_preset_index);
     cJSON_AddNumberToObject(response, "fallbackPreset", cfg.fallback_preset_index);
     cJSON_AddNumberToObject(response, "watchdogTimeoutS", cfg.watchdog_timeout_s);
@@ -590,6 +768,9 @@ esp_err_t get_device_config(httpd_req_t* request) {
     cJSON_AddStringToObject(response, "timezone", cfg.timezone);
     cJSON_AddBoolToObject(response, "syncEnabled", cfg.sync_enabled);
     cJSON_AddNumberToObject(response, "syncRole", cfg.sync_role);
+    cJSON_AddBoolToObject(response, "mqttEnabled", cfg.mqtt_enabled);
+    cJSON_AddStringToObject(response, "mqttBroker", cfg.mqtt_broker);
+    cJSON_AddNumberToObject(response, "mqttPort", cfg.mqtt_port);
 
     cJSON* zones = cJSON_CreateArray();
     for (uint8_t i = 0; i < 8; ++i) {
@@ -612,7 +793,7 @@ esp_err_t get_device_config(httpd_req_t* request) {
 }
 
 esp_err_t put_device_config(httpd_req_t* request) {
-    if (!api::authorize(request)) return ESP_OK;
+    if (!api::authorize(request, api::ApiRole::Admin)) return ESP_OK;
 
     FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
     if (!api_ptr->config()) return send_error(request, "503 Service Unavailable", "config_not_ready");
@@ -622,64 +803,137 @@ esp_err_t put_device_config(httpd_req_t* request) {
         return send_error(request, "400 Bad Request", "invalid_json");
     }
 
+#define VALIDATE_U8(field, min, max, target) \
+    do { \
+        const cJSON* v = cJSON_GetObjectItemCaseSensitive(root, field); \
+        if (v) { \
+            if (!cJSON_IsNumber(v) || v->valuedouble < (min) || v->valuedouble > (max)) { \
+                cJSON_Delete(root); \
+                return send_error(request, "400 Bad Request", "invalid_field_" field); \
+            } \
+            target = static_cast<uint8_t>(v->valueint); \
+        } \
+    } while(0)
+
+#define VALIDATE_U16(field, min, max, target) \
+    do { \
+        const cJSON* v = cJSON_GetObjectItemCaseSensitive(root, field); \
+        if (v) { \
+            if (!cJSON_IsNumber(v) || v->valuedouble < (min) || v->valuedouble > (max)) { \
+                cJSON_Delete(root); \
+                return send_error(request, "400 Bad Request", "invalid_field_" field); \
+            } \
+            target = static_cast<uint16_t>(v->valueint); \
+        } \
+    } while(0)
+
+#define VALIDATE_STRING(field, max_len, target) \
+    do { \
+        const cJSON* v = cJSON_GetObjectItemCaseSensitive(root, field); \
+        if (v) { \
+            if (!cJSON_IsString(v) || strlen(v->valuestring) >= (max_len)) { \
+                cJSON_Delete(root); \
+                return send_error(request, "400 Bad Request", "invalid_field_" field); \
+            } \
+            strncpy(target, v->valuestring, (max_len) - 1); \
+            target[(max_len) - 1] = '\0'; \
+        } \
+    } while(0)
+
     DeviceConfig cfg;
     api_ptr->config()->load_config(cfg);
 
-    const cJSON* dn = cJSON_GetObjectItemCaseSensitive(root, "deviceName");
-    if (cJSON_IsString(dn)) {
-        strncpy(cfg.device_name, dn->valuestring, sizeof(cfg.device_name) - 1);
-        cfg.device_name[sizeof(cfg.device_name) - 1] = '\0';
-    }
+    VALIDATE_STRING("deviceName", sizeof(cfg.device_name), cfg.device_name);
+    VALIDATE_STRING("serialNumber", sizeof(cfg.serial_number), cfg.serial_number);
+    VALIDATE_STRING("hardwareRevision", sizeof(cfg.hardware_revision), cfg.hardware_revision);
+    VALIDATE_STRING("siteLabel", sizeof(cfg.site_label), cfg.site_label);
+    VALIDATE_STRING("groupLabel", sizeof(cfg.group_label), cfg.group_label);
 
-    json_u8(root, "activePreset", 0, kMaxPresets - 1, cfg.active_preset_index);
-    json_u8(root, "fallbackPreset", 0, kMaxPresets - 1, cfg.fallback_preset_index);
-    json_u16(root, "watchdogTimeoutS", 0, 3600, cfg.watchdog_timeout_s);
-    json_u16(root, "maxPowerMw", 0, 60000, cfg.max_power_mw);
-    json_u16(root, "softStartMs", 0, 5000, cfg.soft_start_ms);
+    VALIDATE_U8("activePreset", 0, kMaxPresets - 1, cfg.active_preset_index);
+    VALIDATE_U8("fallbackPreset", 0, kMaxPresets - 1, cfg.fallback_preset_index);
+    VALIDATE_U16("watchdogTimeoutS", 0, 3600, cfg.watchdog_timeout_s);
+    VALIDATE_U16("maxPowerMw", 0, 60000, cfg.max_power_mw);
+    VALIDATE_U16("softStartMs", 0, 5000, cfg.soft_start_ms);
 
     const cJSON* ss = cJSON_GetObjectItemCaseSensitive(root, "softStart");
-    if (cJSON_IsBool(ss)) cfg.soft_start_enabled = cJSON_IsTrue(ss);
-
-    const cJSON* tz = cJSON_GetObjectItemCaseSensitive(root, "timezone");
-    if (cJSON_IsString(tz)) {
-        strncpy(cfg.timezone, tz->valuestring, sizeof(cfg.timezone) - 1);
-        cfg.timezone[sizeof(cfg.timezone) - 1] = '\0';
+    if (ss) {
+        if (!cJSON_IsBool(ss)) {
+            cJSON_Delete(root);
+            return send_error(request, "400 Bad Request", "invalid_field_softStart");
+        }
+        cfg.soft_start_enabled = cJSON_IsTrue(ss);
     }
 
-    const cJSON* se = cJSON_GetObjectItemCaseSensitive(root, "syncEnabled");
-    if (cJSON_IsBool(se)) cfg.sync_enabled = cJSON_IsTrue(se);
+    VALIDATE_STRING("timezone", sizeof(cfg.timezone), cfg.timezone);
 
-    json_u8(root, "syncRole", 0, 2, cfg.sync_role);
+    const cJSON* se = cJSON_GetObjectItemCaseSensitive(root, "syncEnabled");
+    if (se) {
+        if (!cJSON_IsBool(se)) {
+            cJSON_Delete(root);
+            return send_error(request, "400 Bad Request", "invalid_field_syncEnabled");
+        }
+        cfg.sync_enabled = cJSON_IsTrue(se);
+    }
+
+    const cJSON* me = cJSON_GetObjectItemCaseSensitive(root, "mqttEnabled");
+    if (me) {
+        if (!cJSON_IsBool(me)) {
+            cJSON_Delete(root);
+            return send_error(request, "400 Bad Request", "invalid_field_mqttEnabled");
+        }
+        cfg.mqtt_enabled = cJSON_IsTrue(me);
+    }
+
+    VALIDATE_STRING("mqttBroker", sizeof(cfg.mqtt_broker), cfg.mqtt_broker);
+    VALIDATE_U16("mqttPort", 1, 65535, cfg.mqtt_port);
+
+    VALIDATE_U8("syncRole", 0, 2, cfg.sync_role);
 
     const cJSON* zones_arr = cJSON_GetObjectItemCaseSensitive(root, "zones");
-    if (cJSON_IsArray(zones_arr)) {
+    if (zones_arr) {
+        if (!cJSON_IsArray(zones_arr) || cJSON_GetArraySize(zones_arr) > 8) {
+            cJSON_Delete(root);
+            return send_error(request, "400 Bad Request", "invalid_field_zones");
+        }
         int z_idx = 0;
         cJSON* z_item = nullptr;
         cJSON_ArrayForEach(z_item, zones_arr) {
             if (z_idx >= 8) break;
             const cJSON* z_name = cJSON_GetObjectItemCaseSensitive(z_item, "name");
-            if (cJSON_IsString(z_name)) {
+            if (z_name) {
+                if (!cJSON_IsString(z_name) || strlen(z_name->valuestring) >= sizeof(cfg.zones[z_idx].name)) {
+                    cJSON_Delete(root);
+                    return send_error(request, "400 Bad Request", "invalid_field_zones_name");
+                }
                 strncpy(cfg.zones[z_idx].name, z_name->valuestring, sizeof(cfg.zones[z_idx].name) - 1);
                 cfg.zones[z_idx].name[sizeof(cfg.zones[z_idx].name) - 1] = '\0';
             }
             const cJSON* z_role = cJSON_GetObjectItemCaseSensitive(z_item, "role");
-            if (cJSON_IsString(z_role)) {
-                parse_zone_role(z_role->valuestring, cfg.zones[z_idx].role);
+            if (z_role) {
+                if (!cJSON_IsString(z_role) || !parse_zone_role(z_role->valuestring, cfg.zones[z_idx].role)) {
+                    cJSON_Delete(root);
+                    return send_error(request, "400 Bad Request", "invalid_field_zones_role");
+                }
             }
             ++z_idx;
         }
     }
+#undef VALIDATE_U8
+#undef VALIDATE_U16
+#undef VALIDATE_STRING
 
     cJSON_Delete(root);
 
     if (api_ptr->config()->save_config(cfg) != ESP_OK) {
         return send_error(request, "500 Internal Server Error", "nvs_write_failed");
     }
+    
+    api::AuditLog::instance().log(api::ApiRole::Admin, "device_config", "Config updated");
     return send_json(request, R"({"saved":true})");
 }
 
 esp_err_t get_signage_status(httpd_req_t* request) {
-    if (!api::authorize(request)) return ESP_OK;
+    if (!api::authorize(request, api::ApiRole::Operator)) return ESP_OK;
 
     FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
 
@@ -688,7 +942,7 @@ esp_err_t get_signage_status(httpd_req_t* request) {
         cJSON_AddNumberToObject(
             response,
             "activePreset",
-            api_ptr->signage()->active_preset_index()
+            api_ptr->signage()->active_scene_index()
         );
         cJSON_AddBoolToObject(
             response,
@@ -702,6 +956,11 @@ esp_err_t get_signage_status(httpd_req_t* request) {
         );
     } else {
         cJSON_AddStringToObject(response, "signage", "not_started");
+    }
+
+    if (api_ptr->config()) {
+        DeviceConfig cfg;
+        api_ptr->config()->load_config(cfg);
     }
 
     cJSON_AddBoolToObject(
@@ -720,7 +979,7 @@ esp_err_t get_signage_status(httpd_req_t* request) {
 }
 
 esp_err_t get_sequence(httpd_req_t* request) {
-    if (!api::authorize(request)) return ESP_OK;
+    if (!api::authorize(request, api::ApiRole::Operator)) return ESP_OK;
 
     FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
     if (!api_ptr->config()) return send_error(request, "503 Service Unavailable", "config_not_ready");
@@ -762,7 +1021,7 @@ esp_err_t get_sequence(httpd_req_t* request) {
 }
 
 esp_err_t put_sequence(httpd_req_t* request) {
-    if (!api::authorize(request)) return ESP_OK;
+    if (!api::authorize(request, api::ApiRole::Operator)) return ESP_OK;
 
     FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
     if (!api_ptr->config()) return send_error(request, "503 Service Unavailable", "config_not_ready");
@@ -810,11 +1069,14 @@ esp_err_t put_sequence(httpd_req_t* request) {
     if (api_ptr->config()->save_sequence(seq) != ESP_OK) {
         return send_error(request, "500 Internal Server Error", "nvs_write_failed");
     }
+
+    api::AuditLog::instance().log(api::ApiRole::Operator, "sequence_update", "Sequence updated");
+
     return send_json(request, R"({"saved":true})");
 }
 
 esp_err_t get_effects(httpd_req_t* request) {
-    if (!api::authorize(request)) return ESP_OK;
+    if (!api::authorize(request, api::ApiRole::Operator)) return ESP_OK;
 
     cJSON* effects = cJSON_CreateArray();
     for (uint8_t index = static_cast<uint8_t>(SignageEffect::Solid);
@@ -849,7 +1111,7 @@ esp_err_t get_effects(httpd_req_t* request) {
 }
 
 esp_err_t get_calendar_schedule(httpd_req_t* request) {
-    if (!api::authorize(request)) return ESP_OK;
+    if (!api::authorize(request, api::ApiRole::Operator)) return ESP_OK;
 
     FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
     if (!api_ptr->config()) return send_error(request, "503 Service Unavailable", "config_not_ready");
@@ -886,7 +1148,7 @@ esp_err_t get_calendar_schedule(httpd_req_t* request) {
 }
 
 esp_err_t put_calendar_schedule(httpd_req_t* request) {
-    if (!api::authorize(request)) return ESP_OK;
+    if (!api::authorize(request, api::ApiRole::Operator)) return ESP_OK;
 
     FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
     if (!api_ptr->config()) return send_error(request, "503 Service Unavailable", "config_not_ready");
@@ -934,11 +1196,14 @@ esp_err_t put_calendar_schedule(httpd_req_t* request) {
     if (api_ptr->config()->save_calendar_schedule(schedule) != ESP_OK) {
         return send_error(request, "500 Internal Server Error", "nvs_write_failed");
     }
+    
+    api::AuditLog::instance().log(api::ApiRole::Operator, "schedule_update", "Calendar schedule updated");
+
     return send_json(request, R"({"saved":true})");
 }
 
 esp_err_t get_sync_status(httpd_req_t* request) {
-    if (!api::authorize(request)) return ESP_OK;
+    if (!api::authorize(request, api::ApiRole::Operator)) return ESP_OK;
 
     FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
     if (!api_ptr->node_sync()) {
@@ -987,6 +1252,33 @@ esp_err_t get_sync_status(httpd_req_t* request) {
 
 } // namespace
 
+esp_err_t get_audit_log(httpd_req_t* request) {
+    if (!api::authorize(request, api::ApiRole::Admin)) return ESP_OK;
+
+    api::AuditEvent events[50];
+    size_t num_events = api::AuditLog::instance().get_events(events, 50);
+
+    cJSON* arr = cJSON_CreateArray();
+    for (size_t i = 0; i < num_events; ++i) {
+        cJSON* obj = cJSON_CreateObject();
+        cJSON_AddNumberToObject(obj, "timestamp_s", events[i].timestamp_s);
+        cJSON_AddNumberToObject(obj, "role", static_cast<int>(events[i].role));
+        cJSON_AddStringToObject(obj, "action", events[i].action);
+        cJSON_AddStringToObject(obj, "detail", events[i].detail);
+        cJSON_AddItemToArray(arr, obj);
+    }
+
+    char* json = cJSON_PrintUnformatted(arr);
+    cJSON_Delete(arr);
+
+    if (json == nullptr) {
+        return send_error(request, "500 Internal Server Error", "json_encode_failed");
+    }
+    const esp_err_t result = send_json(request, json);
+    cJSON_free(json);
+    return result;
+}
+
 #include "dashboard.hpp"
 
 esp_err_t FactoryApi::serve_dashboard(httpd_req_t* request) {
@@ -995,6 +1287,189 @@ esp_err_t FactoryApi::serve_dashboard(httpd_req_t* request) {
 }
 
 FactoryApi::FactoryApi(FactoryRunner& runner) : runner_(runner) {}
+
+
+// ── Phase 4: OTA & Config Export/Import ──
+
+esp_err_t post_ota(httpd_req_t* request) {
+    if (!api::authorize(request, api::ApiRole::Admin)) return ESP_OK;
+
+    const esp_partition_t* update_partition = esp_ota_get_next_update_partition(nullptr);
+    if (!update_partition) {
+        return send_error(request, "500 Internal Server Error", "No OTA partition found");
+    }
+
+    esp_ota_handle_t update_handle = 0;
+    esp_err_t err = esp_ota_begin(update_partition, OTA_WITH_SEQUENTIAL_WRITES, &update_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE("ota", "esp_ota_begin failed (%s)", esp_err_to_name(err));
+        return send_error(request, "500 Internal Server Error", "OTA begin failed");
+    }
+
+    char buf[1024];
+    int received = 0;
+    int remaining = request->content_len;
+
+    while (remaining > 0) {
+        if ((received = httpd_req_recv(request, buf, std::min(remaining, (int)sizeof(buf)))) <= 0) {
+            if (received == HTTPD_SOCK_ERR_TIMEOUT) {
+                continue;
+            }
+            esp_ota_abort(update_handle);
+            return send_error(request, "500 Internal Server Error", "OTA receive failed");
+        }
+        err = esp_ota_write(update_handle, buf, received);
+        if (err != ESP_OK) {
+            esp_ota_abort(update_handle);
+            return send_error(request, "500 Internal Server Error", "OTA write failed");
+        }
+        remaining -= received;
+    }
+
+    err = esp_ota_end(update_handle);
+    if (err != ESP_OK) {
+        return send_error(request, "500 Internal Server Error", "OTA end failed");
+    }
+
+    err = esp_ota_set_boot_partition(update_partition);
+    if (err != ESP_OK) {
+        return send_error(request, "500 Internal Server Error", "OTA set boot failed");
+    }
+
+    send_json(request, "{\"status\":\"success\",\"message\":\"OTA update successful, rebooting...\"}");
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    esp_restart();
+    return ESP_OK;
+}
+
+esp_err_t get_backup(httpd_req_t* request) {
+    if (!api::authorize(request, api::ApiRole::Admin)) return ESP_OK;
+
+    FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+    if (!api_ptr->config()) {
+        return send_error(request, "500 Internal Server Error", "ConfigStore not available");
+    }
+
+    cJSON* root = cJSON_CreateObject();
+    
+    // Config
+    DeviceConfig cfg;
+    api_ptr->config()->load_config(cfg);
+    cJSON* cfg_json = cJSON_CreateObject();
+    cJSON_AddStringToObject(cfg_json, "deviceName", cfg.device_name);
+    cJSON_AddNumberToObject(cfg_json, "maxPowerMw", cfg.max_power_mw);
+    cJSON_AddNumberToObject(cfg_json, "gammaX10", cfg.gamma_x10);
+    cJSON_AddBoolToObject(cfg_json, "mqttEnabled", cfg.mqtt_enabled);
+    cJSON_AddStringToObject(cfg_json, "mqttBroker", cfg.mqtt_broker);
+    cJSON_AddNumberToObject(cfg_json, "mqttPort", cfg.mqtt_port);
+    cJSON_AddBoolToObject(cfg_json, "syncEnabled", cfg.sync_enabled);
+    cJSON_AddNumberToObject(cfg_json, "syncRole", cfg.sync_role);
+    cJSON_AddItemToObject(root, "config", cfg_json);
+
+    // Presets
+    cJSON* presets_arr = cJSON_CreateArray();
+    for (uint8_t i = 0; i < lg::kMaxPresets; ++i) {
+        SceneConfig sc;
+        if (api_ptr->config()->load_scene(i, sc) == ESP_OK) {
+            cJSON* s = cJSON_CreateObject();
+            cJSON_AddNumberToObject(s, "index", i);
+            cJSON_AddStringToObject(s, "name", sc.name);
+            cJSON_AddNumberToObject(s, "globalBrightness", sc.global_brightness);
+            cJSON_AddNumberToObject(s, "transitionMs", sc.transition_ms);
+            
+            // Serialize layer 0 of zone 0 as a rough proxy for old base_effect
+            cJSON_AddNumberToObject(s, "effect", sc.zones[0].layers[0].effect);
+            cJSON_AddNumberToObject(s, "speedMs", sc.zones[0].layers[0].speed_ms);
+            
+            cJSON_AddItemToArray(presets_arr, s);
+        }
+    }
+    cJSON_AddItemToObject(root, "presets", presets_arr);
+
+    char* json_str = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+
+    httpd_resp_set_type(request, "application/json");
+    httpd_resp_set_hdr(request, "Content-Disposition", "attachment; filename=\"lumigrid_backup.json\"");
+    esp_err_t err = httpd_resp_sendstr(request, json_str);
+    free(json_str);
+    return err;
+}
+
+esp_err_t post_restore(httpd_req_t* request) {
+    if (!api::authorize(request, api::ApiRole::Admin)) return ESP_OK;
+
+    FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+    if (!api_ptr->config()) {
+        return send_error(request, "500 Internal Server Error", "ConfigStore not available");
+    }
+
+    char* buf = (char*)malloc(request->content_len + 1);
+    if (!buf) return send_error(request, "500 Internal Server Error", "Out of memory");
+    
+    int received = httpd_req_recv(request, buf, request->content_len);
+    if (received <= 0) {
+        free(buf);
+        return send_error(request, "500 Internal Server Error", "Failed to receive payload");
+    }
+    buf[received] = '\0';
+
+    cJSON* root = cJSON_Parse(buf);
+    free(buf);
+
+    if (!root) {
+        return send_error(request, "400 Bad Request", "Invalid JSON");
+    }
+
+    // Config
+    cJSON* cfg_json = cJSON_GetObjectItem(root, "config");
+    if (cfg_json) {
+        DeviceConfig cfg;
+        api_ptr->config()->load_config(cfg);
+        
+        cJSON* item;
+        item = cJSON_GetObjectItem(cfg_json, "deviceName"); if (item && item->valuestring) strncpy(cfg.device_name, item->valuestring, sizeof(cfg.device_name));
+        item = cJSON_GetObjectItem(cfg_json, "maxPowerMw"); if (item) cfg.max_power_mw = item->valueint;
+        item = cJSON_GetObjectItem(cfg_json, "gammaX10"); if (item) cfg.gamma_x10 = item->valueint;
+        item = cJSON_GetObjectItem(cfg_json, "mqttEnabled"); if (item) cfg.mqtt_enabled = item->valueint;
+        item = cJSON_GetObjectItem(cfg_json, "mqttBroker"); if (item && item->valuestring) strncpy(cfg.mqtt_broker, item->valuestring, sizeof(cfg.mqtt_broker));
+        item = cJSON_GetObjectItem(cfg_json, "mqttPort"); if (item) cfg.mqtt_port = item->valueint;
+        item = cJSON_GetObjectItem(cfg_json, "syncEnabled"); if (item) cfg.sync_enabled = item->valueint;
+        item = cJSON_GetObjectItem(cfg_json, "syncRole"); if (item) cfg.sync_role = item->valueint;
+        
+        api_ptr->config()->save_config(cfg);
+    }
+
+    // Presets
+    cJSON* presets_arr = cJSON_GetObjectItem(root, "presets");
+    if (presets_arr && cJSON_IsArray(presets_arr)) {
+        cJSON* p;
+        cJSON_ArrayForEach(p, presets_arr) {
+            cJSON* idx = cJSON_GetObjectItem(p, "index");
+            if (idx && idx->valueint >= 0 && idx->valueint < lg::kMaxPresets) {
+                SceneConfig sc;
+                cJSON* item;
+                item = cJSON_GetObjectItem(p, "name"); if (item && item->valuestring) strncpy(sc.name, item->valuestring, sizeof(sc.name));
+                item = cJSON_GetObjectItem(p, "globalBrightness"); if (item) sc.global_brightness = item->valueint;
+                item = cJSON_GetObjectItem(p, "transitionMs"); if (item) sc.transition_ms = item->valueint;
+                
+                item = cJSON_GetObjectItem(p, "effect"); if (item) sc.zones[0].layers[0].effect = item->valueint;
+                item = cJSON_GetObjectItem(p, "speedMs"); if (item) sc.zones[0].layers[0].speed_ms = item->valueint;
+                
+                api_ptr->config()->save_scene(idx->valueint, sc);
+            }
+        }
+    }
+    
+    cJSON_Delete(root);
+
+    api::AuditLog::instance().log(api::ApiRole::Admin, "RESTORE", "Configuration restored via API");
+
+    send_json(request, "{\"status\":\"success\",\"message\":\"Restore successful, rebooting...\"}");
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    esp_restart();
+    return ESP_OK;
+}
 
 esp_err_t FactoryApi::start(
     uint16_t signage_port,
@@ -1010,10 +1485,12 @@ esp_err_t FactoryApi::start(
     node_sync_ = node_sync;
 
     httpd_config_t http_config = HTTPD_DEFAULT_CONFIG();
+    http_config.max_uri_handlers = 24;
     http_config.server_port = signage_port;
     ESP_RETURN_ON_ERROR(httpd_start(&signage_server_, &http_config), "factory-api", "start signage");
 
     http_config.server_port = factory_port;
+    http_config.ctrl_port += 1; // Prevent EADDRINUSE for ctrl_port
     ESP_RETURN_ON_ERROR(httpd_start(&factory_server_, &http_config), "factory-api", "start factory");
 
 #pragma GCC diagnostic push
@@ -1026,27 +1503,36 @@ esp_err_t FactoryApi::start(
         { .uri = "/api/v1/factory/pwm",       .method = HTTP_POST, .handler = post_pwm,       .user_ctx = this },
         { .uri = "/api/v1/factory/abort",     .method = HTTP_POST, .handler = post_abort,     .user_ctx = this },
         { .uri = "/api/v1/factory/auto-loop", .method = HTTP_POST, .handler = post_auto_loop, .user_ctx = this },
+    };
+
+    const httpd_uri_t signage_routes[] = {
         // ── WebSocket + Dashboard ──
         { .uri = "/ws", .method = HTTP_GET, .handler = ws_handler, .user_ctx = this,
           .is_websocket = true, .handle_ws_control_frames = false, .supported_subprotocol = nullptr },
         { .uri = "/",   .method = HTTP_GET, .handler = serve_dashboard, .user_ctx = this },
-    };
-
-    const httpd_uri_t signage_routes[] = {
+        
         // ── Signage endpoints ──
         { .uri = "/api/v1/presets",           .method = HTTP_GET,  .handler = get_presets,      .user_ctx = this },
         { .uri = "/api/v1/presets",           .method = HTTP_PUT,  .handler = put_preset,       .user_ctx = this },
+        { .uri = "/api/v1/auth/update",       .method = HTTP_POST, .handler = post_auth_update, .user_ctx = this },
         { .uri = "/api/v1/activate",          .method = HTTP_POST, .handler = post_activate,    .user_ctx = this },
         { .uri = "/api/v1/config",            .method = HTTP_GET,  .handler = get_device_config, .user_ctx = this },
         { .uri = "/api/v1/config",            .method = HTTP_PUT,  .handler = put_device_config, .user_ctx = this },
         { .uri = "/api/v1/status",            .method = HTTP_GET,  .handler = get_signage_status, .user_ctx = this },
         { .uri = "/api/v1/effects",           .method = HTTP_GET,  .handler = get_effects,        .user_ctx = this },
+        { .uri = "/api/v1/health",            .method = HTTP_GET,  .handler = get_health,         .user_ctx = this },
+        { .uri = "/api/v1/logs",              .method = HTTP_GET,  .handler = get_logs,           .user_ctx = this },
         { .uri = "/api/v1/sequence",          .method = HTTP_GET,  .handler = get_sequence,     .user_ctx = this },
         { .uri = "/api/v1/sequence",          .method = HTTP_PUT,  .handler = put_sequence,     .user_ctx = this },
         { .uri = "/api/v1/schedules",         .method = HTTP_GET,  .handler = get_calendar_schedule, .user_ctx = this },
         { .uri = "/api/v1/schedules",         .method = HTTP_PUT,  .handler = put_calendar_schedule, .user_ctx = this },
         { .uri = "/api/v1/sync",              .method = HTTP_GET,  .handler = get_sync_status,     .user_ctx = this },
+        { .uri = "/api/v1/audit",             .method = HTTP_GET,  .handler = get_audit_log,       .user_ctx = this },
+        { .uri = "/api/v1/ota",               .method = HTTP_POST, .handler = post_ota,           .user_ctx = this },
+        { .uri = "/api/v1/backup",            .method = HTTP_GET,  .handler = get_backup,         .user_ctx = this },
+        { .uri = "/api/v1/restore",           .method = HTTP_POST, .handler = post_restore,       .user_ctx = this },
     };
+
 
     for (const auto& endpoint : factory_routes) {
         ESP_RETURN_ON_ERROR(

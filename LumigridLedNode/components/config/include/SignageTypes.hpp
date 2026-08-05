@@ -13,6 +13,83 @@ struct BrandColor {
     uint8_t b = 0;
 };
 
+// ──────────────────────────── New Product Schema ─────────────────────────
+
+enum class OutputType : uint8_t { RMT = 0, PWM = 1, SPI = 2 };
+
+struct PhysicalOutput {
+    OutputType type = OutputType::RMT;
+    uint8_t hardware_id = 0; // RMT channel 0-7, PWM channel 0-15
+    uint8_t gpio_pin = 0;
+    bool enabled = false;
+};
+
+enum class FixtureProfile : uint8_t { WS2812 = 0, SK6812 = 1, PWM_Single = 2, PWM_RGB = 3, PWM_RGBW = 4 };
+
+enum class PixelOrder : uint8_t { RGB = 0, GRB = 1, RGBW = 2, GRBW = 3 };
+
+struct FixtureConfig {
+    FixtureProfile profile = FixtureProfile::WS2812;
+    PixelOrder pixel_order = PixelOrder::GRB;
+    uint8_t physical_output_index[4] = {}; // Indices into PhysicalOutputs array
+    uint16_t num_pixels = 0;
+    uint8_t max_brightness = 255;
+    uint8_t white_balance[3] = {255, 255, 255};
+    bool gamma_correction = true;
+    uint16_t max_milliwatts = 0; // 0 = no local limit
+};
+
+enum class BlendMode : uint8_t {
+    Normal = 0,
+    Add = 1,
+    Multiply = 2,
+    Screen = 3
+};
+
+inline const char* blend_mode_name(BlendMode mode) {
+    switch (mode) {
+        case BlendMode::Normal:   return "normal";
+        case BlendMode::Add:      return "add";
+        case BlendMode::Multiply: return "multiply";
+        case BlendMode::Screen:   return "screen";
+    }
+    return "normal";
+}
+
+inline bool parse_blend_mode(const char* name, BlendMode& out) {
+    if (!name) return false;
+    if (strcmp(name, "normal") == 0)   { out = BlendMode::Normal; return true; }
+    if (strcmp(name, "add") == 0)      { out = BlendMode::Add; return true; }
+    if (strcmp(name, "multiply") == 0) { out = BlendMode::Multiply; return true; }
+    if (strcmp(name, "screen") == 0)   { out = BlendMode::Screen; return true; }
+    return false;
+}
+
+struct LayerConfig {
+    uint8_t effect = 0; // Maps to SignageEffect
+    BrandColor primary_color = {255, 255, 255};
+    BrandColor secondary_color = {0, 0, 0};
+    uint16_t speed_ms = 2000;
+    uint8_t fx_param = 0;
+    uint8_t palette_id = 0;
+    uint8_t opacity = 255;
+    BlendMode blend_mode = BlendMode::Normal;
+    bool enabled = false;
+};
+
+struct ZoneContent {
+    LayerConfig layers[3] = {};
+};
+
+struct SceneConfig {
+    char name[24] = "";
+    ZoneContent zones[8] = {}; // Content per zone index
+    uint8_t global_brightness = 128;
+    uint16_t transition_ms = 1000;
+    uint32_t checksum = 0;
+};
+
+
 // ──────────────────────────── Signage Effects ─────────────────────────
 
 enum class SignageEffect : uint8_t {
@@ -111,36 +188,6 @@ inline bool parse_signage_modifier(const char* name, SignageModifier& out) {
     return false;
 }
 
-// ──────────────────────────── Channel Config ──────────────────────────
-
-struct ChannelConfig {
-    BrandColor    pixel_color;          // Addressable LED color for this lane
-    uint16_t      pwm_duty = 0;         // PCA9685 duty (0–4095)
-    SignageEffect effect = SignageEffect::Solid;
-    uint16_t      effect_speed_ms = 2000;
-    uint8_t       palette_id = 0;
-    uint8_t       phase_offset = 0;
-    uint8_t       fx_param = 0;
-    bool          pixel_enabled = true;
-    bool          pwm_enabled = true;
-};
-
-// ──────────────────────────── Brand Preset ────────────────────────────
-
-struct BrandPreset {
-    char          name[24]       = {};  // "Store Open", "Night Mode", etc.
-    ChannelConfig channels[8]    = {};  // Per-channel configuration
-    uint8_t       brightness     = 128; // Global brightness (0–255)
-    uint16_t      transition_ms  = 1000;   // Cross-fade duration (ms)
-    uint16_t      overlay_speed_ms = 500;  // 0 = follow sequencer beat
-    SignageModifier overlay_effect = SignageModifier::None;
-    uint8_t       overlay_param = 50;      // Modifier-specific percentage
-
-    void set_name(const char* n) {
-        strncpy(name, n, sizeof(name) - 1);
-        name[sizeof(name) - 1] = '\0';
-    }
-};
 
 // ──────────────────────────── Sequencer ────────────────────────────────
 
@@ -160,6 +207,7 @@ struct Sequence {
     SequencerTrack tracks[8] = {};
     uint16_t       bpm       = 120;
     bool           enabled   = false;
+    uint32_t       checksum  = 0;
 };
 
 // ──────────────────────────── Calendar Scheduler ───────────────────────
@@ -181,6 +229,7 @@ struct CalendarScheduleEntry {
 
 struct CalendarSchedule {
     CalendarScheduleEntry entries[8] = {};
+    uint32_t checksum = 0;
 };
 
 // ──────────────────────────── Device Config ───────────────────────────
@@ -216,13 +265,27 @@ inline bool parse_zone_role(const char* name, ZoneRole& out) {
 struct ZoneConfig {
     char name[24] = "";
     ZoneRole role = ZoneRole::Unassigned;
+    uint32_t fixture_mask = 0; // Bitmask of which fixtures belong to this zone
+};
+
+enum class MergeMode : uint8_t {
+    HTP = 0,
+    LTP = 1
+};
+
+struct ProtocolConfig {
+    bool     artnet_enabled       = true;
+    bool     sacn_enabled         = true;
+    uint16_t universe_start       = 0;
+    MergeMode merge_mode          = MergeMode::HTP;
+    uint16_t stream_timeout_ms    = 2000;
 };
 
 struct DeviceConfig {
     char     device_name[32]        = "lumigrid";
     uint8_t  active_preset_index    = 0;
     uint8_t  fallback_preset_index  = 0;
-    uint16_t watchdog_timeout_s     = 60;   // Seconds before fallback
+    uint16_t watchdog_timeout_s     = 60;   // System/Network timeout
     uint16_t max_power_mw           = 0;    // 0 = no limit
     uint8_t  gamma_x10              = 22;   // 2.2 gamma
     bool     soft_start_enabled     = true;
@@ -234,7 +297,25 @@ struct DeviceConfig {
     bool     sync_enabled           = false;
     uint8_t  sync_role              = 0;    // 0=Auto, 1=Master, 2=Worker
     uint32_t sync_token             = 0;
-    ZoneConfig zones[8]             = {};
+    
+    // RBAC tokens
+    char     admin_token[32]        = "lumigrid_admin";
+    char     installer_token[32]    = "lumigrid_install";
+    char     operator_token[32]     = "lumigrid_op";
+
+    // Device Identity
+    char     serial_number[32]      = "";
+    char     hardware_revision[16]  = "v1.0";
+    char     site_label[64]         = "";
+    char     group_label[64]        = "";
+    
+    // Product-grade configuration mapping
+    PhysicalOutput physical_outputs[16] = {};
+    FixtureConfig fixtures[16]          = {};
+    ZoneConfig zones[8]                 = {};
+    ProtocolConfig protocol             = {};
+
+    uint32_t checksum                   = 0;
 };
 
 // ──────────────────────────── Sync Protocol ──────────────────────────
@@ -246,5 +327,22 @@ enum class NodeRole : uint8_t {
 };
 
 constexpr uint8_t kMaxPresets   = 32;
+
+// ──────────────────────────── Health & Telemetry ─────────────────────
+
+struct DeviceHealth {
+    uint32_t uptime_seconds = 0;
+    uint32_t free_heap = 0;
+    uint32_t min_free_heap = 0;
+    int8_t   wifi_rssi = 0;
+    uint8_t  reset_reason = 0;
+    float    fps = 0.0f;
+    uint16_t active_preset = 0;
+    
+    // Telemetry
+    uint32_t packet_loss_count = 0;
+    uint32_t clipping_events = 0;
+    uint32_t wifi_disconnects = 0;
+};
 
 } // namespace lg
