@@ -764,19 +764,22 @@ async function saveSettings() {
 
 <main id="product-app" hidden>
     <div class="app-shell">
-        <header class="app-header">
-            <div class="brand">
-                <div class="brand-mark" aria-hidden="true">LG</div>
-                <div>
-                    <p class="eyebrow">LumiGrid OS</p>
-                    <h2 id="experience-node-name">LIGHTING NODE</h2>
-                    <span class="online-pill">Connected</span>
+        <header class="app-header" style="flex-wrap: wrap;">
+            <div style="width: 100%; display: flex; justify-content: space-between; align-items: center;">
+                <div class="brand">
+                    <div class="brand-mark" aria-hidden="true">LG</div>
+                    <div>
+                        <p class="eyebrow">LumiGrid OS</p>
+                        <h2 id="experience-node-name">LIGHTING NODE</h2>
+                        <span class="online-pill">Connected</span>
+                    </div>
+                </div>
+                <div class="header-actions">
+                    <button title="Refresh node status" onclick="lg.refresh()">Refresh</button>
+                    <button title="End this browser session" onclick="lg.disconnect()">Disconnect</button>
                 </div>
             </div>
-            <div class="header-actions">
-                <button title="Refresh node status" onclick="lg.refresh()">Refresh</button>
-                <button title="End this browser session" onclick="lg.disconnect()">Disconnect</button>
-            </div>
+            <canvas id="live-preview" height="12" style="width:100%; image-rendering:pixelated; border-radius: 4px; background:#05060f; margin-top: 0.5rem; display: none;"></canvas>
         </header>
 
         <nav class="nav-rail" aria-label="Lighting controls">
@@ -909,8 +912,18 @@ async function saveSettings() {
                     <p class="help">When enabled, the node will publish telemetry and respond to commands via MQTT.</p>
                 </article>
                 <article class="product-card" style="grid-column: 1 / -1;">
-                    <h4>Physical Zones</h4>
-                    <p class="help">Map your 8 physical outputs to room features.</p>
+                    <h4>Hardware Outputs</h4>
+                    <p class="help">Configure physical output pins (e.g. GPIOs) on your controller.</p>
+                    <div id="system-outputs" class="zone-grid" style="margin-top:1rem; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));"></div>
+                </article>
+                <article class="product-card" style="grid-column: 1 / -1;">
+                    <h4>LED Fixtures</h4>
+                    <p class="help">Define LED strips or panels and assign them to physical outputs.</p>
+                    <div id="system-fixtures" class="zone-grid" style="margin-top:1rem; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));"></div>
+                </article>
+                <article class="product-card" style="grid-column: 1 / -1;">
+                    <h4>Logical Zones (Segments)</h4>
+                    <p class="help">Map your LED fixtures to 8 functional zones for scene effects.</p>
                     <div id="system-zones" class="zone-grid" style="margin-top:1rem"></div>
                 </article>
             </div>
@@ -1032,6 +1045,53 @@ window.lg = (() => {
     function speedName(value) { return value > 75 ? 'Fast' : value > 45 ? 'Balanced' : 'Slow'; }
     function clockAge(value) { return value == null ? 'Waiting' : value < 1000 ? 'Just now' : `${Math.round(value / 1000)} s ago`; }
 
+    let ws = null;
+    function initWebSocket() {
+        if (ws) { ws.close(); ws = null; }
+        const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        // In actual device, location.host is the ESP32 IP.
+        ws = new WebSocket(`${proto}//${location.host}/ws`);
+        ws.binaryType = 'arraybuffer';
+        ws.onopen = () => {};
+        ws.onmessage = (event) => {
+            if (event.data instanceof ArrayBuffer) {
+                const arr = new Uint8Array(event.data);
+                if (arr[0] === 76) { // 'L'
+                    renderLivePreview(arr.slice(1));
+                }
+            } else if (typeof event.data === 'string') {
+                try {
+                    const st = JSON.parse(event.data);
+                    state.status = st;
+                } catch(e) {}
+            }
+        };
+        ws.onclose = () => {
+            if (state.token) setTimeout(initWebSocket, 2000);
+        };
+    }
+
+    function renderLivePreview(rgbData) {
+        const canvas = byId('live-preview');
+        if (!canvas) return;
+        const numPixels = Math.floor(rgbData.length / 3);
+        if (numPixels === 0) return;
+        if (canvas.width !== numPixels) {
+            canvas.width = numPixels;
+            canvas.style.display = 'block';
+        }
+        const ctx = canvas.getContext('2d');
+        const imgData = ctx.createImageData(numPixels, 1);
+        for (let i = 0; i < numPixels; i++) {
+            imgData.data[i*4] = rgbData[i*3];
+            imgData.data[i*4+1] = rgbData[i*3+1];
+            imgData.data[i*4+2] = rgbData[i*3+2];
+            imgData.data[i*4+3] = 255;
+        }
+        ctx.putImageData(imgData, 0, 0);
+        ctx.drawImage(canvas, 0, 0, numPixels, 1, 0, 1, numPixels, canvas.height - 1);
+    }
+
     async function connect() {
         state.token = byId('experience-token').value.trim();
         if (!state.token) return toast('Enter the node access token first.', true);
@@ -1039,6 +1099,7 @@ window.lg = (() => {
             await refresh();
             byId('experience-auth').hidden = true;
             byId('product-app').hidden = false;
+            initWebSocket();
             nav('control', document.querySelector('[data-page=control]'));
             toast('Connected to the node.');
         } catch (error) {
@@ -1047,6 +1108,7 @@ window.lg = (() => {
     }
     function disconnect() {
         state.token = '';
+        if (ws) { ws.close(); ws = null; }
         byId('experience-token').value = '';
         byId('product-app').hidden = true;
         byId('experience-auth').hidden = false;
@@ -1129,6 +1191,7 @@ window.lg = (() => {
         if (!existing) return toast('That scene is no longer available.', true);
         state.editing = clone(existing);
         state.selectedStep = null;
+        state.targetZones = [true, false, false, false, false, false, false, false];
         document.querySelectorAll('.nav-rail button').forEach(item => item.classList.remove('active'));
         nav('scene-editor');
         renderSceneEditor();
@@ -1140,22 +1203,47 @@ window.lg = (() => {
         scene.name = byId('scene-name').value.trim();
         scene.globalBrightness = Math.round(clamp(byId('scene-brightness').value,0,100) * 255 / 100);
         scene.transitionMs = clamp(byId('scene-fade').value,0,5000);
+        
+        let firstZ = state.targetZones ? state.targetZones.indexOf(true) : 0;
+        if (firstZ === -1) firstZ = 0;
+
+        const newLayers = scene.zones[firstZ].layers.map((layer, l) => {
+            const newLayer = clone(layer);
+            newLayer.effect = byId(`z-l${l}-effect`)?.value || layer.effect;
+            newLayer.blendMode = byId(`z-l${l}-blend`)?.value || layer.blendMode;
+            newLayer.paletteId = Number(byId(`z-l${l}-palette`)?.value || layer.paletteId || 0);
+            const phex = byId(`z-l${l}-pcolor`)?.value || colorFor(layer.primaryColor);
+            newLayer.primaryColor.r = parseInt(phex.slice(1,3),16); newLayer.primaryColor.g = parseInt(phex.slice(3,5),16); newLayer.primaryColor.b = parseInt(phex.slice(5,7),16);
+            const shex = byId(`z-l${l}-scolor`)?.value || colorFor(layer.secondaryColor);
+            newLayer.secondaryColor.r = parseInt(shex.slice(1,3),16); newLayer.secondaryColor.g = parseInt(shex.slice(3,5),16); newLayer.secondaryColor.b = parseInt(shex.slice(5,7),16);
+            newLayer.speedMs = speedToMs(byId(`z-l${l}-speed`)?.value ?? msToSpeed(layer.speedMs));
+            const meta = effect(newLayer.effect);
+            if (meta.hasParameter) newLayer.fxParam = clamp(byId(`z-l${l}-param`)?.value ?? meta.parameterDefault, meta.parameterMin, meta.parameterMax);
+            newLayer.opacity = Math.round(clamp(byId(`z-l${l}-opacity`)?.value ?? (layer.opacity * 100 / 255), 0, 100) * 255 / 100);
+            newLayer.enabled = Boolean(byId(`z-l${l}-enabled`)?.checked);
+            return newLayer;
+        });
+
         scene.zones.forEach((zone, z) => {
-            zone.layers.forEach((layer, l) => {
-                layer.effect = byId(`z${z}-l${l}-effect`)?.value || layer.effect;
-                layer.blendMode = byId(`z${z}-l${l}-blend`)?.value || layer.blendMode;
-                const phex = byId(`z${z}-l${l}-pcolor`)?.value || colorFor(layer.primaryColor);
-                layer.primaryColor.r = parseInt(phex.slice(1,3),16); layer.primaryColor.g = parseInt(phex.slice(3,5),16); layer.primaryColor.b = parseInt(phex.slice(5,7),16);
-                const shex = byId(`z${z}-l${l}-scolor`)?.value || colorFor(layer.secondaryColor);
-                layer.secondaryColor.r = parseInt(shex.slice(1,3),16); layer.secondaryColor.g = parseInt(shex.slice(3,5),16); layer.secondaryColor.b = parseInt(shex.slice(5,7),16);
-                layer.speedMs = speedToMs(byId(`z${z}-l${l}-speed`)?.value ?? msToSpeed(layer.speedMs));
-                const meta = effect(layer.effect);
-                if (meta.hasParameter) layer.fxParam = clamp(byId(`z${z}-l${l}-param`)?.value ?? meta.parameterDefault, meta.parameterMin, meta.parameterMax);
-                layer.opacity = Math.round(clamp(byId(`z${z}-l${l}-opacity`)?.value ?? (layer.opacity * 100 / 255), 0, 100) * 255 / 100);
-                layer.enabled = Boolean(byId(`z${z}-l${l}-enabled`)?.checked);
-            });
+            if (state.targetZones && state.targetZones[z]) {
+                zone.layers = clone(newLayers);
+            }
         });
     }
+    function toggleTargetZone(z) {
+        readSceneEditor();
+        state.targetZones[z] = !state.targetZones[z];
+        if (state.targetZones.indexOf(true) === -1) state.targetZones[z] = true;
+        renderSceneEditor();
+    }
+    const palettes = [
+        { id: 0, name: "Solid (Primary -> Secondary)" },
+        { id: 1, name: "Rainbow" },
+        { id: 2, name: "Ocean" },
+        { id: 3, name: "Lava" },
+        { id: 4, name: "Forest" },
+        { id: 5, name: "Sunset" }
+    ];
     function renderSceneEditor() {
         const scene = state.editing;
         if (!scene) return;
@@ -1165,39 +1253,59 @@ window.lg = (() => {
         byId('scene-brightness-output').textContent = `${byId('scene-brightness').value}%`;
         byId('scene-fade').value = scene.transitionMs;
         byId('scene-fade-output').textContent = `${(scene.transitionMs / 1000).toFixed(1)} s`;
-        byId('scene-zones').innerHTML = scene.zones.map((zone, z) => {
-            const zName = state.config?.zones?.[z]?.name || `Zone ${z + 1}`;
-            const layersHtml = zone.layers.map((layer, l) => {
-                const meta = effect(layer.effect);
-                const parameter = clamp(layer.fxParam || meta.parameterDefault, meta.parameterMin || 0, meta.parameterMax || 255);
-                return `<div class="layer-editor" style="margin-top:1rem; border-top:1px solid var(--border); padding-top:1rem;">
-                    <h5>Layer ${l + 1}</h5>
-                    <div class="field"><label>Effect</label><select id="z${z}-l${l}-effect" onchange="lg.changeZoneEffect(${z}, ${l}, this.value)">
-                        ${state.effects.map(item => `<option value="${esc(item.id)}" ${item.id === layer.effect ? 'selected' : ''}>${esc(item.label)}</option>`).join('')}
-                    </select></div>
-                    <div class="field"><label>Blend Mode</label><select id="z${z}-l${l}-blend">
-                        <option value="normal" ${layer.blendMode==='normal'?'selected':''}>Normal</option>
-                        <option value="add" ${layer.blendMode==='add'?'selected':''}>Add</option>
-                        <option value="multiply" ${layer.blendMode==='multiply'?'selected':''}>Multiply</option>
-                        <option value="screen" ${layer.blendMode==='screen'?'selected':''}>Screen</option>
-                    </select></div>
-                    <div class="color-line">
-                        <label>Primary</label><input id="z${z}-l${l}-pcolor" type="color" value="${colorFor(layer.primaryColor)}">
-                        <label style="margin-left:1rem">Secondary</label><input id="z${z}-l${l}-scolor" type="color" value="${colorFor(layer.secondaryColor)}">
-                    </div>
-                    <div class="range-row"><label>Opacity</label><input id="z${z}-l${l}-opacity" type="range" min="0" max="100" value="${Math.round(layer.opacity * 100 / 255)}" oninput="lg.updateText('z${z}-l${l}-opacity-out', this.value + '%')"><output id="z${z}-l${l}-opacity-out">${Math.round(layer.opacity * 100 / 255)}%</output></div>
-                    <div class="range-row"><label>Speed</label><input id="z${z}-l${l}-speed" type="range" min="1" max="100" value="${msToSpeed(layer.speedMs)}" oninput="lg.speedText('z${z}-l${l}-speed-out', this.value)"><output id="z${z}-l${l}-speed-out">${speedName(msToSpeed(layer.speedMs))}</output></div>
-                    ${meta.hasParameter ? `<div class="range-row"><label>${esc(meta.parameterLabel)}</label><input id="z${z}-l${l}-param" type="range" min="${meta.parameterMin}" max="${meta.parameterMax}" value="${parameter}" oninput="lg.updateText('z${z}-l${l}-param-out', this.value + ' ${esc(meta.parameterUnit)}')"><output id="z${z}-l${l}-param-out">${parameter} ${esc(meta.parameterUnit)}</output></div>` : `<p class="help">${esc(meta.description)}</p>`}
-                    <div><label class="switch-row"><span>Layer Enabled</span><input id="z${z}-l${l}-enabled" type="checkbox" ${layer.enabled ? 'checked' : ''}></label></div>
-                </div>`;
-            }).join('');
-            return `<article class="product-card zone-card"><div class="zone-title"><h4>${esc(zName)}</h4></div>${layersHtml}</article>`;
+        
+        let firstZ = state.targetZones ? state.targetZones.indexOf(true) : 0;
+        if (firstZ === -1) { firstZ = 0; state.targetZones = [true, false, false, false, false, false, false, false]; }
+
+        const zoneSelectors = `<div class="field"><label>Target Zones</label><div style="display:flex; gap:0.5rem; flex-wrap:wrap; margin-bottom:1rem;">
+            ${[0,1,2,3,4,5,6,7].map(z => {
+                const zName = state.config?.zones?.[z]?.name || `Zone ${z + 1}`;
+                const isSelected = state.targetZones[z];
+                return `<button class="${isSelected ? 'button-primary' : 'button-secondary'}" style="width:auto; margin:0;" onclick="lg.toggleTargetZone(${z})">${isSelected ? '✓ ' : ''}${esc(zName)}</button>`;
+            }).join('')}
+        </div></div>`;
+
+        const layersHtml = scene.zones[firstZ].layers.map((layer, l) => {
+            const meta = effect(layer.effect);
+            const parameter = clamp(layer.fxParam || meta.parameterDefault, meta.parameterMin || 0, meta.parameterMax || 255);
+            return `<div class="layer-editor" style="margin-top:1rem; border-top:1px solid var(--border); padding-top:1rem;">
+                <h5>Layer ${l + 1}</h5>
+                <div class="field"><label>Effect</label><select id="z-l${l}-effect" onchange="lg.changeZoneEffect(${l}, this.value)">
+                    ${state.effects.map(item => `<option value="${esc(item.id)}" ${item.id === layer.effect ? 'selected' : ''}>${esc(item.label)}</option>`).join('')}
+                </select></div>
+                <div class="field"><label>Color Palette</label><select id="z-l${l}-palette">
+                    ${palettes.map(p => `<option value="${p.id}" ${p.id === (layer.paletteId || 0) ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}
+                </select></div>
+                <div class="field"><label>Blend Mode</label><select id="z-l${l}-blend">
+                    <option value="normal" ${layer.blendMode==='normal'?'selected':''}>Normal</option>
+                    <option value="add" ${layer.blendMode==='add'?'selected':''}>Add</option>
+                    <option value="multiply" ${layer.blendMode==='multiply'?'selected':''}>Multiply</option>
+                    <option value="screen" ${layer.blendMode==='screen'?'selected':''}>Screen</option>
+                </select></div>
+                <div class="color-line">
+                    <label>Primary</label><input id="z-l${l}-pcolor" type="color" value="${colorFor(layer.primaryColor)}">
+                    <label style="margin-left:1rem">Secondary</label><input id="z-l${l}-scolor" type="color" value="${colorFor(layer.secondaryColor)}">
+                </div>
+                <div class="range-row"><label>Opacity</label><input id="z-l${l}-opacity" type="range" min="0" max="100" value="${Math.round(layer.opacity * 100 / 255)}" oninput="lg.updateText('z-l${l}-opacity-out', this.value + '%')"><output id="z-l${l}-opacity-out">${Math.round(layer.opacity * 100 / 255)}%</output></div>
+                <div class="range-row"><label>Speed</label><input id="z-l${l}-speed" type="range" min="1" max="100" value="${msToSpeed(layer.speedMs)}" oninput="lg.speedText('z-l${l}-speed-out', this.value)"><output id="z-l${l}-speed-out">${speedName(msToSpeed(layer.speedMs))}</output></div>
+                ${meta.hasParameter ? `<div class="range-row"><label>${esc(meta.parameterLabel)}</label><input id="z-l${l}-param" type="range" min="${meta.parameterMin}" max="${meta.parameterMax}" value="${parameter}" oninput="lg.updateText('z-l${l}-param-out', this.value + ' ${esc(meta.parameterUnit)}')"><output id="z-l${l}-param-out">${parameter} ${esc(meta.parameterUnit)}</output></div>` : `<p class="help">${esc(meta.description)}</p>`}
+                <div><label class="switch-row"><span>Layer Enabled</span><input id="z-l${l}-enabled" type="checkbox" ${layer.enabled ? 'checked' : ''}></label></div>
+            </div>`;
         }).join('');
+
+        byId('scene-zones').innerHTML = `<article class="product-card zone-card">${zoneSelectors}${layersHtml}</article>`;
     }
-    function changeZoneEffect(z, l, value) {
+    function changeZoneEffect(l, value) {
         readSceneEditor();
-        state.editing.zones[z].layers[l].effect = value;
-        state.editing.zones[z].layers[l].fxParam = effect(value).parameterDefault || 0;
+        let firstZ = state.targetZones ? state.targetZones.indexOf(true) : 0;
+        if (firstZ === -1) firstZ = 0;
+        const newParam = effect(value).parameterDefault || 0;
+        state.targetZones.forEach((isSelected, z) => {
+            if (isSelected) {
+                state.editing.zones[z].layers[l].effect = value;
+                state.editing.zones[z].layers[l].fxParam = newParam;
+            }
+        });
         renderSceneEditor();
     }
     async function saveScene() {
@@ -1266,14 +1374,68 @@ window.lg = (() => {
         byId('system-mqtt-port').value = state.config.mqttPort || 1883;
         byId('system-fallback').innerHTML = state.presets.map(scene => `<option value="${Number(scene.index)}" ${Number(scene.index) === Number(state.config.fallbackPreset) ? 'selected' : ''}>${esc(scene.name || 'Untitled scene')}</option>`).join('');
         
+        let physHtml = '';
+        for (let i = 0; i < 16; ++i) {
+            const p = state.config.physicalOutputs?.[i] || {type:0,hardwareId:i,gpioPin:0,enabled:false};
+            physHtml += `<div class="field" style="margin-bottom:0.5rem;padding:0.5rem;background:rgba(0,0,0,0.2);border-radius:8px;">
+                <div style="font-weight:bold;margin-bottom:0.5rem;display:flex;justify-content:space-between">
+                    <span>Output ${i}</span>
+                    <label class="switch-row" style="margin:0"><input id="sys-phys-en-${i}" type="checkbox" ${p.enabled?'checked':''}></label>
+                </div>
+                <label>Type</label>
+                <select id="sys-phys-type-${i}">
+                    <option value="0" ${p.type===0?'selected':''}>RMT (Data)</option>
+                    <option value="1" ${p.type===1?'selected':''}>PWM (Analog)</option>
+                    <option value="2" ${p.type===2?'selected':''}>SPI</option>
+                </select>
+                <label>Hardware ID</label><input type="number" id="sys-phys-hw-${i}" value="${p.hardwareId}" min="0" max="15">
+                <label>GPIO Pin</label><input type="number" id="sys-phys-pin-${i}" value="${p.gpioPin}" min="0" max="48">
+            </div>`;
+        }
+        byId('system-outputs').innerHTML = physHtml;
+
+        let fixHtml = '';
+        for (let i = 0; i < 16; ++i) {
+            const f = state.config.fixtures?.[i] || {profile:0,pixelOrder:1,physicalOutputIndex:[0,0,0,0],numPixels:0,maxBrightness:255,gammaCorrection:true,maxMilliwatts:0};
+            fixHtml += `<div class="field" style="margin-bottom:0.5rem;padding:0.5rem;background:rgba(0,0,0,0.2);border-radius:8px;">
+                <div style="font-weight:bold;margin-bottom:0.5rem;">Fixture ${i}</div>
+                <label>Profile</label>
+                <select id="sys-fix-prof-${i}">
+                    <option value="0" ${f.profile===0?'selected':''}>WS2812</option>
+                    <option value="1" ${f.profile===1?'selected':''}>SK6812</option>
+                    <option value="2" ${f.profile===2?'selected':''}>PWM Single</option>
+                    <option value="3" ${f.profile===3?'selected':''}>PWM RGB</option>
+                    <option value="4" ${f.profile===4?'selected':''}>PWM RGBW</option>
+                </select>
+                <label>Pixel Order</label>
+                <select id="sys-fix-po-${i}">
+                    <option value="0" ${f.pixelOrder===0?'selected':''}>RGB</option>
+                    <option value="1" ${f.pixelOrder===1?'selected':''}>GRB</option>
+                    <option value="2" ${f.pixelOrder===2?'selected':''}>RGBW</option>
+                    <option value="3" ${f.pixelOrder===3?'selected':''}>GRBW</option>
+                </select>
+                <label>Length (Pixels)</label><input type="number" id="sys-fix-len-${i}" value="${f.numPixels}" min="0" max="2000">
+                <label>Output Index</label><input type="number" id="sys-fix-out-${i}" value="${f.physicalOutputIndex[0]}" min="0" max="15">
+            </div>`;
+        }
+        byId('system-fixtures').innerHTML = fixHtml;
+
         const roles = ['Unassigned', 'Sign', 'Sign Element', 'Ambiance Light', 'Main Light'];
         let zonesHtml = '';
         for (let i = 0; i < 8; ++i) {
-            const z = state.config.zones?.[i] || {name: '', role: 'Unassigned'};
+            const z = state.config.zones?.[i] || {name: '', role: 'Unassigned', fixtureMask: 0};
+            
+            let fixChecks = '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:4px;margin-top:4px;">';
+            for (let f = 0; f < 16; ++f) {
+                fixChecks += `<label style="font-size:0.75rem"><input type="checkbox" id="sys-zmask-${i}-${f}" ${(z.fixtureMask & (1<<f))?'checked':''}> F${f}</label>`;
+            }
+            fixChecks += '</div>';
+
             zonesHtml += `<div class="field" style="margin-bottom:0.5rem;padding:0.5rem;background:rgba(0,0,0,0.2);border-radius:8px;">
-                <div style="font-weight:bold;margin-bottom:0.5rem;">CH ${i}</div>
+                <div style="font-weight:bold;margin-bottom:0.5rem;">Zone ${i+1}</div>
                 <label>Name</label><input id="sys-zname-${i}" value="${esc(z.name)}" maxlength="23" placeholder="Zone ${i+1}">
                 <label>Role</label><select id="sys-zrole-${i}">${roles.map(r => `<option value="${r}" ${z.role === r ? 'selected' : ''}>${r}</option>`).join('')}</select>
+                <label>Fixtures in Zone</label>${fixChecks}
             </div>`;
         }
         byId('system-zones').innerHTML = zonesHtml;
@@ -1296,12 +1458,41 @@ window.lg = (() => {
                 mqttEnabled: byId('system-mqtt-enabled').checked,
                 mqttBroker: byId('system-mqtt-broker').value.trim(),
                 mqttPort: Number(byId('system-mqtt-port').value),
-                zones: []
+                zones: [],
+                physicalOutputs: [],
+                fixtures: []
             };
+
+            for (let i = 0; i < 16; ++i) {
+                config.physicalOutputs.push({
+                    type: Number(byId(`sys-phys-type-${i}`)?.value || 0),
+                    hardwareId: Number(byId(`sys-phys-hw-${i}`)?.value || 0),
+                    gpioPin: Number(byId(`sys-phys-pin-${i}`)?.value || 0),
+                    enabled: byId(`sys-phys-en-${i}`)?.checked || false
+                });
+
+                const f = state.config.fixtures?.[i] || {whiteBalance:[255,255,255],maxBrightness:255,gammaCorrection:true,maxMilliwatts:0};
+                config.fixtures.push({
+                    profile: Number(byId(`sys-fix-prof-${i}`)?.value || 0),
+                    pixelOrder: Number(byId(`sys-fix-po-${i}`)?.value || 0),
+                    physicalOutputIndex: [Number(byId(`sys-fix-out-${i}`)?.value || 0),0,0,0],
+                    numPixels: Number(byId(`sys-fix-len-${i}`)?.value || 0),
+                    maxBrightness: f.maxBrightness,
+                    whiteBalance: f.whiteBalance,
+                    gammaCorrection: f.gammaCorrection,
+                    maxMilliwatts: f.maxMilliwatts
+                });
+            }
+
             for (let i = 0; i < 8; ++i) {
+                let fmask = 0;
+                for (let f = 0; f < 16; ++f) {
+                    if (byId(`sys-zmask-${i}-${f}`)?.checked) fmask |= (1 << f);
+                }
                 config.zones.push({
                     name: byId(`sys-zname-${i}`)?.value.trim() || '',
-                    role: byId(`sys-zrole-${i}`)?.value || 'Unassigned'
+                    role: byId(`sys-zrole-${i}`)?.value || 'Unassigned',
+                    fixtureMask: fmask
                 });
             }
             await api('/api/v1/config','PUT',config);

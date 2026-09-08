@@ -4,6 +4,8 @@
 #include "ConfigStore.hpp"
 #include "SignageTypes.hpp"
 #include "PowerBudget.hpp"
+#include <functional>
+#include <vector>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -50,8 +52,12 @@ public:
     /// Call when DeviceConfig changes to update mapping
     void reload_device_config();
 
+    using PreviewCallback = std::function<void(const AddressableLeds& leds)>;
+    void set_preview_callback(PreviewCallback cb) { preview_cb_ = std::move(cb); }
+
 private:
     static void task_entry(void* arg);
+
     void task();
 
     void render_frame(uint32_t now_ms);
@@ -95,7 +101,10 @@ private:
     uint32_t last_fps_time_ms_ = 0;
     float current_fps_ = 0.0f;
 
+    PreviewCallback preview_cb_;
+
     static constexpr uint32_t kFramePeriodMs = 25; // 40 FPS
 };
+
 
 } // namespace lg

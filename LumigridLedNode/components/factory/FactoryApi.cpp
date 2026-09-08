@@ -779,9 +779,40 @@ esp_err_t get_device_config(httpd_req_t* request) {
         cJSON* z = cJSON_CreateObject();
         cJSON_AddStringToObject(z, "name", cfg.zones[i].name);
         cJSON_AddStringToObject(z, "role", zone_role_name(cfg.zones[i].role));
+        cJSON_AddNumberToObject(z, "fixtureMask", cfg.zones[i].fixture_mask);
         cJSON_AddItemToArray(zones, z);
     }
     cJSON_AddItemToObject(response, "zones", zones);
+
+    cJSON* phys = cJSON_CreateArray();
+    for (uint8_t i = 0; i < 16; ++i) {
+        cJSON* p = cJSON_CreateObject();
+        cJSON_AddNumberToObject(p, "type", static_cast<int>(cfg.physical_outputs[i].type));
+        cJSON_AddNumberToObject(p, "hardwareId", cfg.physical_outputs[i].hardware_id);
+        cJSON_AddNumberToObject(p, "gpioPin", cfg.physical_outputs[i].gpio_pin);
+        cJSON_AddBoolToObject(p, "enabled", cfg.physical_outputs[i].enabled);
+        cJSON_AddItemToArray(phys, p);
+    }
+    cJSON_AddItemToObject(response, "physicalOutputs", phys);
+
+    cJSON* fixt = cJSON_CreateArray();
+    for (uint8_t i = 0; i < 16; ++i) {
+        cJSON* f = cJSON_CreateObject();
+        cJSON_AddNumberToObject(f, "profile", static_cast<int>(cfg.fixtures[i].profile));
+        cJSON_AddNumberToObject(f, "pixelOrder", static_cast<int>(cfg.fixtures[i].pixel_order));
+        cJSON* p_idx = cJSON_CreateArray();
+        for (uint8_t j = 0; j < 4; ++j) cJSON_AddItemToArray(p_idx, cJSON_CreateNumber(cfg.fixtures[i].physical_output_index[j]));
+        cJSON_AddItemToObject(f, "physicalOutputIndex", p_idx);
+        cJSON_AddNumberToObject(f, "numPixels", cfg.fixtures[i].num_pixels);
+        cJSON_AddNumberToObject(f, "maxBrightness", cfg.fixtures[i].max_brightness);
+        cJSON* wb = cJSON_CreateArray();
+        for (uint8_t j = 0; j < 3; ++j) cJSON_AddItemToArray(wb, cJSON_CreateNumber(cfg.fixtures[i].white_balance[j]));
+        cJSON_AddItemToObject(f, "whiteBalance", wb);
+        cJSON_AddBoolToObject(f, "gammaCorrection", cfg.fixtures[i].gamma_correction);
+        cJSON_AddNumberToObject(f, "maxMilliwatts", cfg.fixtures[i].max_milliwatts);
+        cJSON_AddItemToArray(fixt, f);
+    }
+    cJSON_AddItemToObject(response, "fixtures", fixt);
 
     char* json = cJSON_PrintUnformatted(response);
     cJSON_Delete(response);
@@ -917,7 +948,83 @@ esp_err_t put_device_config(httpd_req_t* request) {
                     return send_error(request, "400 Bad Request", "invalid_field_zones_role");
                 }
             }
+            const cJSON* z_fm = cJSON_GetObjectItemCaseSensitive(z_item, "fixtureMask");
+            if (z_fm && cJSON_IsNumber(z_fm)) {
+                cfg.zones[z_idx].fixture_mask = static_cast<uint32_t>(z_fm->valueint);
+            }
             ++z_idx;
+        }
+    }
+
+    const cJSON* phys_arr = cJSON_GetObjectItemCaseSensitive(root, "physicalOutputs");
+    if (phys_arr && cJSON_IsArray(phys_arr)) {
+        int p_idx = 0;
+        cJSON* p_item = nullptr;
+        cJSON_ArrayForEach(p_item, phys_arr) {
+            if (p_idx >= 16) break;
+            const cJSON* p_type = cJSON_GetObjectItemCaseSensitive(p_item, "type");
+            if (p_type && cJSON_IsNumber(p_type)) cfg.physical_outputs[p_idx].type = static_cast<OutputType>(p_type->valueint);
+            
+            const cJSON* p_hwid = cJSON_GetObjectItemCaseSensitive(p_item, "hardwareId");
+            if (p_hwid && cJSON_IsNumber(p_hwid)) cfg.physical_outputs[p_idx].hardware_id = static_cast<uint8_t>(p_hwid->valueint);
+            
+            const cJSON* p_pin = cJSON_GetObjectItemCaseSensitive(p_item, "gpioPin");
+            if (p_pin && cJSON_IsNumber(p_pin)) cfg.physical_outputs[p_idx].gpio_pin = static_cast<uint8_t>(p_pin->valueint);
+            
+            const cJSON* p_en = cJSON_GetObjectItemCaseSensitive(p_item, "enabled");
+            if (p_en && cJSON_IsBool(p_en)) cfg.physical_outputs[p_idx].enabled = cJSON_IsTrue(p_en);
+            
+            ++p_idx;
+        }
+    }
+
+    const cJSON* fixt_arr = cJSON_GetObjectItemCaseSensitive(root, "fixtures");
+    if (fixt_arr && cJSON_IsArray(fixt_arr)) {
+        int f_idx = 0;
+        cJSON* f_item = nullptr;
+        cJSON_ArrayForEach(f_item, fixt_arr) {
+            if (f_idx >= 16) break;
+            const cJSON* f_prof = cJSON_GetObjectItemCaseSensitive(f_item, "profile");
+            if (f_prof && cJSON_IsNumber(f_prof)) cfg.fixtures[f_idx].profile = static_cast<FixtureProfile>(f_prof->valueint);
+            
+            const cJSON* f_po = cJSON_GetObjectItemCaseSensitive(f_item, "pixelOrder");
+            if (f_po && cJSON_IsNumber(f_po)) cfg.fixtures[f_idx].pixel_order = static_cast<PixelOrder>(f_po->valueint);
+            
+            const cJSON* f_idx_arr = cJSON_GetObjectItemCaseSensitive(f_item, "physicalOutputIndex");
+            if (f_idx_arr && cJSON_IsArray(f_idx_arr)) {
+                int j = 0;
+                cJSON* i_item = nullptr;
+                cJSON_ArrayForEach(i_item, f_idx_arr) {
+                    if (j >= 4) break;
+                    if (cJSON_IsNumber(i_item)) cfg.fixtures[f_idx].physical_output_index[j] = static_cast<uint8_t>(i_item->valueint);
+                    ++j;
+                }
+            }
+            
+            const cJSON* f_np = cJSON_GetObjectItemCaseSensitive(f_item, "numPixels");
+            if (f_np && cJSON_IsNumber(f_np)) cfg.fixtures[f_idx].num_pixels = static_cast<uint16_t>(f_np->valueint);
+            
+            const cJSON* f_mb = cJSON_GetObjectItemCaseSensitive(f_item, "maxBrightness");
+            if (f_mb && cJSON_IsNumber(f_mb)) cfg.fixtures[f_idx].max_brightness = static_cast<uint8_t>(f_mb->valueint);
+            
+            const cJSON* f_wb = cJSON_GetObjectItemCaseSensitive(f_item, "whiteBalance");
+            if (f_wb && cJSON_IsArray(f_wb)) {
+                int j = 0;
+                cJSON* w_item = nullptr;
+                cJSON_ArrayForEach(w_item, f_wb) {
+                    if (j >= 3) break;
+                    if (cJSON_IsNumber(w_item)) cfg.fixtures[f_idx].white_balance[j] = static_cast<uint8_t>(w_item->valueint);
+                    ++j;
+                }
+            }
+            
+            const cJSON* f_gc = cJSON_GetObjectItemCaseSensitive(f_item, "gammaCorrection");
+            if (f_gc && cJSON_IsBool(f_gc)) cfg.fixtures[f_idx].gamma_correction = cJSON_IsTrue(f_gc);
+            
+            const cJSON* f_mm = cJSON_GetObjectItemCaseSensitive(f_item, "maxMilliwatts");
+            if (f_mm && cJSON_IsNumber(f_mm)) cfg.fixtures[f_idx].max_milliwatts = static_cast<uint16_t>(f_mm->valueint);
+            
+            ++f_idx;
         }
     }
 #undef VALIDATE_U8
@@ -1390,10 +1497,10 @@ esp_err_t get_backup(httpd_req_t* request) {
 
     // Zones
     cJSON* zones_arr = cJSON_CreateArray();
-    for (uint8_t z = 0; z < lg::kMaxZones; ++z) {
+    for (uint8_t z = 0; z < 8; ++z) {
         cJSON* zj = cJSON_CreateObject();
         cJSON_AddStringToObject(zj, "name", cfg.zones[z].name);
-        cJSON_AddStringToObject(zj, "role", cfg.zones[z].role);
+        cJSON_AddStringToObject(zj, "role", zone_role_name(cfg.zones[z].role));
         cJSON_AddNumberToObject(zj, "fixtureMask", cfg.zones[z].fixture_mask);
         cJSON_AddItemToArray(zones_arr, zj);
     }
@@ -1411,12 +1518,9 @@ esp_err_t get_backup(httpd_req_t* request) {
             cJSON_AddStringToObject(s, "name", sc.name);
             cJSON_AddNumberToObject(s, "globalBrightness", sc.global_brightness);
             cJSON_AddNumberToObject(s, "transitionMs", sc.transition_ms);
-            cJSON_AddNumberToObject(s, "overlayEffect", static_cast<int>(sc.overlay_effect));
-            cJSON_AddNumberToObject(s, "overlaySpeedMs", sc.overlay_speed_ms);
-            cJSON_AddNumberToObject(s, "overlayParam", sc.overlay_param);
 
             cJSON* z_arr = cJSON_CreateArray();
-            for (uint8_t z = 0; z < lg::kMaxZones; ++z) {
+            for (uint8_t z = 0; z < 8; ++z) {
                 cJSON* z_obj = cJSON_CreateObject();
                 cJSON* l_arr = cJSON_CreateArray();
                 for (uint8_t l = 0; l < 3; ++l) {
@@ -1440,7 +1544,7 @@ esp_err_t get_backup(httpd_req_t* request) {
 
                     cJSON_AddNumberToObject(l_obj, "opacity", layer.opacity);
                     cJSON_AddNumberToObject(l_obj, "blendMode", static_cast<int>(layer.blend_mode));
-                    cJSON_AddNumberToObject(l_obj, "parameter", layer.parameter);
+                    cJSON_AddNumberToObject(l_obj, "parameter", layer.fx_param);
                     cJSON_AddItemToArray(l_arr, l_obj);
                 }
                 cJSON_AddItemToObject(z_obj, "layers", l_arr);
@@ -1528,9 +1632,9 @@ esp_err_t post_restore(httpd_req_t* request) {
             int z_idx = 0;
             cJSON* zj;
             cJSON_ArrayForEach(zj, z_arr) {
-                if (z_idx >= lg::kMaxZones) break;
+                if (z_idx >= 8) break;
                 item = cJSON_GetObjectItem(zj, "name"); if (item && item->valuestring) strncpy(cfg.zones[z_idx].name, item->valuestring, sizeof(cfg.zones[z_idx].name));
-                item = cJSON_GetObjectItem(zj, "role"); if (item && item->valuestring) strncpy(cfg.zones[z_idx].role, item->valuestring, sizeof(cfg.zones[z_idx].role));
+                item = cJSON_GetObjectItem(zj, "role"); if (item && item->valuestring) parse_zone_role(item->valuestring, cfg.zones[z_idx].role);
                 item = cJSON_GetObjectItem(zj, "fixtureMask"); if (item) cfg.zones[z_idx].fixture_mask = item->valueint;
                 z_idx++;
             }
@@ -1552,16 +1656,13 @@ esp_err_t post_restore(httpd_req_t* request) {
                 item = cJSON_GetObjectItem(p, "name"); if (item && item->valuestring) strncpy(sc.name, item->valuestring, sizeof(sc.name));
                 item = cJSON_GetObjectItem(p, "globalBrightness"); if (item) sc.global_brightness = item->valueint;
                 item = cJSON_GetObjectItem(p, "transitionMs"); if (item) sc.transition_ms = item->valueint;
-                item = cJSON_GetObjectItem(p, "overlayEffect"); if (item) sc.overlay_effect = static_cast<SignageModifier>(item->valueint);
-                item = cJSON_GetObjectItem(p, "overlaySpeedMs"); if (item) sc.overlay_speed_ms = item->valueint;
-                item = cJSON_GetObjectItem(p, "overlayParam"); if (item) sc.overlay_param = item->valueint;
 
                 cJSON* z_arr = cJSON_GetObjectItem(p, "zones");
                 if (z_arr && cJSON_IsArray(z_arr)) {
                     int z_idx = 0;
                     cJSON* zj;
                     cJSON_ArrayForEach(zj, z_arr) {
-                        if (z_idx >= lg::kMaxZones) break;
+                        if (z_idx >= 8) break;
                         cJSON* l_arr = cJSON_GetObjectItem(zj, "layers");
                         if (l_arr && cJSON_IsArray(l_arr)) {
                             int l_idx = 0;
@@ -1570,11 +1671,11 @@ esp_err_t post_restore(httpd_req_t* request) {
                                 if (l_idx >= 3) break;
                                 auto& layer = sc.zones[z_idx].layers[l_idx];
                                 item = cJSON_GetObjectItem(lj, "enabled"); if (item) layer.enabled = cJSON_IsTrue(item);
-                                item = cJSON_GetObjectItem(lj, "effect"); if (item) layer.effect = static_cast<SignageEffect>(item->valueint);
+                                item = cJSON_GetObjectItem(lj, "effect"); if (item) layer.effect = item->valueint;
                                 item = cJSON_GetObjectItem(lj, "speedMs"); if (item) layer.speed_ms = item->valueint;
                                 item = cJSON_GetObjectItem(lj, "opacity"); if (item) layer.opacity = item->valueint;
                                 item = cJSON_GetObjectItem(lj, "blendMode"); if (item) layer.blend_mode = static_cast<BlendMode>(item->valueint);
-                                item = cJSON_GetObjectItem(lj, "parameter"); if (item) layer.parameter = item->valueint;
+                                item = cJSON_GetObjectItem(lj, "parameter"); if (item) layer.fx_param = item->valueint;
 
                                 cJSON* pcol = cJSON_GetObjectItem(lj, "primaryColor");
                                 if (pcol) {
@@ -1595,7 +1696,7 @@ esp_err_t post_restore(httpd_req_t* request) {
                     }
                 } else {
                     // Fallback for v1 legacy backups
-                    item = cJSON_GetObjectItem(p, "effect"); if (item) sc.zones[0].layers[0].effect = static_cast<SignageEffect>(item->valueint);
+                    item = cJSON_GetObjectItem(p, "effect"); if (item) sc.zones[0].layers[0].effect = item->valueint;
                     item = cJSON_GetObjectItem(p, "speedMs"); if (item) sc.zones[0].layers[0].speed_ms = item->valueint;
                 }
                 
@@ -1613,6 +1714,16 @@ esp_err_t post_restore(httpd_req_t* request) {
     esp_restart();
     return ESP_OK;
 }
+
+struct WsBroadcastArg {
+    FactoryApi* api;
+    char payload[384];
+};
+
+struct WsPreviewArg {
+    FactoryApi* api;
+    std::vector<uint8_t> payload;
+};
 
 esp_err_t FactoryApi::start(
     uint16_t signage_port,
@@ -1699,14 +1810,46 @@ esp_err_t FactoryApi::start(
     }
 
     runner_.set_status_callback([this]() { this->notify_status_async(); });
+    
+    if (signage_) {
+        signage_->set_preview_callback([this](const AddressableLeds& leds) {
+            if (this->factory_server_ == nullptr) return;
+
+            // Rate limit to ~10 fps (100ms)
+            static uint32_t last_preview_ms = 0;
+            uint32_t now = esp_log_timestamp();
+            if (now - last_preview_ms < 100) return;
+            
+            bool expected = false;
+            if (!this->preview_pending_.compare_exchange_strong(expected, true)) {
+                return; // Already pending
+            }
+            last_preview_ms = now;
+
+            auto* arg = new WsPreviewArg{};
+            arg->api = this;
+            
+            // Format: 'L' followed by raw RGB data
+            arg->payload.reserve(1 + AddressableLeds::kLanes * AddressableLeds::kPixels * 3);
+            arg->payload.push_back('L');
+            const auto& buf = leds.buffer();
+            for (uint8_t l = 0; l < AddressableLeds::kLanes; ++l) {
+                for (uint16_t p = 0; p < AddressableLeds::kPixels; ++p) {
+                    arg->payload.push_back(buf[l][p].r);
+                    arg->payload.push_back(buf[l][p].g);
+                    arg->payload.push_back(buf[l][p].b);
+                }
+            }
+
+            if (httpd_queue_work(this->factory_server_, ws_broadcast_preview_work, arg) != ESP_OK) {
+                this->preview_pending_ = false;
+                delete arg;
+            }
+        });
+    }
 
     return ESP_OK;
 }
-
-struct WsBroadcastArg {
-    FactoryApi* api;
-    char payload[384];
-};
 
 void FactoryApi::ws_broadcast_work(void* arg) {
     std::unique_ptr<WsBroadcastArg> msg(static_cast<WsBroadcastArg*>(arg));
@@ -1722,6 +1865,29 @@ void FactoryApi::ws_broadcast_work(void* arg) {
     frame.type = HTTPD_WS_TYPE_TEXT;
     frame.payload = reinterpret_cast<uint8_t*>(msg->payload);
     frame.len = strlen(msg->payload);
+
+    for (size_t i = 0; i < clients; ++i) {
+        if (httpd_ws_get_fd_info(msg->api->factory_server_, client_fds[i]) == HTTPD_WS_CLIENT_WEBSOCKET) {
+            httpd_ws_send_frame_async(msg->api->factory_server_, client_fds[i], &frame);
+        }
+    }
+}
+
+void FactoryApi::ws_broadcast_preview_work(void* arg) {
+    std::unique_ptr<WsPreviewArg> msg(static_cast<WsPreviewArg*>(arg));
+    msg->api->preview_pending_ = false;
+
+    std::vector<int> client_fds(msg->api->max_open_sockets_);
+    size_t clients = client_fds.size();
+
+    if (httpd_get_client_list(msg->api->factory_server_, &clients, client_fds.data()) != ESP_OK || clients == 0) {
+        return;
+    }
+
+    httpd_ws_frame_t frame = {};
+    frame.type = HTTPD_WS_TYPE_BINARY;
+    frame.payload = msg->payload.data();
+    frame.len = msg->payload.size();
 
     for (size_t i = 0; i < clients; ++i) {
         if (httpd_ws_get_fd_info(msg->api->factory_server_, client_fds[i]) == HTTPD_WS_CLIENT_WEBSOCKET) {

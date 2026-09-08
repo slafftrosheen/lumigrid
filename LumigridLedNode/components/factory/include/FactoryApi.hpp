@@ -3,6 +3,7 @@
 #include "esp_err.h"
 #include "esp_http_server.h"
 #include "FactoryRunner.hpp"
+#include <atomic>
 
 // Forward declarations for signage components
 namespace lg {
@@ -35,8 +36,8 @@ public:
 
     void notify_status_async();
 
-private:
     static void ws_broadcast_work(void* arg);
+    static void ws_broadcast_preview_work(void* arg);
     static esp_err_t serve_dashboard(httpd_req_t* request);
 
     FactoryRunner& runner_;
@@ -47,6 +48,7 @@ private:
     httpd_handle_t signage_server_ = nullptr;
     httpd_handle_t factory_server_ = nullptr;
     size_t max_open_sockets_ = 0;
+    std::atomic<bool> preview_pending_{false};
 };
 
 } // namespace lg

@@ -71,7 +71,7 @@ extern "C" void app_main(void) {
     
     bool safe_mode = (s_boot_count >= 3);
 
-    xTaskCreate(recovery_task, "recovery", 2048, NULL, 5, NULL);
+    xTaskCreate(recovery_task, "recovery", 4096, NULL, 5, NULL);
 
     // All service objects are static so they survive app_main() return
     // and remain valid for the WiFi callback lambda that captures them by reference.

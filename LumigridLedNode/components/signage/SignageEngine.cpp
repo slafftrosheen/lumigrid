@@ -194,6 +194,10 @@ void SignageEngine::render_frame(uint32_t current_ms) {
             }
         }
         output_.commit_frame(OutputPriority::Signage);
+        
+        if (preview_cb_) {
+            preview_cb_(output_.pixels());
+        }
     }
 }
 

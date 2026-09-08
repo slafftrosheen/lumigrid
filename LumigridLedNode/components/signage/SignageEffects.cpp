@@ -49,6 +49,36 @@ uint8_t effect_parameter(const LayerConfig& layer) {
     return layer.fx_param;
 }
 
+BrandColor get_palette_color(uint8_t palette_id, uint8_t index, const BrandColor& c1, const BrandColor& c2) {
+    if (palette_id == 0) {
+        return {
+            static_cast<uint8_t>((c1.r * (255 - index) + c2.r * index) / 255),
+            static_cast<uint8_t>((c1.g * (255 - index) + c2.g * index) / 255),
+            static_cast<uint8_t>((c1.b * (255 - index) + c2.b * index) / 255)
+        };
+    }
+    if (palette_id == 1) { // Rainbow
+        if (index < 85) return { static_cast<uint8_t>(index * 3), static_cast<uint8_t>(255 - index * 3), 0 };
+        if (index < 170) { index -= 85; return { static_cast<uint8_t>(255 - index * 3), 0, static_cast<uint8_t>(index * 3) }; }
+        index -= 170; return { 0, static_cast<uint8_t>(index * 3), static_cast<uint8_t>(255 - index * 3) };
+    }
+    if (palette_id == 2) { // Ocean
+        return { 0, static_cast<uint8_t>(100 + (index * 155 / 255)), static_cast<uint8_t>(155 + (index * 100 / 255)) };
+    }
+    if (palette_id == 3) { // Lava
+        if (index < 128) return { static_cast<uint8_t>(127 + index), static_cast<uint8_t>(index), 0 };
+        return { 255, static_cast<uint8_t>(127 + (index - 128)), static_cast<uint8_t>(index - 128) };
+    }
+    if (palette_id == 4) { // Forest
+        return { static_cast<uint8_t>(index / 2), static_cast<uint8_t>(128 + index / 2), static_cast<uint8_t>(index / 4) };
+    }
+    if (palette_id == 5) { // Sunset
+        if (index < 128) return { 255, static_cast<uint8_t>(index * 2), static_cast<uint8_t>(index) };
+        return { static_cast<uint8_t>(255 - (index - 128)), 255, static_cast<uint8_t>(128 + (index - 128)) };
+    }
+    return c1;
+}
+
 static Rgb blend_rgb(const Rgb& bg, const Rgb& fg, BlendMode mode, uint8_t fg_opacity) {
     if (fg_opacity == 0) return bg;
     
@@ -161,12 +191,8 @@ void render_fixture_layer(
                 min_b + (uint16_t(sine_val) * (b - min_b)) / 255
             );
 
-            // Interpolate between primary and secondary color based on breath phase
-            BrandColor blended_col{
-                static_cast<uint8_t>((layer.primary_color.r * sine_val + layer.secondary_color.r * (255 - sine_val)) / 255),
-                static_cast<uint8_t>((layer.primary_color.g * sine_val + layer.secondary_color.g * (255 - sine_val)) / 255),
-                static_cast<uint8_t>((layer.primary_color.b * sine_val + layer.secondary_color.b * (255 - sine_val)) / 255)
-            };
+            // Sample palette based on breath phase
+            BrandColor blended_col = get_palette_color(layer.palette_id, 255 - sine_val, layer.primary_color, layer.secondary_color);
             
             fill_pixels(scale_rgb(blended_col, scaled_b));
             set_pwm(scale_pwm(4095, scaled_b));
@@ -185,11 +211,8 @@ void render_fixture_layer(
                     (uint16_t(b) * (parameter - offset)) / parameter
                 );
                 // Head is primary color, trailing tail shifts towards secondary color
-                BrandColor px_col{
-                    static_cast<uint8_t>((layer.primary_color.r * (parameter - offset) + layer.secondary_color.r * offset) / parameter),
-                    static_cast<uint8_t>((layer.primary_color.g * (parameter - offset) + layer.secondary_color.g * offset) / parameter),
-                    static_cast<uint8_t>((layer.primary_color.b * (parameter - offset) + layer.secondary_color.b * offset) / parameter)
-                };
+                uint8_t phase = static_cast<uint8_t>((offset * 255) / parameter);
+                BrandColor px_col = get_palette_color(layer.palette_id, phase, layer.primary_color, layer.secondary_color);
                 apply_color_to_pixels(px, scale_rgb(px_col, tail_b));
             }
 
@@ -259,7 +282,8 @@ void render_fixture_layer(
                     255 - ((uint16_t(255 - sine8(pos_phase)) * contrast) / 255)
                 );
                 const uint8_t pixel_b = scale8(b, intensity);
-                apply_color_to_pixels(px, scale_rgb(layer.primary_color, pixel_b));
+                BrandColor px_col = get_palette_color(layer.palette_id, pos_phase, layer.primary_color, layer.secondary_color);
+                apply_color_to_pixels(px, scale_rgb(px_col, pixel_b));
             }
             set_pwm(scale_pwm(4095, b));
             break;
@@ -295,7 +319,8 @@ void render_fixture_layer(
                     );
                 }
                 const uint8_t intensity = scale8(b, heat);
-                apply_color_to_pixels(px, scale_rgb(layer.primary_color, intensity));
+                BrandColor px_col = get_palette_color(layer.palette_id, heat, layer.primary_color, layer.secondary_color);
+                apply_color_to_pixels(px, scale_rgb(px_col, intensity));
             }
             set_pwm(scale_pwm(4095, b));
             break;
@@ -329,7 +354,8 @@ void render_fixture_layer(
                 const uint8_t phase = static_cast<uint8_t>(((px * 255) / wave_length) + shift);
                 const uint8_t val = sine8(phase);
                 const uint8_t pixel_b = scale8(b, val);
-                apply_color_to_pixels(px, scale_rgb(layer.primary_color, pixel_b));
+                BrandColor px_col = get_palette_color(layer.palette_id, phase, layer.primary_color, layer.secondary_color);
+                apply_color_to_pixels(px, scale_rgb(px_col, pixel_b));
             }
             const uint8_t pwm_phase = static_cast<uint8_t>(shift & 0xFF);
             set_pwm(scale_pwm(4095, scale8(b, sine8(pwm_phase))));
@@ -429,13 +455,6 @@ bool scene_is_visible(
     uint32_t elapsed_ms,
     uint16_t sequencer_beat_ms
 ) {
-    if (scene.overlay_effect == SignageModifier::Strobe) {
-        uint32_t period = scene.overlay_speed_ms > 0 ? scene.overlay_speed_ms : sequencer_beat_ms;
-        if (period == 0) period = 100;
-        uint32_t phase = elapsed_ms % period;
-        uint8_t duty = scene.overlay_param > 0 ? scene.overlay_param : 50;
-        return ((phase * 100) / period) < duty;
-    }
     return true;
 }
 
