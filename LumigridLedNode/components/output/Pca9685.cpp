@@ -98,7 +98,15 @@ esp_err_t Pca9685::init() {
     // These writes are critical — propagate any failure immediately.
     ESP_RETURN_ON_ERROR(write_register(kPrescale, 5), "pca", "prescale");
     ESP_RETURN_ON_ERROR(write_register(kMode2, kMode2OutDrv), "pca", "mode2");
-    ESP_RETURN_ON_ERROR(write_register(kMode1, kMode1Ai | kMode1Restart), "pca", "wake");
+    
+    // Clear SLEEP bit (keep Ai) to wake up the oscillator
+    ESP_RETURN_ON_ERROR(write_register(kMode1, kMode1Ai), "pca", "wake");
+    
+    // Datasheet requires 500us max to stabilize.
+    vTaskDelay(pdMS_TO_TICKS(1)); 
+    
+    // Set RESTART bit
+    ESP_RETURN_ON_ERROR(write_register(kMode1, kMode1Ai | kMode1Restart), "pca", "restart");
 
     // Verify chip communication with a read-back.
     uint8_t reg = kMode1;

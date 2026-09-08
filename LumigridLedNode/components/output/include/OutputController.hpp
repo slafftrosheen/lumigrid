@@ -27,8 +27,8 @@ public:
 
     /// Acquire the output mutex. Use when performing multi-step
     /// pixel/pwm operations that must be atomic.
-    void lock()   { xSemaphoreTake(mutex_, portMAX_DELAY); }
-    void unlock() { xSemaphoreGive(mutex_); }
+    void lock()   { xSemaphoreTakeRecursive(mutex_, portMAX_DELAY); }
+    void unlock() { xSemaphoreGiveRecursive(mutex_); }
 
 private:
     AddressableLeds pixels_;

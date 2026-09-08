@@ -7,7 +7,7 @@
 namespace lg {
 
 esp_err_t OutputController::init() {
-    mutex_ = xSemaphoreCreateMutex();
+    mutex_ = xSemaphoreCreateRecursiveMutex();
     if (mutex_ == nullptr) return ESP_ERR_NO_MEM;
 
     const gpio_config_t cfg = {
@@ -30,31 +30,31 @@ esp_err_t OutputController::init() {
 }
 
 void OutputController::disable() {
-    xSemaphoreTake(mutex_, portMAX_DELAY);
+    xSemaphoreTakeRecursive(mutex_, portMAX_DELAY);
     gpio_set_level(board::kPcaOe, 1);
     enabled_ = false;
-    xSemaphoreGive(mutex_);
+    xSemaphoreGiveRecursive(mutex_);
 }
 
 void OutputController::enable() {
-    xSemaphoreTake(mutex_, portMAX_DELAY);
+    xSemaphoreTakeRecursive(mutex_, portMAX_DELAY);
     gpio_set_level(board::kPcaOe, 0);
     enabled_ = true;
-    xSemaphoreGive(mutex_);
+    xSemaphoreGiveRecursive(mutex_);
 }
 
 esp_err_t OutputController::blackout() {
-    xSemaphoreTake(mutex_, portMAX_DELAY);
+    xSemaphoreTakeRecursive(mutex_, portMAX_DELAY);
     gpio_set_level(board::kPcaOe, 1);
     enabled_ = false;
     esp_err_t err_pwm = pwm_.clear();
     esp_err_t err_pixels = pixels_.blackout();
-    xSemaphoreGive(mutex_);
+    xSemaphoreGiveRecursive(mutex_);
     return (err_pixels != ESP_OK) ? err_pixels : err_pwm;
 }
 
 esp_err_t OutputController::commit() {
-    xSemaphoreTake(mutex_, portMAX_DELAY);
+    xSemaphoreTakeRecursive(mutex_, portMAX_DELAY);
     esp_err_t err_pwm = pwm_.commit();
     esp_err_t err_pixels = pixels_.show();
     
@@ -63,7 +63,7 @@ esp_err_t OutputController::commit() {
         enabled_ = false;
         ESP_LOGE("output", "Pixels hardware commit failed (%s), disabling output safety interlock", esp_err_to_name(err_pixels));
     }
-    xSemaphoreGive(mutex_);
+    xSemaphoreGiveRecursive(mutex_);
     return (err_pixels != ESP_OK) ? err_pixels : err_pwm;
 }
 

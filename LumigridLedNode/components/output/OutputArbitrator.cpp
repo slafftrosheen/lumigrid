@@ -95,12 +95,12 @@ esp_err_t OutputArbitrator::commit_frame(OutputPriority priority, bool enable_ou
         return ESP_ERR_INVALID_STATE;
     }
     
-    if (enable_output) {
-        controller_.enable();
-    }
-    
     esp_err_t err = controller_.commit();
     controller_.unlock();
+    
+    if (enable_output && err == ESP_OK) {
+        controller_.enable();
+    }
     
     frame_active_ = false;
     xSemaphoreGive(mutex_);
