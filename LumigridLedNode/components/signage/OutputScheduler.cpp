@@ -4,7 +4,7 @@
 
 namespace lg {
 
-void OutputScheduler::schedule(
+esp_err_t OutputScheduler::schedule(
     const RenderFrame& frame,
     const DeviceConfig& device_cfg,
     OutputController& controller
@@ -42,7 +42,7 @@ void OutputScheduler::schedule(
         }
     }
 
-    controller.commit();
+    return controller.commit();
 }
 
 } // namespace lg

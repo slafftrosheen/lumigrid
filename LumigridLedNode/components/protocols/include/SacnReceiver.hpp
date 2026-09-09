@@ -14,6 +14,8 @@ struct SacnDmxPacket {
     uint16_t length = 0;
     uint8_t sequence = 0;
     uint8_t priority = 0;
+    uint32_t cid_hash = 0;
+    uint8_t cid[16] = {};
     uint8_t data[512] = {};
 };
 
@@ -23,7 +25,7 @@ class SacnReceiver {
 public:
     esp_err_t start(SacnDmxCallback callback);
 
-    /// Configure active universes for multicast group membership (IGMP join).
+    /// Configure active universes for multicast group membership (IGMP join/leave).
     void set_subscribed_universes(const uint16_t* universes, size_t count);
 
 private:
@@ -31,6 +33,7 @@ private:
     void task();
     bool handle_packet(const uint8_t* packet, size_t length);
     void join_multicast_groups(int sock);
+    void leave_multicast_groups(int sock);
 
     SacnDmxCallback callback_{};
     int sock_ = -1;

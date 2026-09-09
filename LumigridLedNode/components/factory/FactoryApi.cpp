@@ -1038,7 +1038,13 @@ esp_err_t put_device_config(httpd_req_t* request) {
             }
             
             const cJSON* f_np = cJSON_GetObjectItemCaseSensitive(f_item, "numPixels");
-            if (f_np && cJSON_IsNumber(f_np)) cfg.fixtures[f_idx].num_pixels = static_cast<uint16_t>(f_np->valueint);
+            if (f_np && cJSON_IsNumber(f_np)) {
+                if (f_np->valueint < 0 || f_np->valueint > MAX_FIXTURE_PIXELS) {
+                    cJSON_Delete(root);
+                    return send_error(request, "400 Bad Request", "fixture_pixel_limit_exceeded_max_256");
+                }
+                cfg.fixtures[f_idx].num_pixels = static_cast<uint16_t>(f_np->valueint);
+            }
             
             const cJSON* f_mb = cJSON_GetObjectItemCaseSensitive(f_item, "maxBrightness");
             if (f_mb && cJSON_IsNumber(f_mb)) cfg.fixtures[f_idx].max_brightness = static_cast<uint8_t>(f_mb->valueint);

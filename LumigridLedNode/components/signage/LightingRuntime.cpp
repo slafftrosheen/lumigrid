@@ -61,14 +61,16 @@ esp_err_t LightingRuntime::start() {
 }
 
 void LightingRuntime::trigger_estop() {
-    estop_active_.store(true, std::memory_order_release);
+    estop_state_.store(EstopState::Tripped, std::memory_order_release);
     controller_.blackout();
-    ESP_LOGW(TAG, "EMERGENCY STOP TRIGGERED: Hardware output blacked out");
+    ESP_LOGW(TAG, "EMERGENCY STOP TRIGGERED: Hardware output blacked out (latched)");
 }
 
 void LightingRuntime::clear_estop() {
-    estop_active_.store(false, std::memory_order_release);
-    ESP_LOGI(TAG, "EMERGENCY STOP CLEARED: Resuming normal lighting control");
+    if (estop_state_.load(std::memory_order_relaxed) == EstopState::Tripped) {
+        estop_state_.store(EstopState::PendingReset, std::memory_order_release);
+        ESP_LOGI(TAG, "EMERGENCY STOP CLEAR REQUESTED: Forcing 1-frame blackout before scene resume");
+    }
 }
 
 void LightingRuntime::task_entry(void* arg) {
@@ -97,29 +99,59 @@ void LightingRuntime::task() {
 }
 
 void LightingRuntime::render_frame(uint32_t current_ms) {
-    if (!mutex_ || xSemaphoreTake(mutex_, pdMS_TO_TICKS(10)) != pdTRUE) {
-        return;
-    }
-
-    if (estop_active_.load(std::memory_order_acquire)) {
+    // Check E-Stop state
+    const EstopState es = estop_state_.load(std::memory_order_acquire);
+    if (es == EstopState::Tripped) {
         controller_.blackout();
         if (preview_cb_) {
             RenderFrame blank{};
-            preview_cb_(blank, device_cfg_);
+            DeviceConfig local_cfg;
+            if (mutex_ && xSemaphoreTake(mutex_, pdMS_TO_TICKS(5)) == pdTRUE) {
+                local_cfg = device_cfg_;
+                xSemaphoreGive(mutex_);
+                preview_cb_(blank, local_cfg);
+            }
         }
-        xSemaphoreGive(mutex_);
+        return;
+    } else if (es == EstopState::PendingReset) {
+        // Enforce 1-frame blackout acknowledgement before normal scene rendering resumes
+        controller_.blackout();
+        if (preview_cb_) {
+            RenderFrame blank{};
+            DeviceConfig local_cfg;
+            if (mutex_ && xSemaphoreTake(mutex_, pdMS_TO_TICKS(5)) == pdTRUE) {
+                local_cfg = device_cfg_;
+                xSemaphoreGive(mutex_);
+                preview_cb_(blank, local_cfg);
+            }
+        }
+        estop_state_.store(EstopState::Inactive, std::memory_order_release);
+        ESP_LOGI(TAG, "EMERGENCY STOP RESET: Resuming lighting output");
         return;
     }
 
-    const SceneConfig& render_scene = scene_manager_.process_frame(current_ms);
-    uint32_t effect_elapsed = current_ms;
+    // 1. Snapshot shared state under short critical section (< 10 µs)
+    LiveDmxFrame active_live;
+    SceneConfig render_scene;
+    DeviceConfig local_cfg;
 
-    // Stream timeout checks
-    const uint16_t timeout_ms = device_cfg_.protocol.stream_timeout_ms > 0 ? device_cfg_.protocol.stream_timeout_ms : 2000;
+    if (!mutex_ || xSemaphoreTake(mutex_, pdMS_TO_TICKS(5)) != pdTRUE) {
+        return;
+    }
+    active_live = live_dmx_frame_;
+    render_scene = scene_manager_.process_frame(current_ms);
+    local_cfg = device_cfg_;
+    xSemaphoreGive(mutex_);
+
+    // 2. Snapshot control arbitration states (lock-free evaluation)
+    ControlSnapshot ctrl_snapshot = source_manager_.get_snapshot(current_ms);
+
+    // 3. Local pruning of expired live streams
+    const uint16_t timeout_ms = local_cfg.protocol.stream_timeout_ms > 0 ? local_cfg.protocol.stream_timeout_ms : 2000;
     bool any_live_active = false;
     for (uint8_t z = 0; z < 8; ++z) {
         for (uint8_t l = 0; l < 3; ++l) {
-            auto& layer = live_dmx_frame_.layers[z][l];
+            auto& layer = active_live.layers[z][l];
             if (layer.active) {
                 if (current_ms - layer.timestamp_ms > timeout_ms) {
                     layer.active = false;
@@ -132,7 +164,7 @@ void LightingRuntime::render_frame(uint32_t current_ms) {
     }
 
     for (uint8_t f = 0; f < 16; ++f) {
-        auto& fix = live_dmx_frame_.fixtures[f];
+        auto& fix = active_live.fixtures[f];
         if (fix.active) {
             if (current_ms - fix.timestamp_ms > timeout_ms) {
                 fix.active = false;
@@ -143,11 +175,11 @@ void LightingRuntime::render_frame(uint32_t current_ms) {
         }
     }
 
-    if (!any_live_active && source_manager_.current_owner() == ControlSource::LiveDmx) {
+    if (!any_live_active && ctrl_snapshot.current_owner == ControlSource::LiveDmx) {
         source_manager_.release(ControlSource::LiveDmx);
     }
 
-    // 1. Render Pipeline
+    // 4. Render Pipeline (Completely lock-free!)
     RenderFrame& render_frame = current_render_frame_;
     for (auto& fixture : render_frame.fixtures) {
         fixture.pixels.fill(LightValue{0,0,0,0});
@@ -155,7 +187,7 @@ void LightingRuntime::render_frame(uint32_t current_ms) {
     }
 
     for (uint8_t f = 0; f < 16; ++f) {
-        const FixtureConfig& fixture = device_cfg_.fixtures[f];
+        const FixtureConfig& fixture = local_cfg.fixtures[f];
         bool is_pwm = (fixture.profile == FixtureProfile::PWM_Single ||
                        fixture.profile == FixtureProfile::PWM_RGB ||
                        fixture.profile == FixtureProfile::PWM_RGBW);
@@ -164,64 +196,68 @@ void LightingRuntime::render_frame(uint32_t current_ms) {
         const uint8_t target_zone = fixture.zone_id;
         if (target_zone >= 8) continue;
 
-        const ZoneContent& zone = render_scene.zones[target_zone];
-        FixtureFrame& composited_zone = current_composited_zone_; 
-        composited_zone.pixels.fill(LightValue{0,0,0,0});
-        composited_zone.pwm.fill(0);
+        ControlSource fx_owner = ctrl_snapshot.resolve_fixture(f, target_zone, current_ms);
 
-        // Composite 3 layers
-        for (uint8_t l = 0; l < 3; ++l) {
-            ControlSource owner = source_manager_.resolve(target_zone, l, current_ms);
-            FixtureFrame& layer_frame = current_layer_frame_;
-            layer_frame.pixels.fill(LightValue{0,0,0,0});
-            layer_frame.pwm.fill(0);
-
-            if (owner == ControlSource::LiveDmx && live_dmx_frame_.layers[target_zone][l].active) {
-                const auto& live = live_dmx_frame_.layers[target_zone][l];
-                if (live.opacity == 0) continue;
-                
-                uint16_t pcount = std::min<uint16_t>(fixture.num_pixels, MAX_PIXELS);
-                for (uint16_t px = 0; px < pcount; ++px) {
-                    layer_frame.pixels[px] = LightValue{live.color.r, live.color.g, live.color.b, 0};
-                }
-                layer_frame.pwm[0] = (static_cast<uint32_t>(live.color.r) * 4095) / 255;
-                
-                Compositor::blend(composited_zone, layer_frame, BlendMode::Normal, live.opacity, fixture.num_pixels);
-            } else {
-                if (!zone.layers[l].enabled || zone.layers[l].opacity == 0) continue;
-                EffectRenderer::render_layer(layer_frame, zone.layers[l], fixture.num_pixels, effect_elapsed);
-                Compositor::blend(composited_zone, layer_frame, zone.layers[l].blend_mode, zone.layers[l].opacity, fixture.num_pixels);
-            }
-        }
-
-        // Map to fixture (applies effective brightness, white balance, SK6812 RGBW, and gamma)
-        FixtureMapper::map(render_frame.fixtures[f], composited_zone, fixture, render_scene.global_brightness);
-
-        // If direct fixture live DMX is active, blend into rendered fixture
-        if (live_dmx_frame_.fixtures[f].active && live_dmx_frame_.fixtures[f].opacity > 0) {
+        if (fx_owner == ControlSource::LiveDmx && active_live.fixtures[f].active && active_live.fixtures[f].opacity > 0) {
+            // Direct fixture DMX override takes precedence
             FixtureFrame live_mapped;
             FixtureFrame live_src;
-            const uint16_t pcount = std::min<uint16_t>(live_dmx_frame_.fixtures[f].pixel_count, fixture.num_pixels);
+            const uint16_t pcount = std::min<uint16_t>(active_live.fixtures[f].pixel_count, fixture.num_pixels);
             for (uint16_t p = 0; p < pcount; ++p) {
-                live_src.pixels[p] = live_dmx_frame_.fixtures[f].pixels[p];
+                live_src.pixels[p] = active_live.fixtures[f].pixels[p];
             }
-            live_src.pwm = live_dmx_frame_.fixtures[f].pwm;
-            FixtureMapper::map(live_mapped, live_src, fixture, render_scene.global_brightness);
-            Compositor::blend(render_frame.fixtures[f], live_mapped, BlendMode::Normal, live_dmx_frame_.fixtures[f].opacity, fixture.num_pixels);
+            live_src.pwm = active_live.fixtures[f].pwm;
+            FixtureMapper::map(render_frame.fixtures[f], live_src, fixture, render_scene.global_brightness);
+        } else {
+            // Zone compositing
+            const ZoneContent& zone = render_scene.zones[target_zone];
+            FixtureFrame& composited_zone = current_composited_zone_; 
+            composited_zone.pixels.fill(LightValue{0,0,0,0});
+            composited_zone.pwm.fill(0);
+
+            for (uint8_t l = 0; l < 3; ++l) {
+                ControlSource owner = ctrl_snapshot.resolve(target_zone, l, current_ms);
+                FixtureFrame& layer_frame = current_layer_frame_;
+                layer_frame.pixels.fill(LightValue{0,0,0,0});
+                layer_frame.pwm.fill(0);
+
+                if (owner == ControlSource::LiveDmx && active_live.layers[target_zone][l].active) {
+                    const auto& live = active_live.layers[target_zone][l];
+                    if (live.opacity == 0) continue;
+                    
+                    uint16_t pcount = std::min<uint16_t>(fixture.num_pixels, MAX_PIXELS);
+                    for (uint16_t px = 0; px < pcount; ++px) {
+                        layer_frame.pixels[px] = LightValue{live.color.r, live.color.g, live.color.b, 0};
+                    }
+                    layer_frame.pwm[0] = (static_cast<uint32_t>(live.color.r) * 4095) / 255;
+                    
+                    Compositor::blend(composited_zone, layer_frame, BlendMode::Normal, live.opacity, fixture.num_pixels);
+                } else {
+                    if (!zone.layers[l].enabled || zone.layers[l].opacity == 0) continue;
+                    EffectRenderer::render_layer(layer_frame, zone.layers[l], fixture.num_pixels, current_ms);
+                    Compositor::blend(composited_zone, layer_frame, zone.layers[l].blend_mode, zone.layers[l].opacity, fixture.num_pixels);
+                }
+            }
+
+            FixtureMapper::map(render_frame.fixtures[f], composited_zone, fixture, render_scene.global_brightness);
         }
     }
 
-    // 2. Power Limiting
-    power_budget_.enforce(render_frame, device_cfg_, current_ms);
+    // 5. Power Limiting
+    power_budget_.enforce(render_frame, local_cfg, current_ms);
 
-    // 3. Physical Output Scheduling
-    OutputScheduler::schedule(render_frame, device_cfg_, controller_);
-    
-    // 4. Logical RenderFrame Preview
-    if (preview_cb_) {
-        preview_cb_(render_frame, device_cfg_);
+    // 6. Physical Output Scheduling & Error Handling
+    const esp_err_t sched_err = OutputScheduler::schedule(render_frame, local_cfg, controller_);
+    if (sched_err != ESP_OK) {
+        output_fault_.store(true, std::memory_order_relaxed);
+    } else if (output_fault_.load(std::memory_order_relaxed)) {
+        output_fault_.store(false, std::memory_order_relaxed);
     }
-    xSemaphoreGive(mutex_);
+    
+    // 7. Logical RenderFrame Preview
+    if (preview_cb_) {
+        preview_cb_(render_frame, local_cfg);
+    }
 }
 
 void LightingRuntime::activate_scene(uint8_t index) {
@@ -244,20 +280,26 @@ void LightingRuntime::submit_live_frame(const LiveDmxFrame& frame) {
     live_dmx_frame_.timestamp_ms = now;
     last_live_stream_ms_ = now;
 
-    const uint16_t timeout_ms = device_cfg_.protocol.stream_timeout_ms > 0 ? device_cfg_.protocol.stream_timeout_ms : 2000;
+    uint8_t live_zone_mask = 0;
+    uint8_t live_layer_mask = 0;
+    uint16_t live_fixture_mask = 0;
+
     for (uint8_t z = 0; z < 8; ++z) {
         for (uint8_t l = 0; l < 3; ++l) {
             if (live_dmx_frame_.layers[z][l].active) {
-                source_manager_.acquire(ControlSource::LiveDmx, timeout_ms, (1 << z), (1 << l));
+                live_zone_mask |= (1 << z);
+                live_layer_mask |= (1 << l);
             }
         }
     }
     for (uint8_t f = 0; f < 16; ++f) {
         if (live_dmx_frame_.fixtures[f].active) {
-            const uint8_t zone_id = device_cfg_.fixtures[f].zone_id;
-            source_manager_.acquire(ControlSource::LiveDmx, timeout_ms, (1 << zone_id), 0xFF);
+            live_fixture_mask |= (1 << f);
         }
     }
+
+    const uint16_t timeout_ms = device_cfg_.protocol.stream_timeout_ms > 0 ? device_cfg_.protocol.stream_timeout_ms : 2000;
+    source_manager_.acquire(ControlSource::LiveDmx, timeout_ms, live_zone_mask, live_layer_mask, live_fixture_mask);
     xSemaphoreGive(mutex_);
 }
 
@@ -273,7 +315,7 @@ void LightingRuntime::inject_live_data(uint8_t zone_idx, uint8_t layer_idx, cons
     last_live_stream_ms_ = now;
 
     const uint16_t timeout_ms = device_cfg_.protocol.stream_timeout_ms > 0 ? device_cfg_.protocol.stream_timeout_ms : 2000;
-    source_manager_.acquire(ControlSource::LiveDmx, timeout_ms, (1 << zone_idx), (1 << layer_idx));
+    source_manager_.acquire(ControlSource::LiveDmx, timeout_ms, (1 << zone_idx), (1 << layer_idx), 0);
     xSemaphoreGive(mutex_);
 }
 
@@ -303,20 +345,16 @@ void LightingRuntime::inject_live_fixture(
     last_live_stream_ms_ = now;
 
     const uint16_t timeout_ms = device_cfg_.protocol.stream_timeout_ms > 0 ? device_cfg_.protocol.stream_timeout_ms : 2000;
-    const uint8_t zone_id = device_cfg_.fixtures[fixture_idx].zone_id;
-    source_manager_.acquire(ControlSource::LiveDmx, timeout_ms, (1 << zone_id), 0xFF);
+    source_manager_.acquire(ControlSource::LiveDmx, timeout_ms, 0, 0, (1 << fixture_idx));
     xSemaphoreGive(mutex_);
 }
 
-void LightingRuntime::update_dmx_data(const uint8_t* data, size_t length) {
-    if (!mutex_) return;
+std::array<uint8_t, 512> LightingRuntime::last_dmx_data() const {
+    if (!mutex_) return {};
     xSemaphoreTake(mutex_, portMAX_DELAY);
-    if (length > 512) length = 512;
-    memcpy(dmx_data_.data(), data, length);
-    if (length < 512) {
-        memset(dmx_data_.data() + length, 0, 512 - length);
-    }
+    std::array<uint8_t, 512> dmx = live_dmx_frame_.dmx_telemetry;
     xSemaphoreGive(mutex_);
+    return dmx;
 }
 
 void LightingRuntime::feed_watchdog() {

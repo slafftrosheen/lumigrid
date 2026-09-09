@@ -20,6 +20,15 @@ uint16_t be16(const uint8_t* p) {
            (static_cast<uint16_t>(p[0]) << 8);
 }
 
+uint32_t fnv1a_32(const uint8_t* data, size_t len) {
+    uint32_t hash = 2166136261u;
+    for (size_t i = 0; i < len; ++i) {
+        hash ^= data[i];
+        hash *= 16777619u;
+    }
+    return hash;
+}
+
 } // namespace
 
 esp_err_t SacnReceiver::start(SacnDmxCallback callback) {
@@ -38,16 +47,48 @@ esp_err_t SacnReceiver::start(SacnDmxCallback callback) {
 
 void SacnReceiver::set_subscribed_universes(const uint16_t* universes, size_t count) {
     std::lock_guard<std::mutex> lock(mtx_);
+    if (sock_ >= 0) {
+        leave_multicast_groups(sock_);
+    }
+
     subscribed_count_ = 0;
     if (universes && count > 0) {
-        size_t n = (count < subscribed_universes_.size()) ? count : subscribed_universes_.size();
-        for (size_t i = 0; i < n; ++i) {
-            subscribed_universes_[i] = universes[i];
+        for (size_t i = 0; i < count; ++i) {
+            uint16_t u = universes[i];
+            if (u == 0 || u > 63999) continue;
+
+            // Deduplicate
+            bool duplicate = false;
+            for (size_t j = 0; j < subscribed_count_; ++j) {
+                if (subscribed_universes_[j] == u) {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (!duplicate && subscribed_count_ < subscribed_universes_.size()) {
+                subscribed_universes_[subscribed_count_++] = u;
+            }
         }
-        subscribed_count_ = n;
     }
+
     if (sock_ >= 0) {
         join_multicast_groups(sock_);
+    }
+}
+
+void SacnReceiver::leave_multicast_groups(int sock) {
+    for (size_t i = 0; i < subscribed_count_; ++i) {
+        uint16_t u = subscribed_universes_[i];
+        if (u == 0 || u > 63999) continue;
+
+        struct ip_mreq mreq = {};
+        mreq.imr_multiaddr.s_addr = htonl((239U << 24) | (255U << 16) | u);
+        mreq.imr_interface.s_addr = htonl(INADDR_ANY);
+
+        int res = ::setsockopt(sock, IPPROTO_IP, IP_DROP_MEMBERSHIP, &mreq, sizeof(mreq));
+        if (res == 0) {
+            ESP_LOGI(kTag, "Left sACN multicast group 239.255.%u.%u for universe %u", (u >> 8) & 0xFF, u & 0xFF, u);
+        }
     }
 }
 
@@ -138,6 +179,11 @@ bool SacnReceiver::handle_packet(const uint8_t* packet, size_t length) {
     // Root Vector (0x00000004 for E1.31 data packet)
     if (packet[18] != 0 || packet[19] != 0 || packet[20] != 0 || packet[21] != 4) return false;
 
+    // Extract CID (bytes 22..37)
+    uint8_t cid[16];
+    std::memcpy(cid, packet + 22, 16);
+    uint32_t cid_hash = fnv1a_32(cid, 16);
+
     // Framing Layer Vector (0x00000002)
     if (packet[40] != 0 || packet[41] != 0 || packet[42] != 0 || packet[43] != 2) return false;
 
@@ -164,6 +210,8 @@ bool SacnReceiver::handle_packet(const uint8_t* packet, size_t length) {
     out.universe = universe;
     out.sequence = sequence;
     out.priority = priority;
+    out.cid_hash = cid_hash;
+    std::memcpy(out.cid, cid, 16);
     out.length = prop_val_count - 1; // Subtract start code
     
     if (out.length > 512) out.length = 512;

@@ -32,7 +32,6 @@ public:
 
     void inject_live_data(uint8_t zone_idx, uint8_t layer_idx, const BrandColor& color, uint8_t opacity);
     void inject_live_fixture(uint8_t fixture_idx, const LightValue* pixels, uint16_t count, const uint16_t* pwm_duties, uint8_t opacity);
-    void update_dmx_data(const uint8_t* data, size_t length);
     void feed_watchdog();
     
     uint8_t active_scene_index() const;
@@ -49,12 +48,19 @@ public:
     void release_control(ControlSource source);
     ControlSource current_control_source() const;
 
-    // Absolute E-Stop safety state
+    // Absolute E-Stop safety state with latched recovery semantics
     void trigger_estop();
     void clear_estop();
-    bool is_estop_active() const { return estop_active_.load(std::memory_order_relaxed); }
+    bool is_estop_active() const {
+        return estop_state_.load(std::memory_order_relaxed) != EstopState::Inactive;
+    }
 
-    const std::array<uint8_t, 512>& last_dmx_data() const { return dmx_data_; }
+    // Hardware output fault tracking
+    bool is_output_fault() const {
+        return output_fault_.load(std::memory_order_relaxed);
+    }
+
+    std::array<uint8_t, 512> last_dmx_data() const;
 
     using PreviewCallback = std::function<void(const RenderFrame& frame, const DeviceConfig& cfg)>;
     void set_preview_callback(PreviewCallback cb) { preview_cb_ = std::move(cb); }
@@ -63,6 +69,12 @@ public:
     void set_config_reload_callback(ConfigReloadCallback cb) { config_reload_cb_ = std::move(cb); }
 
 private:
+    enum class EstopState : uint8_t {
+        Inactive = 0,
+        Tripped = 1,
+        PendingReset = 2
+    };
+
     ConfigReloadCallback config_reload_cb_;
     static void task_entry(void* arg);
     void task();
@@ -74,10 +86,10 @@ private:
     PowerBudget power_budget_;
     SceneManager scene_manager_;
 
-    std::atomic<bool> estop_active_{false};
+    std::atomic<EstopState> estop_state_{EstopState::Inactive};
+    std::atomic<bool> output_fault_{false};
 
     DeviceConfig device_cfg_{};
-    std::array<uint8_t, 512> dmx_data_{};
 
     LiveDmxFrame live_dmx_frame_{};
     uint32_t last_live_stream_ms_ = 0;

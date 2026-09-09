@@ -54,6 +54,7 @@ void ControlSourceManager::evaluate_priority(uint32_t current_ms) {
 
 bool ControlSourceManager::acquire(ControlSource source, uint32_t lease_ms,
                                     uint8_t zone_mask, uint8_t layer_mask,
+                                    uint16_t fixture_mask,
                                     bool takeover) {
     if (source == ControlSource::Idle) return true;
     if (!mutex_) return false;
@@ -68,6 +69,7 @@ bool ControlSourceManager::acquire(ControlSource source, uint32_t lease_ms,
     states_[index].expires_ms = (lease_ms == 0) ? 0 : (now + lease_ms);
     states_[index].zone_mask = zone_mask;
     states_[index].layer_mask = layer_mask;
+    states_[index].fixture_mask = fixture_mask;
     states_[index].takeover = takeover;
     
     evaluate_priority(now);
@@ -91,21 +93,31 @@ void ControlSourceManager::release(ControlSource source) {
     xSemaphoreGive(mutex_);
 }
 
-ControlSource ControlSourceManager::resolve(uint8_t zone_idx, uint8_t layer_idx, uint32_t current_ms) const {
-    const uint8_t z_bit = (zone_idx < 8) ? (1 << zone_idx) : 0;
-    const uint8_t l_bit = (layer_idx < 3) ? (1 << layer_idx) : 0;
-
-    for (int i = 7; i >= 0; --i) {
-        if (states_[i].active) {
-            if (states_[i].expires_ms != 0 && current_ms >= states_[i].expires_ms) {
-                continue; // expired
-            }
-            if ((states_[i].zone_mask & z_bit) && (states_[i].layer_mask & l_bit)) {
-                return static_cast<ControlSource>(i);
-            }
+ControlSnapshot ControlSourceManager::get_snapshot(uint32_t current_ms) {
+    ControlSnapshot snap;
+    if (mutex_) {
+        xSemaphoreTake(mutex_, portMAX_DELAY);
+        evaluate_priority(current_ms);
+        for (int i = 0; i < 8; ++i) {
+            snap.states[i] = states_[i];
         }
+        snap.current_owner = current_owner_;
+        xSemaphoreGive(mutex_);
+    } else {
+        for (int i = 0; i < 8; ++i) {
+            snap.states[i] = states_[i];
+        }
+        snap.current_owner = current_owner_;
     }
-    return ControlSource::Idle;
+    return snap;
+}
+
+ControlSource ControlSourceManager::resolve(uint8_t zone_idx, uint8_t layer_idx, uint32_t current_ms) const {
+    return const_cast<ControlSourceManager*>(this)->get_snapshot(current_ms).resolve(zone_idx, layer_idx, current_ms);
+}
+
+ControlSource ControlSourceManager::resolve_fixture(uint8_t fixture_idx, uint8_t zone_idx, uint32_t current_ms) const {
+    return const_cast<ControlSourceManager*>(this)->get_snapshot(current_ms).resolve_fixture(fixture_idx, zone_idx, current_ms);
 }
 
 } // namespace lg

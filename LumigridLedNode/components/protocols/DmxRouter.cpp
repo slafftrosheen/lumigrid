@@ -24,6 +24,7 @@ DmxRouter::DmxRouter(LightingRuntime& lighting, const DeviceConfig& config)
 }
 
 void DmxRouter::update_config(const DeviceConfig& config) {
+    std::lock_guard<std::mutex> lock(frame_mutex_);
     protocol_cfg_ = config.protocol;
     for (uint8_t f = 0; f < 16; ++f) {
         fixtures_[f] = config.fixtures[f];
@@ -33,6 +34,7 @@ void DmxRouter::update_config(const DeviceConfig& config) {
 size_t DmxRouter::get_active_universes(uint16_t* out_universes, size_t max_count) const {
     if (!out_universes || max_count == 0) return 0;
 
+    std::lock_guard<std::mutex> lock(frame_mutex_);
     size_t count = 0;
     auto add_universe = [&](uint16_t u) {
         for (size_t i = 0; i < count; ++i) {
@@ -55,17 +57,19 @@ size_t DmxRouter::get_active_universes(uint16_t* out_universes, size_t max_count
 
 void DmxRouter::handle_artnet_dmx(const ArtnetDmxPacket& packet) {
     if (!protocol_cfg_.artnet_enabled) return;
-    process_frame(packet.universe, packet.data, packet.length, 100, 1 /* Art-Net source */);
+    process_frame(packet.universe, packet.data, packet.length, 100,
+                  SourceId{DmxProtocol::ArtNet, packet.source_ip}, 0);
 }
 
 void DmxRouter::handle_sacn_dmx(const SacnDmxPacket& packet) {
     if (!protocol_cfg_.sacn_enabled) return;
-    process_frame(packet.universe, packet.data, packet.length, packet.priority, 2 /* sACN source */);
+    process_frame(packet.universe, packet.data, packet.length, packet.priority,
+                  SourceId{DmxProtocol::sACN, packet.cid_hash}, packet.sequence);
 }
 
 DmxRouter::UniverseState* DmxRouter::get_or_create_universe(uint16_t universe) {
     const uint32_t current_ms = now_ms();
-    const uint32_t stream_timeout = protocol_cfg_.stream_timeout_ms > 0 ? protocol_cfg_.stream_timeout_ms : 2000;
+    const uint32_t stream_timeout = stream_timeout_ms();
 
     UniverseState* oldest_slot = nullptr;
     uint32_t oldest_age = 0xFFFFFFFF;
@@ -89,6 +93,7 @@ DmxRouter::UniverseState* DmxRouter::get_or_create_universe(uint16_t universe) {
         oldest_slot->merged_length = 0;
         for (auto& src : oldest_slot->sources) {
             src.active = false;
+            src.sequence_valid = false;
         }
         oldest_slot->active = true;
         return oldest_slot;
@@ -98,7 +103,7 @@ DmxRouter::UniverseState* DmxRouter::get_or_create_universe(uint16_t universe) {
 }
 
 void DmxRouter::recompute_merge(UniverseState& state, uint32_t current_ms) {
-    const uint32_t stream_timeout = protocol_cfg_.stream_timeout_ms > 0 ? protocol_cfg_.stream_timeout_ms : 2000;
+    const uint32_t stream_timeout = stream_timeout_ms();
 
     // Prune timed-out sources
     uint8_t highest_priority = 0;
@@ -108,6 +113,7 @@ void DmxRouter::recompute_merge(UniverseState& state, uint32_t current_ms) {
         if (src.active) {
             if (current_ms - src.last_packet_ms > stream_timeout) {
                 src.active = false;
+                src.sequence_valid = false;
             } else {
                 any_active = true;
                 if (src.priority > highest_priority) {
@@ -160,7 +166,8 @@ void DmxRouter::recompute_merge(UniverseState& state, uint32_t current_ms) {
     state.merged_length = max_len;
 }
 
-void DmxRouter::process_frame(uint16_t universe, const uint8_t* data, uint16_t length, uint8_t priority, uint32_t source_id) {
+void DmxRouter::process_frame(uint16_t universe, const uint8_t* data, uint16_t length,
+                              uint8_t priority, SourceId source_id, uint8_t sequence) {
     if (!data || length == 0) return;
     if (length > 512) length = 512;
 
@@ -175,9 +182,13 @@ void DmxRouter::process_frame(uint16_t universe, const uint8_t* data, uint16_t l
     }
     if (!relevant) return;
 
+    std::lock_guard<std::mutex> lock(frame_mutex_);
+
     const uint32_t current_ms = now_ms();
     UniverseState* state = get_or_create_universe(universe);
     if (!state) return;
+
+    const uint32_t timeout = stream_timeout_ms();
 
     // Locate or allocate source slot
     SourceStream* target_src = nullptr;
@@ -189,7 +200,7 @@ void DmxRouter::process_frame(uint16_t universe, const uint8_t* data, uint16_t l
             target_src = &src;
             break;
         }
-        if (!src.active || (current_ms - src.last_packet_ms > protocol_cfg_.stream_timeout_ms)) {
+        if (!src.active || (current_ms - src.last_packet_ms > timeout)) {
             if (!oldest_src || src.last_packet_ms < oldest_src_age) {
                 oldest_src = &src;
                 oldest_src_age = src.last_packet_ms;
@@ -199,8 +210,24 @@ void DmxRouter::process_frame(uint16_t universe, const uint8_t* data, uint16_t l
 
     if (!target_src) {
         target_src = oldest_src;
+        if (target_src) {
+            target_src->sequence_valid = false;
+        }
     }
     if (!target_src) return;
+
+    // ANSI E1.31-2016 sACN sequence filtering
+    if (source_id.protocol == DmxProtocol::sACN) {
+        if (target_src->active && target_src->sequence_valid) {
+            const int8_t diff = static_cast<int8_t>(sequence - target_src->last_sequence);
+            // Stale or out-of-order packet: diff <= 0 && diff > -20
+            if (diff <= 0 && diff > -20) {
+                return;
+            }
+        }
+        target_src->last_sequence = sequence;
+        target_src->sequence_valid = true;
+    }
 
     target_src->source_id = source_id;
     target_src->priority = priority;
@@ -300,9 +327,15 @@ void DmxRouter::dispatch_patch(uint16_t universe, const uint8_t* data, uint16_t 
         }
     }
 
-    // 3. Single-handoff atomic submission to LightingRuntime
-    lighting_.update_dmx_data(data, length);
+    // 3. Single authoritative DMX telemetry buffer & atomic submission to LightingRuntime
+    const uint16_t copy_len = std::min<uint16_t>(length, 512);
+    std::memcpy(live_frame_.dmx_telemetry.data(), data, copy_len);
+    live_frame_.dmx_telemetry_len = copy_len;
+    live_frame_.timestamp_ms = now;
+    live_frame_.active = true;
+
     lighting_.submit_live_frame(live_frame_);
 }
 
 } // namespace lg
+

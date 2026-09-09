@@ -43,6 +43,11 @@ void copy_padded(uint8_t* dst, size_t length, const std::string& src) {
 
 esp_err_t ArtnetDiscovery::start(const ArtnetNodeInfo& info, ArtnetDmxCallback dmx_callback) {
     info_ = info;
+    uint8_t net = 0, subnet = 0, univ = 0;
+    decode_port_address(info_.universe, net, subnet, univ);
+    info_.net = net;
+    info_.subnet = subnet;
+    info_.sw_out[0] = univ;
     dmx_callback_ = std::move(dmx_callback);
 
     return xTaskCreatePinnedToCore(
@@ -60,13 +65,23 @@ void ArtnetDiscovery::set_output_universes(const uint16_t* universes, uint8_t co
     std::lock_guard<std::mutex> lock(mtx_);
     if (!universes || count == 0) {
         info_.num_ports = 1;
-        info_.sw_out[0] = static_cast<uint8_t>(info_.universe & 0x0F);
+        uint8_t net = 0, subnet = 0, univ = 0;
+        decode_port_address(info_.universe, net, subnet, univ);
+        info_.net = net;
+        info_.subnet = subnet;
+        info_.sw_out[0] = univ;
         return;
     }
     uint8_t n = (count < 4) ? count : 4;
     info_.num_ports = n;
+    uint8_t net = 0, subnet = 0, univ = 0;
+    decode_port_address(universes[0], net, subnet, univ);
+    info_.net = net;
+    info_.subnet = subnet;
     for (uint8_t i = 0; i < n; ++i) {
-        info_.sw_out[i] = static_cast<uint8_t>(universes[i] & 0x0F);
+        uint8_t p_net = 0, p_sub = 0, p_univ = 0;
+        decode_port_address(universes[i], p_net, p_sub, p_univ);
+        info_.sw_out[i] = p_univ;
     }
 }
 
@@ -122,7 +137,7 @@ void ArtnetDiscovery::task() {
         if (opcode == kOpPoll) {
             handle_poll(buffer, received, source, sock);
         } else if (opcode == kOpDmx) {
-            handle_dmx(buffer, received);
+            handle_dmx(buffer, received, source);
         }
     }
 }
@@ -140,13 +155,14 @@ bool ArtnetDiscovery::handle_poll(const uint8_t* packet, size_t length, const so
     return true;
 }
 
-bool ArtnetDiscovery::handle_dmx(const uint8_t* packet, size_t length) {
+bool ArtnetDiscovery::handle_dmx(const uint8_t* packet, size_t length, const sockaddr_in& source) {
     if (length < 18) return false;
 
     ArtnetDmxPacket out;
     out.sequence = packet[12];
     out.universe = le16(packet + 14);
     out.length = be16(packet + 16);
+    out.source_ip = ntohl(source.sin_addr.s_addr);
 
     if (out.length == 0 || out.length > 512) return false;
     if (18 + out.length > length) return false;
@@ -198,8 +214,8 @@ void ArtnetDiscovery::send_poll_reply(const sockaddr_in& destination, int sock) 
     reply[17] = static_cast<uint8_t>(info_.version & 0xFF);        // 17: VersInfoL
 
     // --- Net/Sub/OEM (18-21) ---
-    reply[18] = info_.net;                       // 18: NetSwitch
-    reply[19] = info_.subnet;                    // 19: SubSwitch
+    reply[18] = info_.net;                       // 18: NetSwitch (bits 14..8 of 15-bit Port-Address)
+    reply[19] = info_.subnet;                    // 19: SubSwitch (bits 7..4 of 15-bit Port-Address)
     reply[20] = static_cast<uint8_t>((info_.oem >> 8) & 0xFF); // 20: OemHi (big-endian)
     reply[21] = static_cast<uint8_t>(info_.oem & 0xFF);        // 21: OemLo
 
@@ -221,7 +237,7 @@ void ArtnetDiscovery::send_poll_reply(const sockaddr_in& destination, int sock) 
     for (uint8_t p = 0; p < 4; ++p) {
         reply[174 + p] = (p < ports) ? 0x80 : 0x00; // 174-177: PortTypes (0x80 = DMX512 output)
         reply[182 + p] = (p < ports) ? 0x80 : 0x00; // 182-185: GoodOutput (0x80 = transmitting)
-        reply[190 + p] = (p < ports) ? info_.sw_out[p] : 0x00; // 190-193: SwOut
+        reply[190 + p] = (p < ports) ? info_.sw_out[p] : 0x00; // 190-193: SwOut (bits 3..0 of Port-Address)
     }
 
     // --- Misc (194-199) ---

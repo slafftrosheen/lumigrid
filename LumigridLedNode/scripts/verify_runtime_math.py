@@ -405,6 +405,168 @@ def test_stage5_watchdog_recovery():
     assert not sm.fallback_active
     print("[PASS] Stage 5 Watchdog failover and state recovery tests passed.")
 
+def test_sacn_sequence_filtering():
+    def is_packet_valid(seq, last_seq, seq_valid):
+        if not seq_valid:
+            return True, seq, True
+        # Signed 8-bit difference
+        diff = (seq - last_seq)
+        if diff > 127:
+            diff -= 256
+        elif diff < -128:
+            diff += 256
+        # E1.31 section 6.7.2:
+        # If diff <= 0 and diff > -20: stale or out-of-order, discard
+        if diff <= 0 and diff > -20:
+            return False, last_seq, True
+        return True, seq, True
+
+    # Initial packet
+    valid, last, seq_v = is_packet_valid(41, 0, False)
+    assert valid and last == 41
+
+    # Next in-order packet (42 > 41) -> accepted
+    valid, last, seq_v = is_packet_valid(42, last, seq_v)
+    assert valid and last == 42
+
+    # Late/out-of-order packet (40 arrived after 42: diff = -2) -> DROPPED!
+    valid, last, seq_v = is_packet_valid(40, last, seq_v)
+    assert not valid and last == 42
+
+    # Duplicate packet (42 arrives again: diff = 0) -> DROPPED!
+    valid, last, seq_v = is_packet_valid(42, last, seq_v)
+    assert not valid and last == 42
+
+    # Sequence wraparound: 255 -> 0 (diff = (0 - 255) = -255 -> +1) -> accepted
+    valid, last, seq_v = is_packet_valid(255, 0, False)
+    valid, last, seq_v = is_packet_valid(0, 255, True)
+    assert valid and last == 0
+
+    # Sequence jump/reset: 200 -> 10 (diff = 10 - 200 = -190 <= -20) -> accepted
+    valid, last, seq_v = is_packet_valid(10, 200, True)
+    assert valid and last == 10
+    print("[PASS] ANSI E1.31 sACN sequence filtering tests passed.")
+
+def test_artnet_port_address_decoding():
+    def decode_port_address(port_address):
+        net = (port_address >> 8) & 0x7F
+        subnet = (port_address >> 4) & 0x0F
+        universe_id = port_address & 0x0F
+        return net, subnet, universe_id
+
+    # Universe 0: Net 0, Subnet 0, Universe 0
+    assert decode_port_address(0) == (0, 0, 0)
+    # Universe 15: Net 0, Subnet 0, Universe 15
+    assert decode_port_address(15) == (0, 0, 15)
+    # Universe 16: Net 0, Subnet 1, Universe 0 (would collide with universe 0 under 4-bit truncation!)
+    assert decode_port_address(16) == (0, 1, 0)
+    # Universe 256: Net 1, Subnet 0, Universe 0
+    assert decode_port_address(256) == (1, 0, 0)
+    # Universe 32767: Net 127, Subnet 15, Universe 15 (Max 15-bit address)
+    assert decode_port_address(32767) == (127, 15, 15)
+    print("[PASS] Art-Net 4 15-bit Port-Address decoding tests passed.")
+
+def test_fixture_vs_zone_control_arbitration():
+    # Priority hierarchy: 7: EStop, 5: LiveDmx, 2: ScenePlayback
+    class ControlArbitration:
+        def __init__(self):
+            self.states = {}
+
+        def set_state(self, source, active, zone_mask, fixture_mask, expires_ms=0):
+            self.states[source] = {
+                "active": active,
+                "zone_mask": zone_mask,
+                "fixture_mask": fixture_mask,
+                "expires_ms": expires_ms
+            }
+
+        def resolve_fixture(self, fixture_idx, zone_idx, current_ms):
+            f_bit = 1 << fixture_idx
+            z_bit = 1 << zone_idx
+
+            # 1. Direct fixture ownership check (highest priority source claiming fixture wins)
+            for src in sorted(self.states.keys(), reverse=True):
+                st = self.states[src]
+                if st["active"] and (st["expires_ms"] == 0 or current_ms < st["expires_ms"]):
+                    if st["fixture_mask"] & f_bit:
+                        return src
+
+            # 2. Fallback to zone ownership
+            for src in sorted(self.states.keys(), reverse=True):
+                st = self.states[src]
+                if st["active"] and (st["expires_ms"] == 0 or current_ms < st["expires_ms"]):
+                    if st["zone_mask"] & z_bit:
+                        return src
+
+            return 0
+
+    arb = ControlArbitration()
+    # ScenePlayback (2) owns all zones (0xFF) and no specific fixtures
+    arb.set_state(2, active=True, zone_mask=0xFF, fixture_mask=0)
+
+    # LiveDmx (5) owns Fixture 0 specifically (fixture_mask = 0x0001) without owning the zone!
+    arb.set_state(5, active=True, zone_mask=0x00, fixture_mask=0x0001, expires_ms=2000)
+
+    # In Zone 0: Fixture 0 should resolve to LiveDmx (5)
+    assert arb.resolve_fixture(fixture_idx=0, zone_idx=0, current_ms=500) == 5
+
+    # In Zone 0: Fixture 1 should resolve to ScenePlayback (2) — NOT locked out by Fixture 0!
+    assert arb.resolve_fixture(fixture_idx=1, zone_idx=0, current_ms=500) == 2
+
+    # In Zone 1: Fixture 2 should resolve to ScenePlayback (2)
+    assert arb.resolve_fixture(fixture_idx=2, zone_idx=1, current_ms=500) == 2
+
+    # After LiveDmx expires (t=2500ms), Fixture 0 reverts to ScenePlayback (2)
+    assert arb.resolve_fixture(fixture_idx=0, zone_idx=0, current_ms=2500) == 2
+    print("[PASS] Fixture-level vs Zone-level control arbitration tests passed.")
+
+def test_latched_estop_semantics():
+    class EstopSimulator:
+        Inactive = 0
+        Tripped = 1
+        PendingReset = 2
+
+        def __init__(self):
+            self.state = self.Inactive
+            self.blackout_frames = 0
+            self.scene_frames = 0
+
+        def trigger(self):
+            self.state = self.Tripped
+
+        def clear(self):
+            if self.state == self.Tripped:
+                self.state = self.PendingReset
+
+        def render_frame(self):
+            if self.state == self.Tripped:
+                self.blackout_frames += 1
+                return "blackout"
+            elif self.state == self.PendingReset:
+                self.blackout_frames += 1
+                self.state = self.Inactive  # 1-frame blackout acknowledgement complete
+                return "blackout"
+            else:
+                self.scene_frames += 1
+                return "scene"
+
+    sim = EstopSimulator()
+    assert sim.render_frame() == "scene"
+    assert sim.scene_frames == 1
+
+    # Trigger E-Stop
+    sim.trigger()
+    assert sim.render_frame() == "blackout"
+    assert sim.render_frame() == "blackout"
+
+    # Operator requests clear: must NOT immediately resume scene!
+    sim.clear()
+    assert sim.render_frame() == "blackout"  # Frame 1 after clear is forced black
+
+    # Next frame resumes scene
+    assert sim.render_frame() == "scene"
+    print("[PASS] Latched E-Stop state machine & mandatory blackout frame tests passed.")
+
 if __name__ == "__main__":
     test_compositor()
     test_power_enforce()
@@ -417,4 +579,9 @@ if __name__ == "__main__":
     test_stage5_control_priority_and_estop()
     test_stage5_multinode_preset_sync()
     test_stage5_watchdog_recovery()
-    print("ALL STAGE 1, 2, 3, 4, AND 5 TESTS PASSED SUCCESSFULLY.")
+    test_sacn_sequence_filtering()
+    test_artnet_port_address_decoding()
+    test_fixture_vs_zone_control_arbitration()
+    test_latched_estop_semantics()
+    print("ALL RUNTIME CORRECTNESS TESTS PASSED SUCCESSFULLY.")
+
