@@ -2,7 +2,7 @@
 #pragma once
 #include "ClockDiscipline.hpp"
 #include "ConfigStore.hpp"
-#include "SignageEngine.hpp"
+#include "LightingRuntime.hpp"
 #include "esp_err.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -15,7 +15,7 @@ class Scheduler {
 public:
     Scheduler(
         ConfigStore& config,
-        SignageEngine& engine,
+        LightingRuntime& engine,
         ClockDiscipline& clock
     );
 
@@ -33,7 +33,7 @@ private:
     void refresh_config(uint64_t clock_ms);
 
     ConfigStore& config_;
-    SignageEngine& engine_;
+    LightingRuntime& engine_;
     ClockDiscipline& clock_;
 
     bool time_synced_ = false;

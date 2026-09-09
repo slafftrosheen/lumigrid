@@ -12,7 +12,7 @@ namespace lg {
 
 Scheduler::Scheduler(
     ConfigStore& config,
-    SignageEngine& engine,
+    LightingRuntime& engine,
     ClockDiscipline& clock
 ) : config_(config), engine_(engine), clock_(clock) {}
 

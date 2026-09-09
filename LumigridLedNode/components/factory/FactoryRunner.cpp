@@ -48,7 +48,7 @@ uint32_t clamp_duration(uint32_t duration_ms) {
 
 } // namespace
 
-FactoryRunner::FactoryRunner(OutputArbitrator& output) : output_(output) {}
+FactoryRunner::FactoryRunner(ControlSourceManager& output) : output_(output) {}
 
 esp_err_t FactoryRunner::start() {
     queue_ = xQueueCreate(kQueueDepth, sizeof(FactoryCommand));
@@ -59,7 +59,7 @@ esp_err_t FactoryRunner::start() {
 
     status_.active_effect = FactoryEffect::SafeBlackout;
     status_.brightness = LG_FACTORY_DEFAULT_BRIGHTNESS;
-    status_.auto_loop = false; // Disabled by default to prevent flicker with SignageEngine
+    status_.auto_loop = false; // Disabled by default to prevent flicker with LightingRuntime
     status_.outputs_enabled = false;
 
     const BaseType_t created = xTaskCreatePinnedToCore(
@@ -108,8 +108,8 @@ void FactoryRunner::task_entry(void* argument) {
 }
 
 void FactoryRunner::blackout() {
-    output_.release(OutputPriority::Factory);
-    output_.release(OutputPriority::ArtNet);
+    output_.release(ControlSource::Factory);
+    output_.release(ControlSource::LiveDmx);
 
     xSemaphoreTake(status_mutex_, portMAX_DELAY);
     status_.active_effect = FactoryEffect::SafeBlackout;
@@ -125,7 +125,7 @@ void FactoryRunner::start_effect(FactoryEffect effect,
                                  uint32_t duration_ms,
                                  uint8_t brightness,
                                  uint32_t started_ms) {
-    output_.acquire(OutputPriority::Factory);
+    output_.acquire(ControlSource::Factory);
 
     xSemaphoreTake(status_mutex_, portMAX_DELAY);
     status_.active_effect = effect;
@@ -177,7 +177,7 @@ void FactoryRunner::apply_command(const FactoryCommand& command,
             return;
 
         case FactoryCommandType::SetAutoLoop:
-            output_.release(OutputPriority::Factory);
+            output_.release(ControlSource::Factory);
 
             xSemaphoreTake(status_mutex_, portMAX_DELAY);
             status_.auto_loop = command.enabled;
@@ -207,7 +207,7 @@ void FactoryRunner::apply_command(const FactoryCommand& command,
 
         case FactoryCommandType::PixelLaneSolid:
         case FactoryCommandType::PwmChannelLevel:
-            output_.acquire(OutputPriority::Factory);
+            output_.acquire(ControlSource::Factory);
 
             direct_test_ = command;
             direct_test_active_ = true;
@@ -240,7 +240,7 @@ void FactoryRunner::task() {
 
     // Kick off the first loop effect immediately at boot.
     if (status().auto_loop) {
-        output_.acquire(OutputPriority::Factory);
+        output_.acquire(ControlSource::Factory);
         start_effect(
             kLoopEffects[loop_index],
             kLoopEffectDurationMs,
@@ -277,19 +277,17 @@ void FactoryRunner::task() {
         xSemaphoreGive(status_mutex_);
 
         if (is_streaming) {
-            output_.acquire(OutputPriority::ArtNet, 1000); // Re-acquire lease for 1 second
+            output_.acquire(ControlSource::LiveDmx, 1000); // Re-acquire lease for 1 second
 
-            if (output_.begin_frame(OutputPriority::ArtNet)) {
+            if (output_.begin_frame(ControlSource::LiveDmx)) {
                 const uint8_t b = local_stream_brightness;
 
                 for (uint8_t lane = 0; lane < 8; ++lane) {
                     output_.pixels().fill(
                         lane,
-                        {
-                            static_cast<uint8_t>((uint16_t(local_stream.lane_rgb[lane][0]) * b) / 255),
-                            static_cast<uint8_t>((uint16_t(local_stream.lane_rgb[lane][1]) * b) / 255),
-                            static_cast<uint8_t>((uint16_t(local_stream.lane_rgb[lane][2]) * b) / 255)
-                        }
+                        static_cast<uint8_t>((uint16_t(local_stream.lane_rgb[lane][0]) * b) / 255),
+                        static_cast<uint8_t>((uint16_t(local_stream.lane_rgb[lane][1]) * b) / 255),
+                        static_cast<uint8_t>((uint16_t(local_stream.lane_rgb[lane][2]) * b) / 255)
                     );
 
                     const uint16_t duty =
@@ -302,7 +300,7 @@ void FactoryRunner::task() {
                     output_.pwm().set(lane, duty);
                 }
 
-                output_.commit_frame(OutputPriority::ArtNet);
+                output_.commit_frame(ControlSource::LiveDmx);
             }
 
             if (current_ms - local_stream_last_ms > 1000) {
@@ -322,7 +320,7 @@ void FactoryRunner::task() {
         if (direct_test_active_) {
             const uint32_t elapsed = current_ms - current.effect_started_ms;
 
-            if (output_.begin_frame(OutputPriority::Factory)) {
+            if (output_.begin_frame(ControlSource::Factory)) {
                 output_.pixels().clear();
                 output_.pwm().set_all(0);
 
@@ -331,11 +329,9 @@ void FactoryRunner::task() {
 
                     output_.pixels().fill(
                         direct_test_.lane_or_channel,
-                        {
-                            static_cast<uint8_t>((uint16_t(direct_test_.red) * b) / 255),
-                            static_cast<uint8_t>((uint16_t(direct_test_.green) * b) / 255),
-                            static_cast<uint8_t>((uint16_t(direct_test_.blue) * b) / 255)
-                        }
+                        static_cast<uint8_t>((uint16_t(direct_test_.red) * b) / 255),
+                        static_cast<uint8_t>((uint16_t(direct_test_.green) * b) / 255),
+                        static_cast<uint8_t>((uint16_t(direct_test_.blue) * b) / 255)
                     );
                 }
 
@@ -346,7 +342,7 @@ void FactoryRunner::task() {
                     );
                 }
 
-                output_.commit_frame(OutputPriority::Factory);
+                output_.commit_frame(ControlSource::Factory);
             }
 
             if (elapsed >= current.effect_duration_ms) {
@@ -380,7 +376,7 @@ void FactoryRunner::task() {
             }
 
             if (current_ms - loop_started_ms >= kLoopEffectDurationMs) {
-                output_.release(OutputPriority::Factory);
+                output_.release(ControlSource::Factory);
                 between_loop_effects = true;
                 blackout_started_ms = current_ms;
 
@@ -399,7 +395,7 @@ void FactoryRunner::task() {
         if (current.test_active) {
             const uint32_t elapsed = current_ms - current.effect_started_ms;
 
-            if (output_.begin_frame(OutputPriority::Factory)) {
+            if (output_.begin_frame(ControlSource::Factory)) {
                 render_effect(
                     current.active_effect,
                     output_.controller(),
@@ -407,7 +403,7 @@ void FactoryRunner::task() {
                     current.brightness
                 );
 
-                output_.commit_frame(OutputPriority::Factory);
+                output_.commit_frame(ControlSource::Factory);
             }
         }
 

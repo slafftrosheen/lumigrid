@@ -772,55 +772,54 @@
         </header>
 
         <nav class="nav-rail" aria-label="Lighting controls">
-            <button class="active" data-page="control" onclick="lg.nav('control', this)">
+            <button class="active" data-page="dashboard" onclick="lg.nav('dashboard', this)">
                 <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><line x1="3" y1="4" x2="13" y2="4"/><line x1="3" y1="8" x2="13" y2="8"/><line x1="3" y1="12" x2="13" y2="12"/><circle cx="6" cy="4" r="1.5" fill="currentColor" stroke="none"/><circle cx="10" cy="8" r="1.5" fill="currentColor" stroke="none"/><circle cx="7" cy="12" r="1.5" fill="currentColor" stroke="none"/></svg>
-                Control
+                Dashboard
             </button>
             <button data-page="scenes" onclick="lg.nav('scenes', this)">
                 <svg viewBox="0 0 16 16" fill="currentColor"><rect x="1" y="1" width="6" height="6" rx="1.5"/><rect x="9" y="1" width="6" height="6" rx="1.5" opacity=".45"/><rect x="1" y="9" width="6" height="6" rx="1.5" opacity=".45"/><rect x="9" y="9" width="6" height="6" rx="1.5"/></svg>
                 Scenes
             </button>
+            <button data-page="zones" onclick="lg.nav('zones', this)">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><rect x="2" y="2" width="12" height="12" rx="2"/><line x1="6" y1="2" x2="6" y2="14"/><line x1="10" y1="2" x2="10" y2="14"/></svg>
+                Zones
+            </button>
             <button data-page="timeline" onclick="lg.nav('timeline', this)">
                 <svg viewBox="0 0 16 16" fill="currentColor"><rect x="1" y="9" width="3" height="6" rx="1"/><rect x="5.5" y="5" width="3" height="10" rx="1" opacity=".7"/><rect x="10" y="2" width="3" height="13" rx="1"/></svg>
                 Timeline
             </button>
-            <button data-page="automation" onclick="lg.nav('automation', this)">
-                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="8" cy="8" r="6"/><path d="M8 4.5v3.5l2.5 1.5"/></svg>
-                Automation
+            <button data-page="dmx" onclick="lg.nav('dmx', this)">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M2 13V3a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v10M6 8h4M6 11h4M6 5h4"/></svg>
+                Live DMX
             </button>
-            <button data-page="system" onclick="lg.nav('system', this)">
+            <button data-page="diagnostics" onclick="lg.nav('diagnostics', this)">
                 <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="8" cy="8" r="2.5"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M12.6 3.4l-1.4 1.4M4.8 11.2L3.4 12.6"/></svg>
-                System
+                Diagnostics
             </button>
         </nav>
 
-        <section id="page-control" class="product-page active">
+        
+        <section id="page-dashboard" class="product-page active">
             <div class="page-heading">
-                <div><p class="eyebrow">Now playing</p><h3>Control room</h3></div>
+                <div><p class="eyebrow">Operational Overview</p><h3>Dashboard</h3></div>
                 <button class="button-danger" onclick="lg.blackout()">Emergency blackout</button>
             </div>
             <div class="overview-grid">
                 <article class="product-card">
-                    <h4 id="now-playing">Loading scenes…</h4>
-                    <p id="now-playing-copy" class="muted">The node is checking its playback state.</p>
-                    <div id="status-stats" class="stat-list"></div>
+                    <h4>Current State</h4>
+                    <p id="dash-playing" class="muted">Loading...</p>
+                    <div id="dash-stats" class="stat-list"></div>
                 </article>
                 <article class="product-card">
-                    <h4>Sync health</h4>
-                    <p id="sync-summary" class="muted">Checking the room clock…</p>
-                    <div id="sync-stats" class="stat-list"></div>
+                    <h4>Source Ownership</h4>
+                    <div id="dash-sources" class="stat-list"></div>
                 </article>
             </div>
-            <div class="page-heading" style="margin-top:1.5rem">
-                <div><p class="eyebrow">One tap scenes</p><h3>Set the mood</h3></div>
-                <button class="button-secondary" onclick="lg.nav('scenes', document.querySelector('[data-page=scenes]'))">Manage scenes</button>
-            </div>
-            <div id="control-scenes" class="scene-grid"></div>
         </section>
 
         <section id="page-scenes" class="product-page">
             <div class="page-heading">
-                <div><p class="eyebrow">Scene library</p><h3>Looks, not numbers</h3></div>
+                <div><p class="eyebrow">Scene Library</p><h3>Manage Scenes</h3></div>
                 <button class="button-secondary" onclick="lg.refresh()">Refresh library</button>
             </div>
             <div id="scene-library" class="scene-grid"></div>
@@ -828,129 +827,82 @@
 
         <section id="page-scene-editor" class="product-page">
             <div class="editor-toolbar">
-                <div><button class="button-secondary" onclick="lg.backToScenes()">← Scenes</button><div><p class="eyebrow">Scene designer</p><h3 id="scene-editor-title">Edit scene</h3></div></div>
+                <div><button class="button-secondary" onclick="lg.backToScenes()">← Scenes</button><div><p class="eyebrow">Scene Designer</p><h3 id="scene-editor-title">Edit scene</h3></div></div>
                 <button class="button-primary" onclick="lg.saveScene()">Save scene</button>
             </div>
             <article class="product-card">
                 <div class="settings-grid">
-                    <div class="field"><label for="scene-name">Scene name</label><input id="scene-name" maxlength="23" placeholder="Store open"></div>
-                    <div>
-                        <div class="range-row"><label for="scene-brightness">Room brightness</label><input id="scene-brightness" type="range" min="0" max="100" oninput="lg.updateText('scene-brightness-output', this.value + '%')"><output id="scene-brightness-output"></output></div>
-                        <div class="range-row"><label for="scene-fade">Scene fade</label><input id="scene-fade" type="range" min="0" max="5000" step="100" oninput="lg.updateText('scene-fade-output', (this.value / 1000).toFixed(1) + ' s')"><output id="scene-fade-output"></output></div>
-                    </div>
-                </div>
-                <div class="overlay-controls" style="margin-top:1rem">
-                    <div class="field"><label for="scene-overlay">Layered finishing effect</label><select id="scene-overlay" onchange="lg.changeOverlay(this.value)"><option value="none">No overlay</option><option value="strobe">Beat strobe overlay</option></select></div>
-                    <div id="scene-overlay-options"></div>
+                    <div class="field"><label>Scene name</label><input id="scene-name" maxlength="23"></div>
+                    <div class="range-row"><label>Brightness</label><input id="scene-brightness" type="range" min="0" max="100" oninput="lg.updateText('scene-brightness-output', this.value + '%')"><output id="scene-brightness-output"></output></div>
+                    <div class="range-row"><label>Fade Time (ms)</label><input id="scene-fade" type="range" min="0" max="5000" step="100" oninput="lg.updateText('scene-fade-output', this.value + ' ms')"><output id="scene-fade-output"></output></div>
                 </div>
             </article>
-            <p class="help" style="margin:1rem 0">Each zone starts with a base look. Add the strobe overlay to make any scene pulse without replacing its color or motion.</p>
-            <div id="scene-zones" class="zone-grid"></div>
+            <div id="scene-zones" class="sync-grid" style="margin-top:1.5rem"></div>
+        </section>
+
+        <section id="page-zones" class="product-page">
+            <div class="page-heading">
+                <div><p class="eyebrow">Physical Mapping</p><h3>Zone View</h3></div>
+            </div>
+            <div id="zone-map" class="sync-grid"></div>
         </section>
 
         <section id="page-timeline" class="product-page">
             <div class="page-heading">
-                <div><p class="eyebrow">Performance timeline</p><h3>Build the room's rhythm</h3></div>
+                <div><p class="eyebrow">Visual Beat Grid</p><h3>Timeline Editor</h3></div>
                 <button class="button-primary" onclick="lg.saveTimeline()">Save timeline</button>
             </div>
             <article class="product-card">
                 <div class="timeline-toolbar">
-                    <div>
-                        <strong>Tempo</strong>
-                        <input id="timeline-bpm" type="range" min="40" max="240" oninput="lg.setBpm(this.value)">
-                        <output id="timeline-bpm-output"></output>
-                    </div>
+                    <div><strong>Tempo</strong><input id="timeline-bpm" type="range" min="40" max="240" oninput="lg.setBpm(this.value)"><output id="timeline-bpm-output"></output></div>
                     <label class="switch-row"><span>Play timeline</span><input id="timeline-enabled" type="checkbox" onchange="lg.setTimelineEnabled(this.checked)"></label>
                 </div>
-                <p class="help">Pick a scene below, then click or drag it onto a step. Every one of the eight lighting zones loops its own sixteen-step lane.</p>
-                <div id="timeline-palette" class="palette" aria-label="Scene palette"></div>
+                <div id="timeline-palette" class="palette" style="margin-top:1rem"></div>
             </article>
             <article class="product-card timeline-scroll">
-                <div id="timeline-tracks"></div>
-                <div id="step-inspector"></div>
+                <div id="timeline-tracks" style="display:grid;gap:0.5rem"></div>
             </article>
         </section>
 
-        <section id="page-automation" class="product-page">
+        <section id="page-dmx" class="product-page">
             <div class="page-heading">
-                <div><p class="eyebrow">Calendar automation</p><h3>Let the room run itself</h3></div>
-                <div class="cue-toolbar"><button class="button-secondary" onclick="lg.addCue()">Add cue</button><button class="button-primary" onclick="lg.saveAutomation()">Save automation</button></div>
+                <div><p class="eyebrow">Incoming Universe</p><h3>Live DMX</h3></div>
             </div>
             <article class="product-card">
-                <p class="help">Schedule a scene or start the timeline at a local time. A scene cue takes over from a calendar-started timeline.</p>
-                <div id="cue-list" class="cue-list" style="margin-top:1rem"></div>
+                <div id="dmx-view">Waiting for DMX data...</div>
             </article>
         </section>
 
-        <section id="page-system" class="product-page">
+        <section id="page-diagnostics" class="product-page">
             <div class="page-heading">
-                <div><p class="eyebrow">Node and room health</p><h3>System</h3></div>
-                <button class="button-primary" onclick="lg.saveSystem()">Save settings</button>
+                <div><p class="eyebrow">Maintenance</p><h3>Diagnostics & Factory</h3></div>
             </div>
             <div class="settings-grid">
                 <article class="product-card">
-                    <h4>Node preferences</h4>
-                    <div class="field"><label for="system-name">Node name</label><input id="system-name" maxlength="31"></div>
-                    <div class="field"><label for="system-fallback">Safe fallback scene</label><select id="system-fallback"></select></div>
-                    <div class="field"><label for="system-timezone">Timezone</label><input id="system-timezone" placeholder="UTC0"></div>
+                    <h4>Factory Testing</h4>
+                    <button class="button-secondary" style="width:100%;margin-bottom:0.5rem" onclick="lg.runTestSequence('lane')">Test Lanes</button>
+                    <button class="button-secondary" style="width:100%" onclick="lg.runTestSequence('color')">Test Colors</button>
                 </article>
                 <article class="product-card">
-                    <h4>Room sync</h4>
-                    <label class="switch-row"><span>Sync this node with the room</span><input id="system-sync-enabled" type="checkbox"></label>
-                    <div class="field"><label for="system-sync-role">Room role</label><select id="system-sync-role"><option value="0">Automatic leader selection</option><option value="1">Lead the room</option><option value="2">Follow the room</option></select></div>
-                    <p class="help">Role changes are applied the next time the node starts. Automatic mode elects one node instead of broadcasting from every node.</p>
+                    <h4>Firmware OTA</h4>
+                    <input type="file" id="ota-file" accept=".bin" style="width:100%;margin-bottom:1rem;">
+                    <button class="button-primary" style="width:100%" onclick="lg.uploadOta()">Update Firmware</button>
+                    <div id="ota-status" class="help" style="margin-top:1rem;"></div>
                 </article>
                 <article class="product-card">
-                    <h4>MQTT Configuration</h4>
-                    <label class="switch-row"><span>Enable MQTT</span><input id="system-mqtt-enabled" type="checkbox"></label>
-                    <div class="field"><label for="system-mqtt-broker">MQTT Broker Address</label><input id="system-mqtt-broker" placeholder="192.168.1.100" maxlength="63"></div>
-                    <div class="field"><label for="system-mqtt-port">MQTT Port</label><input id="system-mqtt-port" type="number" value="1883" min="1" max="65535"></div>
-                    <p class="help">When enabled, the node will publish telemetry and respond to commands via MQTT.</p>
-                </article>
-                <article class="product-card" style="grid-column: 1 / -1;">
-                    <div class="section-header" onclick="lg.toggleHwSection('system-outputs')">
-                        <h4>Hardware Outputs</h4>
-                        <span class="section-chevron" id="system-outputs-chevron">▸</span>
-                    </div>
-                    <p class="help">Configure physical output pins (e.g. GPIOs) on your controller.</p>
-                    <div id="system-outputs" class="zone-grid hw-section collapsed" style="margin-top:1rem; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));"></div>
-                </article>
-                <article class="product-card" style="grid-column: 1 / -1;">
-                    <div class="section-header" onclick="lg.toggleHwSection('system-fixtures')">
-                        <h4>LED Fixtures</h4>
-                        <span class="section-chevron" id="system-fixtures-chevron">▸</span>
-                    </div>
-                    <p class="help">Define LED strips or panels and assign them to physical outputs.</p>
-                    <div id="system-fixtures" class="zone-grid hw-section collapsed" style="margin-top:1rem; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));"></div>
-                </article>
-                <article class="product-card" style="grid-column: 1 / -1;">
-                    <h4>Logical Zones (Segments)</h4>
-                    <p class="help">Map your LED fixtures to 8 functional zones for scene effects.</p>
-                    <div id="system-zones" class="zone-grid" style="margin-top:1rem"></div>
-                </article>
-            </div>
-            <div class="page-heading" style="margin-top:1.5rem"><div><p class="eyebrow">Topology</p><h3>Nodes in this room</h3></div><button class="button-secondary" onclick="lg.refreshSync()">Refresh health</button></div>
-            <div id="sync-topology" class="sync-grid"></div>
-
-            <div class="page-heading" style="margin-top:2.5rem"><div><p class="eyebrow">Maintenance</p><h3>Firmware &amp; Config</h3></div></div>
-            <div class="settings-grid">
-                <article class="product-card">
-                    <h4>Over-The-Air Update (OTA)</h4>
-                    <p class="help mb-1">Upload a signed firmware binary to update the node.</p>
-                    <input type="file" id="ota-file" accept=".bin" style="width: 100%; margin-bottom: 1rem;">
-                    <button class="button-primary" style="width: 100%" onclick="lg.uploadOta()">Update Firmware</button>
-                    <div id="ota-status" class="help" style="margin-top: 1rem;"></div>
-                </article>
-                <article class="product-card">
-                    <h4>Configuration Export &amp; Import</h4>
-                    <p class="help mb-1">Backup or restore device settings and presets.</p>
-                    <button class="button-secondary" style="width: 100%" onclick="lg.downloadBackup()">Export Configuration</button>
-                    <hr style="border: 0; border-top: 1px solid var(--border); margin: 1.5rem 0;">
+                    <h4>Backup & Restore</h4>
+                    <button class="button-secondary" style="width: 100%;margin-bottom:1rem" onclick="lg.downloadBackup()">Export Configuration</button>
                     <input type="file" id="restore-file" accept=".json" style="width: 100%; margin-bottom: 1rem;">
                     <button class="button-primary" style="width: 100%" onclick="lg.uploadRestore()">Restore Configuration</button>
                 </article>
+                <article class="product-card">
+                    <h4>Health Metrics</h4>
+                    <pre id="health-stats" class="help" style="background:rgba(0,0,0,0.2);padding:1rem;border-radius:8px;"></pre>
+                    <button class="button-secondary" style="width:100%;margin-top:0.5rem" onclick="lg.loadCommissioning()">Refresh Health</button>
+                </article>
             </div>
         </section>
+
     </div>
 </main>
 <div id="experience-toast" role="status" aria-live="polite"></div>
@@ -1094,7 +1046,7 @@ window.lg = (() => {
             byId('experience-auth').hidden = true;
             byId('product-app').hidden = false;
             initWebSocket();
-            nav('control', document.querySelector('[data-page=control]'));
+            nav('dashboard', document.querySelector('[data-page=dashboard]'));
             toast('Connected to the node.');
         } catch (error) {
             toast(`Could not connect: ${error.message}`, true);
@@ -1123,43 +1075,168 @@ window.lg = (() => {
         state.schedules = normalSchedules(schedules);
         state.sync = sync;
         byId('experience-node-name').textContent = (config.deviceName || 'Lighting node').toUpperCase();
-        renderControl();
+        renderDashboard();
         renderScenes();
+        renderZones();
         renderTimeline();
-        renderAutomation();
-        renderSystem();
+        renderLiveDMX();
+        renderDiagnostics();
     }
     function nav(page, button) {
         document.querySelectorAll('.product-page').forEach(item => item.classList.remove('active'));
-        byId('page-' + page).classList.add('active');
+        byId('page-' + page)?.classList.add('active');
         document.querySelectorAll('.nav-rail button').forEach(item => item.classList.remove('active'));
         if (button) button.classList.add('active');
-        if (page === 'control') renderControl();
+        if (page === 'dashboard') renderDashboard();
         if (page === 'scenes') renderScenes();
+        if (page === 'zones') renderZones();
         if (page === 'timeline') renderTimeline();
-        if (page === 'automation') renderAutomation();
-        if (page === 'system') renderSystem();
+        if (page === 'dmx') renderLiveDMX();
+        if (page === 'diagnostics') renderDiagnostics();
     }
 
-    function renderControl() {
+    
+    function renderDashboard() {
         const active = state.status?.activePreset;
-        byId('now-playing').textContent = active === undefined ? 'No scene selected' : sceneName(active);
-        byId('now-playing-copy').textContent = state.status?.transitioning ? 'Fading into the selected scene.' : state.status?.fallbackActive ? 'The safety fallback is active.' : 'The room is ready.';
-        byId('status-stats').innerHTML = [
-            ['Scene', active === undefined ? '—' : sceneName(active)],
-            ['Clock', state.status?.timeSynced ? 'Synced' : 'Starting'],
-            ['Fade', state.status?.transitioning ? 'In progress' : 'Ready'],
-            ['Safety', state.status?.fallbackActive ? 'Fallback' : 'Normal']
-        ].map(([label,value]) => `<div><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`).join('');
-        byId('sync-summary').textContent = !state.sync ? 'Sync is not running on this node.' : state.sync.clockLocked ? `Clock locked as ${state.sync.activeRole}.` : 'Waiting for a room leader.';
-        byId('sync-stats').innerHTML = state.sync ? [
-            ['Role', state.sync.activeRole],
-            ['Peers', state.sync.peerCount],
-            ['Packet', clockAge(state.sync.lastPacketAgeMs)],
-            ['Jitter', `${state.sync.clockJitterUs || 0} μs`]
-        ].map(([label,value]) => `<div><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`).join('') : '<div><span>Room sync</span><strong>Off</strong></div>';
-        byId('control-scenes').innerHTML = state.presets.length ? state.presets.map(sceneCard).join('') : '<div class="empty-state">No scenes are stored yet.</div>';
+        byId('dash-playing').textContent = active === undefined ? 'No scene selected' : sceneName(active);
+        
+        let owner = "Idle";
+        if (state.status?.controlSource !== undefined) {
+            owner = state.status.controlSource === 5 ? "ScenePlayback" : 
+                    state.status.controlSource === 6 ? "Fallback" : 
+                    state.status.controlSource === 2 ? "LiveDmx" : 
+                    state.status.controlSource === 1 ? "Factory" : "Idle";
+        }
+        
+        byId('dash-stats').innerHTML = `
+            <div><span>Active Scene</span><strong>${active === undefined ? '—' : esc(sceneName(active))}</strong></div>
+            <div><span>Transition</span><strong>${state.status?.transitioning ? 'In progress' : 'Ready'}</strong></div>
+            <div><span>Safety</span><strong>${state.status?.fallbackActive ? 'Fallback' : 'Normal'}</strong></div>
+        `;
+        byId('dash-sources').innerHTML = `
+            <div><span>Current Owner</span><strong>${owner}</strong></div>
+        `;
     }
+    function renderZones() {
+        if (!state.config) return;
+        let html = '';
+        for (let i = 0; i < 8; i++) {
+            const z = state.config.zones?.[i] || {name: `Zone ${i+1}`, role: 'Unassigned', fixtureMask: 0};
+            if (!z.name) continue;
+            let lanes = [];
+            for (let f = 0; f < 16; f++) {
+                if (z.fixtureMask & (1<<f)) {
+                    const fix = state.config.fixtures?.[f];
+                    if (fix) lanes.push(`Lane ${fix.physicalOutputIndex[0]} (${fix.numPixels} px)`);
+                }
+            }
+            html += `<article class="product-card">
+                <h4>${esc(z.name)}</h4>
+                <p class="muted">${esc(z.role)}</p>
+                <div class="stat-list" style="margin-top:1rem">
+                    ${lanes.map(l => `<div><span>Output</span><strong>${l}</strong></div>`).join('')}
+                    ${lanes.length === 0 ? '<div><span>Output</span><strong>Unmapped</strong></div>' : ''}
+                </div>
+            </article>`;
+        }
+        byId('zone-map').innerHTML = html || '<div class="empty-state">No zones configured.</div>';
+    }
+    
+    function renderLiveDMX() {
+        if (!state.config) return;
+        const dmxData = state.status?.dmx || Array(512).fill(0);
+        let html = '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(2rem,1fr));gap:2px;">';
+        for(let i=0; i<Math.min(dmxData.length, 64); i++) {
+            const v = dmxData[i] || 0;
+            const bg = `rgba(255,255,255,${v/255})`;
+            html += `<div style="background:${bg};height:2rem;display:flex;align-items:center;justify-content:center;color:${v>128?'#000':'#666'};font-size:0.6rem;border-radius:2px">${v}</div>`;
+        }
+        html += '</div>';
+        byId('dmx-view').innerHTML = `<p class="help" style="margin-bottom:1rem">Showing first 64 channels.</p>${html}`;
+    }
+
+    function renderDiagnostics() {
+        // Just loads health immediately
+        loadCommissioning();
+    }
+    
+    function renderSceneEditor() {
+        const scene = state.editing;
+        if (!scene) return;
+        byId('scene-editor-title').textContent = scene.name || 'Untitled scene';
+        byId('scene-name').value = scene.name || '';
+        byId('scene-brightness').value = Math.round(scene.globalBrightness * 100 / 255);
+        byId('scene-brightness-output').textContent = `${byId('scene-brightness').value}%`;
+        byId('scene-fade').value = scene.transitionMs;
+        byId('scene-fade-output').textContent = `${scene.transitionMs} ms`;
+
+        let html = '';
+        for (let z=0; z<8; z++) {
+            if (!state.config?.zones?.[z]?.name) continue;
+            const zName = state.config.zones[z].name;
+            const layer = scene.zones[z].layers[0]; // just focus on layer 0 for the simplified UI
+            const meta = effect(layer.effect);
+            
+            html += `<article class="product-card">
+                <h4>${esc(zName)}</h4>
+                <div class="field" style="margin-top:0.5rem"><select id="z-${z}-effect" onchange="lg.changeZoneEffect(${z}, this.value)">
+                    ${state.effects.map(item => `<option value="${esc(item.id)}" ${item.id === layer.effect ? 'selected' : ''}>${esc(item.label)}</option>`).join('')}
+                </select></div>
+                
+                <div class="color-line" style="margin-top:0.5rem;display:flex;gap:1rem;">
+                    <div style="display:flex;align-items:center;gap:0.5rem"><div style="width:20px;height:20px;border-radius:50%;background:${colorFor(layer.primaryColor)};border:2px solid #333"></div><input type="color" id="z-${z}-pcolor" value="${colorFor(layer.primaryColor)}" style="opacity:0;width:1px;position:absolute"> <button class="button-secondary" style="padding:0.2rem 0.5rem;font-size:0.7rem" onclick="byId('z-${z}-pcolor').click()">Pri</button></div>
+                    <div style="display:flex;align-items:center;gap:0.5rem"><div style="width:20px;height:20px;border-radius:50%;background:${colorFor(layer.secondaryColor)};border:2px solid #333"></div><input type="color" id="z-${z}-scolor" value="${colorFor(layer.secondaryColor)}" style="opacity:0;width:1px;position:absolute"> <button class="button-secondary" style="padding:0.2rem 0.5rem;font-size:0.7rem" onclick="byId('z-${z}-scolor').click()">Sec</button></div>
+                </div>
+                
+                <div class="range-row" style="margin-top:1rem"><label>Speed</label><input id="z-${z}-speed" type="range" min="1" max="100" value="${msToSpeed(layer.speedMs)}"></div>
+                ${meta.hasParameter ? `<div class="range-row"><label>${esc(meta.parameterLabel)}</label><input id="z-${z}-param" type="range" min="${meta.parameterMin}" max="${meta.parameterMax}" value="${layer.fxParam || meta.parameterDefault}"></div>` : ''}
+            </article>`;
+        }
+        byId('scene-zones').innerHTML = html;
+    }
+    
+    function readSceneEditor() {
+        const scene = state.editing;
+        if (!scene || !byId('scene-name')) return;
+        scene.name = byId('scene-name').value.trim();
+        scene.globalBrightness = Math.round(clamp(byId('scene-brightness').value,0,100) * 255 / 100);
+        scene.transitionMs = clamp(byId('scene-fade').value,0,5000);
+
+        for (let z=0; z<8; z++) {
+            if (!state.config?.zones?.[z]?.name) continue;
+            const layer = scene.zones[z].layers[0];
+            
+            layer.effect = byId(`z-${z}-effect`)?.value || layer.effect;
+            const phex = byId(`z-${z}-pcolor`)?.value || colorFor(layer.primaryColor);
+            layer.primaryColor.r = parseInt(phex.slice(1,3),16); layer.primaryColor.g = parseInt(phex.slice(3,5),16); layer.primaryColor.b = parseInt(phex.slice(5,7),16);
+            const shex = byId(`z-${z}-scolor`)?.value || colorFor(layer.secondaryColor);
+            layer.secondaryColor.r = parseInt(shex.slice(1,3),16); layer.secondaryColor.g = parseInt(shex.slice(3,5),16); layer.secondaryColor.b = parseInt(shex.slice(5,7),16);
+            
+            layer.speedMs = speedToMs(byId(`z-${z}-speed`)?.value ?? msToSpeed(layer.speedMs));
+            const meta = effect(layer.effect);
+            if (meta.hasParameter) layer.fxParam = clamp(byId(`z-${z}-param`)?.value ?? meta.parameterDefault, meta.parameterMin, meta.parameterMax);
+        }
+    }
+    
+    function renderTimeline() {
+        if (!state.sequence) return;
+        byId('timeline-bpm').value = clamp(state.sequence.bpm,40,240);
+        byId('timeline-bpm-output').textContent = `${state.sequence.bpm} BPM`;
+        byId('timeline-enabled').checked = state.sequence.enabled;
+        byId('timeline-palette').innerHTML = state.presets.map(scene => `<button draggable="true" class="${state.selectedScene === scene.index ? 'selected' : ''}" ondragstart="lg.dragScene(event,${Number(scene.index)})" onclick="lg.selectPalette(${Number(scene.index)})"><strong>${esc(scene.name || 'Untitled')}</strong></button>`).join('') || '<span class="help">Create a scene first.</span>';
+        
+        // Visual Beat Grid
+        byId('timeline-tracks').innerHTML = state.sequence.tracks.map((track,trackIndex) => {
+            if (!state.config?.zones?.[trackIndex]?.name) return '';
+            return `<div style="display:flex;align-items:center;gap:1rem;background:rgba(255,255,255,0.02);padding:0.5rem;border-radius:8px;border:1px solid rgba(255,255,255,0.05)">
+                <div style="width:100px"><strong>${esc(state.config.zones[trackIndex].name)}</strong></div>
+                <div style="display:flex;gap:4px;flex:1">
+                    ${track.steps.map((step,stepIndex) => `<div class="step" style="width:24px;height:32px;background:${step.presetIndex>0?'#6366f1':'#2a2e44'};border-radius:4px;cursor:pointer" title="Step ${stepIndex+1}" onclick="lg.setStepScene(${trackIndex},${stepIndex},state.selectedScene||0)"></div>`).join('')}
+                </div>
+            </div>`;
+        }).join('');
+    }
+
     function sceneCard(scene) {
         const firstEffect = effect(scene.zones[0].layers[0].effect);
         const pc = scene.zones[0].layers[0].primaryColor;
@@ -1173,7 +1250,7 @@ window.lg = (() => {
         try {
             await api('/api/v1/activate', 'POST', {preset:index});
             state.status = {...(state.status || {}),activePreset:index,transitioning:true};
-            renderControl();
+            renderDashboard();
             toast(`${sceneName(index)} is playing.`);
         } catch (error) { toast(error.message, true); }
     }
@@ -1346,104 +1423,13 @@ window.lg = (() => {
         catch (error) { toast(error.message,true); }
     }
 
-    function renderAutomation() {
-        byId('cue-list').innerHTML = state.schedules.map((cue,index) => `<div class="cue"><label class="switch-row"><span>On</span><input type="checkbox" ${cue.enabled ? 'checked' : ''} onchange="lg.setCue(${index},'enabled',this.checked)"></label><input type="time" value="${String(cue.hour).padStart(2,'0')}:${String(cue.minute).padStart(2,'0')}" onchange="lg.setCueTime(${index},this.value)" aria-label="Cue time"><select onchange="lg.setCue(${index},'action',this.value)"><option value="preset" ${cue.action === 'preset' ? 'selected' : ''}>Activate scene</option><option value="sequence" ${cue.action === 'sequence' ? 'selected' : ''}>Start timeline</option></select><select ${cue.action === 'sequence' ? 'disabled' : ''} onchange="lg.setCue(${index},'presetIndex',this.value)" aria-label="Cue scene">${state.presets.map(scene => `<option value="${Number(scene.index)}" ${Number(cue.presetIndex) === Number(scene.index) ? 'selected' : ''}>${esc(scene.name || 'Untitled scene')}</option>`).join('')}</select><div class="days">${['S','M','T','W','T','F','S'].map((day,bit) => `<button class="${cue.daysOfWeek & (1 << bit) ? 'active' : ''}" title="${['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'][bit]}" onclick="lg.toggleDay(${index},${bit})">${day}</button>`).join('')}</div></div>`).join('');
-    }
-    function addCue() { const empty = state.schedules.findIndex(cue => !cue.enabled); if (empty < 0) return toast('All eight calendar cues are already in use.', true); state.schedules[empty] = {...state.schedules[empty],enabled:true}; renderAutomation(); }
-    function setCue(index,key,value) { state.schedules[index][key] = key === 'presetIndex' ? Number(value) : value; renderAutomation(); }
-    function setCueTime(index,value) { const [hour,minute] = value.split(':').map(Number); state.schedules[index].hour = clamp(hour,0,23); state.schedules[index].minute = clamp(minute,0,59); }
-    function toggleDay(index,bit) { state.schedules[index].daysOfWeek ^= (1 << bit); renderAutomation(); }
-    async function saveAutomation() {
+    function saveAutomation() {
         if (state.schedules.some(cue => cue.enabled && !cue.daysOfWeek)) return toast('Choose at least one day for every active cue.',true);
         try { await api('/api/v1/schedules','PUT',{entries:state.schedules}); toast('Automation saved.'); }
         catch (error) { toast(error.message,true); }
     }
 
-    function renderSystem() {
-        if (!state.config) return;
-        byId('system-name').value = state.config.deviceName || '';
-        byId('system-timezone').value = state.config.timezone || 'UTC0';
-        byId('system-sync-enabled').checked = Boolean(state.config.syncEnabled);
-        byId('system-sync-role').value = String(state.config.syncRole ?? 0);
-        byId('system-mqtt-enabled').checked = Boolean(state.config.mqttEnabled);
-        byId('system-mqtt-broker').value = state.config.mqttBroker || '';
-        byId('system-mqtt-port').value = state.config.mqttPort || 1883;
-        byId('system-fallback').innerHTML = state.presets.map(scene => `<option value="${Number(scene.index)}" ${Number(scene.index) === Number(state.config.fallbackPreset) ? 'selected' : ''}>${esc(scene.name || 'Untitled scene')}</option>`).join('');
-
-        let physHtml = '';
-        for (let i = 0; i < 16; ++i) {
-            const p = state.config.physicalOutputs?.[i] || {type:0,hardwareId:i,gpioPin:0,enabled:false};
-            physHtml += `<div class="hw-field">
-                <div class="hw-field-head">
-                    <span>Output ${i}</span>
-                    <label class="switch-row" style="margin:0;padding:0"><input id="sys-phys-en-${i}" type="checkbox" ${p.enabled?'checked':''}></label>
-                </div>
-                <label>Type</label>
-                <select id="sys-phys-type-${i}">
-                    <option value="0" ${p.type===0?'selected':''}>RMT (Data)</option>
-                    <option value="1" ${p.type===1?'selected':''}>PWM (Analog)</option>
-                    <option value="2" ${p.type===2?'selected':''}>SPI</option>
-                </select>
-                <label>Hardware ID</label><input type="number" id="sys-phys-hw-${i}" value="${p.hardwareId}" min="0" max="15">
-                <label>GPIO Pin</label><input type="number" id="sys-phys-pin-${i}" value="${p.gpioPin}" min="0" max="48">
-            </div>`;
-        }
-        byId('system-outputs').innerHTML = physHtml;
-
-        let fixHtml = '';
-        for (let i = 0; i < 16; ++i) {
-            const f = state.config.fixtures?.[i] || {profile:0,pixelOrder:1,physicalOutputIndex:[0,0,0,0],numPixels:0,maxBrightness:255,gammaCorrection:true,maxMilliwatts:0};
-            fixHtml += `<div class="hw-field">
-                <div class="hw-field-head">Fixture ${i}</div>
-                <label>Profile</label>
-                <select id="sys-fix-prof-${i}">
-                    <option value="0" ${f.profile===0?'selected':''}>WS2812</option>
-                    <option value="1" ${f.profile===1?'selected':''}>SK6812</option>
-                    <option value="2" ${f.profile===2?'selected':''}>PWM Single</option>
-                    <option value="3" ${f.profile===3?'selected':''}>PWM RGB</option>
-                    <option value="4" ${f.profile===4?'selected':''}>PWM RGBW</option>
-                </select>
-                <label>Pixel Order</label>
-                <select id="sys-fix-po-${i}">
-                    <option value="0" ${f.pixelOrder===0?'selected':''}>RGB</option>
-                    <option value="1" ${f.pixelOrder===1?'selected':''}>GRB</option>
-                    <option value="2" ${f.pixelOrder===2?'selected':''}>RGBW</option>
-                    <option value="3" ${f.pixelOrder===3?'selected':''}>GRBW</option>
-                </select>
-                <label>Length (Pixels)</label><input type="number" id="sys-fix-len-${i}" value="${f.numPixels}" min="0" max="2000">
-                <label>Output Index</label><input type="number" id="sys-fix-out-${i}" value="${f.physicalOutputIndex[0]}" min="0" max="15">
-            </div>`;
-        }
-        byId('system-fixtures').innerHTML = fixHtml;
-
-        const roles = ['Unassigned', 'Sign', 'Sign Element', 'Ambiance Light', 'Main Light'];
-        let zonesHtml = '';
-        for (let i = 0; i < 8; ++i) {
-            const z = state.config.zones?.[i] || {name: '', role: 'Unassigned', fixtureMask: 0};
-
-            let fixChecks = '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:4px;margin-top:4px;">';
-            for (let f = 0; f < 16; ++f) {
-                fixChecks += `<label style="font-size:0.75rem"><input type="checkbox" id="sys-zmask-${i}-${f}" ${(z.fixtureMask & (1<<f))?'checked':''}> F${f}</label>`;
-            }
-            fixChecks += '</div>';
-
-            zonesHtml += `<div class="hw-field">
-                <div class="hw-field-head">Zone ${i+1}</div>
-                <label>Name</label><input id="sys-zname-${i}" value="${esc(z.name)}" maxlength="23" placeholder="Zone ${i+1}">
-                <label>Role</label><select id="sys-zrole-${i}">${roles.map(r => `<option value="${r}" ${z.role === r ? 'selected' : ''}>${r}</option>`).join('')}</select>
-                <label>Fixtures in Zone</label>${fixChecks}
-            </div>`;
-        }
-        byId('system-zones').innerHTML = zonesHtml;
-
-        const nodes = [];
-        if (state.sync) {
-            nodes.push(`<article class="product-card node-card primary"><span class="scene-chip">● THIS NODE</span><h4>${esc(state.config.deviceName || 'Lighting node')}</h4><p class="muted">${esc(state.sync.activeRole)} · ${state.sync.clockLocked ? 'clock locked' : 'waiting for clock'}</p><p class="latency">${state.sync.clockJitterUs || 0} μs <span class="help">jitter</span></p></article>`);
-            state.sync.peers.forEach(peer => nodes.push(`<article class="product-card node-card"><span class="scene-chip">● FOLLOWER</span><h4>${esc(peer.address)}</h4><p class="muted">Seen ${clockAge(peer.ageMs)}</p><p class="latency">${peer.latencyMs} ms</p></article>`));
-        }
-        byId('sync-topology').innerHTML = nodes.join('') || '<div class="empty-state">Sync is off or this node has not discovered any room peers yet.</div>';
-    }
-    async function saveSystem() {
+    function saveSystem() {
         try {
             const config = {
                 deviceName: byId('system-name').value.trim(),
@@ -1497,7 +1483,7 @@ window.lg = (() => {
         } catch (error) { toast(error.message,true); }
     }
     async function refreshSync() {
-        try { state.sync = await api('/api/v1/sync'); renderControl(); renderSystem(); }
+        try { state.sync = await api('/api/v1/sync'); renderDashboard(); renderSystem(); }
         catch (error) { toast(error.message,true); }
     }
     function updateText(id,value) { const output = byId(id); if (output) output.textContent = value; }

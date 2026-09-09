@@ -3,7 +3,7 @@
 #include "FactoryEffects.hpp"
 #include "FactoryTypes.hpp"
 #include <functional>
-#include "OutputArbitrator.hpp"
+#include "ControlSourceManager.hpp"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -13,12 +13,14 @@ namespace lg {
 
 class FactoryRunner {
 public:
-    explicit FactoryRunner(OutputArbitrator& output);
+    explicit FactoryRunner(ControlSourceManager& output);
 
     esp_err_t start();
     bool enqueue(const FactoryCommand& command);
     void set_stream_frame(const StreamFramePayload& payload, uint8_t brightness, uint32_t duration_ms);
     FactoryStatus status() const;
+
+    ControlSourceManager& output() { return output_; }
 
     using StatusCallback = std::function<void()>;
     void set_status_callback(StatusCallback cb) { status_callback_ = std::move(cb); }
@@ -36,7 +38,7 @@ private:
     );
     void blackout();
 
-    OutputArbitrator& output_;
+    ControlSourceManager& output_;
 
     QueueHandle_t queue_ = nullptr;
     SemaphoreHandle_t status_mutex_ = nullptr;

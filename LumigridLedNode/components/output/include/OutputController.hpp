@@ -1,6 +1,7 @@
 #pragma once
-#include "AddressableLeds.hpp"
-#include "Pca9685.hpp"
+#include "AddressableDriver.hpp"
+#include "Pca9685Driver.hpp"
+#include "SignageTypes.hpp"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -15,11 +16,15 @@ namespace lg {
 class OutputController {
 public:
     esp_err_t init();
+    
+    // Reconfigures hardware driver layers based on logical configuration
+    esp_err_t reconfigure(const DeviceConfig& cfg);
+    
     esp_err_t blackout();
     esp_err_t commit();
 
-    AddressableLeds& pixels() { return pixels_; }
-    Pca9685& pwm() { return pwm_; }
+    AddressableDriver& pixels() { return pixels_; }
+    Pca9685Driver& pwm() { return pwm_; }
 
     void enable();
     void disable();
@@ -31,8 +36,8 @@ public:
     void unlock() { xSemaphoreGiveRecursive(mutex_); }
 
 private:
-    AddressableLeds pixels_;
-    Pca9685 pwm_;
+    AddressableDriver pixels_;
+    Pca9685Driver pwm_;
     SemaphoreHandle_t mutex_ = nullptr;
     bool enabled_ = false;
 };

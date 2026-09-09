@@ -5,7 +5,7 @@
 
 namespace lg {
 
-class Pca9685 {
+class Pca9685Driver {
 public:
     // Note: The PCA9685 IC supports 16 channels, but only the first 8 are broken out 
     // on the Lumigrid PCB. Therefore, we limit the driver to 8 channels.

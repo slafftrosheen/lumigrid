@@ -1,6 +1,7 @@
 idf_component_register(
     SRCS
         "main.cpp"
+        "LumigridRuntime.cpp"
     INCLUDE_DIRS
         "."
     REQUIRES

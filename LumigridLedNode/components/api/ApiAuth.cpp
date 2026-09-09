@@ -7,9 +7,9 @@ namespace lg::api {
 namespace {
 
 static const char* TAG = "api_auth";
-static char s_admin_token[32] = "lumigrid_admin";
-static char s_installer_token[32] = "lumigrid_install";
-static char s_operator_token[32] = "lumigrid_op";
+static char s_admin_token[32] = {0};
+static char s_installer_token[32] = {0};
+static char s_operator_token[32] = {0};
 
 }
 
@@ -73,11 +73,11 @@ bool authorize(httpd_req_t* request, ApiRole minimum_role) {
 
     ApiRole provided_role;
 
-    if (std::strcmp(provided_token, s_admin_token) == 0) {
+    if (s_admin_token[0] != '\0' && std::strcmp(provided_token, s_admin_token) == 0) {
         provided_role = ApiRole::Admin;
-    } else if (std::strcmp(provided_token, s_installer_token) == 0) {
+    } else if (s_installer_token[0] != '\0' && std::strcmp(provided_token, s_installer_token) == 0) {
         provided_role = ApiRole::Installer;
-    } else if (std::strcmp(provided_token, s_operator_token) == 0) {
+    } else if (s_operator_token[0] != '\0' && std::strcmp(provided_token, s_operator_token) == 0) {
         provided_role = ApiRole::Operator;
     } else {
         ESP_LOGW(TAG, "Auth failed! Received invalid token.");

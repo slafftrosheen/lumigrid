@@ -21,8 +21,8 @@ uint8_t PowerBudget::soft_start_factor(uint32_t ms_since_enable) const {
     return static_cast<uint8_t>((uint32_t(ms_since_enable) * 255) / ramp_ms_);
 }
 
-uint32_t PowerBudget::enforce(const AddressableLeds& pixels,
-                              const Pca9685& pwm,
+uint32_t PowerBudget::enforce(const AddressableDriver& pixels,
+                              const Pca9685Driver& pwm,
                               uint8_t& brightness) {
     if (limit_mw_ == 0) return 0; // No limit set
 
@@ -38,7 +38,7 @@ uint32_t PowerBudget::enforce(const AddressableLeds& pixels,
     // Estimate PWM power from current duty values
     uint32_t total_pwm_mw = 0;
     const auto& values = pwm.values();
-    for (size_t ch = 0; ch < Pca9685::kChannels; ++ch) {
+    for (size_t ch = 0; ch < Pca9685Driver::kChannels; ++ch) {
         total_pwm_mw += (uint32_t(values[ch]) * kPwmChannelMaxMw) / 4095;
     }
 

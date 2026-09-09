@@ -1,8 +1,11 @@
 #include "FactoryEffects.hpp"
+#include "RenderTypes.hpp"
 #include <algorithm>
 
 namespace lg {
 namespace {
+inline void fill_rgb(OutputController& out, uint8_t lane, Rgb c) { out.pixels().fill(lane, c.r, c.g, c.b); }
+inline void set_rgb(OutputController& out, uint8_t lane, uint16_t px, Rgb c) { out.pixels().set(lane, px, c.r, c.g, c.b, 0); }
 
 constexpr Rgb kIdentityColors[] = {
     {255, 0, 0},     // lane 0: red
@@ -86,17 +89,17 @@ void render_effect(FactoryEffect effect,
 
         case FactoryEffect::Identity:
             for (uint8_t lane = 0; lane < 8; ++lane) {
-                output.pixels().fill(lane, scale(kIdentityColors[lane], brightness));
+                fill_rgb(output, lane, scale(kIdentityColors[lane], brightness));
                 output.pwm().set(lane, pwm_level);
             }
             break;
 
         case FactoryEffect::PixelChase: {
             const uint16_t pixel =
-                (elapsed_ms / 75) % AddressableLeds::kPixels;
+                (elapsed_ms / 75) % AddressableDriver::kPixels;
 
             for (uint8_t lane = 0; lane < 8; ++lane) {
-                output.pixels().set(
+                set_rgb(output, 
                     lane,
                     pixel,
                     scale(kIdentityColors[lane], brightness)
@@ -112,9 +115,9 @@ void render_effect(FactoryEffect effect,
 
         case FactoryEffect::Rainbow:
             for (uint8_t lane = 0; lane < 8; ++lane) {
-                for (uint16_t px = 0; px < AddressableLeds::kPixels; ++px) {
+                for (uint16_t px = 0; px < AddressableDriver::kPixels; ++px) {
                     const uint8_t hue = phase8 + px * 8 + lane * 24;
-                    output.pixels().set(lane, px, scale(wheel(hue), brightness));
+                    set_rgb(output, lane, px, scale(wheel(hue), brightness));
                 }
 
                 output.pwm().set(lane, static_cast<uint16_t>(
@@ -125,7 +128,7 @@ void render_effect(FactoryEffect effect,
 
         case FactoryEffect::WhiteWalk: {
             const uint8_t lane = (elapsed_ms / 500) % 8;
-            output.pixels().fill(lane, {brightness, brightness, brightness});
+            fill_rgb(output, lane, {brightness, brightness, brightness});
             output.pwm().set(lane, pwm_level);
             break;
         }
@@ -135,7 +138,7 @@ void render_effect(FactoryEffect effect,
             output.pwm().set(channel, pwm_level);
 
             for (uint8_t lane = 0; lane < 8; ++lane) {
-                output.pixels().fill(
+                fill_rgb(output, 
                     lane,
                     lane == channel ? scale(kIdentityColors[lane], brightness)
                                     : Rgb{0, 0, 0}
@@ -154,7 +157,7 @@ void render_effect(FactoryEffect effect,
 
             for (uint8_t channel = 0; channel < 8; ++channel) {
                 output.pwm().set(channel, level);
-                output.pixels().fill(
+                fill_rgb(output, 
                     channel,
                     scale(kIdentityColors[channel], triangle)
                 );
@@ -167,7 +170,7 @@ void render_effect(FactoryEffect effect,
             const Rgb c = scale(kIdentityColors[lane], brightness);
 
             for (uint8_t index = 0; index < 8; ++index) {
-                output.pixels().fill(index, index == lane ? c : Rgb{0, 0, 0});
+                fill_rgb(output, index, index == lane ? c : Rgb{0, 0, 0});
                 output.pwm().set(index, index == lane ? pwm_level : 0);
             }
             break;
@@ -176,7 +179,7 @@ void render_effect(FactoryEffect effect,
         case FactoryEffect::BurnIn:
             for (uint8_t lane = 0; lane < 8; ++lane) {
                 const Rgb c = scale(wheel(phase8 + lane * 32), brightness);
-                output.pixels().fill(lane, c);
+                fill_rgb(output, lane, c);
                 output.pwm().set(lane, static_cast<uint16_t>(
                     (uint32_t(c.r + c.g + c.b) * 4095) / (255 * 3)
                 ));

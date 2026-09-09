@@ -1,7 +1,7 @@
 // components/sync/include/NodeSync.hpp
 #pragma once
 #include "ClockDiscipline.hpp"
-#include "SignageEngine.hpp"
+#include "LightingRuntime.hpp"
 #include "SignageTypes.hpp"
 #include "esp_err.h"
 #include "freertos/FreeRTOS.h"
@@ -39,7 +39,7 @@ struct NodeSyncStatus {
 /// Multi-node synchronization over UDP broadcast with bounded clock discipline.
 class NodeSync {
 public:
-    NodeSync(SignageEngine& engine, ConfigStore& config, ClockDiscipline& clock);
+    NodeSync(LightingRuntime& engine, ConfigStore& config, ClockDiscipline& clock);
 
     esp_err_t start(NodeRole role);
     void stop();
@@ -66,7 +66,7 @@ private:
     void update_peer(const sockaddr_in& sender, uint16_t latency_ms);
     void reset_master();
 
-    SignageEngine& engine_;
+    LightingRuntime& engine_;
     ConfigStore&   config_;
     ClockDiscipline& clock_;
     NodeRole configured_role_ = NodeRole::Auto;

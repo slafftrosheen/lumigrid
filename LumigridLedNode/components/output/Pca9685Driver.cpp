@@ -1,4 +1,4 @@
-#include "Pca9685.hpp"
+#include "Pca9685Driver.hpp"
 #include "lg_board_pins.hpp"
 
 #include "driver/i2c_master.h"
@@ -59,7 +59,7 @@ esp_err_t init_i2c_once() {
 }
 }
 
-esp_err_t Pca9685::write_register(uint8_t reg, uint8_t value) {
+esp_err_t Pca9685Driver::write_register(uint8_t reg, uint8_t value) {
     xSemaphoreTake(s_i2c_mutex, portMAX_DELAY);
     const uint8_t packet[] = {reg, value};
     esp_err_t ret = i2c_master_transmit(s_dev, packet, sizeof(packet), 100);
@@ -67,7 +67,7 @@ esp_err_t Pca9685::write_register(uint8_t reg, uint8_t value) {
     return ret;
 }
 
-esp_err_t Pca9685::write_bytes(uint8_t start_reg,
+esp_err_t Pca9685Driver::write_bytes(uint8_t start_reg,
                                const uint8_t* data,
                                size_t len) {
     uint8_t packet[1 + kChannels * 4] = {};
@@ -82,7 +82,7 @@ esp_err_t Pca9685::write_bytes(uint8_t start_reg,
     return ret;
 }
 
-esp_err_t Pca9685::init() {
+esp_err_t Pca9685Driver::init() {
     ESP_RETURN_ON_ERROR(init_i2c_once(), "pca", "i2c init");
 
     ESP_LOGI("pca", "Initializing PCA9685 at 0x%02X...", lg::board::kPcaAddress);
@@ -128,24 +128,24 @@ esp_err_t Pca9685::init() {
     return clear();
 }
 
-esp_err_t Pca9685::set(uint8_t channel, uint16_t duty) {
+esp_err_t Pca9685Driver::set(uint8_t channel, uint16_t duty) {
     if (channel >= kChannels || duty > 4095) return ESP_ERR_INVALID_ARG;
     values_[channel] = duty;
     return ESP_OK;
 }
 
-esp_err_t Pca9685::set_all(uint16_t duty) {
+esp_err_t Pca9685Driver::set_all(uint16_t duty) {
     if (duty > 4095) return ESP_ERR_INVALID_ARG;
     values_.fill(duty);
     return ESP_OK;
 }
 
-esp_err_t Pca9685::clear() {
+esp_err_t Pca9685Driver::clear() {
     values_.fill(0);
     return commit();
 }
 
-esp_err_t Pca9685::commit() {
+esp_err_t Pca9685Driver::commit() {
     uint8_t bytes[kChannels * 4] = {};
 
     for (uint8_t channel = 0; channel < kChannels; ++channel) {

@@ -8,7 +8,7 @@
 // Forward declarations for signage components
 namespace lg {
 class ConfigStore;
-class SignageEngine;
+class LightingRuntime;
 class Scheduler;
 class NodeSync;
 }
@@ -23,14 +23,14 @@ public:
     esp_err_t start(uint16_t signage_port = 80,
                     uint16_t factory_port = 8080,
                     ConfigStore* config = nullptr,
-                    SignageEngine* signage = nullptr,
+                    LightingRuntime* signage = nullptr,
                     Scheduler* scheduler = nullptr,
                     NodeSync* node_sync = nullptr);
     void stop();
 
     FactoryRunner& runner() { return runner_; }
     ConfigStore* config() { return config_; }
-    SignageEngine* signage() { return signage_; }
+    LightingRuntime* signage() { return signage_; }
     Scheduler* scheduler() { return scheduler_; }
     NodeSync* node_sync() { return node_sync_; }
 
@@ -42,7 +42,7 @@ public:
 
     FactoryRunner& runner_;
     ConfigStore* config_ = nullptr;
-    SignageEngine* signage_ = nullptr;
+    LightingRuntime* signage_ = nullptr;
     Scheduler* scheduler_ = nullptr;
     NodeSync* node_sync_ = nullptr;
     httpd_handle_t signage_server_ = nullptr;

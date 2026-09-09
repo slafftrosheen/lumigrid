@@ -1,70 +1,100 @@
 #include "OutputController.hpp"
+#include "esp_log.h"
 #include "lg_board_pins.hpp"
-
-#include "driver/gpio.h"
-#include "esp_check.h"
 
 namespace lg {
 
 esp_err_t OutputController::init() {
+    ESP_LOGI("output", "Initializing OutputController...");
+
     mutex_ = xSemaphoreCreateRecursiveMutex();
-    if (mutex_ == nullptr) return ESP_ERR_NO_MEM;
+    if (mutex_ == nullptr) {
+        return ESP_ERR_NO_MEM;
+    }
 
-    const gpio_config_t cfg = {
-        .pin_bit_mask = 1ULL << board::kPcaOe,
-        .mode = GPIO_MODE_OUTPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE
-    };
+    lock();
+    esp_err_t err = pixels_.init();
+    if (err != ESP_OK) {
+        unlock();
+        return err;
+    }
 
-    ESP_RETURN_ON_ERROR(gpio_config(&cfg), "output", "oe cfg");
+    err = pwm_.init();
+    if (err != ESP_OK) {
+        ESP_LOGW("output", "Failed to init PCA9685 PWM driver (%s). Addressable LEDs will still work.", esp_err_to_name(err));
+    }
+    unlock();
 
-    // PCA OE# disabled before any bus or LED initialization.
-    disable();
-
-    ESP_RETURN_ON_ERROR(pwm_.init(), "output", "pca init");
-    ESP_RETURN_ON_ERROR(pixels_.init(), "output", "aled init");
-
-    return blackout();
+    return ESP_OK;
 }
 
-void OutputController::disable() {
-    xSemaphoreTakeRecursive(mutex_, portMAX_DELAY);
-    gpio_set_level(board::kPcaOe, 1);
-    enabled_ = false;
-    xSemaphoreGiveRecursive(mutex_);
-}
+esp_err_t OutputController::reconfigure(const DeviceConfig& cfg) {
+    lock();
+    ESP_LOGI("output", "Reconfiguring OutputController drivers based on DeviceConfig...");
+    
+    // We iterate over the fixtures, map them to physical RMT outputs, and 
+    // configure the addressable driver lane appropriately.
+    for (uint8_t f = 0; f < 16; ++f) {
+        const FixtureConfig& fix = cfg.fixtures[f];
+        if (fix.num_pixels == 0) continue;
 
-void OutputController::enable() {
-    xSemaphoreTakeRecursive(mutex_, portMAX_DELAY);
-    gpio_set_level(board::kPcaOe, 0);
-    enabled_ = true;
-    xSemaphoreGiveRecursive(mutex_);
+        for (uint8_t i = 0; i < 4; ++i) {
+            uint8_t p_idx = fix.physical_output_index[i];
+            if (p_idx >= 16) continue;
+
+            const PhysicalOutput& phys = cfg.physical_outputs[p_idx];
+            if (!phys.enabled) continue;
+
+            if (phys.type == OutputType::RMT && phys.hardware_id < AddressableDriver::kLanes) {
+                // Determine GPIO based on hardware_id
+                uint8_t gpio = board::kAledPins[phys.hardware_id];
+                
+                // Optional: override with schema GPIO if dynamic mapping is desired
+                // if (phys.gpio_pin != 0) gpio = phys.gpio_pin;
+
+                esp_err_t err = pixels_.configure_lane(phys.hardware_id, gpio, fix.profile, fix.pixel_order, fix.num_pixels);
+                if (err != ESP_OK) {
+                    ESP_LOGE("output", "Failed to configure lane %u: %s", phys.hardware_id, esp_err_to_name(err));
+                }
+            }
+            // PWM channels don't need explicit reconfiguration, Pca9685 driver handles 0-4095 globally
+        }
+    }
+    
+    unlock();
+    return ESP_OK;
 }
 
 esp_err_t OutputController::blackout() {
-    xSemaphoreTakeRecursive(mutex_, portMAX_DELAY);
-    gpio_set_level(board::kPcaOe, 1);
-    enabled_ = false;
-    esp_err_t err_pwm = pwm_.clear();
-    esp_err_t err_pixels = pixels_.blackout();
-    xSemaphoreGiveRecursive(mutex_);
-    return (err_pixels != ESP_OK) ? err_pixels : err_pwm;
+    lock();
+    esp_err_t err1 = pixels_.blackout();
+    esp_err_t err2 = pwm_.clear();
+    unlock();
+    return err1 != ESP_OK ? err1 : err2;
 }
 
 esp_err_t OutputController::commit() {
-    xSemaphoreTakeRecursive(mutex_, portMAX_DELAY);
-    esp_err_t err_pwm = pwm_.commit();
-    esp_err_t err_pixels = pixels_.show();
+    if (!enabled_) return ESP_OK;
+
+    lock();
+    esp_err_t err1 = pixels_.show();
+    esp_err_t err2 = pwm_.commit();
+    unlock();
     
-    if (err_pixels != ESP_OK) {
-        gpio_set_level(board::kPcaOe, 1);
-        enabled_ = false;
-        ESP_LOGE("output", "Pixels hardware commit failed (%s), disabling output safety interlock", esp_err_to_name(err_pixels));
-    }
-    xSemaphoreGiveRecursive(mutex_);
-    return (err_pixels != ESP_OK) ? err_pixels : err_pwm;
+    return err1 != ESP_OK ? err1 : err2;
+}
+
+void OutputController::enable() {
+    lock();
+    enabled_ = true;
+    unlock();
+}
+
+void OutputController::disable() {
+    lock();
+    enabled_ = false;
+    blackout();
+    unlock();
 }
 
 } // namespace lg

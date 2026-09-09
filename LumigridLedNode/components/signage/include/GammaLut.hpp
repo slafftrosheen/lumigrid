@@ -3,7 +3,7 @@
 // Generates compile-time LUTs so no runtime computation is needed.
 #pragma once
 #include <cstdint>
-#include "AddressableLeds.hpp"
+#include "RenderTypes.hpp"
 
 namespace lg {
 

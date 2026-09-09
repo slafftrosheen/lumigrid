@@ -1,8 +1,8 @@
 // components/signage/include/PowerBudget.hpp
 #pragma once
 #include <cstdint>
-#include "AddressableLeds.hpp"
-#include "Pca9685.hpp"
+#include "AddressableDriver.hpp"
+#include "Pca9685Driver.hpp"
 
 namespace lg {
 
@@ -28,8 +28,8 @@ public:
 
     /// Estimate total power and clamp brightness if budget exceeded.
     /// Modifies brightness in-place. Returns estimated mW before clamping.
-    uint32_t enforce(const AddressableLeds& pixels,
-                     const Pca9685& pwm,
+    uint32_t enforce(const AddressableDriver& pixels,
+                     const Pca9685Driver& pwm,
                      uint8_t& brightness);
 
 private:

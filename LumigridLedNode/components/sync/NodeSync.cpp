@@ -37,7 +37,7 @@ uint32_t auto_election_delay(const uint8_t mac[6]) {
 } // namespace
 
 NodeSync::NodeSync(
-    SignageEngine& engine,
+    LightingRuntime& engine,
     ConfigStore& config,
     ClockDiscipline& clock
 ) : engine_(engine), config_(config), clock_(clock) {}

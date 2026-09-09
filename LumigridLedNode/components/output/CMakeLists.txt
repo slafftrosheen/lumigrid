@@ -1,3 +1,3 @@
-idf_component_register(SRCS "AddressableLeds.cpp" "Pca9685.cpp" "OutputController.cpp" "OutputArbitrator.cpp"
+idf_component_register(SRCS "AddressableDriver.cpp" "Pca9685Driver.cpp" "OutputController.cpp"
                        INCLUDE_DIRS "include"
-                       REQUIRES board espressif__led_strip esp_timer)
+                       REQUIRES board espressif__led_strip esp_timer config factory)

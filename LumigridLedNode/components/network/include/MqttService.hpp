@@ -8,7 +8,7 @@
 #include <string>
 #include <functional>
 
-#include "SignageEngine.hpp"
+#include "LightingRuntime.hpp"
 
 namespace lg {
 
@@ -19,7 +19,7 @@ public:
     MqttService();
     ~MqttService();
 
-    esp_err_t init(const char* broker_uri, const char* client_id, const char* topic_prefix, SignageEngine* signage);
+    esp_err_t init(const char* broker_uri, const char* client_id, const char* topic_prefix, LightingRuntime* signage);
     esp_err_t start();
     void stop();
 
@@ -44,7 +44,7 @@ private:
     
     CommandCallback command_cb_;
     TimerHandle_t telemetry_timer_ = nullptr;
-    SignageEngine* signage_ = nullptr;
+    LightingRuntime* signage_ = nullptr;
     bool connected_ = false;
 };
 

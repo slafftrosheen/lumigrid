@@ -4,772 +4,761 @@ static const char dashboard_html[] = R"LGHTML(<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>Lumigrid OS</title>
     <style>
+        /* ═══════════════════════════════════════════════════════
+           LUMIGRID OS — DESIGN SYSTEM
+           ═══════════════════════════════════════════════════════ */
         :root {
-            --bg: #0a0a0f;
-            --surface: rgba(25, 25, 35, 0.7);
-            --surface-hover: rgba(35, 35, 50, 0.9);
-            --border: rgba(255, 255, 255, 0.1);
-            --text: #f0f0f5;
-            --text-muted: #9ba1a6;
+            --bg: #05060f;
+            --bg-subtle: #0a0b18;
+            --surface: rgba(14, 15, 28, 0.78);
+            --surface-elevated: rgba(22, 24, 42, 0.88);
+            --surface-hover: rgba(32, 35, 55, 0.92);
+            --surface-active: rgba(42, 46, 68, 0.95);
+            --border: rgba(255, 255, 255, 0.07);
+            --border-subtle: rgba(255, 255, 255, 0.04);
+            --border-focus: rgba(129, 140, 248, 0.5);
+            --text: #eef0f6;
+            --text-secondary: #a0a4b8;
+            --text-muted: #6b7084;
             --primary: #6366f1;
-            --primary-glow: rgba(99, 102, 241, 0.4);
-            --success: #10b981;
-            --danger: #ef4444;
+            --primary-dim: #4f46e5;
+            --primary-soft: rgba(99, 102, 241, 0.14);
+            --primary-glow: rgba(99, 102, 241, 0.35);
+            --accent: #34d399;
+            --accent-soft: rgba(52, 211, 153, 0.14);
+            --accent-glow: rgba(52, 211, 153, 0.3);
+            --danger: #f87171;
+            --danger-bg: rgba(127, 29, 29, 0.35);
+            --danger-glow: rgba(248, 113, 113, 0.3);
+            --warning: #fbbf24;
+            --radius-sm: 8px;
             --radius: 12px;
-            --font: 'Inter', system-ui, sans-serif;
+            --radius-lg: 16px;
+            --radius-xl: 20px;
+            --radius-full: 999px;
+            --font: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+            --ease: cubic-bezier(0.4, 0, 0.2, 1);
+            --transition: 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+            --transition-slow: 0.35s cubic-bezier(0.4, 0, 0.2, 1);
         }
 
-        * { box-sizing: border-box; margin: 0; padding: 0; }
+        /* ── Reset ── */
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
         body {
             font-family: var(--font);
             background: var(--bg);
             color: var(--text);
-            line-height: 1.5;
+            line-height: 1.55;
             min-height: 100vh;
-            background-image: 
-                radial-gradient(circle at 15% 50%, rgba(99, 102, 241, 0.1), transparent 25%),
-                radial-gradient(circle at 85% 30%, rgba(16, 185, 129, 0.1), transparent 25%);
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+            overflow-x: hidden;
+        }
+        body::after {
+            content: '';
+            position: fixed; inset: 0;
+            background:
+                radial-gradient(ellipse 80% 50% at 10% 45%, rgba(99,102,241,.07), transparent),
+                radial-gradient(ellipse 60% 70% at 90% 25%, rgba(52,211,153,.05), transparent);
+            pointer-events: none; z-index: -1;
         }
 
-        .container { max-width: 1200px; margin: 0 auto; padding: 2rem; }
-        
-        /* Auth Screen */
-        #auth {
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            height: 100vh;
+        /* ── Typography ── */
+        h1, h2, h3, h4, h5 { font-weight: 650; letter-spacing: -0.02em; line-height: 1.25; }
+        h3 { font-size: 1.3rem; }
+        h4 { font-size: 0.95rem; margin-bottom: 0.6rem; }
+        .eyebrow {
+            color: #a5b4fc; font-size: 0.68rem; font-weight: 800;
+            letter-spacing: 0.15em; text-transform: uppercase;
         }
-        .auth-card {
-            background: var(--surface);
-            backdrop-filter: blur(16px);
-            padding: 3rem;
-            border-radius: var(--radius);
-            border: 1px solid var(--border);
-            text-align: center;
-            width: 100%;
-            max-width: 400px;
-            box-shadow: 0 8px 32px rgba(0,0,0,0.4);
-        }
-
-        h1, h2, h3 { margin-bottom: 1rem; font-weight: 600; }
-        
-        input, select, button {
-            font-family: inherit;
-            font-size: 1rem;
-            border-radius: 8px;
-            border: 1px solid var(--border);
-            background: rgba(0,0,0,0.3);
-            color: var(--text);
-            padding: 0.75rem 1rem;
-            width: 100%;
-            margin-bottom: 1rem;
-            transition: all 0.2s;
-        }
-        
-        input:focus, select:focus {
-            outline: none;
-            border-color: var(--primary);
-            box-shadow: 0 0 0 3px var(--primary-glow);
-        }
-
-        button {
-            background: var(--surface);
-            cursor: pointer;
-            font-weight: 500;
-        }
-        button:hover { background: var(--surface-hover); }
-        button.primary { background: var(--primary); border-color: var(--primary); }
-        button.primary:hover { background: #4f46e5; box-shadow: 0 0 15px var(--primary-glow); }
-        button.danger { background: var(--danger); border-color: var(--danger); }
-
-        /* Dashboard Layout */
-        header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            padding-bottom: 2rem;
-            border-bottom: 1px solid var(--border);
-            margin-bottom: 2rem;
-        }
-        
-        .nav-tabs { display: flex; gap: 1rem; margin-bottom: 2rem; }
-        .nav-tabs button { width: auto; margin: 0; background: transparent; border-color: transparent; }
-        .nav-tabs button.active { background: var(--surface); border-color: var(--border); }
-
-        .page { display: none; animation: fadeIn 0.3s; }
-        .page.active { display: block; }
-        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
-
-        .card {
-            background: var(--surface);
-            backdrop-filter: blur(12px);
-            border: 1px solid var(--border);
-            border-radius: var(--radius);
-            padding: 1.5rem;
-            margin-bottom: 1.5rem;
-        }
-
-        /* Preset Editor Grid */
-        .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; }
-        .grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; }
-        
-        .channel-editor {
-            background: rgba(0,0,0,0.2);
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            padding: 1rem;
-        }
-
-        /* Sequencer Grid */
-        .seq-track {
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-            margin-bottom: 0.5rem;
-            background: rgba(0,0,0,0.2);
-            padding: 0.5rem;
-            border-radius: 8px;
-            overflow-x: auto;
-        }
-        .seq-step {
-            min-width: 60px;
-            height: 60px;
-            background: var(--surface);
-            border: 1px solid var(--border);
-            border-radius: 6px;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            font-size: 0.75rem;
-            cursor: pointer;
-        }
-        .seq-step.active {
-            border-color: var(--primary);
-            background: rgba(99, 102, 241, 0.2);
-        }
-        .seq-step input {
-            width: 40px; padding: 2px; margin: 2px; text-align: center;
-            font-size: 0.75rem; background: transparent; border: 1px solid transparent;
-        }
-        .seq-step input:focus { background: rgba(0,0,0,0.5); border-color: var(--primary); }
-
-        .toast {
-            position: fixed; bottom: 2rem; right: 2rem;
-            background: var(--surface); padding: 1rem 2rem;
-            border-radius: 8px; border-left: 4px solid var(--primary);
-            box-shadow: 0 10px 25px rgba(0,0,0,0.5);
-            transform: translateY(150%); transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-            z-index: 1000;
-        }
-        .toast.show { transform: translateY(0); }
-        .toast.error { border-left-color: var(--danger); }
-        
-        /* Flex Utils */
-        .flex { display: flex; gap: 1rem; }
-        .items-center { align-items: center; }
-        .justify-between { justify-content: space-between; }
+        .muted { color: var(--text-muted); font-size: 0.88rem; }
+        .help { color: var(--text-muted); font-size: 0.75rem; line-height: 1.5; }
         .mb-1 { margin-bottom: 1rem; }
 
-        /* Product dashboard */
+        /* ══════════════════════════════════════════════════════
+           LOGIN SCREEN
+           ══════════════════════════════════════════════════════ */
         #experience-auth, #product-app { min-height: 100vh; }
         #experience-auth[hidden], #product-app[hidden] { display: none; }
         #experience-auth {
             display: grid; place-items: center; padding: 1.5rem;
+            position: relative; overflow: hidden;
+        }
+        #experience-auth::before {
+            content: '';
+            position: absolute;
+            width: 250%; height: 250%; top: -75%; left: -75%;
             background:
-                radial-gradient(circle at 20% 15%, rgba(99,102,241,.28), transparent 32rem),
-                radial-gradient(circle at 80% 80%, rgba(16,185,129,.18), transparent 28rem);
+                radial-gradient(circle at 25% 35%, rgba(99,102,241,.22), transparent 35%),
+                radial-gradient(circle at 70% 65%, rgba(52,211,153,.16), transparent 30%),
+                radial-gradient(circle at 45% 85%, rgba(129,140,248,.1), transparent 25%);
+            animation: aurora 25s ease-in-out infinite alternate;
+            pointer-events: none;
+        }
+        @keyframes aurora {
+            0%   { transform: translate(0, 0) rotate(0deg) scale(1); }
+            33%  { transform: translate(-4%, 3%) rotate(2deg) scale(1.03); }
+            66%  { transform: translate(3%, -2%) rotate(-1.5deg) scale(0.97); }
+            100% { transform: translate(-2%, 1%) rotate(0.8deg) scale(1.01); }
         }
         .experience-login {
-            width: min(26rem, 100%); padding: 2rem; border: 1px solid var(--border);
-            border-radius: 1.25rem; background: rgba(15,16,28,.88);
-            box-shadow: 0 1.5rem 5rem rgba(0,0,0,.45);
+            position: relative;
+            width: min(26rem, 100%); padding: 2.5rem 2rem 2rem;
+            border: 1px solid rgba(255,255,255,0.08);
+            border-radius: var(--radius-xl);
+            background: rgba(10, 12, 24, 0.9);
+            backdrop-filter: blur(24px);
+            box-shadow:
+                0 2rem 5rem rgba(0,0,0,.5),
+                0 0 0 0.5px rgba(255,255,255,0.06) inset,
+                0 1px 0 rgba(255,255,255,0.04) inset;
         }
-        .eyebrow { color: #a5b4fc; font-size: .72rem; font-weight: 800; letter-spacing: .15em; text-transform: uppercase; }
-        .experience-login h1 { font-size: clamp(2rem, 8vw, 3rem); letter-spacing: -.06em; margin: .35rem 0 .65rem; }
-        .muted { color: var(--text-muted); font-size: .9rem; }
-        .experience-login label, .field label { display: block; font-size: .78rem; font-weight: 700; letter-spacing: .04em; margin: 1.2rem 0 .4rem; }
-        #product-app { padding: 1.25rem; max-width: 90rem; margin: 0 auto; }
+        .login-logo {
+            display: flex; align-items: center; gap: 0.75rem;
+            margin-bottom: 1.5rem;
+        }
+        .login-logo svg { flex-shrink: 0; filter: drop-shadow(0 0 8px rgba(99,102,241,0.4)); }
+        .experience-login h1 {
+            font-size: clamp(1.8rem, 7vw, 2.6rem);
+            letter-spacing: -0.05em;
+            margin: 0.25rem 0 0.5rem;
+            background: linear-gradient(135deg, var(--text) 0%, #a5b4fc 50%, var(--accent) 100%);
+            background-size: 200% 200%;
+            -webkit-background-clip: text; background-clip: text;
+            -webkit-text-fill-color: transparent;
+            animation: shimmer 6s ease infinite;
+        }
+        @keyframes shimmer {
+            0%, 100% { background-position: 0% 50%; }
+            50% { background-position: 100% 50%; }
+        }
+        .experience-login label, .field label {
+            display: block; font-size: 0.78rem; font-weight: 700;
+            letter-spacing: 0.04em; margin: 1.4rem 0 0.45rem;
+            color: var(--text-secondary);
+        }
+
+        /* ══════════════════════════════════════════════════════
+           FORM CONTROLS
+           ══════════════════════════════════════════════════════ */
+        input, select, button { font-family: inherit; }
+        input, select {
+            font-size: 0.9rem; border-radius: var(--radius-sm);
+            border: 1px solid var(--border);
+            background: rgba(5, 6, 15, 0.6);
+            color: var(--text); padding: 0.7rem 0.85rem;
+            width: 100%;
+            transition: border-color var(--transition), box-shadow var(--transition), background var(--transition);
+        }
+        input:focus, select:focus {
+            outline: none; border-color: var(--primary);
+            box-shadow: 0 0 0 3px var(--primary-soft), 0 0 16px rgba(99,102,241,0.12);
+            background: rgba(8, 10, 22, 0.8);
+        }
+        input::placeholder { color: var(--text-muted); }
+        select { cursor: pointer; }
+
+        /* Toggle Switch — targets checkboxes inside .switch-row */
+        .switch-row { display: flex; align-items: center; justify-content: space-between; gap: 0.8rem; padding: 0.55rem 0; font-size: 0.82rem; }
+        .switch-row label { margin: 0; }
+        .switch-row input[type="checkbox"] {
+            -webkit-appearance: none; appearance: none;
+            width: 2.75rem; height: 1.5rem;
+            border-radius: var(--radius-full);
+            background: rgba(255,255,255,0.08);
+            border: 1px solid rgba(255,255,255,0.12);
+            cursor: pointer; position: relative;
+            transition: background var(--transition), border-color var(--transition), box-shadow var(--transition);
+            flex-shrink: 0;
+        }
+        .switch-row input[type="checkbox"]::after {
+            content: '';
+            position: absolute; top: 2px; left: 2px;
+            width: calc(1.5rem - 6px); height: calc(1.5rem - 6px);
+            border-radius: 50%; background: rgba(255,255,255,0.7);
+            box-shadow: 0 1px 3px rgba(0,0,0,0.4);
+            transition: transform var(--transition), background var(--transition);
+        }
+        .switch-row input[type="checkbox"]:checked {
+            background: var(--primary); border-color: var(--primary);
+            box-shadow: 0 0 12px rgba(99,102,241,0.25);
+        }
+        .switch-row input[type="checkbox"]:checked::after {
+            transform: translateX(1.25rem); background: white;
+        }
+
+        /* Range Slider */
+        #product-app input[type="range"] {
+            -webkit-appearance: none; appearance: none;
+            height: 5px; border-radius: 3px;
+            background: rgba(255,255,255,0.1);
+            border: none; outline: none; cursor: pointer;
+            padding: 0; min-height: 0;
+        }
+        #product-app input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none; width: 18px; height: 18px;
+            border-radius: 50%; background: white;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.35), 0 0 0 2px var(--primary);
+            cursor: pointer; transition: box-shadow var(--transition);
+        }
+        #product-app input[type="range"]::-webkit-slider-thumb:hover {
+            box-shadow: 0 1px 6px rgba(0,0,0,0.35), 0 0 0 2px var(--primary), 0 0 14px var(--primary-glow);
+        }
+        #product-app input[type="range"]::-moz-range-thumb {
+            width: 18px; height: 18px; border: 2px solid var(--primary);
+            border-radius: 50%; background: white;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.35); cursor: pointer;
+        }
+        #product-app input[type="range"]::-moz-range-track {
+            height: 5px; border-radius: 3px; background: rgba(255,255,255,0.1); border: none;
+        }
+
+        /* Other checkboxes (not in switch-row) */
+        #product-app input[type="checkbox"]:not(.switch-row input) { accent-color: #818cf8; }
+
+        /* ══════════════════════════════════════════════════════
+           BUTTONS
+           ══════════════════════════════════════════════════════ */
+        button {
+            font-size: 0.85rem; font-weight: 600;
+            border-radius: var(--radius-sm); padding: 0.65rem 1rem;
+            border: 1px solid var(--border);
+            color: var(--text); background: rgba(255,255,255,0.06);
+            cursor: pointer;
+            transition: all var(--transition);
+            -webkit-tap-highlight-color: transparent;
+        }
+        button:hover { background: rgba(255,255,255,0.12); }
+        button:active { transform: scale(0.97); }
+        .button-primary {
+            border-color: transparent;
+            background: linear-gradient(135deg, #6366f1, #4f46e5);
+            box-shadow: 0 2px 8px rgba(99,102,241,0.3);
+            font-weight: 700;
+        }
+        .button-primary:hover {
+            filter: brightness(1.12);
+            box-shadow: 0 4px 16px rgba(99,102,241,0.4);
+        }
+        .button-secondary {
+            border-radius: var(--radius-sm); padding: 0.65rem 0.85rem;
+            border: 1px solid var(--border); color: var(--text);
+            background: rgba(255,255,255,0.06); cursor: pointer;
+        }
+        .button-secondary:hover { background: rgba(255,255,255,0.12); }
+        .button-danger {
+            color: #fecaca;
+            border-color: rgba(248,113,113,0.35);
+            background: var(--danger-bg);
+            box-shadow: 0 0 0 0 var(--danger-glow);
+            animation: danger-pulse 3s ease-in-out infinite;
+        }
+        .button-danger:hover {
+            background: rgba(153, 27, 27, 0.5);
+            box-shadow: 0 0 20px var(--danger-glow);
+            animation: none;
+        }
+        @keyframes danger-pulse {
+            0%, 100% { box-shadow: 0 0 0 0 rgba(248,113,113,0); }
+            50% { box-shadow: 0 0 0 4px rgba(248,113,113,0.08); }
+        }
+
+        /* ══════════════════════════════════════════════════════
+           APP SHELL
+           ══════════════════════════════════════════════════════ */
+        #product-app { padding: 1.25rem; max-width: 88rem; margin: 0 auto; }
         #product-app button, #product-app input, #product-app select { width: auto; margin: 0; }
         #product-app input, #product-app select {
-            min-height: 2.5rem; padding: .55rem .7rem; background: rgba(5,6,15,.55);
+            min-height: 2.5rem; padding: 0.55rem 0.75rem;
+            background: rgba(5,6,15,.55);
         }
-        #product-app input[type="range"] { min-height: 0; padding: 0; accent-color: #818cf8; }
-        #product-app input[type="checkbox"] { min-height: auto; accent-color: #818cf8; }
-        .app-shell { display: grid; gap: 1.25rem; }
+        .app-shell { display: grid; gap: 1rem; }
         .app-header {
-            display: flex; gap: 1rem; align-items: center; justify-content: space-between;
-            padding: 1rem 1.2rem; border: 1px solid var(--border); border-radius: 1rem;
-            background: rgba(16,17,31,.78); backdrop-filter: blur(1rem);
+            display: flex; flex-wrap: wrap; gap: 0.75rem;
+            align-items: center; justify-content: space-between;
+            padding: 1rem 1.25rem;
+            border: 1px solid var(--border);
+            border-radius: var(--radius-lg);
+            background: rgba(10, 12, 24, 0.82);
+            backdrop-filter: blur(16px);
+            box-shadow: 0 4px 16px rgba(0,0,0,0.2);
         }
-        .brand { display: flex; align-items: center; gap: .75rem; min-width: 0; }
-        .brand-mark { width: 2.5rem; aspect-ratio: 1; display: grid; place-items: center; border-radius: .8rem; color: white; font-weight: 900; background: linear-gradient(135deg, #818cf8, #34d399); box-shadow: 0 .4rem 1.2rem rgba(99,102,241,.4); }
-        .brand h2 { margin: 0; font-size: 1rem; letter-spacing: .08em; }
-        .online-pill, .status-pill { display: inline-flex; align-items: center; gap: .4rem; font-size: .72rem; color: #bbf7d0; }
-        .online-pill::before { content: ""; width: .45rem; height: .45rem; border-radius: 50%; background: #34d399; box-shadow: 0 0 .7rem #34d399; }
-        .header-actions { display: flex; align-items: center; gap: .5rem; }
-        .header-actions button, .button-secondary, .button-danger, .button-primary {
-            border-radius: .65rem; padding: .65rem .85rem; border: 1px solid var(--border); color: var(--text); background: rgba(255,255,255,.06); cursor: pointer;
+        .brand { display: flex; align-items: center; gap: 0.75rem; min-width: 0; }
+        .brand-mark {
+            width: 2.5rem; height: 2.5rem;
+            display: grid; place-items: center;
+            border-radius: 0.7rem;
+            background: linear-gradient(135deg, #818cf8, #34d399);
+            box-shadow: 0 4px 12px rgba(99,102,241,0.35);
+            overflow: hidden;
+            animation: brand-glow 4s ease-in-out infinite alternate;
         }
-        .button-primary { border-color: transparent; background: linear-gradient(135deg, #6366f1, #4f46e5); font-weight: 750; }
-        .button-danger { color: #fecaca; border-color: rgba(248,113,113,.45); background: rgba(127,29,29,.32); }
-        .header-actions button:hover, .button-secondary:hover { background: rgba(255,255,255,.13); }
-        .button-primary:hover { filter: brightness(1.13); }
-        .nav-rail { display: flex; flex-wrap: wrap; gap: .45rem; padding: .4rem; background: rgba(16,17,31,.62); border: 1px solid var(--border); border-radius: .9rem; }
-        .nav-rail button { border: 0; background: transparent; color: var(--text-muted); border-radius: .6rem; padding: .65rem .9rem; cursor: pointer; }
-        .nav-rail button.active { color: white; background: rgba(129,140,248,.2); box-shadow: inset 0 0 0 1px rgba(165,180,252,.25); }
-        .product-page { display: none; animation: page-in .24s ease both; }
+        @keyframes brand-glow {
+            0% { box-shadow: 0 4px 12px rgba(99,102,241,0.35); }
+            100% { box-shadow: 0 4px 20px rgba(52,211,153,0.35); }
+        }
+        .brand-mark svg { width: 22px; height: 22px; }
+        .brand h2 { margin: 0; font-size: 1rem; letter-spacing: 0.08em; }
+        .online-pill {
+            display: inline-flex; align-items: center; gap: 0.4rem;
+            font-size: 0.7rem; color: #bbf7d0; font-weight: 600;
+        }
+        .online-pill::before {
+            content: ""; width: 0.45rem; height: 0.45rem;
+            border-radius: 50%; background: #34d399;
+            box-shadow: 0 0 6px #34d399;
+            animation: pulse-dot 2s ease-in-out infinite;
+        }
+        @keyframes pulse-dot {
+            0%, 100% { box-shadow: 0 0 4px #34d399; opacity: 1; }
+            50% { box-shadow: 0 0 12px #34d399, 0 0 20px rgba(52,211,153,0.3); opacity: 0.8; }
+        }
+        .header-actions { display: flex; align-items: center; gap: 0.45rem; }
+        .header-actions button { font-size: 0.78rem; padding: 0.55rem 0.75rem; }
+        #live-preview {
+            width: 100%; image-rendering: pixelated;
+            border-radius: 6px; background: rgba(5,6,15,0.6);
+            margin-top: 0.5rem; display: none;
+            border: 1px solid rgba(255,255,255,0.06);
+            box-shadow: 0 0 20px rgba(99,102,241,0.08);
+        }
+
+        /* ══════════════════════════════════════════════════════
+           NAVIGATION RAIL
+           ══════════════════════════════════════════════════════ */
+        .nav-rail {
+            display: flex; flex-wrap: wrap; gap: 0.35rem;
+            padding: 0.35rem;
+            background: rgba(10, 12, 24, 0.65);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            position: relative;
+        }
+        .nav-rail button {
+            display: inline-flex; align-items: center; gap: 0.5rem;
+            border: 0; background: transparent;
+            color: var(--text-muted); border-radius: 0.6rem;
+            padding: 0.6rem 0.85rem; cursor: pointer;
+            font-weight: 600; font-size: 0.82rem;
+            transition: color var(--transition), background var(--transition), box-shadow var(--transition);
+        }
+        .nav-rail button svg {
+            width: 16px; height: 16px; opacity: 0.6;
+            transition: opacity var(--transition);
+            flex-shrink: 0;
+        }
+        .nav-rail button:hover { color: var(--text-secondary); background: rgba(255,255,255,0.04); }
+        .nav-rail button:hover svg { opacity: 0.8; }
+        .nav-rail button.active {
+            color: white; background: rgba(129,140,248,0.18);
+            box-shadow: inset 0 0 0 1px rgba(165,180,252,0.2);
+        }
+        .nav-rail button.active svg { opacity: 1; }
+
+        /* ══════════════════════════════════════════════════════
+           PAGES & TRANSITIONS
+           ══════════════════════════════════════════════════════ */
+        .product-page { display: none; animation: page-in 0.3s var(--ease) both; }
         .product-page.active { display: block; }
-        @keyframes page-in { from { opacity: 0; transform: translateY(.5rem); } to { opacity: 1; transform: none; } }
-        .page-heading { display: flex; justify-content: space-between; align-items: flex-end; gap: 1rem; margin: .5rem 0 1rem; flex-wrap: wrap; }
-        .page-heading h3 { margin: 0; font-size: 1.3rem; letter-spacing: -.02em; }
-        .overview-grid, .scene-grid, .zone-grid, .settings-grid, .sync-grid { display: grid; gap: 1rem; }
-        .overview-grid { grid-template-columns: 1.1fr .9fr; }
-        .scene-grid { grid-template-columns: repeat(auto-fill, minmax(14rem, 1fr)); }
-        .zone-grid { grid-template-columns: repeat(auto-fill, minmax(16rem, 1fr)); }
-        .settings-grid { grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr)); }
-        .sync-grid { grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr)); }
-        .product-card { padding: 1rem; border-radius: 1rem; border: 1px solid var(--border); background: rgba(20,21,37,.74); box-shadow: 0 .8rem 2rem rgba(0,0,0,.14); }
-        .product-card h4 { margin: 0; font-size: .95rem; }
-        .product-card p { margin: .4rem 0 0; }
-        .scene-card { display: grid; gap: .85rem; min-height: 10rem; }
-        .scene-card .scene-actions { display: flex; gap: .5rem; margin-top: auto; }
+        @keyframes page-in {
+            from { opacity: 0; transform: translateY(8px); }
+            to   { opacity: 1; transform: none; }
+        }
+        .page-heading {
+            display: flex; justify-content: space-between; align-items: flex-end;
+            gap: 1rem; margin: 0.5rem 0 1rem; flex-wrap: wrap;
+        }
+        .page-heading h3 { margin: 0; }
+
+        /* ══════════════════════════════════════════════════════
+           CARDS
+           ══════════════════════════════════════════════════════ */
+        .product-card {
+            padding: 1.25rem; border-radius: var(--radius-lg);
+            border: 1px solid var(--border);
+            background: var(--surface);
+            backdrop-filter: blur(10px);
+            box-shadow:
+                0 2px 8px rgba(0,0,0,0.12),
+                0 0 0 0.5px rgba(255,255,255,0.03) inset;
+            transition: border-color var(--transition), box-shadow var(--transition), transform var(--transition);
+        }
+        .product-card:hover {
+            border-color: rgba(255,255,255,0.1);
+        }
+        .product-card h4 { margin: 0 0 0.5rem; font-size: 0.95rem; }
+        .product-card p { margin: 0.35rem 0 0; }
+
+        /* ══════════════════════════════════════════════════════
+           CONTROL ROOM
+           ══════════════════════════════════════════════════════ */
+        .overview-grid { display: grid; grid-template-columns: 1.1fr 0.9fr; gap: 1rem; }
+        .stat-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.55rem; margin-top: 0.85rem; }
+        .stat-list div {
+            padding: 0.65rem; border-radius: var(--radius-sm);
+            background: rgba(0,0,0,0.2);
+            border: 1px solid var(--border-subtle);
+            transition: border-color var(--transition);
+        }
+        .stat-list div:hover { border-color: var(--border); }
+        .stat-list span {
+            display: block; color: var(--text-muted);
+            font-size: 0.65rem; text-transform: uppercase;
+            letter-spacing: 0.08em; font-weight: 600;
+        }
+        .stat-list strong { font-size: 0.95rem; font-variant-numeric: tabular-nums; }
+
+        /* ── Scene Cards ── */
+        .scene-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(14rem, 1fr)); gap: 1rem; }
+        .scene-card {
+            display: grid; gap: 0.75rem; min-height: 10rem;
+            border-top: 3px solid var(--scene-color, var(--primary));
+            transition: transform var(--transition), box-shadow var(--transition), border-color var(--transition);
+        }
+        .scene-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 24px rgba(0,0,0,0.25), 0 0 20px rgba(99,102,241,0.06);
+        }
+        .scene-card .scene-actions { display: flex; gap: 0.5rem; margin-top: auto; }
         .scene-card .scene-actions button { flex: 1; }
-        .scene-chip { display: inline-flex; align-items: center; gap: .35rem; color: #c7d2fe; font-size: .73rem; font-weight: 700; }
-        .stat-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .65rem; margin-top: .85rem; }
-        .stat-list div { padding: .65rem; border-radius: .65rem; background: rgba(0,0,0,.18); }
-        .stat-list span { display: block; color: var(--text-muted); font-size: .68rem; text-transform: uppercase; letter-spacing: .07em; }
-        .stat-list strong { font-size: .95rem; }
-        .editor-toolbar, .timeline-toolbar, .cue-toolbar { display: flex; justify-content: space-between; align-items: center; gap: .75rem; flex-wrap: wrap; margin-bottom: 1rem; }
-        .editor-toolbar > div, .timeline-toolbar > div, .cue-toolbar > div { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
-        .range-row { display: grid; grid-template-columns: minmax(7rem, 1fr) minmax(8rem, 2fr) minmax(3.2rem, auto); gap: .65rem; align-items: center; margin-top: .8rem; }
-        .range-row label { font-size: .78rem; font-weight: 700; }
-        .range-row output { color: #c7d2fe; font-variant-numeric: tabular-nums; text-align: right; }
-        .switch-row { display: flex; align-items: center; justify-content: space-between; gap: .8rem; padding: .55rem 0; font-size: .82rem; }
-        .switch-row label { margin: 0; }
-        .zone-card { display: grid; gap: .65rem; }
+        .scene-chip {
+            display: inline-flex; align-items: center; gap: 0.35rem;
+            color: #c7d2fe; font-size: 0.72rem; font-weight: 700;
+        }
+
+        /* ══════════════════════════════════════════════════════
+           SCENE EDITOR
+           ══════════════════════════════════════════════════════ */
+        .editor-toolbar, .timeline-toolbar, .cue-toolbar {
+            display: flex; justify-content: space-between; align-items: center;
+            gap: 0.75rem; flex-wrap: wrap; margin-bottom: 1rem;
+        }
+        .editor-toolbar > div, .timeline-toolbar > div, .cue-toolbar > div {
+            display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;
+        }
+        .range-row {
+            display: grid; grid-template-columns: minmax(7rem, 1fr) minmax(8rem, 2fr) minmax(3.2rem, auto);
+            gap: 0.65rem; align-items: center; margin-top: 0.8rem;
+        }
+        .range-row label { font-size: 0.78rem; font-weight: 700; color: var(--text-secondary); }
+        .range-row output { color: #c7d2fe; font-variant-numeric: tabular-nums; text-align: right; font-weight: 600; font-size: 0.85rem; }
+        .color-line { display: flex; justify-content: space-between; align-items: center; gap: 0.7rem; }
+        .color-line input[type="color"] { width: 3.5rem !important; height: 2.2rem; padding: 0.15rem !important; border-radius: var(--radius-sm); cursor: pointer; }
+        .zone-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(16rem, 1fr)); gap: 1rem; }
+        .zone-card { display: grid; gap: 0.65rem; }
         .zone-title { display: flex; justify-content: space-between; align-items: center; }
-        .zone-title span { color: var(--text-muted); font-size: .72rem; }
-        .color-line { display: flex; justify-content: space-between; align-items: center; gap: .7rem; }
-        .color-line input { width: 3.5rem !important; padding: .15rem !important; }
-        .help { color: var(--text-muted); font-size: .72rem; line-height: 1.45; }
-        .overlay-controls { display: grid; gap: .6rem; }
-        .palette { display: flex; gap: .55rem; overflow-x: auto; padding-bottom: .3rem; }
-        .palette button { min-width: 8.5rem; text-align: left; border-radius: .7rem; padding: .65rem; border: 1px solid var(--border); background: rgba(255,255,255,.04); color: var(--text); cursor: grab; }
-        .palette button.selected { border-color: #818cf8; background: rgba(99,102,241,.2); }
-        .track { display: grid; grid-template-columns: 9rem minmax(36rem, 1fr); gap: .65rem; align-items: center; margin: .55rem 0; }
-        .track-head { display: grid; gap: .35rem; padding: .55rem; border-radius: .65rem; background: rgba(255,255,255,.04); }
-        .track-head strong { font-size: .78rem; }
-        .track-head select { width: 100% !important; min-height: 2rem !important; font-size: .72rem; }
-        .step-lane { display: grid; grid-template-columns: repeat(16, minmax(3.4rem, 1fr)); gap: .3rem; }
-        .step { min-height: 3.5rem; overflow: hidden; border-radius: .5rem; border: 1px solid rgba(255,255,255,.1); background: rgba(255,255,255,.035); color: var(--text-muted); cursor: pointer; padding: .3rem; text-align: left; }
-        .step span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .63rem; }
-        .step small { color: #a5b4fc; font-size: .57rem; }
-        .step.selected { border-color: #818cf8; box-shadow: 0 0 0 2px rgba(129,140,248,.2); }
-        .step.inactive { opacity: .34; }
-        .timeline-scroll { overflow-x: auto; padding-bottom: .5rem; }
+        .zone-title span { color: var(--text-muted); font-size: 0.72rem; }
+        .overlay-controls { display: grid; gap: 0.6rem; }
+        .settings-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr)); gap: 1rem; }
+
+        /* Layer editor */
+        .layer-editor {
+            margin-top: 1.25rem; border-top: 1px solid var(--border);
+            padding-top: 1.25rem; position: relative;
+        }
+        .layer-editor h5 {
+            font-size: 0.82rem; font-weight: 700;
+            color: var(--text-secondary); margin-bottom: 0.75rem;
+            display: flex; align-items: center; gap: 0.5rem;
+        }
+        .layer-editor h5::before {
+            content: ''; width: 8px; height: 8px;
+            border-radius: 2px; background: var(--primary); opacity: 0.6;
+        }
+
+        /* ══════════════════════════════════════════════════════
+           TIMELINE
+           ══════════════════════════════════════════════════════ */
+        .palette {
+            display: flex; gap: 0.5rem; overflow-x: auto;
+            padding-bottom: 0.4rem;
+            scrollbar-width: thin; scrollbar-color: rgba(255,255,255,0.1) transparent;
+        }
+        .palette button {
+            min-width: 8.5rem; text-align: left;
+            border-radius: var(--radius-sm); padding: 0.65rem;
+            border: 1px solid var(--border);
+            background: rgba(255,255,255,0.04);
+            color: var(--text); cursor: grab;
+            transition: border-color var(--transition), background var(--transition), box-shadow var(--transition);
+        }
+        .palette button:hover { background: rgba(255,255,255,0.08); }
+        .palette button.selected {
+            border-color: #818cf8; background: rgba(99,102,241,0.15);
+            box-shadow: 0 0 12px rgba(99,102,241,0.12);
+        }
+        .palette button strong { display: block; font-size: 0.82rem; }
+        .palette button span { display: block; font-size: 0.7rem; color: var(--text-muted); margin-top: 0.15rem; }
+        .track {
+            display: grid; grid-template-columns: 9rem minmax(36rem, 1fr);
+            gap: 0.65rem; align-items: center; margin: 0.55rem 0;
+        }
+        .track-head {
+            display: grid; gap: 0.35rem; padding: 0.55rem;
+            border-radius: var(--radius-sm);
+            background: rgba(255,255,255,0.04);
+            border: 1px solid var(--border-subtle);
+        }
+        .track-head strong { font-size: 0.78rem; }
+        .track-head select { width: 100% !important; min-height: 2rem !important; font-size: 0.72rem; }
+        .step-lane {
+            display: grid;
+            grid-template-columns: repeat(16, minmax(3.4rem, 1fr));
+            gap: 0.25rem;
+        }
+        .step {
+            min-height: 3.5rem; overflow: hidden;
+            border-radius: 0.45rem;
+            border: 1px solid rgba(255,255,255,0.08);
+            background: rgba(255,255,255,0.03);
+            color: var(--text-muted); cursor: pointer;
+            padding: 0.3rem; text-align: left;
+            transition: border-color var(--transition), background var(--transition), box-shadow var(--transition);
+        }
+        .step:hover { background: rgba(255,255,255,0.06); border-color: rgba(255,255,255,0.12); }
+        .step span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.63rem; }
+        .step small { color: #a5b4fc; font-size: 0.57rem; font-weight: 700; }
+        .step.selected {
+            border-color: #818cf8;
+            box-shadow: 0 0 0 2px rgba(129,140,248,0.2), 0 0 12px rgba(99,102,241,0.1);
+            background: rgba(99,102,241,0.08);
+        }
+        .step.inactive { opacity: 0.3; }
+        .timeline-scroll { overflow-x: auto; padding-bottom: 0.5rem; }
         .step-inspector { margin-top: 1rem; display: grid; grid-template-columns: 1fr auto; gap: 1rem; align-items: end; }
-        .beat-options { display: flex; gap: .35rem; }
-        .beat-options button { padding: .45rem .6rem; border: 1px solid var(--border); border-radius: .45rem; color: var(--text-muted); background: transparent; cursor: pointer; }
-        .beat-options button.active { color: white; background: rgba(99,102,241,.25); border-color: #818cf8; }
-        .cue-list { display: grid; gap: .65rem; }
-        .cue { display: grid; grid-template-columns: auto 7rem 1fr 1.3fr auto; align-items: center; gap: .65rem; padding: .75rem; border: 1px solid var(--border); border-radius: .75rem; background: rgba(255,255,255,.035); }
-        .days { display: flex; gap: .2rem; }
-        .days button { border: 1px solid var(--border); border-radius: .35rem; background: transparent; color: var(--text-muted); padding: .3rem .38rem; font-size: .65rem; cursor: pointer; }
-        .days button.active { color: white; background: #4f46e5; border-color: #6366f1; }
+        .beat-options { display: flex; gap: 0.3rem; }
+        .beat-options button {
+            padding: 0.45rem 0.65rem; border: 1px solid var(--border);
+            border-radius: 0.4rem; color: var(--text-muted);
+            background: transparent; cursor: pointer;
+            font-variant-numeric: tabular-nums; font-weight: 600;
+            transition: all var(--transition);
+        }
+        .beat-options button:hover { background: rgba(255,255,255,0.06); }
+        .beat-options button.active {
+            color: white; background: rgba(99,102,241,0.22);
+            border-color: #818cf8;
+        }
+
+        /* ══════════════════════════════════════════════════════
+           AUTOMATION
+           ══════════════════════════════════════════════════════ */
+        .cue-list { display: grid; gap: 0.6rem; }
+        .cue {
+            display: grid;
+            grid-template-columns: auto 7rem 1fr 1.3fr auto;
+            align-items: center; gap: 0.65rem;
+            padding: 0.8rem;
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            background: rgba(255,255,255,0.025);
+            transition: border-color var(--transition), background var(--transition);
+        }
+        .cue:hover { border-color: rgba(255,255,255,0.1); background: rgba(255,255,255,0.04); }
+        .days { display: flex; gap: 0.2rem; }
+        .days button {
+            border: 1px solid var(--border); border-radius: 0.35rem;
+            background: transparent; color: var(--text-muted);
+            padding: 0.3rem 0.4rem; font-size: 0.65rem;
+            cursor: pointer; font-weight: 700;
+            transition: all var(--transition);
+        }
+        .days button:hover { background: rgba(255,255,255,0.06); }
+        .days button.active {
+            color: white;
+            background: linear-gradient(135deg, #4f46e5, #6366f1);
+            border-color: #6366f1;
+            box-shadow: 0 2px 6px rgba(99,102,241,0.25);
+        }
+
+        /* ══════════════════════════════════════════════════════
+           SYSTEM PAGE
+           ══════════════════════════════════════════════════════ */
+        .sync-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr)); gap: 1rem; }
         .node-card { min-height: 7.5rem; }
-        .node-card.primary { border-color: rgba(52,211,153,.5); background: linear-gradient(145deg, rgba(16,185,129,.14), rgba(20,21,37,.74)); }
-        .node-card .latency { color: #a7f3d0; font-size: 1.2rem; font-weight: 800; margin-top: .7rem; }
-        .empty-state { padding: 2rem; text-align: center; color: var(--text-muted); border: 1px dashed var(--border); border-radius: .9rem; }
-        #experience-toast { position: fixed; z-index: 30; right: 1rem; bottom: 1rem; max-width: min(28rem, calc(100vw - 2rem)); padding: .8rem 1rem; border-radius: .7rem; background: #1e293b; border: 1px solid #475569; color: white; transform: translateY(8rem); transition: transform .22s ease; }
-        #experience-toast.show { transform: translateY(0); }
-        #experience-toast.error { background: #450a0a; border-color: #f87171; }
+        .node-card.primary {
+            border-color: rgba(52,211,153,0.4);
+            background: linear-gradient(145deg, rgba(16,185,129,0.12), var(--surface));
+        }
+        .node-card .latency {
+            color: #a7f3d0; font-size: 1.2rem; font-weight: 800;
+            margin-top: 0.7rem; font-variant-numeric: tabular-nums;
+        }
+
+        /* Collapsible hardware sections */
+        .section-header {
+            display: flex; justify-content: space-between; align-items: center;
+            cursor: pointer; user-select: none;
+            padding: 0.15rem 0; margin-bottom: 0.4rem;
+            transition: opacity var(--transition);
+        }
+        .section-header:hover { opacity: 0.8; }
+        .section-header h4 { margin: 0; }
+        .section-chevron {
+            color: var(--text-muted); font-size: 1rem;
+            transition: transform var(--transition);
+            line-height: 1;
+        }
+        .hw-section { transition: opacity 0.15s; }
+        .hw-section.collapsed { display: none; }
+
+        /* Hardware config field cards */
+        .hw-field {
+            margin-bottom: 0.4rem; padding: 0.65rem;
+            background: rgba(0,0,0,0.2); border-radius: var(--radius-sm);
+            border: 1px solid var(--border-subtle);
+            transition: border-color var(--transition);
+        }
+        .hw-field:hover { border-color: var(--border); }
+        .hw-field-head {
+            font-weight: 700; margin-bottom: 0.4rem; font-size: 0.85rem;
+            display: flex; justify-content: space-between; align-items: center;
+        }
+
+        /* ══════════════════════════════════════════════════════
+           EMPTY STATE
+           ══════════════════════════════════════════════════════ */
+        .empty-state {
+            padding: 2.5rem; text-align: center; color: var(--text-muted);
+            border: 1px dashed rgba(255,255,255,0.08);
+            border-radius: var(--radius);
+            background: rgba(255,255,255,0.015);
+            font-weight: 500;
+        }
+
+        /* ══════════════════════════════════════════════════════
+           TOAST NOTIFICATIONS
+           ══════════════════════════════════════════════════════ */
+        #experience-toast {
+            position: fixed; z-index: 50;
+            right: 1.25rem; bottom: 1.25rem;
+            max-width: min(26rem, calc(100vw - 2.5rem));
+            padding: 0.85rem 1.15rem; border-radius: var(--radius);
+            background: rgba(15, 23, 42, 0.94);
+            backdrop-filter: blur(12px);
+            border: 1px solid rgba(255,255,255,0.08);
+            border-left: 3px solid var(--accent);
+            color: white; font-size: 0.85rem; font-weight: 550;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.4), 0 0 0 0.5px rgba(255,255,255,0.05) inset;
+            transform: translateY(calc(100% + 3rem));
+            opacity: 0;
+            transition: transform 0.35s var(--ease), opacity 0.35s;
+            overflow: hidden;
+        }
+        #experience-toast.show { transform: translateY(0); opacity: 1; }
+        #experience-toast.error { border-left-color: var(--danger); }
+        #experience-toast::after {
+            content: ''; position: absolute;
+            bottom: 0; left: 0; right: 0; height: 2px;
+            background: var(--accent);
+            transform-origin: left; transform: scaleX(0);
+        }
+        #experience-toast.show::after {
+            transform: scaleX(1);
+            animation: toast-drain 3.5s linear forwards;
+        }
+        #experience-toast.error::after { background: var(--danger); }
+        @keyframes toast-drain {
+            from { transform: scaleX(1); }
+            to   { transform: scaleX(0); }
+        }
+
+        /* ══════════════════════════════════════════════════════
+           RESPONSIVE
+           ══════════════════════════════════════════════════════ */
         @media (max-width: 52rem) {
-            #product-app { padding: .75rem; }
+            #product-app { padding: 0.65rem; }
             .overview-grid { grid-template-columns: 1fr; }
             .app-header { align-items: flex-start; }
             .track { grid-template-columns: 1fr; }
             .cue { grid-template-columns: 1fr 1fr; }
             .cue .days { grid-column: 1 / -1; }
             .step-inspector { grid-template-columns: 1fr; }
+            .nav-rail {
+                position: fixed; bottom: 0; left: 0; right: 0;
+                z-index: 40; border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+                justify-content: center;
+                background: rgba(10, 12, 24, 0.92);
+                backdrop-filter: blur(16px);
+                padding: 0.4rem 0.6rem calc(0.4rem + env(safe-area-inset-bottom, 0));
+                box-shadow: 0 -4px 20px rgba(0,0,0,0.3);
+                border-top: 1px solid var(--border);
+            }
+            .nav-rail button { flex-direction: column; gap: 0.15rem; padding: 0.5rem 0.6rem; font-size: 0.6rem; }
+            .nav-rail button svg { width: 20px; height: 20px; }
+            .app-shell { padding-bottom: calc(4.5rem + env(safe-area-inset-bottom, 0)); }
         }
+        @media (max-width: 36rem) {
+            .settings-grid { grid-template-columns: 1fr; }
+            .scene-grid { grid-template-columns: 1fr; }
+        }
+
+        /* ── Scrollbar ── */
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.18); }
+
+        /* ── Focus visible ── */
+        :focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+
+        /* ── Utility ── */
+        .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); border: 0; }
     </style>
 </head>
 <body>
-<template id="legacy-dashboard">
-
-<div id="auth">
-    <div class="auth-card">
-        <h1>LUMIGRID OS</h1>
-        <p class="text-muted mb-1">Enter access token</p>
-        <input type="password" id="token" placeholder="Bearer Token">
-        <button class="primary" onclick="connect()">Connect to Node</button>
-    </div>
-</div>
-
-<div id="app" class="container" style="display:none;">
-    <header>
-        <div>
-            <h2>LUMIGRID <span id="node-name" style="font-weight:300;color:var(--primary)">NODE</span></h2>
-            <div style="font-size:0.875rem;color:var(--success)">● Online</div>
-        </div>
-        <button style="width:auto;margin:0" onclick="disconnect()">Disconnect</button>
-    </header>
-
-        <div class="nav-tabs">
-        <button class="active" onclick="nav('overview')">Overview</button>
-        <button onclick="nav('presets'); loadPresets()">Presets</button>
-        <button onclick="nav('sequencer'); loadSequencer()">Sequencer</button>
-        <button onclick="nav('commissioning'); loadCommissioning()">Commissioning</button>
-        <button onclick="nav('settings'); loadSettings()">Settings</button>
-        <button onclick="nav('system')">System</button>
-    </div>
-
-    <!-- OVERVIEW -->
-    <div id="page-overview" class="page active">
-        <div class="grid-2">
-            <div class="card">
-                <h3>Quick Actions</h3>
-                <button class="danger" onclick="api('/api/v1/factory/abort', 'POST')">Emergency Blackout</button>
-                <button onclick="api('/api/v1/activate', 'POST', {preset: 0})">Load Default Preset</button>
-            </div>
-            <div class="card">
-                <h3>System Status</h3>
-                <pre id="status-json" style="font-size:0.8rem;overflow:auto;background:rgba(0,0,0,0.3);padding:1rem;border-radius:8px;"></pre>
-                <button class="mb-1" onclick="loadStatus()">Refresh Status</button>
-            </div>
-        </div>
-    </div>
-
-    
-    <!-- COMMISSIONING -->
-    <div id="page-commissioning" class="page">
-        <div class="flex justify-between items-center mb-1">
-            <h3>Commissioning Wizard</h3>
-            <button style="width:auto;margin:0" onclick="generateAcceptanceReport()">Generate Report</button>
-        </div>
-        
-        <div class="grid-2">
-            <div class="card">
-                <h4>1. Network Health</h4>
-                <div id="health-stats" style="margin: 1rem 0; font-family: monospace;">Loading...</div>
-                <button onclick="loadCommissioning()">Refresh Health</button>
-            </div>
-            
-            <div class="card">
-                <h4>2. Wiring & Lane Test</h4>
-                <p class="muted">Runs diagnostic sequence across all lanes to verify data integrity.</p>
-                <div class="flex" style="margin-top:1rem;">
-                    <button onclick="runTestSequence('lane')">Test Lanes</button>
-                    <button onclick="runTestSequence('color')">Color Order Test</button>
-                </div>
-            </div>
-            
-            <div class="card" style="grid-column: 1 / -1;">
-                <h4>3. System Logs</h4>
-                <pre id="sys-logs" style="height:200px; overflow-y:auto; background:rgba(0,0,0,0.3); padding:1rem; border-radius:8px; font-size:0.8rem;"></pre>
-                <button onclick="loadLogs()" style="margin-top:1rem;">Refresh Logs</button>
-            </div>
-        </div>
-    </div>
-
-    <!-- PRESETS -->
-    <div id="page-presets" class="page">
-        <div class="flex justify-between items-center mb-1">
-            <h3>Brand Presets</h3>
-            <button style="width:auto;margin:0" onclick="loadPresets()">Refresh</button>
-        </div>
-        <div id="preset-list" class="grid-2"></div>
-    </div>
-
-    <!-- PRESET EDITOR MODAL (Inline Page) -->
-    <div id="page-preset-edit" class="page">
-        <div class="flex justify-between items-center mb-1">
-            <h3 id="edit-preset-title">Edit Preset</h3>
-            <div>
-                <button style="width:auto;margin:0" onclick="nav('presets')">Cancel</button>
-                <button class="primary" style="width:auto;margin:0" onclick="savePreset()">Save Changes</button>
-            </div>
-        </div>
-        
-        <div class="card grid-2">
-            <div>
-                <label>Preset Name</label>
-                <input type="text" id="pe-name">
-            </div>
-            <div>
-                <label>Global Brightness (0-255)</label>
-                <input type="number" id="pe-brightness" min="0" max="255">
-            </div>
-            <div>
-                <label>Crossfade Transition (ms)</label>
-                <input type="number" id="pe-transition" min="0" max="10000">
-            </div>
-        </div>
-
-        <div id="pe-channels" class="grid-4">
-            <!-- Populated via JS -->
-        </div>
-    </div>
-
-    <!-- SEQUENCER -->
-    <div id="page-sequencer" class="page">
-        <div class="card flex justify-between items-center">
-            <div class="flex items-center">
-                <label style="margin-right:1rem">Global BPM</label>
-                <input type="number" id="seq-bpm" style="width:100px;margin:0">
-            </div>
-            <div class="flex items-center">
-                <input type="checkbox" id="seq-enabled" style="width:auto;margin:0;margin-right:0.5rem">
-                <label>Sequencer Enabled</label>
-            </div>
-            <button class="primary" style="width:auto;margin:0" onclick="saveSequencer()">Save Sequencer</button>
-        </div>
-        <div class="card">
-            <h3>16-Step Tracks (Per Channel)</h3>
-            <p class="text-muted mb-1">Enter the Preset Index (0-31) and Length in Beats. Click a step to enable/disable it.</p>
-            <div id="seq-tracks"></div>
-        </div>
-    </div>
-
-    <!-- SETTINGS -->
-    <div id="page-settings" class="page">
-        <div class="card grid-2">
-            <div>
-                <label>Device Name</label><input type="text" id="cfg-name">
-                <label>Active Preset Index</label><input type="number" id="cfg-active">
-                <label>Fallback Preset Index</label><input type="number" id="cfg-fallback">
-                <label>Timezone String</label><input type="text" id="cfg-timezone">
-            </div>
-            <div>
-                <label>Max Power (mW, 0=off)</label><input type="number" id="cfg-power">
-                <label>Watchdog Timeout (s)</label><input type="number" id="cfg-watchdog">
-                <label>Soft Start (ms)</label><input type="number" id="cfg-softstart">
-                <label>Sync Role (0=Auto, 1=Master, 2=Worker)</label><input type="number" id="cfg-role">
-                <div class="flex items-center mt-1">
-                    <input type="checkbox" id="cfg-softstart-enabled" style="width:auto"><label>Soft Start Enabled</label>
-                </div>
-                <div class="flex items-center">
-                    <input type="checkbox" id="cfg-sync-enabled" style="width:auto"><label>Sync Enabled</label>
-                </div>
-            </div>
-        </div>
-        <div class="card mt-2">
-            <h4>Security</h4>
-            <div style="display:flex;gap:1rem;margin-top:0.5rem">
-                <input type="password" id="cfg-new-token" placeholder="New API Token (min 4 chars)">
-                <button class="primary" onclick="updateAuthToken()">Update Token</button>
-            </div>
-        </div>
-        <button class="primary mt-2" onclick="saveSettings()">Save Settings</button>
-    </div>
-</div>
-
-<div id="toast" class="toast">Message</div>
-
-<script>
-const $ = id => document.getElementById(id);
-let token = '', currentPresetEditIndex = 0, currentPresetData = null;
-
-const toast = (msg, err=false) => {
-    const e = $('toast');
-    e.textContent = msg;
-    e.className = 'toast show' + (err ? ' error' : '');
-    setTimeout(() => e.className = 'toast', 3000);
-};
-
-async function api(path, method='GET', body) {
-    const res = await fetch(path, {
-        method,
-        headers: {
-            'Authorization': 'Bearer ' + token,
-            'Content-Type': 'application/json'
-        },
-        body: body ? JSON.stringify(body) : undefined
-    });
-    if(!res.ok) {
-        let m = `HTTP ${res.status}`;
-        try { m = (await res.json()).error || m; } catch(e){}
-        throw Error(m);
-    }
-    return res.json();
-}
-
-async function connect() {
-    token = $('token').value;
-    try {
-        await loadStatus();
-        $('auth').style.display = 'none';
-        $('app').style.display = 'block';
-        toast('Connected successfully');
-    } catch(e) {
-        toast('Connection failed: ' + e.message, true);
-    }
-}
-
-function disconnect() {
-    token = '';
-    $('app').style.display = 'none';
-    $('auth').style.display = 'flex';
-}
-
-function nav(page) {
-    document.querySelectorAll('.nav-tabs button').forEach(b => b.classList.remove('active'));
-    event.target.classList.add('active');
-    document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
-    $('page-' + page).classList.add('active');
-}
-
-// Overview
-async function loadStatus() {
-    try {
-        const [fac, sig] = await Promise.all([
-            api('/api/v1/factory/status'),
-            api('/api/v1/status')
-        ]);
-        $('status-json').textContent = JSON.stringify({factory: fac, signage: sig}, null, 2);
-    } catch(e) { toast(e.message, true); }
-}
-
-async function updateAuthToken() {
-    const newToken = $('cfg-new-token').value;
-    if (newToken.length < 4) return toast('Token must be at least 4 characters', true);
-    
-    try {
-        await api('/api/v1/auth/update', 'POST', { newToken });
-        toast('Token updated successfully. Re-authenticating...');
-        token = newToken; // Use new token immediately
-        $('cfg-new-token').value = '';
-    } catch(e) { toast(e.message, true); }
-}
-
-// Presets
-async function loadPresets() {
-    try {
-        const presets = await api('/api/v1/presets');
-        const list = $('preset-list');
-        list.innerHTML = '';
-        presets.forEach(p => {
-            const el = document.createElement('div');
-            el.className = 'card';
-            el.innerHTML = `
-                <div class="flex justify-between items-center">
-                    <div>
-                        <h4 style="color:var(--primary)">[${p.index}] ${p.name || 'Untitled'}</h4>
-                        <div style="font-size:0.8rem;color:var(--text-muted)">Brightness: ${p.brightness}</div>
-                    </div>
-                    <div>
-                        <button style="padding:0.5rem;font-size:0.8rem" onclick="api('/api/v1/activate','POST',{preset:${p.index}}).then(()=>toast('Activated'))">Play</button>
-                        <button style="padding:0.5rem;font-size:0.8rem" onclick="openPresetEditor(${p.index})">Edit</button>
-                    </div>
-                </div>
-            `;
-            list.appendChild(el);
-        });
-    } catch(e) { toast(e.message, true); }
-}
-
-async function openPresetEditor(index) {
-    currentPresetEditIndex = index;
-    try {
-        const presets = await api('/api/v1/presets');
-        currentPresetData = presets.find(p => p.index === index);
-        if(!currentPresetData) throw Error("Preset not found");
-        
-        $('edit-preset-title').textContent = `Edit Preset [${index}]`;
-        $('pe-name').value = currentPresetData.name;
-        $('pe-brightness').value = currentPresetData.brightness;
-        $('pe-transition').value = currentPresetData.transitionMs;
-
-        const chCont = $('pe-channels');
-        chCont.innerHTML = '';
-        const fxOpts = ['solid','breathe','chase','sweep','reveal','sparkle','gradient','strobe','fire'];
-        
-        currentPresetData.channels.forEach((c, i) => {
-            const hex = '#' + [c.r, c.g, c.b].map(x => x.toString(16).padStart(2,'0')).join('');
-            chCont.innerHTML += `
-                <div class="channel-editor">
-                    <h4>CH ${i}</h4>
-                    <label>Effect</label>
-                    <select id="pe-fx-${i}">${fxOpts.map(f => `<option value="${f}" ${c.effect===f?'selected':''}>${f}</option>`).join('')}</select>
-                    <label>Color</label>
-                    <input type="color" id="pe-col-${i}" value="${hex}">
-                    <label>PWM (0-4095)</label>
-                    <input type="number" id="pe-pwm-${i}" value="${c.pwmDuty}">
-                    <label>Speed (ms)</label>
-                    <input type="number" id="pe-spd-${i}" value="${c.effectSpeedMs}">
-                    <label>Offset</label>
-                    <input type="number" id="pe-off-${i}" value="${c.phaseOffset}">
-                    <div style="display:flex;gap:1rem;margin-top:0.5rem;">
-                        <label><input type="checkbox" id="pe-en-px-${i}" ${c.pixelEnabled?'checked':''}> Pixels</label>
-                        <label><input type="checkbox" id="pe-en-pwm-${i}" ${c.pwmEnabled?'checked':''}> PWM</label>
-                    </div>
-                </div>
-            `;
-        });
-        nav('preset-edit');
-    } catch(e) { toast(e.message, true); }
-}
-
-async function savePreset() {
-    const payload = {
-        index: currentPresetEditIndex,
-        name: $('pe-name').value,
-        brightness: Number($('pe-brightness').value),
-        transitionMs: Number($('pe-transition').value),
-        channels: []
-    };
-    for(let i=0; i<8; i++) {
-        const hex = $(`pe-col-${i}`).value;
-        payload.channels.push({
-            effect: $(`pe-fx-${i}`).value,
-            r: parseInt(hex.slice(1,3), 16),
-            g: parseInt(hex.slice(3,5), 16),
-            b: parseInt(hex.slice(5,7), 16),
-            pwmDuty: Number($(`pe-pwm-${i}`).value),
-            effectSpeedMs: Number($(`pe-spd-${i}`).value),
-            phaseOffset: Number($(`pe-off-${i}`).value),
-            paletteId: 0, fxParam: 0,
-            pixelEnabled: $(`pe-en-px-${i}`).checked,
-            pwmEnabled: $(`pe-en-pwm-${i}`).checked
-        });
-    }
-    try {
-        await api('/api/v1/presets', 'PUT', payload);
-        toast('Preset saved');
-        nav('presets');
-        loadPresets();
-    } catch(e) { toast(e.message, true); }
-}
-
-// Sequencer
-async function loadSequencer() {
-    try {
-        const seq = await api('/api/v1/sequence');
-        $('seq-bpm').value = seq.bpm;
-        $('seq-enabled').checked = seq.enabled;
-        const cont = $('seq-tracks');
-        cont.innerHTML = '';
-        seq.tracks.forEach((t, i) => {
-            let stepsHtml = '';
-            for(let s=0; s<16; s++) {
-                const step = t.steps[s] || {presetIndex:0, lengthBeats:1};
-                const isActive = s < t.numSteps;
-                stepsHtml += `
-                    <div class="seq-step ${isActive?'active':''}" onclick="this.classList.toggle('active'); updateNumSteps(${i})">
-                        <input type="number" id="sq-p-${i}-${s}" value="${step.presetIndex}" title="Preset Index" onclick="event.stopPropagation()">
-                        <input type="number" id="sq-l-${i}-${s}" value="${step.lengthBeats}" title="Beats Length" onclick="event.stopPropagation()">
-                    </div>
-                `;
-            }
-            cont.innerHTML += `
-                <div class="seq-track" id="track-${i}" data-steps="${t.numSteps}">
-                    <div style="width:100px;">
-                        <label><input type="checkbox" id="sq-en-${i}" ${t.enabled?'checked':''}> TRK ${i}</label>
-                    </div>
-                    ${stepsHtml}
-                </div>
-            `;
-        });
-    } catch(e) { toast(e.message, true); }
-}
-
-function updateNumSteps(trackIdx) {
-    const track = $(`track-${trackIdx}`);
-    const steps = track.querySelectorAll('.seq-step');
-    let count = 0;
-    steps.forEach(s => { if(s.classList.contains('active')) count++; });
-    track.dataset.steps = count || 1; // min 1
-}
-
-async function saveSequencer() {
-    const seq = {
-        bpm: Number($('seq-bpm').value),
-        enabled: $('seq-enabled').checked,
-        tracks: []
-    };
-    for(let i=0; i<8; i++) {
-        const trk = {
-            channelId: i,
-            enabled: $(`sq-en-${i}`).checked,
-            numSteps: Number($(`track-${i}`).dataset.steps) || 1,
-            steps: []
-        };
-        for(let s=0; s<16; s++) {
-            trk.steps.push({
-                presetIndex: Number($(`sq-p-${i}-${s}`).value),
-                lengthBeats: Number($(`sq-l-${i}-${s}`).value)
-            });
-        }
-        seq.tracks.push(trk);
-    }
-    try {
-        await api('/api/v1/sequence', 'PUT', seq);
-        toast('Sequence saved');
-    } catch(e) { toast(e.message, true); }
-}
-
-// Settings
-async function loadSettings() {
-    try {
-        const c = await api('/api/v1/config');
-        $('cfg-name').value = c.deviceName;
-        $('cfg-active').value = c.activePreset;
-        $('cfg-fallback').value = c.fallbackPreset;
-        $('cfg-power').value = c.maxPowerMw;
-        $('cfg-watchdog').value = c.watchdogTimeoutS;
-        $('cfg-softstart').value = c.softStartMs;
-        $('cfg-timezone').value = c.timezone;
-        $('cfg-role').value = c.syncRole;
-        $('cfg-softstart-enabled').checked = c.softStart;
-        $('cfg-sync-enabled').checked = c.syncEnabled;
-    } catch(e) { toast(e.message, true); }
-}
-
-async function saveSettings() {
-    try {
-        await api('/api/v1/config', 'PUT', {
-            deviceName: $('cfg-name').value,
-            activePreset: Number($('cfg-active').value),
-            fallbackPreset: Number($('cfg-fallback').value),
-            maxPowerMw: Number($('cfg-power').value),
-            watchdogTimeoutS: Number($('cfg-watchdog').value),
-            softStartMs: Number($('cfg-softstart').value),
-            timezone: $('cfg-timezone').value,
-            syncRole: Number($('cfg-role').value),
-            softStart: $('cfg-softstart-enabled').checked,
-            syncEnabled: $('cfg-sync-enabled').checked
-        });
-        toast('Settings saved');
-    } catch(e) { toast(e.message, true); }
-}
-</script>
-</template>
 
 <section id="experience-auth" aria-labelledby="login-title">
     <div class="experience-login">
         <form onsubmit="lg.connect(); return false;">
-        <p class="eyebrow">LumiGrid lighting control</p>
-        <h1 id="login-title">Make light feel alive.</h1>
+        <div class="login-logo">
+            <svg width="36" height="36" viewBox="0 0 36 36" fill="none" aria-hidden="true">
+                <defs><linearGradient id="lg" x1="0" y1="0" x2="36" y2="36"><stop stop-color="#818cf8"/><stop offset="1" stop-color="#34d399"/></linearGradient></defs>
+                <rect x="2" y="2" width="8" height="8" rx="2.5" fill="url(#lg)"/>
+                <rect x="14" y="2" width="8" height="8" rx="2.5" fill="url(#lg)" opacity=".65"/>
+                <rect x="26" y="2" width="8" height="8" rx="2.5" fill="url(#lg)" opacity=".35"/>
+                <rect x="2" y="14" width="8" height="8" rx="2.5" fill="url(#lg)" opacity=".65"/>
+                <rect x="14" y="14" width="8" height="8" rx="2.5" fill="url(#lg)"/>
+                <rect x="26" y="14" width="8" height="8" rx="2.5" fill="url(#lg)" opacity=".65"/>
+                <rect x="2" y="26" width="8" height="8" rx="2.5" fill="url(#lg)" opacity=".35"/>
+                <rect x="14" y="26" width="8" height="8" rx="2.5" fill="url(#lg)" opacity=".65"/>
+                <rect x="26" y="26" width="8" height="8" rx="2.5" fill="url(#lg)"/>
+            </svg>
+            <div>
+                <p class="eyebrow">LumiGrid lighting control</p>
+            </div>
+        </div>
+        <h1 id="login-title">Make light<br>feel alive.</h1>
         <p class="muted">Connect securely to this node to arrange scenes, timelines, and automation.</p>
         <input type="text" autocomplete="username" tabindex="-1" aria-hidden="true" hidden>
         <label for="experience-token">Node access token</label>
         <input id="experience-token" type="password" autocomplete="current-password" placeholder="Enter the token supplied with this node">
-        <button class="button-primary" type="submit" style="width:100%;margin-top:1rem">Connect</button>
+        <button class="button-primary" type="submit" style="width:100%;margin-top:1.25rem">Connect</button>
         </form>
     </div>
 </section>
 
 <main id="product-app" hidden>
     <div class="app-shell">
-        <header class="app-header" style="flex-wrap: wrap;">
+        <header class="app-header">
             <div style="width: 100%; display: flex; justify-content: space-between; align-items: center;">
                 <div class="brand">
-                    <div class="brand-mark" aria-hidden="true">LG</div>
+                    <div class="brand-mark" aria-hidden="true">
+                        <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
+                            <rect x="1" y="1" width="5" height="5" rx="1.5" fill="white" opacity=".9"/>
+                            <rect x="8.5" y="1" width="5" height="5" rx="1.5" fill="white" opacity=".5"/>
+                            <rect x="16" y="1" width="5" height="5" rx="1.5" fill="white" opacity=".25"/>
+                            <rect x="1" y="8.5" width="5" height="5" rx="1.5" fill="white" opacity=".5"/>
+                            <rect x="8.5" y="8.5" width="5" height="5" rx="1.5" fill="white" opacity=".9"/>
+                            <rect x="16" y="8.5" width="5" height="5" rx="1.5" fill="white" opacity=".5"/>
+                            <rect x="1" y="16" width="5" height="5" rx="1.5" fill="white" opacity=".25"/>
+                            <rect x="8.5" y="16" width="5" height="5" rx="1.5" fill="white" opacity=".5"/>
+                            <rect x="16" y="16" width="5" height="5" rx="1.5" fill="white" opacity=".9"/>
+                        </svg>
+                    </div>
                     <div>
                         <p class="eyebrow">LumiGrid OS</p>
                         <h2 id="experience-node-name">LIGHTING NODE</h2>
@@ -781,44 +770,58 @@ async function saveSettings() {
                     <button title="End this browser session" onclick="lg.disconnect()">Disconnect</button>
                 </div>
             </div>
-            <canvas id="live-preview" height="12" style="width:100%; image-rendering:pixelated; border-radius: 4px; background:#05060f; margin-top: 0.5rem; display: none;"></canvas>
+            <canvas id="live-preview" height="12"></canvas>
         </header>
 
         <nav class="nav-rail" aria-label="Lighting controls">
-            <button class="active" data-page="control" onclick="lg.nav('control', this)">Control</button>
-            <button data-page="scenes" onclick="lg.nav('scenes', this)">Scenes</button>
-            <button data-page="timeline" onclick="lg.nav('timeline', this)">Timeline</button>
-            <button data-page="automation" onclick="lg.nav('automation', this)">Automation</button>
-            <button data-page="system" onclick="lg.nav('system', this)">System</button>
+            <button class="active" data-page="dashboard" onclick="lg.nav('dashboard', this)">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><line x1="3" y1="4" x2="13" y2="4"/><line x1="3" y1="8" x2="13" y2="8"/><line x1="3" y1="12" x2="13" y2="12"/><circle cx="6" cy="4" r="1.5" fill="currentColor" stroke="none"/><circle cx="10" cy="8" r="1.5" fill="currentColor" stroke="none"/><circle cx="7" cy="12" r="1.5" fill="currentColor" stroke="none"/></svg>
+                Dashboard
+            </button>
+            <button data-page="scenes" onclick="lg.nav('scenes', this)">
+                <svg viewBox="0 0 16 16" fill="currentColor"><rect x="1" y="1" width="6" height="6" rx="1.5"/><rect x="9" y="1" width="6" height="6" rx="1.5" opacity=".45"/><rect x="1" y="9" width="6" height="6" rx="1.5" opacity=".45"/><rect x="9" y="9" width="6" height="6" rx="1.5"/></svg>
+                Scenes
+            </button>
+            <button data-page="zones" onclick="lg.nav('zones', this)">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><rect x="2" y="2" width="12" height="12" rx="2"/><line x1="6" y1="2" x2="6" y2="14"/><line x1="10" y1="2" x2="10" y2="14"/></svg>
+                Zones
+            </button>
+            <button data-page="timeline" onclick="lg.nav('timeline', this)">
+                <svg viewBox="0 0 16 16" fill="currentColor"><rect x="1" y="9" width="3" height="6" rx="1"/><rect x="5.5" y="5" width="3" height="10" rx="1" opacity=".7"/><rect x="10" y="2" width="3" height="13" rx="1"/></svg>
+                Timeline
+            </button>
+            <button data-page="dmx" onclick="lg.nav('dmx', this)">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M2 13V3a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v10M6 8h4M6 11h4M6 5h4"/></svg>
+                Live DMX
+            </button>
+            <button data-page="diagnostics" onclick="lg.nav('diagnostics', this)">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="8" cy="8" r="2.5"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M12.6 3.4l-1.4 1.4M4.8 11.2L3.4 12.6"/></svg>
+                Diagnostics
+            </button>
         </nav>
 
-        <section id="page-control" class="product-page active">
+        
+        <section id="page-dashboard" class="product-page active">
             <div class="page-heading">
-                <div><p class="eyebrow">Now playing</p><h3>Control room</h3></div>
+                <div><p class="eyebrow">Operational Overview</p><h3>Dashboard</h3></div>
                 <button class="button-danger" onclick="lg.blackout()">Emergency blackout</button>
             </div>
             <div class="overview-grid">
                 <article class="product-card">
-                    <h4 id="now-playing">Loading scenes…</h4>
-                    <p id="now-playing-copy" class="muted">The node is checking its playback state.</p>
-                    <div id="status-stats" class="stat-list"></div>
+                    <h4>Current State</h4>
+                    <p id="dash-playing" class="muted">Loading...</p>
+                    <div id="dash-stats" class="stat-list"></div>
                 </article>
                 <article class="product-card">
-                    <h4>Sync health</h4>
-                    <p id="sync-summary" class="muted">Checking the room clock…</p>
-                    <div id="sync-stats" class="stat-list"></div>
+                    <h4>Source Ownership</h4>
+                    <div id="dash-sources" class="stat-list"></div>
                 </article>
             </div>
-            <div class="page-heading" style="margin-top:1.5rem">
-                <div><p class="eyebrow">One tap scenes</p><h3>Set the mood</h3></div>
-                <button class="button-secondary" onclick="lg.nav('scenes', document.querySelector('[data-page=scenes]'))">Manage scenes</button>
-            </div>
-            <div id="control-scenes" class="scene-grid"></div>
         </section>
 
         <section id="page-scenes" class="product-page">
             <div class="page-heading">
-                <div><p class="eyebrow">Scene library</p><h3>Looks, not numbers</h3></div>
+                <div><p class="eyebrow">Scene Library</p><h3>Manage Scenes</h3></div>
                 <button class="button-secondary" onclick="lg.refresh()">Refresh library</button>
             </div>
             <div id="scene-library" class="scene-grid"></div>
@@ -826,131 +829,82 @@ async function saveSettings() {
 
         <section id="page-scene-editor" class="product-page">
             <div class="editor-toolbar">
-                <div><button class="button-secondary" onclick="lg.backToScenes()">← Scenes</button><div><p class="eyebrow">Scene designer</p><h3 id="scene-editor-title">Edit scene</h3></div></div>
+                <div><button class="button-secondary" onclick="lg.backToScenes()">← Scenes</button><div><p class="eyebrow">Scene Designer</p><h3 id="scene-editor-title">Edit scene</h3></div></div>
                 <button class="button-primary" onclick="lg.saveScene()">Save scene</button>
             </div>
             <article class="product-card">
                 <div class="settings-grid">
-                    <div class="field"><label for="scene-name">Scene name</label><input id="scene-name" maxlength="23" placeholder="Store open"></div>
-                    <div>
-                        <div class="range-row">
-                            <label for="scene-brightness">Room brightness</label>
-                            <input id="scene-brightness" type="range" min="0" max="100" oninput="lg.updateText('scene-brightness-output', this.value + '%')">
-                            <output id="scene-brightness-output"></output>
-                        </div>
-                        <div class="range-row">
-                            <label for="scene-fade">Scene fade</label>
-                            <input id="scene-fade" type="range" min="0" max="5000" step="100" oninput="lg.updateText('scene-fade-output', (this.value / 1000).toFixed(1) + ' s')">
-                            <output id="scene-fade-output"></output>
-                        </div>
-                    </div>
-                </div>
-                <div class="overlay-controls" style="margin-top:1rem">
-                    <div class="field"><label for="scene-overlay">Layered finishing effect</label><select id="scene-overlay" onchange="lg.changeOverlay(this.value)"><option value="none">No overlay</option><option value="strobe">Beat strobe overlay</option></select></div>
-                    <div id="scene-overlay-options"></div>
+                    <div class="field"><label>Scene name</label><input id="scene-name" maxlength="23"></div>
+                    <div class="range-row"><label>Brightness</label><input id="scene-brightness" type="range" min="0" max="100" oninput="lg.updateText('scene-brightness-output', this.value + '%')"><output id="scene-brightness-output"></output></div>
+                    <div class="range-row"><label>Fade Time (ms)</label><input id="scene-fade" type="range" min="0" max="5000" step="100" oninput="lg.updateText('scene-fade-output', this.value + ' ms')"><output id="scene-fade-output"></output></div>
                 </div>
             </article>
-            <p class="help" style="margin:1rem 0">Each zone starts with a base look. Add the strobe overlay to make any scene pulse without replacing its color or motion.</p>
-            <div id="scene-zones" class="zone-grid"></div>
+            <div id="scene-zones" class="sync-grid" style="margin-top:1.5rem"></div>
+        </section>
+
+        <section id="page-zones" class="product-page">
+            <div class="page-heading">
+                <div><p class="eyebrow">Physical Mapping</p><h3>Zone View</h3></div>
+            </div>
+            <div id="zone-map" class="sync-grid"></div>
         </section>
 
         <section id="page-timeline" class="product-page">
             <div class="page-heading">
-                <div><p class="eyebrow">Performance timeline</p><h3>Build the room’s rhythm</h3></div>
+                <div><p class="eyebrow">Visual Beat Grid</p><h3>Timeline Editor</h3></div>
                 <button class="button-primary" onclick="lg.saveTimeline()">Save timeline</button>
             </div>
             <article class="product-card">
                 <div class="timeline-toolbar">
-                    <div>
-                        <strong>Tempo</strong>
-                        <input id="timeline-bpm" type="range" min="40" max="240" oninput="lg.setBpm(this.value)">
-                        <output id="timeline-bpm-output"></output>
-                    </div>
+                    <div><strong>Tempo</strong><input id="timeline-bpm" type="range" min="40" max="240" oninput="lg.setBpm(this.value)"><output id="timeline-bpm-output"></output></div>
                     <label class="switch-row"><span>Play timeline</span><input id="timeline-enabled" type="checkbox" onchange="lg.setTimelineEnabled(this.checked)"></label>
                 </div>
-                <p class="help">Pick a scene below, then click or drag it onto a step. Every one of the eight lighting zones loops its own sixteen-step lane.</p>
-                <div id="timeline-palette" class="palette" aria-label="Scene palette"></div>
+                <div id="timeline-palette" class="palette" style="margin-top:1rem"></div>
             </article>
             <article class="product-card timeline-scroll">
-                <div id="timeline-tracks"></div>
-                <div id="step-inspector"></div>
+                <div id="timeline-tracks" style="display:grid;gap:0.5rem"></div>
             </article>
         </section>
 
-        <section id="page-automation" class="product-page">
+        <section id="page-dmx" class="product-page">
             <div class="page-heading">
-                <div><p class="eyebrow">Calendar automation</p><h3>Let the room run itself</h3></div>
-                <div class="cue-toolbar"><button class="button-secondary" onclick="lg.addCue()">Add cue</button><button class="button-primary" onclick="lg.saveAutomation()">Save automation</button></div>
+                <div><p class="eyebrow">Incoming Universe</p><h3>Live DMX</h3></div>
             </div>
             <article class="product-card">
-                <p class="help">Schedule a scene or start the timeline at a local time. A scene cue takes over from a calendar-started timeline.</p>
-                <div id="cue-list" class="cue-list" style="margin-top:1rem"></div>
+                <div id="dmx-view">Waiting for DMX data...</div>
             </article>
         </section>
 
-        <section id="page-system" class="product-page">
+        <section id="page-diagnostics" class="product-page">
             <div class="page-heading">
-                <div><p class="eyebrow">Node and room health</p><h3>System</h3></div>
-                <button class="button-primary" onclick="lg.saveSystem()">Save settings</button>
+                <div><p class="eyebrow">Maintenance</p><h3>Diagnostics & Factory</h3></div>
             </div>
             <div class="settings-grid">
                 <article class="product-card">
-                    <h4>Node preferences</h4>
-                    <div class="field"><label for="system-name">Node name</label><input id="system-name" maxlength="31"></div>
-                    <div class="field"><label for="system-fallback">Safe fallback scene</label><select id="system-fallback"></select></div>
-                    <div class="field"><label for="system-timezone">Timezone</label><input id="system-timezone" placeholder="UTC0"></div>
+                    <h4>Factory Testing</h4>
+                    <button class="button-secondary" style="width:100%;margin-bottom:0.5rem" onclick="lg.runTestSequence('lane')">Test Lanes</button>
+                    <button class="button-secondary" style="width:100%" onclick="lg.runTestSequence('color')">Test Colors</button>
                 </article>
                 <article class="product-card">
-                    <h4>Room sync</h4>
-                    <label class="switch-row"><span>Sync this node with the room</span><input id="system-sync-enabled" type="checkbox"></label>
-                    <div class="field"><label for="system-sync-role">Room role</label><select id="system-sync-role"><option value="0">Automatic leader selection</option><option value="1">Lead the room</option><option value="2">Follow the room</option></select></div>
-                    <p class="help">Role changes are applied the next time the node starts. Automatic mode elects one node instead of broadcasting from every node.</p>
+                    <h4>Firmware OTA</h4>
+                    <input type="file" id="ota-file" accept=".bin" style="width:100%;margin-bottom:1rem;">
+                    <button class="button-primary" style="width:100%" onclick="lg.uploadOta()">Update Firmware</button>
+                    <div id="ota-status" class="help" style="margin-top:1rem;"></div>
                 </article>
                 <article class="product-card">
-                    <h4>MQTT Configuration</h4>
-                    <label class="switch-row"><span>Enable MQTT</span><input id="system-mqtt-enabled" type="checkbox"></label>
-                    <div class="field"><label for="system-mqtt-broker">MQTT Broker Address</label><input id="system-mqtt-broker" placeholder="192.168.1.100" maxlength="63"></div>
-                    <div class="field"><label for="system-mqtt-port">MQTT Port</label><input id="system-mqtt-port" type="number" value="1883" min="1" max="65535"></div>
-                    <p class="help">When enabled, the node will publish telemetry and respond to commands via MQTT.</p>
-                </article>
-                <article class="product-card" style="grid-column: 1 / -1;">
-                    <h4>Hardware Outputs</h4>
-                    <p class="help">Configure physical output pins (e.g. GPIOs) on your controller.</p>
-                    <div id="system-outputs" class="zone-grid" style="margin-top:1rem; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));"></div>
-                </article>
-                <article class="product-card" style="grid-column: 1 / -1;">
-                    <h4>LED Fixtures</h4>
-                    <p class="help">Define LED strips or panels and assign them to physical outputs.</p>
-                    <div id="system-fixtures" class="zone-grid" style="margin-top:1rem; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));"></div>
-                </article>
-                <article class="product-card" style="grid-column: 1 / -1;">
-                    <h4>Logical Zones (Segments)</h4>
-                    <p class="help">Map your LED fixtures to 8 functional zones for scene effects.</p>
-                    <div id="system-zones" class="zone-grid" style="margin-top:1rem"></div>
-                </article>
-            </div>
-            <div class="page-heading" style="margin-top:1.5rem"><div><p class="eyebrow">Topology</p><h3>Nodes in this room</h3></div><button class="button-secondary" onclick="lg.refreshSync()">Refresh health</button></div>
-            <div id="sync-topology" class="sync-grid"></div>
-            
-            <div class="page-heading" style="margin-top:2.5rem"><div><p class="eyebrow">Maintenance</p><h3>Firmware & Config</h3></div></div>
-            <div class="settings-grid">
-                <article class="product-card">
-                    <h4>Over-The-Air Update (OTA)</h4>
-                    <p class="help mb-1">Upload a signed firmware binary to update the node.</p>
-                    <input type="file" id="ota-file" accept=".bin" style="width: 100%; margin-bottom: 1rem;">
-                    <button class="button-primary" style="width: 100%" onclick="lg.uploadOta()">Update Firmware</button>
-                    <div id="ota-status" class="help" style="margin-top: 1rem;"></div>
-                </article>
-                <article class="product-card">
-                    <h4>Configuration Export & Import</h4>
-                    <p class="help mb-1">Backup or restore device settings and presets.</p>
-                    <button class="button-secondary" style="width: 100%" onclick="lg.downloadBackup()">Export Configuration</button>
-                    <hr style="border: 0; border-top: 1px solid var(--border); margin: 1.5rem 0;">
+                    <h4>Backup & Restore</h4>
+                    <button class="button-secondary" style="width: 100%;margin-bottom:1rem" onclick="lg.downloadBackup()">Export Configuration</button>
                     <input type="file" id="restore-file" accept=".json" style="width: 100%; margin-bottom: 1rem;">
                     <button class="button-primary" style="width: 100%" onclick="lg.uploadRestore()">Restore Configuration</button>
                 </article>
+                <article class="product-card">
+                    <h4>Health Metrics</h4>
+                    <pre id="health-stats" class="help" style="background:rgba(0,0,0,0.2);padding:1rem;border-radius:8px;"></pre>
+                    <button class="button-secondary" style="width:100%;margin-top:0.5rem" onclick="lg.loadCommissioning()">Refresh Health</button>
+                </article>
             </div>
         </section>
+
     </div>
 </main>
 <div id="experience-toast" role="status" aria-live="polite"></div>
@@ -1051,26 +1005,18 @@ window.lg = (() => {
     function initWebSocket() {
         if (ws) { ws.close(); ws = null; }
         const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-        // In actual device, location.host is the ESP32 IP.
         ws = new WebSocket(`${proto}//${location.host}/ws`);
         ws.binaryType = 'arraybuffer';
         ws.onopen = () => {};
         ws.onmessage = (event) => {
             if (event.data instanceof ArrayBuffer) {
                 const arr = new Uint8Array(event.data);
-                if (arr[0] === 76) { // 'L'
-                    renderLivePreview(arr.slice(1));
-                }
+                if (arr[0] === 76) { renderLivePreview(arr.slice(1)); }
             } else if (typeof event.data === 'string') {
-                try {
-                    const st = JSON.parse(event.data);
-                    state.status = st;
-                } catch(e) {}
+                try { const st = JSON.parse(event.data); state.status = st; } catch(e) {}
             }
         };
-        ws.onclose = () => {
-            if (state.token) setTimeout(initWebSocket, 2000);
-        };
+        ws.onclose = () => { if (state.token) setTimeout(initWebSocket, 2000); };
     }
 
     function renderLivePreview(rgbData) {
@@ -1102,7 +1048,7 @@ window.lg = (() => {
             byId('experience-auth').hidden = true;
             byId('product-app').hidden = false;
             initWebSocket();
-            nav('control', document.querySelector('[data-page=control]'));
+            nav('dashboard', document.querySelector('[data-page=dashboard]'));
             toast('Connected to the node.');
         } catch (error) {
             toast(`Could not connect: ${error.message}`, true);
@@ -1131,46 +1077,173 @@ window.lg = (() => {
         state.schedules = normalSchedules(schedules);
         state.sync = sync;
         byId('experience-node-name').textContent = (config.deviceName || 'Lighting node').toUpperCase();
-        renderControl();
+        renderDashboard();
         renderScenes();
+        renderZones();
         renderTimeline();
-        renderAutomation();
-        renderSystem();
+        renderLiveDMX();
+        renderDiagnostics();
     }
     function nav(page, button) {
         document.querySelectorAll('.product-page').forEach(item => item.classList.remove('active'));
-        byId('page-' + page).classList.add('active');
+        byId('page-' + page)?.classList.add('active');
         document.querySelectorAll('.nav-rail button').forEach(item => item.classList.remove('active'));
         if (button) button.classList.add('active');
-        if (page === 'control') renderControl();
+        if (page === 'dashboard') renderDashboard();
         if (page === 'scenes') renderScenes();
+        if (page === 'zones') renderZones();
         if (page === 'timeline') renderTimeline();
-        if (page === 'automation') renderAutomation();
-        if (page === 'system') renderSystem();
+        if (page === 'dmx') renderLiveDMX();
+        if (page === 'diagnostics') renderDiagnostics();
     }
 
-    function renderControl() {
+    
+    function renderDashboard() {
         const active = state.status?.activePreset;
-        byId('now-playing').textContent = active === undefined ? 'No scene selected' : sceneName(active);
-        byId('now-playing-copy').textContent = state.status?.transitioning ? 'Fading into the selected scene.' : state.status?.fallbackActive ? 'The safety fallback is active.' : 'The room is ready.';
-        byId('status-stats').innerHTML = [
-            ['Scene', active === undefined ? '—' : sceneName(active)],
-            ['Clock', state.status?.timeSynced ? 'Synced' : 'Starting'],
-            ['Fade', state.status?.transitioning ? 'In progress' : 'Ready'],
-            ['Safety', state.status?.fallbackActive ? 'Fallback' : 'Normal']
-        ].map(([label,value]) => `<div><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`).join('');
-        byId('sync-summary').textContent = !state.sync ? 'Sync is not running on this node.' : state.sync.clockLocked ? `Clock locked as ${state.sync.activeRole}.` : 'Waiting for a room leader.';
-        byId('sync-stats').innerHTML = state.sync ? [
-            ['Role', state.sync.activeRole],
-            ['Peers', state.sync.peerCount],
-            ['Packet', clockAge(state.sync.lastPacketAgeMs)],
-            ['Jitter', `${state.sync.clockJitterUs || 0} μs`]
-        ].map(([label,value]) => `<div><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`).join('') : '<div><span>Room sync</span><strong>Off</strong></div>';
-        byId('control-scenes').innerHTML = state.presets.length ? state.presets.map(sceneCard).join('') : '<div class="empty-state">No scenes are stored yet.</div>';
+        byId('dash-playing').textContent = active === undefined ? 'No scene selected' : sceneName(active);
+        
+        let owner = "Idle";
+        if (state.status?.controlSource !== undefined) {
+            owner = state.status.controlSource === 5 ? "ScenePlayback" : 
+                    state.status.controlSource === 6 ? "Fallback" : 
+                    state.status.controlSource === 2 ? "LiveDmx" : 
+                    state.status.controlSource === 1 ? "Factory" : "Idle";
+        }
+        
+        byId('dash-stats').innerHTML = `
+            <div><span>Active Scene</span><strong>${active === undefined ? '—' : esc(sceneName(active))}</strong></div>
+            <div><span>Transition</span><strong>${state.status?.transitioning ? 'In progress' : 'Ready'}</strong></div>
+            <div><span>Safety</span><strong>${state.status?.fallbackActive ? 'Fallback' : 'Normal'}</strong></div>
+        `;
+        byId('dash-sources').innerHTML = `
+            <div><span>Current Owner</span><strong>${owner}</strong></div>
+        `;
     }
+    function renderZones() {
+        if (!state.config) return;
+        let html = '';
+        for (let i = 0; i < 8; i++) {
+            const z = state.config.zones?.[i] || {name: `Zone ${i+1}`, role: 'Unassigned', fixtureMask: 0};
+            if (!z.name) continue;
+            let lanes = [];
+            for (let f = 0; f < 16; f++) {
+                if (z.fixtureMask & (1<<f)) {
+                    const fix = state.config.fixtures?.[f];
+                    if (fix) lanes.push(`Lane ${fix.physicalOutputIndex[0]} (${fix.numPixels} px)`);
+                }
+            }
+            html += `<article class="product-card">
+                <h4>${esc(z.name)}</h4>
+                <p class="muted">${esc(z.role)}</p>
+                <div class="stat-list" style="margin-top:1rem">
+                    ${lanes.map(l => `<div><span>Output</span><strong>${l}</strong></div>`).join('')}
+                    ${lanes.length === 0 ? '<div><span>Output</span><strong>Unmapped</strong></div>' : ''}
+                </div>
+            </article>`;
+        }
+        byId('zone-map').innerHTML = html || '<div class="empty-state">No zones configured.</div>';
+    }
+    
+    function renderLiveDMX() {
+        if (!state.config) return;
+        const dmxData = state.status?.dmx || Array(512).fill(0);
+        let html = '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(2rem,1fr));gap:2px;">';
+        for(let i=0; i<Math.min(dmxData.length, 64); i++) {
+            const v = dmxData[i] || 0;
+            const bg = `rgba(255,255,255,${v/255})`;
+            html += `<div style="background:${bg};height:2rem;display:flex;align-items:center;justify-content:center;color:${v>128?'#000':'#666'};font-size:0.6rem;border-radius:2px">${v}</div>`;
+        }
+        html += '</div>';
+        byId('dmx-view').innerHTML = `<p class="help" style="margin-bottom:1rem">Showing first 64 channels.</p>${html}`;
+    }
+
+    function renderDiagnostics() {
+        // Just loads health immediately
+        loadCommissioning();
+    }
+    
+    function renderSceneEditor() {
+        const scene = state.editing;
+        if (!scene) return;
+        byId('scene-editor-title').textContent = scene.name || 'Untitled scene';
+        byId('scene-name').value = scene.name || '';
+        byId('scene-brightness').value = Math.round(scene.globalBrightness * 100 / 255);
+        byId('scene-brightness-output').textContent = `${byId('scene-brightness').value}%`;
+        byId('scene-fade').value = scene.transitionMs;
+        byId('scene-fade-output').textContent = `${scene.transitionMs} ms`;
+
+        let html = '';
+        for (let z=0; z<8; z++) {
+            if (!state.config?.zones?.[z]?.name) continue;
+            const zName = state.config.zones[z].name;
+            const layer = scene.zones[z].layers[0]; // just focus on layer 0 for the simplified UI
+            const meta = effect(layer.effect);
+            
+            html += `<article class="product-card">
+                <h4>${esc(zName)}</h4>
+                <div class="field" style="margin-top:0.5rem"><select id="z-${z}-effect" onchange="lg.changeZoneEffect(${z}, this.value)">
+                    ${state.effects.map(item => `<option value="${esc(item.id)}" ${item.id === layer.effect ? 'selected' : ''}>${esc(item.label)}</option>`).join('')}
+                </select></div>
+                
+                <div class="color-line" style="margin-top:0.5rem;display:flex;gap:1rem;">
+                    <div style="display:flex;align-items:center;gap:0.5rem"><div style="width:20px;height:20px;border-radius:50%;background:${colorFor(layer.primaryColor)};border:2px solid #333"></div><input type="color" id="z-${z}-pcolor" value="${colorFor(layer.primaryColor)}" style="opacity:0;width:1px;position:absolute"> <button class="button-secondary" style="padding:0.2rem 0.5rem;font-size:0.7rem" onclick="byId('z-${z}-pcolor').click()">Pri</button></div>
+                    <div style="display:flex;align-items:center;gap:0.5rem"><div style="width:20px;height:20px;border-radius:50%;background:${colorFor(layer.secondaryColor)};border:2px solid #333"></div><input type="color" id="z-${z}-scolor" value="${colorFor(layer.secondaryColor)}" style="opacity:0;width:1px;position:absolute"> <button class="button-secondary" style="padding:0.2rem 0.5rem;font-size:0.7rem" onclick="byId('z-${z}-scolor').click()">Sec</button></div>
+                </div>
+                
+                <div class="range-row" style="margin-top:1rem"><label>Speed</label><input id="z-${z}-speed" type="range" min="1" max="100" value="${msToSpeed(layer.speedMs)}"></div>
+                ${meta.hasParameter ? `<div class="range-row"><label>${esc(meta.parameterLabel)}</label><input id="z-${z}-param" type="range" min="${meta.parameterMin}" max="${meta.parameterMax}" value="${layer.fxParam || meta.parameterDefault}"></div>` : ''}
+            </article>`;
+        }
+        byId('scene-zones').innerHTML = html;
+    }
+    
+    function readSceneEditor() {
+        const scene = state.editing;
+        if (!scene || !byId('scene-name')) return;
+        scene.name = byId('scene-name').value.trim();
+        scene.globalBrightness = Math.round(clamp(byId('scene-brightness').value,0,100) * 255 / 100);
+        scene.transitionMs = clamp(byId('scene-fade').value,0,5000);
+
+        for (let z=0; z<8; z++) {
+            if (!state.config?.zones?.[z]?.name) continue;
+            const layer = scene.zones[z].layers[0];
+            
+            layer.effect = byId(`z-${z}-effect`)?.value || layer.effect;
+            const phex = byId(`z-${z}-pcolor`)?.value || colorFor(layer.primaryColor);
+            layer.primaryColor.r = parseInt(phex.slice(1,3),16); layer.primaryColor.g = parseInt(phex.slice(3,5),16); layer.primaryColor.b = parseInt(phex.slice(5,7),16);
+            const shex = byId(`z-${z}-scolor`)?.value || colorFor(layer.secondaryColor);
+            layer.secondaryColor.r = parseInt(shex.slice(1,3),16); layer.secondaryColor.g = parseInt(shex.slice(3,5),16); layer.secondaryColor.b = parseInt(shex.slice(5,7),16);
+            
+            layer.speedMs = speedToMs(byId(`z-${z}-speed`)?.value ?? msToSpeed(layer.speedMs));
+            const meta = effect(layer.effect);
+            if (meta.hasParameter) layer.fxParam = clamp(byId(`z-${z}-param`)?.value ?? meta.parameterDefault, meta.parameterMin, meta.parameterMax);
+        }
+    }
+    
+    function renderTimeline() {
+        if (!state.sequence) return;
+        byId('timeline-bpm').value = clamp(state.sequence.bpm,40,240);
+        byId('timeline-bpm-output').textContent = `${state.sequence.bpm} BPM`;
+        byId('timeline-enabled').checked = state.sequence.enabled;
+        byId('timeline-palette').innerHTML = state.presets.map(scene => `<button draggable="true" class="${state.selectedScene === scene.index ? 'selected' : ''}" ondragstart="lg.dragScene(event,${Number(scene.index)})" onclick="lg.selectPalette(${Number(scene.index)})"><strong>${esc(scene.name || 'Untitled')}</strong></button>`).join('') || '<span class="help">Create a scene first.</span>';
+        
+        // Visual Beat Grid
+        byId('timeline-tracks').innerHTML = state.sequence.tracks.map((track,trackIndex) => {
+            if (!state.config?.zones?.[trackIndex]?.name) return '';
+            return `<div style="display:flex;align-items:center;gap:1rem;background:rgba(255,255,255,0.02);padding:0.5rem;border-radius:8px;border:1px solid rgba(255,255,255,0.05)">
+                <div style="width:100px"><strong>${esc(state.config.zones[trackIndex].name)}</strong></div>
+                <div style="display:flex;gap:4px;flex:1">
+                    ${track.steps.map((step,stepIndex) => `<div class="step" style="width:24px;height:32px;background:${step.presetIndex>0?'#6366f1':'#2a2e44'};border-radius:4px;cursor:pointer" title="Step ${stepIndex+1}" onclick="lg.setStepScene(${trackIndex},${stepIndex},state.selectedScene||0)"></div>`).join('')}
+                </div>
+            </div>`;
+        }).join('');
+    }
+
     function sceneCard(scene) {
         const firstEffect = effect(scene.zones[0].layers[0].effect);
-        return `<article class="product-card scene-card"><div><span class="scene-chip">● ${esc(firstEffect.label)}</span><h4>${esc(scene.name || 'Untitled scene')}</h4><p class="muted">${Math.round(scene.globalBrightness * 100 / 255)}% brightness · ${Math.round(scene.transitionMs / 100) / 10}s fade</p></div><p class="help">${esc(firstEffect.description)}</p><div class="scene-actions"><button class="button-secondary" onclick="lg.playScene(${Number(scene.index)})">Play</button><button class="button-secondary" onclick="lg.editScene(${Number(scene.index)})">Edit</button></div></article>`;
+        const pc = scene.zones[0].layers[0].primaryColor;
+        const sceneColor = colorFor(pc);
+        return `<article class="product-card scene-card" style="--scene-color:${sceneColor}"><div><span class="scene-chip">● ${esc(firstEffect.label)}</span><h4>${esc(scene.name || 'Untitled scene')}</h4><p class="muted">${Math.round(scene.globalBrightness * 100 / 255)}% brightness · ${Math.round(scene.transitionMs / 100) / 10}s fade</p></div><p class="help">${esc(firstEffect.description)}</p><div class="scene-actions"><button class="button-secondary" onclick="lg.playScene(${Number(scene.index)})">Play</button><button class="button-secondary" onclick="lg.editScene(${Number(scene.index)})">Edit</button></div></article>`;
     }
     function renderScenes() {
         byId('scene-library').innerHTML = state.presets.length ? state.presets.map(sceneCard).join('') : '<div class="empty-state">No scenes are stored yet.</div>';
@@ -1179,7 +1252,7 @@ window.lg = (() => {
         try {
             await api('/api/v1/activate', 'POST', {preset:index});
             state.status = {...(state.status || {}),activePreset:index,transitioning:true};
-            renderControl();
+            renderDashboard();
             toast(`${sceneName(index)} is playing.`);
         } catch (error) { toast(error.message, true); }
     }
@@ -1205,7 +1278,7 @@ window.lg = (() => {
         scene.name = byId('scene-name').value.trim();
         scene.globalBrightness = Math.round(clamp(byId('scene-brightness').value,0,100) * 255 / 100);
         scene.transitionMs = clamp(byId('scene-fade').value,0,5000);
-        
+
         let firstZ = state.targetZones ? state.targetZones.indexOf(true) : 0;
         if (firstZ === -1) firstZ = 0;
 
@@ -1239,7 +1312,7 @@ window.lg = (() => {
         renderSceneEditor();
     }
     const palettes = [
-        { id: 0, name: "Solid (Primary -> Secondary)" },
+        { id: 0, name: "Solid (Primary → Secondary)" },
         { id: 1, name: "Rainbow" },
         { id: 2, name: "Ocean" },
         { id: 3, name: "Lava" },
@@ -1255,7 +1328,7 @@ window.lg = (() => {
         byId('scene-brightness-output').textContent = `${byId('scene-brightness').value}%`;
         byId('scene-fade').value = scene.transitionMs;
         byId('scene-fade-output').textContent = `${(scene.transitionMs / 1000).toFixed(1)} s`;
-        
+
         let firstZ = state.targetZones ? state.targetZones.indexOf(true) : 0;
         if (firstZ === -1) { firstZ = 0; state.targetZones = [true, false, false, false, false, false, false, false]; }
 
@@ -1270,7 +1343,7 @@ window.lg = (() => {
         const layersHtml = scene.zones[firstZ].layers.map((layer, l) => {
             const meta = effect(layer.effect);
             const parameter = clamp(layer.fxParam || meta.parameterDefault, meta.parameterMin || 0, meta.parameterMax || 255);
-            return `<div class="layer-editor" style="margin-top:1rem; border-top:1px solid var(--border); padding-top:1rem;">
+            return `<div class="layer-editor">
                 <h5>Layer ${l + 1}</h5>
                 <div class="field"><label>Effect</label><select id="z-l${l}-effect" onchange="lg.changeZoneEffect(${l}, this.value)">
                     ${state.effects.map(item => `<option value="${esc(item.id)}" ${item.id === layer.effect ? 'selected' : ''}>${esc(item.label)}</option>`).join('')}
@@ -1352,104 +1425,13 @@ window.lg = (() => {
         catch (error) { toast(error.message,true); }
     }
 
-    function renderAutomation() {
-        byId('cue-list').innerHTML = state.schedules.map((cue,index) => `<div class="cue"><label class="switch-row"><span>On</span><input type="checkbox" ${cue.enabled ? 'checked' : ''} onchange="lg.setCue(${index},'enabled',this.checked)"></label><input type="time" value="${String(cue.hour).padStart(2,'0')}:${String(cue.minute).padStart(2,'0')}" onchange="lg.setCueTime(${index},this.value)" aria-label="Cue time"><select onchange="lg.setCue(${index},'action',this.value)"><option value="preset" ${cue.action === 'preset' ? 'selected' : ''}>Activate scene</option><option value="sequence" ${cue.action === 'sequence' ? 'selected' : ''}>Start timeline</option></select><select ${cue.action === 'sequence' ? 'disabled' : ''} onchange="lg.setCue(${index},'presetIndex',this.value)" aria-label="Cue scene">${state.presets.map(scene => `<option value="${Number(scene.index)}" ${Number(cue.presetIndex) === Number(scene.index) ? 'selected' : ''}>${esc(scene.name || 'Untitled scene')}</option>`).join('')}</select><div class="days">${['S','M','T','W','T','F','S'].map((day,bit) => `<button class="${cue.daysOfWeek & (1 << bit) ? 'active' : ''}" title="${['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'][bit]}" onclick="lg.toggleDay(${index},${bit})">${day}</button>`).join('')}</div></div>`).join('');
-    }
-    function addCue() { const empty = state.schedules.findIndex(cue => !cue.enabled); if (empty < 0) return toast('All eight calendar cues are already in use.', true); state.schedules[empty] = {...state.schedules[empty],enabled:true}; renderAutomation(); }
-    function setCue(index,key,value) { state.schedules[index][key] = key === 'presetIndex' ? Number(value) : value; renderAutomation(); }
-    function setCueTime(index,value) { const [hour,minute] = value.split(':').map(Number); state.schedules[index].hour = clamp(hour,0,23); state.schedules[index].minute = clamp(minute,0,59); }
-    function toggleDay(index,bit) { state.schedules[index].daysOfWeek ^= (1 << bit); renderAutomation(); }
-    async function saveAutomation() {
+    function saveAutomation() {
         if (state.schedules.some(cue => cue.enabled && !cue.daysOfWeek)) return toast('Choose at least one day for every active cue.',true);
         try { await api('/api/v1/schedules','PUT',{entries:state.schedules}); toast('Automation saved.'); }
         catch (error) { toast(error.message,true); }
     }
 
-    function renderSystem() {
-        if (!state.config) return;
-        byId('system-name').value = state.config.deviceName || '';
-        byId('system-timezone').value = state.config.timezone || 'UTC0';
-        byId('system-sync-enabled').checked = Boolean(state.config.syncEnabled);
-        byId('system-sync-role').value = String(state.config.syncRole ?? 0);
-        byId('system-mqtt-enabled').checked = Boolean(state.config.mqttEnabled);
-        byId('system-mqtt-broker').value = state.config.mqttBroker || '';
-        byId('system-mqtt-port').value = state.config.mqttPort || 1883;
-        byId('system-fallback').innerHTML = state.presets.map(scene => `<option value="${Number(scene.index)}" ${Number(scene.index) === Number(state.config.fallbackPreset) ? 'selected' : ''}>${esc(scene.name || 'Untitled scene')}</option>`).join('');
-        
-        let physHtml = '';
-        for (let i = 0; i < 16; ++i) {
-            const p = state.config.physicalOutputs?.[i] || {type:0,hardwareId:i,gpioPin:0,enabled:false};
-            physHtml += `<div class="field" style="margin-bottom:0.5rem;padding:0.5rem;background:rgba(0,0,0,0.2);border-radius:8px;">
-                <div style="font-weight:bold;margin-bottom:0.5rem;display:flex;justify-content:space-between">
-                    <span>Output ${i}</span>
-                    <label class="switch-row" style="margin:0"><input id="sys-phys-en-${i}" type="checkbox" ${p.enabled?'checked':''}></label>
-                </div>
-                <label>Type</label>
-                <select id="sys-phys-type-${i}">
-                    <option value="0" ${p.type===0?'selected':''}>RMT (Data)</option>
-                    <option value="1" ${p.type===1?'selected':''}>PWM (Analog)</option>
-                    <option value="2" ${p.type===2?'selected':''}>SPI</option>
-                </select>
-                <label>Hardware ID</label><input type="number" id="sys-phys-hw-${i}" value="${p.hardwareId}" min="0" max="15">
-                <label>GPIO Pin</label><input type="number" id="sys-phys-pin-${i}" value="${p.gpioPin}" min="0" max="48">
-            </div>`;
-        }
-        byId('system-outputs').innerHTML = physHtml;
-
-        let fixHtml = '';
-        for (let i = 0; i < 16; ++i) {
-            const f = state.config.fixtures?.[i] || {profile:0,pixelOrder:1,physicalOutputIndex:[0,0,0,0],numPixels:0,maxBrightness:255,gammaCorrection:true,maxMilliwatts:0};
-            fixHtml += `<div class="field" style="margin-bottom:0.5rem;padding:0.5rem;background:rgba(0,0,0,0.2);border-radius:8px;">
-                <div style="font-weight:bold;margin-bottom:0.5rem;">Fixture ${i}</div>
-                <label>Profile</label>
-                <select id="sys-fix-prof-${i}">
-                    <option value="0" ${f.profile===0?'selected':''}>WS2812</option>
-                    <option value="1" ${f.profile===1?'selected':''}>SK6812</option>
-                    <option value="2" ${f.profile===2?'selected':''}>PWM Single</option>
-                    <option value="3" ${f.profile===3?'selected':''}>PWM RGB</option>
-                    <option value="4" ${f.profile===4?'selected':''}>PWM RGBW</option>
-                </select>
-                <label>Pixel Order</label>
-                <select id="sys-fix-po-${i}">
-                    <option value="0" ${f.pixelOrder===0?'selected':''}>RGB</option>
-                    <option value="1" ${f.pixelOrder===1?'selected':''}>GRB</option>
-                    <option value="2" ${f.pixelOrder===2?'selected':''}>RGBW</option>
-                    <option value="3" ${f.pixelOrder===3?'selected':''}>GRBW</option>
-                </select>
-                <label>Length (Pixels)</label><input type="number" id="sys-fix-len-${i}" value="${f.numPixels}" min="0" max="2000">
-                <label>Output Index</label><input type="number" id="sys-fix-out-${i}" value="${f.physicalOutputIndex[0]}" min="0" max="15">
-            </div>`;
-        }
-        byId('system-fixtures').innerHTML = fixHtml;
-
-        const roles = ['Unassigned', 'Sign', 'Sign Element', 'Ambiance Light', 'Main Light'];
-        let zonesHtml = '';
-        for (let i = 0; i < 8; ++i) {
-            const z = state.config.zones?.[i] || {name: '', role: 'Unassigned', fixtureMask: 0};
-            
-            let fixChecks = '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:4px;margin-top:4px;">';
-            for (let f = 0; f < 16; ++f) {
-                fixChecks += `<label style="font-size:0.75rem"><input type="checkbox" id="sys-zmask-${i}-${f}" ${(z.fixtureMask & (1<<f))?'checked':''}> F${f}</label>`;
-            }
-            fixChecks += '</div>';
-
-            zonesHtml += `<div class="field" style="margin-bottom:0.5rem;padding:0.5rem;background:rgba(0,0,0,0.2);border-radius:8px;">
-                <div style="font-weight:bold;margin-bottom:0.5rem;">Zone ${i+1}</div>
-                <label>Name</label><input id="sys-zname-${i}" value="${esc(z.name)}" maxlength="23" placeholder="Zone ${i+1}">
-                <label>Role</label><select id="sys-zrole-${i}">${roles.map(r => `<option value="${r}" ${z.role === r ? 'selected' : ''}>${r}</option>`).join('')}</select>
-                <label>Fixtures in Zone</label>${fixChecks}
-            </div>`;
-        }
-        byId('system-zones').innerHTML = zonesHtml;
-        
-        const nodes = [];
-        if (state.sync) {
-            nodes.push(`<article class="product-card node-card primary"><span class="scene-chip">● THIS NODE</span><h4>${esc(state.config.deviceName || 'Lighting node')}</h4><p class="muted">${esc(state.sync.activeRole)} · ${state.sync.clockLocked ? 'clock locked' : 'waiting for clock'}</p><p class="latency">${state.sync.clockJitterUs || 0} μs <span class="help">jitter</span></p></article>`);
-            state.sync.peers.forEach(peer => nodes.push(`<article class="product-card node-card"><span class="scene-chip">● FOLLOWER</span><h4>${esc(peer.address)}</h4><p class="muted">Seen ${clockAge(peer.ageMs)}</p><p class="latency">${peer.latencyMs} ms</p></article>`));
-        }
-        byId('sync-topology').innerHTML = nodes.join('') || '<div class="empty-state">Sync is off or this node has not discovered any room peers yet.</div>';
-    }
-    async function saveSystem() {
+    function saveSystem() {
         try {
             const config = {
                 deviceName: byId('system-name').value.trim(),
@@ -1503,18 +1485,27 @@ window.lg = (() => {
         } catch (error) { toast(error.message,true); }
     }
     async function refreshSync() {
-        try { state.sync = await api('/api/v1/sync'); renderControl(); renderSystem(); }
+        try { state.sync = await api('/api/v1/sync'); renderDashboard(); renderSystem(); }
         catch (error) { toast(error.message,true); }
     }
     function updateText(id,value) { const output = byId(id); if (output) output.textContent = value; }
     function speedText(id,value) { updateText(id,speedName(Number(value))); }
     function changeOverlay(value) {}
     function changeOverlayBeat(value) {}
+
+    function toggleHwSection(id) {
+        const el = byId(id);
+        if (!el) return;
+        el.classList.toggle('collapsed');
+        const chevron = byId(id + '-chevron');
+        if (chevron) chevron.textContent = el.classList.contains('collapsed') ? '▸' : '▾';
+    }
+
     async function uploadOta() {
         const fileInput = byId('ota-file');
         const file = fileInput.files[0];
         if (!file) return toast('Please select a firmware binary first.', true);
-        
+
         const statusEl = byId('ota-status');
         statusEl.textContent = 'Uploading firmware... please wait.';
         try {
@@ -1621,7 +1612,7 @@ window.lg = (() => {
         } catch(e) { toast('Failed to load logs: ' + e.message, true); }
     }
 
-    return {connect,disconnect,refresh,nav,playScene,blackout,editScene,backToScenes,renderSceneEditor,changeZoneEffect,changeOverlay,changeOverlayBeat,saveScene,updateText,speedText,selectPalette,dragScene,dropScene,selectStep,setStepScene,setStepLength,toggleTrack,setLoop,setBpm,setTimelineEnabled,saveTimeline,addCue,setCue,setCueTime,toggleDay,saveAutomation,saveSystem,refreshSync,uploadOta,downloadBackup,uploadRestore,loadCommissioning,runTestSequence,generateAcceptanceReport,loadLogs};
+    return {connect,disconnect,refresh,nav,playScene,blackout,editScene,backToScenes,renderSceneEditor,changeZoneEffect,changeOverlay,changeOverlayBeat,saveScene,updateText,speedText,selectPalette,dragScene,dropScene,selectStep,setStepScene,setStepLength,toggleTrack,setLoop,setBpm,setTimelineEnabled,saveTimeline,addCue,setCue,setCueTime,toggleDay,saveAutomation,saveSystem,refreshSync,uploadOta,downloadBackup,uploadRestore,loadCommissioning,runTestSequence,generateAcceptanceReport,loadLogs,toggleTargetZone,toggleHwSection};
 })();
 </script>
 </body>

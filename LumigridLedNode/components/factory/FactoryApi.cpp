@@ -11,7 +11,7 @@
 
 #include "FactoryApp.hpp"
 #include "ConfigStore.hpp"
-#include "SignageEngine.hpp"
+#include "LightingRuntime.hpp"
 #include "SignageTypes.hpp"
 #include "Scheduler.hpp"
 #include "NodeSync.hpp"
@@ -1063,6 +1063,14 @@ esp_err_t get_signage_status(httpd_req_t* request) {
             "transitioning",
             api_ptr->signage()->is_transitioning()
         );
+
+        cJSON* dmx_array = cJSON_CreateArray();
+        const auto& dmx = api_ptr->signage()->last_dmx_data();
+        for (int i = 0; i < 512; ++i) {
+            cJSON_AddItemToArray(dmx_array, cJSON_CreateNumber(dmx[i]));
+        }
+        cJSON_AddItemToObject(response, "dmx", dmx_array);
+
     } else {
         cJSON_AddStringToObject(response, "signage", "not_started");
     }
@@ -1071,6 +1079,12 @@ esp_err_t get_signage_status(httpd_req_t* request) {
         DeviceConfig cfg;
         api_ptr->config()->load_config(cfg);
     }
+
+    cJSON_AddNumberToObject(
+        response,
+        "controlSource",
+        static_cast<int>(api_ptr->runner().output().current_owner())
+    );
 
     cJSON_AddBoolToObject(
         response,
@@ -1729,7 +1743,7 @@ esp_err_t FactoryApi::start(
     uint16_t signage_port,
     uint16_t factory_port,
     ConfigStore* config,
-    SignageEngine* signage,
+    LightingRuntime* signage,
     Scheduler* scheduler,
     NodeSync* node_sync
 ) {
@@ -1812,7 +1826,7 @@ esp_err_t FactoryApi::start(
     runner_.set_status_callback([this]() { this->notify_status_async(); });
     
     if (signage_) {
-        signage_->set_preview_callback([this](const AddressableLeds& leds) {
+        signage_->set_preview_callback([this](const AddressableDriver& leds) {
             if (this->factory_server_ == nullptr) return;
 
             // Rate limit to ~10 fps (100ms)
@@ -1829,12 +1843,12 @@ esp_err_t FactoryApi::start(
             auto* arg = new WsPreviewArg{};
             arg->api = this;
             
-            // Format: 'L' followed by raw RGB data
-            arg->payload.reserve(1 + AddressableLeds::kLanes * AddressableLeds::kPixels * 3);
-            arg->payload.push_back('L');
+            // Format: 0x01 followed by raw RGB data
+            arg->payload.reserve(1 + AddressableDriver::kLanes * AddressableDriver::kPixels * 3);
+            arg->payload.push_back(0x01);
             const auto& buf = leds.buffer();
-            for (uint8_t l = 0; l < AddressableLeds::kLanes; ++l) {
-                for (uint16_t p = 0; p < AddressableLeds::kPixels; ++p) {
+            for (uint8_t l = 0; l < AddressableDriver::kLanes; ++l) {
+                for (uint16_t p = 0; p < AddressableDriver::kPixels; ++p) {
                     arg->payload.push_back(buf[l][p].r);
                     arg->payload.push_back(buf[l][p].g);
                     arg->payload.push_back(buf[l][p].b);

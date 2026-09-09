@@ -2,6 +2,7 @@
 #include "ConfigStore.hpp"
 #include "esp_check.h"
 #include "esp_log.h"
+#include "esp_random.h"
 #include <cstring>
 #include <cstdio>
 #include <memory>
@@ -245,9 +246,32 @@ esp_err_t ConfigStore::load_config(DeviceConfig& config) {
 
     if (err == ESP_ERR_NVS_NOT_FOUND || err == ESP_ERR_NVS_INVALID_STATE) {
         config = DeviceConfig{};
+        // Check for hardcoded defaults and replace with secure random token
+        if (std::strcmp(config.admin_token, "lumigrid_admin") == 0) {
+            uint8_t random_bytes[8];
+            esp_fill_random(random_bytes, sizeof(random_bytes));
+            std::snprintf(config.admin_token, sizeof(config.admin_token),
+                          "%02x%02x%02x%02x%02x%02x%02x%02x",
+                          random_bytes[0], random_bytes[1], random_bytes[2], random_bytes[3],
+                          random_bytes[4], random_bytes[5], random_bytes[6], random_bytes[7]);
+            ESP_LOGW(TAG, "==================================================");
+            ESP_LOGW(TAG, "GENERATED NEW ADMIN TOKEN: %s", config.admin_token);
+            ESP_LOGW(TAG, "Please record this token. It will not be shown again.");
+            ESP_LOGW(TAG, "==================================================");
+        }
         // Generate CRC for default config
         config.checksum = calc_device_crc(config);
+        
+        // Save the generated config to NVS so we don't regenerate it next boot
+        nvs_set_blob(handle_, "device_cfg", &config, sizeof(DeviceConfig));
+        nvs_commit(handle_);
         return ESP_OK;
+    } else if (err == ESP_OK) {
+        // Just in case it loaded a config that still has the legacy default token, we should probably update it too?
+        // Actually, if they saved it, we might not want to overwrite it, but we can log a warning.
+        if (std::strcmp(config.admin_token, "lumigrid_admin") == 0) {
+            ESP_LOGW(TAG, "WARNING: Device is using default admin token 'lumigrid_admin'. Please change it!");
+        }
     }
     return err;
 }
@@ -417,6 +441,36 @@ void ConfigStore::ensure_defaults() {
         s_night->zones[i].layers[0].opacity = 255;
     }
     save_scene(1, *s_night);
+
+    // 🔒 Security Provisioning
+    auto dc = std::make_unique<DeviceConfig>();
+    if (load_config(*dc) == ESP_OK) {
+        if (strcmp(dc->admin_token, "lumigrid_admin") == 0) {
+            ESP_LOGI(TAG, "Factory default credentials detected. Provisioning new tokens...");
+            
+            auto generate_token = [](char* out, size_t max_len) {
+                uint8_t rand_bytes[8];
+                esp_fill_random(rand_bytes, sizeof(rand_bytes));
+                snprintf(out, max_len, "%02x%02x%02x%02x%02x%02x%02x%02x",
+                         rand_bytes[0], rand_bytes[1], rand_bytes[2], rand_bytes[3],
+                         rand_bytes[4], rand_bytes[5], rand_bytes[6], rand_bytes[7]);
+            };
+
+            generate_token(dc->admin_token, sizeof(dc->admin_token));
+            generate_token(dc->installer_token, sizeof(dc->installer_token));
+            generate_token(dc->operator_token, sizeof(dc->operator_token));
+
+            ESP_LOGW(TAG, "==================================================");
+            ESP_LOGW(TAG, "  NEW CREDENTIALS GENERATED");
+            ESP_LOGW(TAG, "  Admin Token:     %s", dc->admin_token);
+            ESP_LOGW(TAG, "  Installer Token: %s", dc->installer_token);
+            ESP_LOGW(TAG, "  Operator Token:  %s", dc->operator_token);
+            ESP_LOGW(TAG, "  STORE THESE SECURELY. THEY WILL NOT BE SHOWN AGAIN.");
+            ESP_LOGW(TAG, "==================================================");
+
+            save_config(*dc);
+        }
+    }
 }
 
 } // namespace lg

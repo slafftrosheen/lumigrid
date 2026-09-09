@@ -1,3 +1,11 @@
-idf_component_register(SRCS "GammaLut.cpp" "PowerBudget.cpp" "SignageEffects.cpp" "SignageEngine.cpp"
+idf_component_register(SRCS "GammaLut.cpp" 
+                            "PowerBudget.cpp" 
+                            "SceneManager.cpp" 
+                            "EffectRenderer.cpp" 
+                            "Compositor.cpp" 
+                            "FixtureMapper.cpp" 
+                            "OutputScheduler.cpp" 
+                            "LightingRuntime.cpp"
+                            "ControlSourceManager.cpp"
                        INCLUDE_DIRS "include"
                        REQUIRES output config board esp_timer)
