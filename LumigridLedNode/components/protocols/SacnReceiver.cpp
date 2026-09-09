@@ -36,6 +36,40 @@ esp_err_t SacnReceiver::start(SacnDmxCallback callback) {
     ) == pdPASS ? ESP_OK : ESP_FAIL;
 }
 
+void SacnReceiver::set_subscribed_universes(const uint16_t* universes, size_t count) {
+    std::lock_guard<std::mutex> lock(mtx_);
+    subscribed_count_ = 0;
+    if (universes && count > 0) {
+        size_t n = (count < subscribed_universes_.size()) ? count : subscribed_universes_.size();
+        for (size_t i = 0; i < n; ++i) {
+            subscribed_universes_[i] = universes[i];
+        }
+        subscribed_count_ = n;
+    }
+    if (sock_ >= 0) {
+        join_multicast_groups(sock_);
+    }
+}
+
+void SacnReceiver::join_multicast_groups(int sock) {
+    for (size_t i = 0; i < subscribed_count_; ++i) {
+        uint16_t u = subscribed_universes_[i];
+        if (u == 0 || u > 63999) continue;
+
+        struct ip_mreq mreq = {};
+        // E1.31 Section 9.3.1: 239.255.(u >> 8).(u & 0xFF)
+        mreq.imr_multiaddr.s_addr = htonl((239U << 24) | (255U << 16) | u);
+        mreq.imr_interface.s_addr = htonl(INADDR_ANY);
+
+        int res = ::setsockopt(sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq));
+        if (res < 0) {
+            ESP_LOGW(kTag, "Failed to join multicast for universe %u (errno %d)", u, errno);
+        } else {
+            ESP_LOGI(kTag, "Joined sACN multicast group 239.255.%u.%u for universe %u", (u >> 8) & 0xFF, u & 0xFF, u);
+        }
+    }
+}
+
 void SacnReceiver::task_entry(void* arg) {
     static_cast<SacnReceiver*>(arg)->task();
 }
@@ -47,6 +81,9 @@ void SacnReceiver::task() {
         vTaskDelete(nullptr);
         return;
     }
+
+    int opt = 1;
+    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
     sockaddr_in addr = {};
     addr.sin_family = AF_INET;
@@ -60,11 +97,11 @@ void SacnReceiver::task() {
         return;
     }
 
-    int opt = 1;
-    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
-    // Optional: Multicast membership for Universes if required, but listening to INADDR_ANY 
-    // will catch unicast and broadcast/multicast packets directed to this interface.
+    {
+        std::lock_guard<std::mutex> lock(mtx_);
+        sock_ = sock;
+        join_multicast_groups(sock);
+    }
 
     uint8_t buffer[1024];
 

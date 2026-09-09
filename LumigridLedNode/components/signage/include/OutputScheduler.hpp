@@ -2,7 +2,7 @@
 #pragma once
 #include "RenderTypes.hpp"
 #include "SignageTypes.hpp"
-#include "ControlSourceManager.hpp"
+#include "OutputController.hpp"
 
 namespace lg {
 
@@ -11,8 +11,7 @@ public:
     static void schedule(
         const RenderFrame& frame,
         const DeviceConfig& device_cfg,
-        ControlSourceManager& source_manager,
-        ControlSource source
+        OutputController& controller
     );
 };
 

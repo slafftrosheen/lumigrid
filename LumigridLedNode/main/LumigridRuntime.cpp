@@ -15,16 +15,20 @@ namespace lg {
 RTC_DATA_ATTR static int s_boot_count = 0;
 
 LumigridRuntime::LumigridRuntime()
-    : source_manager_(output_),
-      factory_runner_(source_manager_),
+    : source_manager_(),
+      factory_runner_(source_manager_, output_),
       api_(factory_runner_),
-      lighting_(source_manager_, config_),
+      lighting_(source_manager_, output_, config_),
       dmx_router_(lighting_),
       clock_(),
       scheduler_(config_, lighting_, clock_),
       node_sync_(lighting_, config_, clock_) {
     lighting_.set_config_reload_callback([this](const DeviceConfig& cfg) {
         dmx_router_.update_config(cfg);
+        uint16_t active_unis[16];
+        size_t u_count = dmx_router_.get_active_universes(active_unis, 16);
+        sacn_.set_subscribed_universes(active_unis, u_count);
+        artnet_.set_output_universes(active_unis, static_cast<uint8_t>(u_count));
     });
 }
 
@@ -144,18 +148,26 @@ esp_err_t LumigridRuntime::start() {
                 uint8_t mac[6] = {};
                 esp_read_mac(mac, ESP_MAC_WIFI_STA);
 
+                DeviceConfig current_cfg;
+                config_.load_config(current_cfg);
+                dmx_router_.update_config(current_cfg);
+
+                uint16_t active_unis[16];
+                size_t u_count = dmx_router_.get_active_universes(active_unis, 16);
+                uint8_t port_count = (u_count > 0 && u_count <= 4) ? static_cast<uint8_t>(u_count) : 1;
+
                 ArtnetNodeInfo node{};
                 node.short_name = "LumiGrid Factory";
                 node.long_name = "LumiGrid 8xALED 8xPWM Factory Test Node";
                 node.report = "#0001 [0000] LumiGrid ready";
+                node.num_ports = port_count;
+                for (uint8_t i = 0; i < port_count; ++i) {
+                    node.sw_out[i] = static_cast<uint8_t>(active_unis[i] & 0x0F);
+                }
                 std::memcpy(node.mac, mac, 6);
 
                 ESP_LOGI("lumigrid", "Step 6: api.start(80, 8080)...");
                 ESP_ERROR_CHECK(api_.start(80, 8080, &config_, &lighting_, &scheduler_, &node_sync_));
-
-                DeviceConfig current_cfg;
-                config_.load_config(current_cfg);
-                dmx_router_.update_config(current_cfg);
 
                 ESP_LOGI("lumigrid", "Step 7: mdns.start()...");
                 ESP_ERROR_CHECK(mdns_.start(current_cfg.device_name, "LumiGrid Signage", 80));
@@ -167,6 +179,7 @@ esp_err_t LumigridRuntime::start() {
                         dmx_router_.handle_artnet_dmx(packet);
                     }
                 ));
+                artnet_.set_output_universes(active_unis, port_count);
 
                 ESP_LOGI("lumigrid", "Step 8.5: sacn.start()...");
                 ESP_ERROR_CHECK(sacn_.start(
@@ -174,6 +187,7 @@ esp_err_t LumigridRuntime::start() {
                         dmx_router_.handle_sacn_dmx(packet);
                     }
                 ));
+                sacn_.set_subscribed_universes(active_unis, u_count);
 
                 if (!safe_mode_) {
                     ESP_LOGI("lumigrid", "Step 9: scheduler.start()...");

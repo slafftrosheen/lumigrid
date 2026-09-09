@@ -1,6 +1,7 @@
 // components/signage/SceneManager.cpp
 #include "SceneManager.hpp"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include <algorithm>
 #include <cstring>
 
@@ -55,8 +56,9 @@ void SceneManager::init() {
     render_scene_ = scene;
     active_index_ = active_idx;
     saved_active_index_ = active_idx;
-    scene_started_ms_ = 0;
-    last_command_ms_ = 0;
+    const uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
+    scene_started_ms_ = now;
+    last_command_ms_ = now;
     ESP_LOGI(TAG, "SceneManager starting with scene %u: \"%s\"", active_idx, scene.name);
 }
 
@@ -70,6 +72,8 @@ void SceneManager::activate_scene(uint8_t index, uint32_t current_ms) {
         ESP_LOGW(TAG, "Preset %u not found", index);
         return;
     }
+
+    last_command_ms_ = current_ms;
 
     if (transitioning_) {
         const uint32_t elapsed = current_ms - transition_start_ms_;
@@ -89,6 +93,7 @@ void SceneManager::activate_scene(uint8_t index, uint32_t current_ms) {
 }
 
 void SceneManager::activate_scene_direct(const SceneConfig& scene, uint32_t current_ms, bool immediate) {
+    last_command_ms_ = current_ms;
     if (immediate) {
         current_scene_ = scene;
         transitioning_ = false;

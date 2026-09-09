@@ -3,6 +3,8 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <array>
+#include <mutex>
 
 #include "esp_err.h"
 
@@ -25,6 +27,8 @@ struct ArtnetNodeInfo {
     uint8_t net = 0;
     uint8_t subnet = 0;
     uint8_t universe = 0;
+    uint8_t num_ports = 1;
+    std::array<uint8_t, 4> sw_out = {0, 0, 0, 0};
     uint8_t mac[6] = {0};
     uint8_t ip[4] = {0};
     uint8_t status1 = 0xD2;
@@ -45,6 +49,9 @@ class ArtnetDiscovery {
 public:
     esp_err_t start(const ArtnetNodeInfo& info, ArtnetDmxCallback dmx_callback);
 
+    /// Update reported output universes for ArtPoll replies
+    void set_output_universes(const uint16_t* universes, uint8_t count);
+
 private:
     static void task_entry(void* arg);
     void task();
@@ -54,6 +61,7 @@ private:
 
     ArtnetNodeInfo info_{};
     ArtnetDmxCallback dmx_callback_{};
+    std::mutex mtx_;
 };
 
 } // namespace lg

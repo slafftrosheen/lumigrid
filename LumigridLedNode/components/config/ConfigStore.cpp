@@ -224,9 +224,15 @@ esp_err_t ConfigStore::load_config(DeviceConfig& config) {
                         ESP_LOGW(TAG, "DeviceConfig %s CRC mismatch", k);
                         return ESP_ERR_NVS_INVALID_STATE;
                     }
+                    if (temp->schema_version < 2) {
+                        ESP_LOGI(TAG, "Migrating DeviceConfig %s from schema v%u to v2", k, temp->schema_version);
+                        temp->schema_version = 2;
+                        temp->checksum = calc_device_crc(*temp);
+                    }
                     out = *temp;
                 }
             } else {
+                ESP_LOGW(TAG, "DeviceConfig size mismatch (len=%u, expected=%u)", (unsigned)len, (unsigned)sizeof(DeviceConfig));
                 err = ESP_ERR_NVS_INVALID_LENGTH;
             }
         }
@@ -235,7 +241,7 @@ esp_err_t ConfigStore::load_config(DeviceConfig& config) {
 
     esp_err_t err = load_from_key("device_cfg", config);
     
-    if (err == ESP_ERR_NVS_INVALID_STATE) {
+    if (err == ESP_ERR_NVS_INVALID_STATE || err == ESP_ERR_NVS_INVALID_LENGTH) {
         ESP_LOGW(TAG, "Restoring DeviceConfig from backup slot");
         err = load_from_key("device_cfg_bak", config);
         if (err == ESP_OK) {
@@ -244,7 +250,7 @@ esp_err_t ConfigStore::load_config(DeviceConfig& config) {
         }
     }
 
-    if (err == ESP_ERR_NVS_NOT_FOUND || err == ESP_ERR_NVS_INVALID_STATE) {
+    if (err == ESP_ERR_NVS_NOT_FOUND || err == ESP_ERR_NVS_INVALID_STATE || err == ESP_ERR_NVS_INVALID_LENGTH) {
         config = DeviceConfig{};
         // Check for hardcoded defaults and replace with secure random token
         if (std::strcmp(config.admin_token, "lumigrid_admin") == 0) {

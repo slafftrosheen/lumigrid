@@ -4,56 +4,87 @@
 #include "Compositor.hpp"
 #include "FixtureMapper.hpp"
 #include "OutputScheduler.hpp"
-#include "esp_log.h"
+#include "ColorPipeline.hpp"
 #include "esp_timer.h"
+#include "esp_log.h"
 #include <algorithm>
+#include <cstring>
+
+static const char* TAG = "LightingRuntime";
 
 namespace lg {
 namespace {
-uint32_t now_ms() {
+
+inline uint32_t now_ms() {
     return static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
 }
+
 } // namespace
 
-LightingRuntime::LightingRuntime(ControlSourceManager& source_manager, ConfigStore& config)
-    : source_manager_(source_manager), config_(config), scene_manager_(config) {}
+LightingRuntime::LightingRuntime(ControlSourceManager& source_manager, OutputController& controller, ConfigStore& config)
+    : source_manager_(source_manager),
+      controller_(controller),
+      config_(config),
+      scene_manager_(config) {}
 
 esp_err_t LightingRuntime::start() {
-    mutex_ = xSemaphoreCreateMutex();
-    if (!mutex_) return ESP_ERR_NO_MEM;
-
     config_.load_config(device_cfg_);
-    
     power_budget_.set_limit_mw(device_cfg_.max_power_mw);
     power_budget_.set_soft_start(device_cfg_.soft_start_enabled, device_cfg_.soft_start_ms);
+    ColorPipeline::set_gamma(device_cfg_.gamma_x10);
+
+    mutex_ = xSemaphoreCreateMutex();
+    if (!mutex_) {
+        ESP_LOGE(TAG, "Failed to create mutex");
+        return ESP_ERR_NO_MEM;
+    }
 
     scene_manager_.init();
-    scene_manager_.update_device_config(device_cfg_);
 
-    enable_ms_ = now_ms();
-
-    source_manager_.acquire(ControlSource::Fallback);
-
-    const BaseType_t created = xTaskCreatePinnedToCore(
-        task_entry, "lighting", 8192, this, 4, &task_handle_, 1
+    BaseType_t ret = xTaskCreatePinnedToCore(
+        task_entry,
+        "lighting_rt",
+        8192,
+        this,
+        6,
+        &task_handle_,
+        1 // Core 1 (app core)
     );
 
-    return (created == pdPASS) ? ESP_OK : ESP_ERR_NO_MEM;
+    if (ret != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create task");
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "LightingRuntime started (gamma=%.1f, max_mw=%u)", device_cfg_.gamma_x10 / 10.0f, device_cfg_.max_power_mw);
+    return ESP_OK;
+}
+
+void LightingRuntime::trigger_estop() {
+    estop_active_.store(true, std::memory_order_release);
+    controller_.blackout();
+    ESP_LOGW(TAG, "EMERGENCY STOP TRIGGERED: Hardware output blacked out");
+}
+
+void LightingRuntime::clear_estop() {
+    estop_active_.store(false, std::memory_order_release);
+    ESP_LOGI(TAG, "EMERGENCY STOP CLEARED: Resuming normal lighting control");
 }
 
 void LightingRuntime::task_entry(void* arg) {
     static_cast<LightingRuntime*>(arg)->task();
-    vTaskDelete(nullptr);
 }
 
 void LightingRuntime::task() {
+    TickType_t last_wake = xTaskGetTickCount();
+    enable_ms_ = now_ms();
     power_budget_.on_enable();
-    last_fps_time_ms_ = now_ms();
 
-    TickType_t xLastWakeTime = xTaskGetTickCount();
-    for (;;) {
-        const uint32_t current_ms = now_ms();
-        
+    while (true) {
+        uint32_t current_ms = now_ms();
+        render_frame(current_ms);
+
+        // Calculate and report actual frame rate
         frame_count_++;
         if (current_ms - last_fps_time_ms_ >= 1000) {
             current_fps_ = (frame_count_ * 1000.0f) / (current_ms - last_fps_time_ms_);
@@ -61,42 +92,51 @@ void LightingRuntime::task() {
             last_fps_time_ms_ = current_ms;
         }
 
-        render_frame(current_ms);
-        
-        uint32_t delay_ms = kFramePeriodMs;
-        xSemaphoreTake(mutex_, portMAX_DELAY);
-        if (last_live_stream_ms_ > 0 && (current_ms - last_live_stream_ms_ < 1000)) {
-            delay_ms = 10; // 100 FPS for live streaming
-        }
-        xSemaphoreGive(mutex_);
-        
-        vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(delay_ms));
+        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(kFramePeriodMs));
     }
 }
 
 void LightingRuntime::render_frame(uint32_t current_ms) {
-    xSemaphoreTake(mutex_, portMAX_DELAY);
-    const SceneConfig& render_scene = scene_manager_.process_frame(current_ms);
-    const uint32_t effect_elapsed = current_ms - scene_manager_.scene_started_ms();
+    if (!mutex_ || xSemaphoreTake(mutex_, pdMS_TO_TICKS(10)) != pdTRUE) {
+        return;
+    }
 
-    // Check if live layers or live fixtures timed out
-    const uint32_t stream_timeout = device_cfg_.protocol.stream_timeout_ms > 0 ? device_cfg_.protocol.stream_timeout_ms : 2000;
+    if (estop_active_.load(std::memory_order_acquire)) {
+        controller_.blackout();
+        if (preview_cb_) {
+            RenderFrame blank{};
+            preview_cb_(blank, device_cfg_);
+        }
+        xSemaphoreGive(mutex_);
+        return;
+    }
+
+    const SceneConfig& render_scene = scene_manager_.process_frame(current_ms);
+    uint32_t effect_elapsed = current_ms;
+
+    // Stream timeout checks
+    const uint16_t timeout_ms = device_cfg_.protocol.stream_timeout_ms > 0 ? device_cfg_.protocol.stream_timeout_ms : 2000;
     bool any_live_active = false;
     for (uint8_t z = 0; z < 8; ++z) {
         for (uint8_t l = 0; l < 3; ++l) {
-            if (live_layers_[z][l].active) {
-                if (current_ms - live_layers_[z][l].timestamp_ms > stream_timeout) {
-                    live_layers_[z][l].active = false;
+            auto& layer = live_dmx_frame_.layers[z][l];
+            if (layer.active) {
+                if (current_ms - layer.timestamp_ms > timeout_ms) {
+                    layer.active = false;
+                    layer.opacity = 0;
                 } else {
                     any_live_active = true;
                 }
             }
         }
     }
+
     for (uint8_t f = 0; f < 16; ++f) {
-        if (live_fixtures_[f].active) {
-            if (current_ms - live_fixtures_[f].timestamp_ms > stream_timeout) {
-                live_fixtures_[f].active = false;
+        auto& fix = live_dmx_frame_.fixtures[f];
+        if (fix.active) {
+            if (current_ms - fix.timestamp_ms > timeout_ms) {
+                fix.active = false;
+                fix.opacity = 0;
             } else {
                 any_live_active = true;
             }
@@ -136,8 +176,8 @@ void LightingRuntime::render_frame(uint32_t current_ms) {
             layer_frame.pixels.fill(LightValue{0,0,0,0});
             layer_frame.pwm.fill(0);
 
-            if (owner == ControlSource::LiveDmx && live_layers_[target_zone][l].active) {
-                const auto& live = live_layers_[target_zone][l];
+            if (owner == ControlSource::LiveDmx && live_dmx_frame_.layers[target_zone][l].active) {
+                const auto& live = live_dmx_frame_.layers[target_zone][l];
                 if (live.opacity == 0) continue;
                 
                 uint16_t pcount = std::min<uint16_t>(fixture.num_pixels, MAX_PIXELS);
@@ -158,40 +198,28 @@ void LightingRuntime::render_frame(uint32_t current_ms) {
         FixtureMapper::map(render_frame.fixtures[f], composited_zone, fixture, render_scene.global_brightness);
 
         // If direct fixture live DMX is active, blend into rendered fixture
-        if (live_fixtures_[f].active && live_fixtures_[f].opacity > 0) {
+        if (live_dmx_frame_.fixtures[f].active && live_dmx_frame_.fixtures[f].opacity > 0) {
             FixtureFrame live_mapped;
             FixtureFrame live_src;
-            const uint16_t pcount = std::min<uint16_t>(static_cast<uint16_t>(live_fixtures_[f].pixels.size()), fixture.num_pixels);
+            const uint16_t pcount = std::min<uint16_t>(live_dmx_frame_.fixtures[f].pixel_count, fixture.num_pixels);
             for (uint16_t p = 0; p < pcount; ++p) {
-                live_src.pixels[p] = live_fixtures_[f].pixels[p];
+                live_src.pixels[p] = live_dmx_frame_.fixtures[f].pixels[p];
             }
-            live_src.pwm = live_fixtures_[f].pwm;
+            live_src.pwm = live_dmx_frame_.fixtures[f].pwm;
             FixtureMapper::map(live_mapped, live_src, fixture, render_scene.global_brightness);
-            Compositor::blend(render_frame.fixtures[f], live_mapped, BlendMode::Normal, live_fixtures_[f].opacity, fixture.num_pixels);
+            Compositor::blend(render_frame.fixtures[f], live_mapped, BlendMode::Normal, live_dmx_frame_.fixtures[f].opacity, fixture.num_pixels);
         }
     }
 
-    // 2. Power Limiting (enforce predicted power & soft-start directly on newly rendered RenderFrame)
+    // 2. Power Limiting
     power_budget_.enforce(render_frame, device_cfg_, current_ms);
 
-    // 3. Resolve active control source for OutputScheduler
-    ControlSource active_source = source_manager_.current_owner();
-    if (active_source == ControlSource::Idle || active_source == ControlSource::Fallback || active_source == ControlSource::ScenePlayback) {
-        active_source = scene_manager_.is_fallback_active() ? ControlSource::Fallback : ControlSource::ScenePlayback;
-        if (active_source == ControlSource::ScenePlayback) {
-            source_manager_.release(ControlSource::Fallback);
-            source_manager_.acquire(ControlSource::ScenePlayback);
-        } else {
-            source_manager_.release(ControlSource::ScenePlayback);
-            source_manager_.acquire(ControlSource::Fallback);
-        }
-    }
-
-    // 4. Output Scheduling
-    OutputScheduler::schedule(render_frame, device_cfg_, source_manager_, active_source);
+    // 3. Physical Output Scheduling
+    OutputScheduler::schedule(render_frame, device_cfg_, controller_);
     
+    // 4. Logical RenderFrame Preview
     if (preview_cb_) {
-        preview_cb_(source_manager_.pixels());
+        preview_cb_(render_frame, device_cfg_);
     }
     xSemaphoreGive(mutex_);
 }
@@ -208,14 +236,40 @@ void LightingRuntime::activate_scene_direct(const SceneConfig& scene, bool immed
     xSemaphoreGive(mutex_);
 }
 
-void LightingRuntime::inject_live_data(uint8_t zone_idx, uint8_t layer_idx, const BrandColor& color, uint8_t opacity) {
-    if (zone_idx >= 8 || layer_idx >= 3) return;
+void LightingRuntime::submit_live_frame(const LiveDmxFrame& frame) {
+    if (!mutex_) return;
     xSemaphoreTake(mutex_, portMAX_DELAY);
     const uint32_t now = now_ms();
-    live_layers_[zone_idx][layer_idx].color = color;
-    live_layers_[zone_idx][layer_idx].opacity = opacity;
-    live_layers_[zone_idx][layer_idx].timestamp_ms = now;
-    live_layers_[zone_idx][layer_idx].active = true;
+    live_dmx_frame_ = frame;
+    live_dmx_frame_.timestamp_ms = now;
+    last_live_stream_ms_ = now;
+
+    const uint16_t timeout_ms = device_cfg_.protocol.stream_timeout_ms > 0 ? device_cfg_.protocol.stream_timeout_ms : 2000;
+    for (uint8_t z = 0; z < 8; ++z) {
+        for (uint8_t l = 0; l < 3; ++l) {
+            if (live_dmx_frame_.layers[z][l].active) {
+                source_manager_.acquire(ControlSource::LiveDmx, timeout_ms, (1 << z), (1 << l));
+            }
+        }
+    }
+    for (uint8_t f = 0; f < 16; ++f) {
+        if (live_dmx_frame_.fixtures[f].active) {
+            const uint8_t zone_id = device_cfg_.fixtures[f].zone_id;
+            source_manager_.acquire(ControlSource::LiveDmx, timeout_ms, (1 << zone_id), 0xFF);
+        }
+    }
+    xSemaphoreGive(mutex_);
+}
+
+void LightingRuntime::inject_live_data(uint8_t zone_idx, uint8_t layer_idx, const BrandColor& color, uint8_t opacity) {
+    if (zone_idx >= 8 || layer_idx >= 3) return;
+    if (!mutex_) return;
+    xSemaphoreTake(mutex_, portMAX_DELAY);
+    const uint32_t now = now_ms();
+    live_dmx_frame_.layers[zone_idx][layer_idx].color = color;
+    live_dmx_frame_.layers[zone_idx][layer_idx].opacity = opacity;
+    live_dmx_frame_.layers[zone_idx][layer_idx].timestamp_ms = now;
+    live_dmx_frame_.layers[zone_idx][layer_idx].active = true;
     last_live_stream_ms_ = now;
 
     const uint16_t timeout_ms = device_cfg_.protocol.stream_timeout_ms > 0 ? device_cfg_.protocol.stream_timeout_ms : 2000;
@@ -231,14 +285,13 @@ void LightingRuntime::inject_live_fixture(
     uint8_t opacity
 ) {
     if (fixture_idx >= 16) return;
+    if (!mutex_) return;
     xSemaphoreTake(mutex_, portMAX_DELAY);
     const uint32_t now = now_ms();
-    auto& lf = live_fixtures_[fixture_idx];
+    auto& lf = live_dmx_frame_.fixtures[fixture_idx];
     uint16_t pcount = std::min<uint16_t>(count, MAX_PIXELS);
+    lf.pixel_count = pcount;
     if (pixels && pcount > 0) {
-        if (lf.pixels.size() != pcount) {
-            lf.pixels.resize(pcount);
-        }
         std::memcpy(lf.pixels.data(), pixels, pcount * sizeof(LightValue));
     }
     if (pwm_duties) {
@@ -256,6 +309,7 @@ void LightingRuntime::inject_live_fixture(
 }
 
 void LightingRuntime::update_dmx_data(const uint8_t* data, size_t length) {
+    if (!mutex_) return;
     xSemaphoreTake(mutex_, portMAX_DELAY);
     if (length > 512) length = 512;
     memcpy(dmx_data_.data(), data, length);
@@ -266,6 +320,7 @@ void LightingRuntime::update_dmx_data(const uint8_t* data, size_t length) {
 }
 
 void LightingRuntime::feed_watchdog() {
+    if (!mutex_) return;
     xSemaphoreTake(mutex_, portMAX_DELAY);
     scene_manager_.feed_watchdog(now_ms());
     xSemaphoreGive(mutex_);
@@ -296,6 +351,7 @@ void LightingRuntime::reload_device_config() {
     config_.load_config(device_cfg_);
     power_budget_.set_limit_mw(device_cfg_.max_power_mw);
     power_budget_.set_soft_start(device_cfg_.soft_start_enabled, device_cfg_.soft_start_ms);
+    ColorPipeline::set_gamma(device_cfg_.gamma_x10);
     scene_manager_.update_device_config(device_cfg_);
     if (config_reload_cb_) {
         config_reload_cb_(device_cfg_);
@@ -304,6 +360,9 @@ void LightingRuntime::reload_device_config() {
 }
 
 bool LightingRuntime::acquire_control(ControlSource source, uint32_t lease_ms, uint8_t zone_mask, uint8_t layer_mask) {
+    if (source == ControlSource::EStop) {
+        trigger_estop();
+    }
     if (!mutex_) return false;
     xSemaphoreTake(mutex_, portMAX_DELAY);
     bool won = source_manager_.acquire(source, lease_ms, zone_mask, layer_mask);
@@ -312,6 +371,9 @@ bool LightingRuntime::acquire_control(ControlSource source, uint32_t lease_ms, u
 }
 
 void LightingRuntime::release_control(ControlSource source) {
+    if (source == ControlSource::EStop) {
+        clear_estop();
+    }
     if (!mutex_) return;
     xSemaphoreTake(mutex_, portMAX_DELAY);
     source_manager_.release(source);

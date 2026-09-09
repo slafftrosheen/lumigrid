@@ -287,6 +287,7 @@ struct ProtocolConfig {
 };
 
 struct DeviceConfig {
+    uint8_t  schema_version         = 2;
     char     device_name[32]        = "lumigrid";
     uint8_t  active_preset_index    = 0;
     uint8_t  fallback_preset_index  = 0;

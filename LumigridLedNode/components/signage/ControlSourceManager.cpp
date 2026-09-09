@@ -7,19 +7,27 @@ static const char* TAG = "ControlSrc";
 
 namespace lg {
 
-ControlSourceManager::ControlSourceManager(OutputController& controller) 
-    : controller_(controller) {
+ControlSourceManager::ControlSourceManager() = default;
+
+ControlSourceManager::~ControlSourceManager() {
+    if (mutex_) {
+        vSemaphoreDelete(mutex_);
+        mutex_ = nullptr;
+    }
 }
 
 esp_err_t ControlSourceManager::init() {
-    mutex_ = xSemaphoreCreateMutex();
-    if (!mutex_) return ESP_ERR_NO_MEM;
+    if (!mutex_) {
+        mutex_ = xSemaphoreCreateMutex();
+        if (!mutex_) return ESP_ERR_NO_MEM;
+    }
     
     for (int i = 0; i < 8; ++i) {
         states_[i] = ControlState{};
         states_[i].source = static_cast<ControlSource>(i);
         states_[i].active = false;
     }
+    current_owner_ = ControlSource::Idle;
     return ESP_OK;
 }
 
@@ -48,6 +56,7 @@ bool ControlSourceManager::acquire(ControlSource source, uint32_t lease_ms,
                                     uint8_t zone_mask, uint8_t layer_mask,
                                     bool takeover) {
     if (source == ControlSource::Idle) return true;
+    if (!mutex_) return false;
     
     xSemaphoreTake(mutex_, portMAX_DELAY);
     uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000);
@@ -70,6 +79,7 @@ bool ControlSourceManager::acquire(ControlSource source, uint32_t lease_ms,
 
 void ControlSourceManager::release(ControlSource source) {
     if (source == ControlSource::Idle) return;
+    if (!mutex_) return;
     
     xSemaphoreTake(mutex_, portMAX_DELAY);
     uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000);
@@ -96,56 +106,6 @@ ControlSource ControlSourceManager::resolve(uint8_t zone_idx, uint8_t layer_idx,
         }
     }
     return ControlSource::Idle;
-}
-
-bool ControlSourceManager::begin_frame(ControlSource source) {
-    xSemaphoreTake(mutex_, portMAX_DELAY);
-    uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000);
-    
-    evaluate_priority(now);
-    
-    if (current_owner_ != source) {
-        xSemaphoreGive(mutex_);
-        return false;
-    }
-    
-    if (frame_active_) {
-        ESP_LOGW(TAG, "begin_frame called while frame already active by %d", static_cast<int>(frame_lock_));
-        xSemaphoreGive(mutex_);
-        return false;
-    }
-    
-    frame_active_ = true;
-    frame_lock_ = source;
-    xSemaphoreGive(mutex_);
-    return true;
-}
-
-esp_err_t ControlSourceManager::commit_frame(ControlSource source, bool enable_output) {
-    xSemaphoreTake(mutex_, portMAX_DELAY);
-    if (!frame_active_ || frame_lock_ != source) {
-        xSemaphoreGive(mutex_);
-        return ESP_ERR_INVALID_STATE;
-    }
-    
-    esp_err_t err;
-    if (enable_output) {
-        err = controller_.commit();
-    } else {
-        err = controller_.blackout();
-    }
-    
-    frame_active_ = false;
-    xSemaphoreGive(mutex_);
-    return err;
-}
-
-void ControlSourceManager::abort_frame(ControlSource source) {
-    xSemaphoreTake(mutex_, portMAX_DELAY);
-    if (frame_active_ && frame_lock_ == source) {
-        frame_active_ = false;
-    }
-    xSemaphoreGive(mutex_);
 }
 
 } // namespace lg

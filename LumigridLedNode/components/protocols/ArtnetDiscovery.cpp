@@ -56,6 +56,20 @@ esp_err_t ArtnetDiscovery::start(const ArtnetNodeInfo& info, ArtnetDmxCallback d
     ) == pdPASS ? ESP_OK : ESP_FAIL;
 }
 
+void ArtnetDiscovery::set_output_universes(const uint16_t* universes, uint8_t count) {
+    std::lock_guard<std::mutex> lock(mtx_);
+    if (!universes || count == 0) {
+        info_.num_ports = 1;
+        info_.sw_out[0] = static_cast<uint8_t>(info_.universe & 0x0F);
+        return;
+    }
+    uint8_t n = (count < 4) ? count : 4;
+    info_.num_ports = n;
+    for (uint8_t i = 0; i < n; ++i) {
+        info_.sw_out[i] = static_cast<uint8_t>(universes[i] & 0x0F);
+    }
+}
+
 void ArtnetDiscovery::task_entry(void* arg) {
     static_cast<ArtnetDiscovery*>(arg)->task();
 }
@@ -67,6 +81,10 @@ void ArtnetDiscovery::task() {
         vTaskDelete(nullptr);
         return;
     }
+
+    int opt = 1;
+    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    setsockopt(sock, SOL_SOCKET, SO_BROADCAST, &opt, sizeof(opt));
 
     sockaddr_in addr = {};
     addr.sin_family = AF_INET;
@@ -80,10 +98,7 @@ void ArtnetDiscovery::task() {
         return;
     }
 
-    int opt = 1;
-    setsockopt(sock, SOL_SOCKET, SO_BROADCAST, &opt, sizeof(opt));
-
-    uint8_t buffer[600];
+    uint8_t buffer[1024];
 
     for (;;) {
         sockaddr_in source = {};
@@ -147,6 +162,8 @@ bool ArtnetDiscovery::handle_dmx(const uint8_t* packet, size_t length) {
 void ArtnetDiscovery::send_poll_reply(const sockaddr_in& destination, int sock) {
     uint8_t reply[239] = {};
 
+    std::lock_guard<std::mutex> lock(mtx_);
+
     // --- Header (0-9) ---
     std::memcpy(reply, "Art-Net\0", 8);         // 0-7:   ID
     write_le16(reply + 8, kOpPollReply);         // 8-9:   OpCode 0x2100 LE
@@ -197,26 +214,23 @@ void ArtnetDiscovery::send_poll_reply(const sockaddr_in& destination, int sock) 
     copy_padded(reply + 108, 64, info_.report);      // 108-171: NodeReport[64]
 
     // --- Port Info (172-177) ---
+    uint8_t ports = std::min<uint8_t>(info_.num_ports > 0 ? info_.num_ports : 1, 4);
     reply[172] = 0x00;                           // 172: NumPortsHi
-    reply[173] = 0x01;                           // 173: NumPortsLo = 1
-    reply[174] = 0x80;                           // 174: PortTypes[0] = output
-    // 175-177: PortTypes[1-3] = 0 (unused ports)
+    reply[173] = ports;                          // 173: NumPortsLo
 
-    // --- Good Input/Output (178-185) ---
-    // 178-181: GoodInput[0-3] = 0 (no input ports)
-    reply[182] = 0x80;                           // 182: GoodOutputA[0] = data transmitting
-    // 183-185: GoodOutputA[1-3] = 0 (unused ports)
-
-    // --- SwIn/SwOut (186-193) ---
-    // 186-189: SwIn[0-3] = 0 (no input ports)
-    reply[190] = info_.universe;                 // 190: SwOut[0] = output universe
-    // 191-193: SwOut[1-3] = 0 (unused ports)
+    for (uint8_t p = 0; p < 4; ++p) {
+        reply[174 + p] = (p < ports) ? 0x80 : 0x00; // 174-177: PortTypes (0x80 = DMX512 output)
+        reply[182 + p] = (p < ports) ? 0x80 : 0x00; // 182-185: GoodOutput (0x80 = transmitting)
+        reply[190 + p] = (p < ports) ? info_.sw_out[p] : 0x00; // 190-193: SwOut
+    }
 
     // --- Misc (194-199) ---
-    // 194: AcnPriority = 0
-    // 195: SwMacro = 0 (deprecated)
-    // 196: SwRemote = 0 (deprecated)
-    // 197-199: Spare[3] = 0
+    reply[194] = 0;                              // 194: AcnPriority = 0
+    reply[195] = 0;                              // 195: SwMacro = 0
+    reply[196] = 0;                              // 196: SwRemote = 0
+    reply[197] = 0;                              // 197-199: Spare[3] = 0
+    reply[198] = 0;
+    reply[199] = 0;
 
     // --- Style (200) ---
     reply[200] = info_.style;                    // 200: Style
@@ -227,11 +241,8 @@ void ArtnetDiscovery::send_poll_reply(const sockaddr_in& destination, int sock) 
     }
 
     // --- Bind/Status2 (207-212) ---
-    // 207-210: BindIp[4] = 0 (same as node IP, already reported)
     reply[211] = 1;                              // 211: BindIndex (1 = root device)
     reply[212] = info_.status2;                  // 212: Status2
-
-    // 213-238: Art-Net 4 extended fields default to 0
 
     sockaddr_in dest = destination;
     dest.sin_port = htons(kArtnetPort);

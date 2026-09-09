@@ -205,6 +205,42 @@ def test_htp_ltp_and_priority():
     assert htp_result == [100, 100, 200, 200]
     print("[PASS] HTP (Highest Takes Precedence) merge test passed.")
 
+    # 1b. Multi-source HTP tracking without sticky maximum
+    class MultiSourceHTP:
+        def __init__(self, timeout_ms=2000):
+            self.sources = {}
+            self.timeout_ms = timeout_ms
+
+        def receive(self, source_id, priority, data, current_ms):
+            self.sources[source_id] = {
+                "priority": priority,
+                "data": list(data),
+                "timestamp": current_ms
+            }
+
+        def recompute(self, current_ms):
+            active = {
+                sid: s for sid, s in self.sources.items()
+                if (current_ms - s["timestamp"] <= self.timeout_ms)
+            }
+            if not active:
+                return [0] * 4
+            highest_pri = max(s["priority"] for s in active.values())
+            eligible = [s for s in active.values() if s["priority"] == highest_pri]
+            merged = [0] * 4
+            for s in eligible:
+                for ch in range(4):
+                    merged[ch] = max(merged[ch], s["data"][ch])
+            return merged
+
+    router = MultiSourceHTP(timeout_ms=2000)
+    router.receive(source_id=1, priority=100, data=[255, 0, 0, 0], current_ms=1000)
+    router.receive(source_id=2, priority=100, data=[100, 0, 0, 0], current_ms=1500)
+    assert router.recompute(current_ms=1600) == [255, 0, 0, 0]
+    # Source 1 times out at t=3100 (elapsed 2100ms > 2000ms); source 2 remains active
+    assert router.recompute(current_ms=3100) == [100, 0, 0, 0]
+    print("[PASS] Multi-source HTP recomputation test passed (no sticky max).")
+
     # 2. LTP Merge: incoming replaces buffer
     ltp_result = list(incoming)
     assert ltp_result == incoming

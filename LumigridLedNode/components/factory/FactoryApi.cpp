@@ -1903,7 +1903,7 @@ esp_err_t FactoryApi::start(
     runner_.set_status_callback([this]() { this->notify_status_async(); });
     
     if (signage_) {
-        signage_->set_preview_callback([this](const AddressableDriver& leds) {
+        signage_->set_preview_callback([this](const RenderFrame& frame, const DeviceConfig& cfg) {
             if (this->factory_server_ == nullptr) return;
 
             // Rate limit to ~10 fps (100ms)
@@ -1920,15 +1920,51 @@ esp_err_t FactoryApi::start(
             auto* arg = new WsPreviewArg{};
             arg->api = this;
             
-            // Format: 0x01 followed by raw RGB data
-            arg->payload.reserve(1 + AddressableDriver::kLanes * AddressableDriver::kPixels * 3);
+            // Format: 0x01 followed by raw RGB data from RenderFrame
+            arg->payload.reserve(1 + 8 * 128 * 3);
             arg->payload.push_back(0x01);
-            const auto& buf = leds.buffer();
-            for (uint8_t l = 0; l < AddressableDriver::kLanes; ++l) {
-                for (uint16_t p = 0; p < AddressableDriver::kPixels; ++p) {
-                    arg->payload.push_back(buf[l][p].r);
-                    arg->payload.push_back(buf[l][p].g);
-                    arg->payload.push_back(buf[l][p].b);
+
+            for (uint8_t f = 0; f < 16; ++f) {
+                const auto& fix = cfg.fixtures[f];
+                const auto& ff = frame.fixtures[f];
+                bool is_pwm = (fix.profile == FixtureProfile::PWM_Single ||
+                               fix.profile == FixtureProfile::PWM_RGB ||
+                               fix.profile == FixtureProfile::PWM_RGBW);
+                if (fix.num_pixels == 0 && !is_pwm) continue;
+
+                if (!is_pwm) {
+                    uint16_t pcount = std::min<uint16_t>(fix.num_pixels, 128);
+                    for (uint16_t p = 0; p < pcount; ++p) {
+                        const auto& lv = ff.pixels[p];
+                        uint8_t r = std::min(255, int(lv.r) + lv.w);
+                        uint8_t g = std::min(255, int(lv.g) + lv.w);
+                        uint8_t b = std::min(255, int(lv.b) + lv.w);
+                        arg->payload.push_back(r);
+                        arg->payload.push_back(g);
+                        arg->payload.push_back(b);
+                    }
+                } else {
+                    if (fix.profile == FixtureProfile::PWM_Single) {
+                        uint8_t v = static_cast<uint8_t>((uint32_t(ff.pwm[0]) * 255) / 4095);
+                        arg->payload.push_back(v);
+                        arg->payload.push_back(v);
+                        arg->payload.push_back(v);
+                    } else if (fix.profile == FixtureProfile::PWM_RGB) {
+                        uint8_t r = static_cast<uint8_t>((uint32_t(ff.pwm[0]) * 255) / 4095);
+                        uint8_t g = static_cast<uint8_t>((uint32_t(ff.pwm[1]) * 255) / 4095);
+                        uint8_t b = static_cast<uint8_t>((uint32_t(ff.pwm[2]) * 255) / 4095);
+                        arg->payload.push_back(r);
+                        arg->payload.push_back(g);
+                        arg->payload.push_back(b);
+                    } else if (fix.profile == FixtureProfile::PWM_RGBW) {
+                        uint8_t r = static_cast<uint8_t>((uint32_t(ff.pwm[0]) * 255) / 4095);
+                        uint8_t g = static_cast<uint8_t>((uint32_t(ff.pwm[1]) * 255) / 4095);
+                        uint8_t b = static_cast<uint8_t>((uint32_t(ff.pwm[2]) * 255) / 4095);
+                        uint8_t w = static_cast<uint8_t>((uint32_t(ff.pwm[3]) * 255) / 4095);
+                        arg->payload.push_back(std::min(255, int(r) + w));
+                        arg->payload.push_back(std::min(255, int(g) + w));
+                        arg->payload.push_back(std::min(255, int(b) + w));
+                    }
                 }
             }
 

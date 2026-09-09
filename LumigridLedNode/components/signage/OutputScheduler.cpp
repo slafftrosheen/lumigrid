@@ -7,20 +7,10 @@ namespace lg {
 void OutputScheduler::schedule(
     const RenderFrame& frame,
     const DeviceConfig& device_cfg,
-    ControlSourceManager& source_manager,
-    ControlSource source
+    OutputController& controller
 ) {
-    if (!source_manager.begin_frame(source)) {
-        return;
-    }
-
-    source_manager.pixels().clear();
-    source_manager.pwm().clear();
-
-    if (source == ControlSource::EStop) {
-        source_manager.commit_frame(source, false);
-        return;
-    }
+    controller.pixels().clear();
+    controller.pwm().clear();
 
     for (uint8_t f = 0; f < 16; ++f) {
         const FixtureConfig& fixture = device_cfg.fixtures[f];
@@ -44,15 +34,15 @@ void OutputScheduler::schedule(
                 uint16_t pcount = std::min<uint16_t>(fixture.num_pixels, MAX_PIXELS);
                 for (uint16_t px = 0; px < pcount; ++px) {
                     const LightValue& lv = fx_frame.pixels[px];
-                    source_manager.pixels().set(phys.hardware_id, px, lv.r, lv.g, lv.b, lv.w);
+                    controller.pixels().set(phys.hardware_id, px, lv.r, lv.g, lv.b, lv.w);
                 }
             } else if (phys.type == OutputType::PWM) {
-                source_manager.pwm().set(phys.hardware_id, fx_frame.pwm[i]);
+                controller.pwm().set(phys.hardware_id, fx_frame.pwm[i]);
             }
         }
     }
 
-    source_manager.commit_frame(source);
+    controller.commit();
 }
 
 } // namespace lg

@@ -1,13 +1,16 @@
 // components/signage/include/LightingRuntime.hpp
 #pragma once
+#include <atomic>
+#include <functional>
+#include <array>
+
 #include "ControlSourceManager.hpp"
+#include "OutputController.hpp"
 #include "ConfigStore.hpp"
 #include "SignageTypes.hpp"
 #include "PowerBudget.hpp"
 #include "SceneManager.hpp"
 #include "RenderTypes.hpp"
-#include <functional>
-#include <vector>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -17,12 +20,16 @@ namespace lg {
 
 class LightingRuntime {
 public:
-    LightingRuntime(ControlSourceManager& source_manager, ConfigStore& config);
+    LightingRuntime(ControlSourceManager& source_manager, OutputController& controller, ConfigStore& config);
 
     esp_err_t start();
 
     void activate_scene(uint8_t index);
     void activate_scene_direct(const SceneConfig& scene, bool immediate = false);
+
+    /// Atomically submit a full live DMX frame from DmxRouter
+    void submit_live_frame(const LiveDmxFrame& frame);
+
     void inject_live_data(uint8_t zone_idx, uint8_t layer_idx, const BrandColor& color, uint8_t opacity);
     void inject_live_fixture(uint8_t fixture_idx, const LightValue* pixels, uint16_t count, const uint16_t* pwm_duties, uint8_t opacity);
     void update_dmx_data(const uint8_t* data, size_t length);
@@ -42,9 +49,14 @@ public:
     void release_control(ControlSource source);
     ControlSource current_control_source() const;
 
+    // Absolute E-Stop safety state
+    void trigger_estop();
+    void clear_estop();
+    bool is_estop_active() const { return estop_active_.load(std::memory_order_relaxed); }
+
     const std::array<uint8_t, 512>& last_dmx_data() const { return dmx_data_; }
 
-    using PreviewCallback = std::function<void(const AddressableDriver& leds)>;
+    using PreviewCallback = std::function<void(const RenderFrame& frame, const DeviceConfig& cfg)>;
     void set_preview_callback(PreviewCallback cb) { preview_cb_ = std::move(cb); }
 
     using ConfigReloadCallback = std::function<void(const DeviceConfig& cfg)>;
@@ -57,29 +69,17 @@ private:
     void render_frame(uint32_t current_ms);
 
     ControlSourceManager& source_manager_;
+    OutputController& controller_;
     ConfigStore& config_;
     PowerBudget power_budget_;
     SceneManager scene_manager_;
 
+    std::atomic<bool> estop_active_{false};
+
     DeviceConfig device_cfg_{};
     std::array<uint8_t, 512> dmx_data_{};
 
-    struct LiveLayerData {
-        BrandColor color{0, 0, 0};
-        uint8_t opacity = 0;
-        uint32_t timestamp_ms = 0;
-        bool active = false;
-    };
-    std::array<std::array<LiveLayerData, 3>, 8> live_layers_{};
-
-    struct LiveFixtureData {
-        std::vector<LightValue> pixels;
-        std::array<uint16_t, 4> pwm{};
-        uint8_t opacity = 0;
-        uint32_t timestamp_ms = 0;
-        bool active = false;
-    };
-    std::array<LiveFixtureData, 16> live_fixtures_{};
+    LiveDmxFrame live_dmx_frame_{};
     uint32_t last_live_stream_ms_ = 0;
 
     RenderFrame current_render_frame_;
