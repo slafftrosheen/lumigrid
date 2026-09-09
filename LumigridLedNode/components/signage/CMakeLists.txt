@@ -1,4 +1,5 @@
 idf_component_register(SRCS "GammaLut.cpp" 
+                            "ColorPipeline.cpp"
                             "PowerBudget.cpp" 
                             "SceneManager.cpp" 
                             "EffectRenderer.cpp" 

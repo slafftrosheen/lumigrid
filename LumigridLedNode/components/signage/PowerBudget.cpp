@@ -21,33 +21,145 @@ uint8_t PowerBudget::soft_start_factor(uint32_t ms_since_enable) const {
     return static_cast<uint8_t>((uint32_t(ms_since_enable) * 255) / ramp_ms_);
 }
 
-uint32_t PowerBudget::enforce(const AddressableDriver& pixels,
-                              const Pca9685Driver& pwm,
-                              uint8_t& brightness) {
-    if (limit_mw_ == 0) return 0; // No limit set
+uint32_t PowerBudget::enforce(RenderFrame& frame, const DeviceConfig& cfg, uint32_t current_ms) {
+    // 1. Calculate soft-start factor
+    uint8_t ss_factor = 255;
+    if (soft_start_enabled_) {
+        uint32_t ms_since_enable = current_ms - enable_ms_;
+        ss_factor = soft_start_factor(ms_since_enable);
+    }
 
-    uint32_t total_pixel_mw = 0;
-    const auto& buffer = pixels.buffer();
-    for (const auto& lane : buffer) {
-        for (const auto& pixel : lane) {
-            const uint32_t rgb_sum = uint32_t(pixel.r) + pixel.g + pixel.b;
-            total_pixel_mw += (rgb_sum * kPixelMaxMw) / 765;
+    uint32_t total_idle_mw = 0;
+    uint32_t total_active_mw = 0;
+    bool throttled = false;
+
+    // 2. Per-fixture power calculation and local fixture limit enforcement
+    for (uint8_t f = 0; f < 16; ++f) {
+        const FixtureConfig& fix = cfg.fixtures[f];
+        bool is_pwm = (fix.profile == FixtureProfile::PWM_Single ||
+                       fix.profile == FixtureProfile::PWM_RGB ||
+                       fix.profile == FixtureProfile::PWM_RGBW);
+        if (fix.num_pixels == 0 && !is_pwm) continue;
+
+        FixtureFrame& ff = frame.fixtures[f];
+
+        uint32_t fixture_idle_mw = 0;
+        uint32_t fixture_active_mw = 0;
+
+        if (!is_pwm) {
+            uint16_t pcount = std::min<uint16_t>(fix.num_pixels, MAX_PIXELS);
+            fixture_idle_mw = static_cast<uint32_t>(pcount) * kPixelIdleMw;
+            for (uint16_t p = 0; p < pcount; ++p) {
+                const LightValue& lv = ff.pixels[p];
+                uint32_t sum = uint32_t(lv.r) + lv.g + lv.b + lv.w;
+                fixture_active_mw += (sum * kPixelActiveMw) / 765;
+            }
+
+            // Enforce local fixture limit if configured
+            if (fix.max_milliwatts > 0) {
+                uint32_t fixture_total = fixture_idle_mw + fixture_active_mw;
+                if (fixture_total > fix.max_milliwatts) {
+                    throttled = true;
+                    if (fix.max_milliwatts <= fixture_idle_mw) {
+                        for (uint16_t p = 0; p < pcount; ++p) {
+                            ff.pixels[p] = {0, 0, 0, 0};
+                        }
+                        fixture_active_mw = 0;
+                    } else if (fixture_active_mw > 0) {
+                        uint32_t allowed_active = fix.max_milliwatts - fixture_idle_mw;
+                        uint8_t local_scale = static_cast<uint8_t>((uint64_t(allowed_active) * 255) / fixture_active_mw);
+                        for (uint16_t p = 0; p < pcount; ++p) {
+                            LightValue& lv = ff.pixels[p];
+                            lv.r = static_cast<uint8_t>((uint16_t(lv.r) * local_scale) / 255);
+                            lv.g = static_cast<uint8_t>((uint16_t(lv.g) * local_scale) / 255);
+                            lv.b = static_cast<uint8_t>((uint16_t(lv.b) * local_scale) / 255);
+                            lv.w = static_cast<uint8_t>((uint16_t(lv.w) * local_scale) / 255);
+                        }
+                        fixture_active_mw = (fixture_active_mw * local_scale) / 255;
+                    }
+                }
+            }
+        } else {
+            // PWM fixtures have negligible quiescent consumption
+            uint8_t num_channels = 1;
+            if (fix.profile == FixtureProfile::PWM_RGB) num_channels = 3;
+            else if (fix.profile == FixtureProfile::PWM_RGBW) num_channels = 4;
+
+            for (uint8_t ch = 0; ch < num_channels; ++ch) {
+                fixture_active_mw += (uint32_t(ff.pwm[ch]) * kPwmChannelMaxMw) / 4095;
+            }
+
+            // Enforce local fixture limit if configured
+            if (fix.max_milliwatts > 0 && fixture_active_mw > fix.max_milliwatts && fixture_active_mw > 0) {
+                throttled = true;
+                uint8_t local_scale = static_cast<uint8_t>((uint64_t(fix.max_milliwatts) * 255) / fixture_active_mw);
+                for (uint8_t ch = 0; ch < num_channels; ++ch) {
+                    ff.pwm[ch] = static_cast<uint16_t>((uint32_t(ff.pwm[ch]) * local_scale) / 255);
+                }
+                LightValue& lv = ff.pixels[0];
+                lv.r = static_cast<uint8_t>((uint16_t(lv.r) * local_scale) / 255);
+                lv.g = static_cast<uint8_t>((uint16_t(lv.g) * local_scale) / 255);
+                lv.b = static_cast<uint8_t>((uint16_t(lv.b) * local_scale) / 255);
+                lv.w = static_cast<uint8_t>((uint16_t(lv.w) * local_scale) / 255);
+                fixture_active_mw = (fixture_active_mw * local_scale) / 255;
+            }
+        }
+
+        total_idle_mw += fixture_idle_mw;
+        total_active_mw += fixture_active_mw;
+    }
+
+    const uint32_t total_mw = total_idle_mw + total_active_mw;
+    last_power_mw_ = total_mw;
+
+    // 3. Determine if global scaling is needed
+    uint8_t power_scale = 255;
+    if (limit_mw_ > 0 && total_mw > limit_mw_) {
+        throttled = true;
+        if (total_active_mw > 0) {
+            uint32_t available_active_mw = (limit_mw_ > total_idle_mw) ? (limit_mw_ - total_idle_mw) : 0;
+            power_scale = static_cast<uint8_t>((uint64_t(available_active_mw) * 255) / total_active_mw);
+        } else {
+            power_scale = 0;
         }
     }
 
-    // Estimate PWM power from current duty values
-    uint32_t total_pwm_mw = 0;
-    const auto& values = pwm.values();
-    for (size_t ch = 0; ch < Pca9685Driver::kChannels; ++ch) {
-        total_pwm_mw += (uint32_t(values[ch]) * kPwmChannelMaxMw) / 4095;
+    if (throttled) {
+        throttling_events_++;
     }
 
-    const uint32_t total_mw = total_pixel_mw + total_pwm_mw;
+    // Combine soft start and power scale
+    const uint16_t final_scale = (uint16_t(ss_factor) * power_scale) / 255;
 
-    if (total_mw > limit_mw_) {
-        // Scale brightness proportionally
-        const uint32_t scaled = (uint32_t(brightness) * limit_mw_) / total_mw;
-        brightness = static_cast<uint8_t>(std::min(scaled, uint32_t(255)));
+    if (final_scale < 255) {
+        for (uint8_t f = 0; f < 16; ++f) {
+            FixtureFrame& ff = frame.fixtures[f];
+            const FixtureConfig& fix = cfg.fixtures[f];
+            bool is_pwm = (fix.profile == FixtureProfile::PWM_Single ||
+                           fix.profile == FixtureProfile::PWM_RGB ||
+                           fix.profile == FixtureProfile::PWM_RGBW);
+            if (fix.num_pixels == 0 && !is_pwm) continue;
+
+            if (!is_pwm) {
+                uint16_t pcount = std::min<uint16_t>(fix.num_pixels, MAX_PIXELS);
+                for (uint16_t p = 0; p < pcount; ++p) {
+                    LightValue& lv = ff.pixels[p];
+                    lv.r = static_cast<uint8_t>((uint16_t(lv.r) * final_scale) / 255);
+                    lv.g = static_cast<uint8_t>((uint16_t(lv.g) * final_scale) / 255);
+                    lv.b = static_cast<uint8_t>((uint16_t(lv.b) * final_scale) / 255);
+                    lv.w = static_cast<uint8_t>((uint16_t(lv.w) * final_scale) / 255);
+                }
+            } else {
+                for (uint8_t ch = 0; ch < 4; ++ch) {
+                    ff.pwm[ch] = static_cast<uint16_t>((uint32_t(ff.pwm[ch]) * final_scale) / 255);
+                }
+                LightValue& lv = ff.pixels[0];
+                lv.r = static_cast<uint8_t>((uint16_t(lv.r) * final_scale) / 255);
+                lv.g = static_cast<uint8_t>((uint16_t(lv.g) * final_scale) / 255);
+                lv.b = static_cast<uint8_t>((uint16_t(lv.b) * final_scale) / 255);
+                lv.w = static_cast<uint8_t>((uint16_t(lv.w) * final_scale) / 255);
+            }
+        }
     }
 
     return total_mw;

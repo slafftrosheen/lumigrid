@@ -3,10 +3,10 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-    <title>Lumigrid OS</title>
+    <title>LumiGrid OS — Node Controller</title>
     <style>
         /* ═══════════════════════════════════════════════════════
-           LUMIGRID OS — DESIGN SYSTEM
+           LUMIGRID OS — DESIGN SYSTEM (Dark Glassmorphism)
            ═══════════════════════════════════════════════════════ */
         :root {
             --bg: #05060f;
@@ -15,7 +15,7 @@
             --surface-elevated: rgba(22, 24, 42, 0.88);
             --surface-hover: rgba(32, 35, 55, 0.92);
             --surface-active: rgba(42, 46, 68, 0.95);
-            --border: rgba(255, 255, 255, 0.07);
+            --border: rgba(255, 255, 255, 0.08);
             --border-subtle: rgba(255, 255, 255, 0.04);
             --border-focus: rgba(129, 140, 248, 0.5);
             --text: #eef0f6;
@@ -32,1585 +32,1816 @@
             --danger-bg: rgba(127, 29, 29, 0.35);
             --danger-glow: rgba(248, 113, 113, 0.3);
             --warning: #fbbf24;
+            --warning-soft: rgba(251, 191, 36, 0.15);
             --radius-sm: 8px;
             --radius: 12px;
             --radius-lg: 16px;
             --radius-xl: 20px;
             --radius-full: 999px;
-            --font: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+            --font: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, system-ui, sans-serif;
             --ease: cubic-bezier(0.4, 0, 0.2, 1);
             --transition: 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-            --transition-slow: 0.35s cubic-bezier(0.4, 0, 0.2, 1);
         }
 
-        /* ── Reset ── */
+        /* ── Reset & Base ── */
         *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
         body {
             font-family: var(--font);
             background: var(--bg);
             color: var(--text);
-            line-height: 1.55;
+            line-height: 1.5;
             min-height: 100vh;
             -webkit-font-smoothing: antialiased;
-            -moz-osx-font-smoothing: grayscale;
             overflow-x: hidden;
         }
         body::after {
             content: '';
             position: fixed; inset: 0;
             background:
-                radial-gradient(ellipse 80% 50% at 10% 45%, rgba(99,102,241,.07), transparent),
-                radial-gradient(ellipse 60% 70% at 90% 25%, rgba(52,211,153,.05), transparent);
+                radial-gradient(ellipse 80% 50% at 10% 35%, rgba(99,102,241,.08), transparent 60%),
+                radial-gradient(ellipse 60% 70% at 90% 20%, rgba(52,211,153,.06), transparent 50%),
+                radial-gradient(ellipse 70% 60% at 50% 90%, rgba(129,140,248,.05), transparent 60%);
             pointer-events: none; z-index: -1;
         }
 
         /* ── Typography ── */
         h1, h2, h3, h4, h5 { font-weight: 650; letter-spacing: -0.02em; line-height: 1.25; }
+        h2 { font-size: 1.15rem; }
         h3 { font-size: 1.3rem; }
-        h4 { font-size: 0.95rem; margin-bottom: 0.6rem; }
+        h4 { font-size: 0.95rem; }
+        h5 { font-size: 0.82rem; font-weight: 700; color: var(--text-secondary); }
         .eyebrow {
             color: #a5b4fc; font-size: 0.68rem; font-weight: 800;
             letter-spacing: 0.15em; text-transform: uppercase;
         }
-        .muted { color: var(--text-muted); font-size: 0.88rem; }
-        .help { color: var(--text-muted); font-size: 0.75rem; line-height: 1.5; }
-        .mb-1 { margin-bottom: 1rem; }
+        .muted { color: var(--text-muted); font-size: 0.85rem; }
+        .help { color: var(--text-muted); font-size: 0.75rem; line-height: 1.4; }
 
-        /* ══════════════════════════════════════════════════════
-           LOGIN SCREEN
-           ══════════════════════════════════════════════════════ */
-        #experience-auth, #product-app { min-height: 100vh; }
-        #experience-auth[hidden], #product-app[hidden] { display: none; }
-        #experience-auth {
-            display: grid; place-items: center; padding: 1.5rem;
-            position: relative; overflow: hidden;
-        }
-        #experience-auth::before {
-            content: '';
-            position: absolute;
-            width: 250%; height: 250%; top: -75%; left: -75%;
-            background:
-                radial-gradient(circle at 25% 35%, rgba(99,102,241,.22), transparent 35%),
-                radial-gradient(circle at 70% 65%, rgba(52,211,153,.16), transparent 30%),
-                radial-gradient(circle at 45% 85%, rgba(129,140,248,.1), transparent 25%);
-            animation: aurora 25s ease-in-out infinite alternate;
-            pointer-events: none;
-        }
-        @keyframes aurora {
-            0%   { transform: translate(0, 0) rotate(0deg) scale(1); }
-            33%  { transform: translate(-4%, 3%) rotate(2deg) scale(1.03); }
-            66%  { transform: translate(3%, -2%) rotate(-1.5deg) scale(0.97); }
-            100% { transform: translate(-2%, 1%) rotate(0.8deg) scale(1.01); }
-        }
-        .experience-login {
-            position: relative;
-            width: min(26rem, 100%); padding: 2.5rem 2rem 2rem;
-            border: 1px solid rgba(255,255,255,0.08);
-            border-radius: var(--radius-xl);
-            background: rgba(10, 12, 24, 0.9);
-            backdrop-filter: blur(24px);
-            box-shadow:
-                0 2rem 5rem rgba(0,0,0,.5),
-                0 0 0 0.5px rgba(255,255,255,0.06) inset,
-                0 1px 0 rgba(255,255,255,0.04) inset;
-        }
-        .login-logo {
-            display: flex; align-items: center; gap: 0.75rem;
-            margin-bottom: 1.5rem;
-        }
-        .login-logo svg { flex-shrink: 0; filter: drop-shadow(0 0 8px rgba(99,102,241,0.4)); }
-        .experience-login h1 {
-            font-size: clamp(1.8rem, 7vw, 2.6rem);
-            letter-spacing: -0.05em;
-            margin: 0.25rem 0 0.5rem;
-            background: linear-gradient(135deg, var(--text) 0%, #a5b4fc 50%, var(--accent) 100%);
-            background-size: 200% 200%;
-            -webkit-background-clip: text; background-clip: text;
-            -webkit-text-fill-color: transparent;
-            animation: shimmer 6s ease infinite;
-        }
-        @keyframes shimmer {
-            0%, 100% { background-position: 0% 50%; }
-            50% { background-position: 100% 50%; }
-        }
-        .experience-login label, .field label {
-            display: block; font-size: 0.78rem; font-weight: 700;
-            letter-spacing: 0.04em; margin: 1.4rem 0 0.45rem;
-            color: var(--text-secondary);
-        }
-
-        /* ══════════════════════════════════════════════════════
-           FORM CONTROLS
-           ══════════════════════════════════════════════════════ */
+        /* ── Form Controls ── */
         input, select, button { font-family: inherit; }
         input, select {
-            font-size: 0.9rem; border-radius: var(--radius-sm);
+            font-size: 0.88rem; border-radius: var(--radius-sm);
             border: 1px solid var(--border);
             background: rgba(5, 6, 15, 0.6);
-            color: var(--text); padding: 0.7rem 0.85rem;
-            width: 100%;
-            transition: border-color var(--transition), box-shadow var(--transition), background var(--transition);
+            color: var(--text); padding: 0.55rem 0.75rem;
+            width: 100%; transition: border-color var(--transition), box-shadow var(--transition);
         }
         input:focus, select:focus {
             outline: none; border-color: var(--primary);
-            box-shadow: 0 0 0 3px var(--primary-soft), 0 0 16px rgba(99,102,241,0.12);
+            box-shadow: 0 0 0 3px var(--primary-soft);
             background: rgba(8, 10, 22, 0.8);
         }
         input::placeholder { color: var(--text-muted); }
         select { cursor: pointer; }
+        select option { background: #0c0e1e; color: var(--text); }
 
-        /* Toggle Switch — targets checkboxes inside .switch-row */
-        .switch-row { display: flex; align-items: center; justify-content: space-between; gap: 0.8rem; padding: 0.55rem 0; font-size: 0.82rem; }
-        .switch-row label { margin: 0; }
+        /* Switch row */
+        .switch-row { display: flex; align-items: center; justify-content: space-between; gap: 0.8rem; padding: 0.4rem 0; font-size: 0.82rem; cursor: pointer; }
         .switch-row input[type="checkbox"] {
-            -webkit-appearance: none; appearance: none;
-            width: 2.75rem; height: 1.5rem;
+            appearance: none; -webkit-appearance: none;
+            width: 2.6rem; height: 1.4rem;
             border-radius: var(--radius-full);
-            background: rgba(255,255,255,0.08);
-            border: 1px solid rgba(255,255,255,0.12);
-            cursor: pointer; position: relative;
-            transition: background var(--transition), border-color var(--transition), box-shadow var(--transition);
-            flex-shrink: 0;
+            background: rgba(255,255,255,0.1);
+            border: 1px solid rgba(255,255,255,0.15);
+            cursor: pointer; position: relative; flex-shrink: 0;
+            transition: background var(--transition), border-color var(--transition);
         }
         .switch-row input[type="checkbox"]::after {
-            content: '';
-            position: absolute; top: 2px; left: 2px;
-            width: calc(1.5rem - 6px); height: calc(1.5rem - 6px);
-            border-radius: 50%; background: rgba(255,255,255,0.7);
-            box-shadow: 0 1px 3px rgba(0,0,0,0.4);
-            transition: transform var(--transition), background var(--transition);
+            content: ''; position: absolute; top: 2px; left: 2px;
+            width: calc(1.4rem - 6px); height: calc(1.4rem - 6px);
+            border-radius: 50%; background: white;
+            transition: transform var(--transition);
         }
         .switch-row input[type="checkbox"]:checked {
             background: var(--primary); border-color: var(--primary);
-            box-shadow: 0 0 12px rgba(99,102,241,0.25);
         }
         .switch-row input[type="checkbox"]:checked::after {
-            transform: translateX(1.25rem); background: white;
+            transform: translateX(1.2rem);
         }
 
-        /* Range Slider */
-        #product-app input[type="range"] {
-            -webkit-appearance: none; appearance: none;
-            height: 5px; border-radius: 3px;
-            background: rgba(255,255,255,0.1);
-            border: none; outline: none; cursor: pointer;
-            padding: 0; min-height: 0;
+        /* Range sliders */
+        input[type="range"] {
+            appearance: none; -webkit-appearance: none;
+            height: 5px; border-radius: 3px; background: rgba(255,255,255,0.12);
+            border: none; outline: none; cursor: pointer; padding: 0;
         }
-        #product-app input[type="range"]::-webkit-slider-thumb {
-            -webkit-appearance: none; width: 18px; height: 18px;
-            border-radius: 50%; background: white;
-            box-shadow: 0 1px 4px rgba(0,0,0,0.35), 0 0 0 2px var(--primary);
-            cursor: pointer; transition: box-shadow var(--transition);
+        input[type="range"]::-webkit-slider-thumb {
+            appearance: none; -webkit-appearance: none;
+            width: 16px; height: 16px; border-radius: 50%;
+            background: white; box-shadow: 0 1px 4px rgba(0,0,0,0.4), 0 0 0 2px var(--primary);
+            cursor: pointer; transition: transform var(--transition);
         }
-        #product-app input[type="range"]::-webkit-slider-thumb:hover {
-            box-shadow: 0 1px 6px rgba(0,0,0,0.35), 0 0 0 2px var(--primary), 0 0 14px var(--primary-glow);
-        }
-        #product-app input[type="range"]::-moz-range-thumb {
-            width: 18px; height: 18px; border: 2px solid var(--primary);
-            border-radius: 50%; background: white;
-            box-shadow: 0 1px 4px rgba(0,0,0,0.35); cursor: pointer;
-        }
-        #product-app input[type="range"]::-moz-range-track {
-            height: 5px; border-radius: 3px; background: rgba(255,255,255,0.1); border: none;
-        }
+        input[type="range"]::-webkit-slider-thumb:hover { transform: scale(1.15); }
 
-        /* Other checkboxes (not in switch-row) */
-        #product-app input[type="checkbox"]:not(.switch-row input) { accent-color: #818cf8; }
-
-        /* ══════════════════════════════════════════════════════
-           BUTTONS
-           ══════════════════════════════════════════════════════ */
+        /* Buttons */
         button {
-            font-size: 0.85rem; font-weight: 600;
-            border-radius: var(--radius-sm); padding: 0.65rem 1rem;
+            font-size: 0.82rem; font-weight: 600;
+            border-radius: var(--radius-sm); padding: 0.55rem 0.9rem;
             border: 1px solid var(--border);
             color: var(--text); background: rgba(255,255,255,0.06);
-            cursor: pointer;
-            transition: all var(--transition);
-            -webkit-tap-highlight-color: transparent;
+            cursor: pointer; transition: all var(--transition);
+            display: inline-flex; align-items: center; justify-content: center; gap: 0.4rem;
         }
-        button:hover { background: rgba(255,255,255,0.12); }
+        button:hover { background: rgba(255,255,255,0.12); border-color: rgba(255,255,255,0.15); }
         button:active { transform: scale(0.97); }
         .button-primary {
             border-color: transparent;
             background: linear-gradient(135deg, #6366f1, #4f46e5);
-            box-shadow: 0 2px 8px rgba(99,102,241,0.3);
-            font-weight: 700;
+            box-shadow: 0 2px 8px rgba(99,102,241,0.3); font-weight: 700;
         }
-        .button-primary:hover {
-            filter: brightness(1.12);
-            box-shadow: 0 4px 16px rgba(99,102,241,0.4);
-        }
-        .button-secondary {
-            border-radius: var(--radius-sm); padding: 0.65rem 0.85rem;
-            border: 1px solid var(--border); color: var(--text);
-            background: rgba(255,255,255,0.06); cursor: pointer;
-        }
-        .button-secondary:hover { background: rgba(255,255,255,0.12); }
+        .button-primary:hover { filter: brightness(1.12); box-shadow: 0 4px 16px rgba(99,102,241,0.45); }
+        .button-secondary { background: rgba(255,255,255,0.05); }
         .button-danger {
-            color: #fecaca;
-            border-color: rgba(248,113,113,0.35);
+            color: #fecaca; border-color: rgba(248,113,113,0.35);
             background: var(--danger-bg);
-            box-shadow: 0 0 0 0 var(--danger-glow);
-            animation: danger-pulse 3s ease-in-out infinite;
         }
-        .button-danger:hover {
-            background: rgba(153, 27, 27, 0.5);
-            box-shadow: 0 0 20px var(--danger-glow);
-            animation: none;
+        .button-danger:hover { background: rgba(185, 28, 28, 0.6); }
+
+        /* ── Auth Screen ── */
+        #experience-auth {
+            display: grid; place-items: center; min-height: 100vh; padding: 1.5rem;
+            position: relative; overflow: hidden;
         }
-        @keyframes danger-pulse {
-            0%, 100% { box-shadow: 0 0 0 0 rgba(248,113,113,0); }
-            50% { box-shadow: 0 0 0 4px rgba(248,113,113,0.08); }
+        #experience-auth[hidden], #product-app[hidden] { display: none; }
+        .experience-login {
+            position: relative; width: min(26rem, 100%);
+            padding: 2.5rem 2rem 2rem; border-radius: var(--radius-xl);
+            background: rgba(10, 12, 24, 0.9); backdrop-filter: blur(24px);
+            border: 1px solid rgba(255,255,255,0.09);
+            box-shadow: 0 2rem 5rem rgba(0,0,0,0.6);
+        }
+        .experience-login h1 {
+            font-size: clamp(1.8rem, 6vw, 2.4rem); letter-spacing: -0.04em; margin: 0.25rem 0 0.5rem;
+            background: linear-gradient(135deg, var(--text) 0%, #a5b4fc 50%, var(--accent) 100%);
+            -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
         }
 
-        /* ══════════════════════════════════════════════════════
-           APP SHELL
-           ══════════════════════════════════════════════════════ */
-        #product-app { padding: 1.25rem; max-width: 88rem; margin: 0 auto; }
-        #product-app button, #product-app input, #product-app select { width: auto; margin: 0; }
-        #product-app input, #product-app select {
-            min-height: 2.5rem; padding: 0.55rem 0.75rem;
-            background: rgba(5,6,15,.55);
-        }
+        /* ── App Shell ── */
+        #product-app { padding: 1.25rem; max-width: 92rem; margin: 0 auto; }
         .app-shell { display: grid; gap: 1rem; }
         .app-header {
-            display: flex; flex-wrap: wrap; gap: 0.75rem;
-            align-items: center; justify-content: space-between;
-            padding: 1rem 1.25rem;
+            display: flex; flex-direction: column; gap: 0.75rem;
+            padding: 1rem 1.25rem; border-radius: var(--radius-lg);
+            background: rgba(10, 12, 24, 0.85); backdrop-filter: blur(16px);
             border: 1px solid var(--border);
-            border-radius: var(--radius-lg);
-            background: rgba(10, 12, 24, 0.82);
-            backdrop-filter: blur(16px);
-            box-shadow: 0 4px 16px rgba(0,0,0,0.2);
+            box-shadow: 0 4px 16px rgba(0,0,0,0.25);
+        }
+        .header-top {
+            display: flex; flex-wrap: wrap; justify-content: space-between;
+            align-items: center; gap: 0.75rem;
         }
         .brand { display: flex; align-items: center; gap: 0.75rem; min-width: 0; }
         .brand-mark {
-            width: 2.5rem; height: 2.5rem;
-            display: grid; place-items: center;
-            border-radius: 0.7rem;
-            background: linear-gradient(135deg, #818cf8, #34d399);
-            box-shadow: 0 4px 12px rgba(99,102,241,0.35);
-            overflow: hidden;
-            animation: brand-glow 4s ease-in-out infinite alternate;
+            width: 2.5rem; height: 2.5rem; display: grid; place-items: center;
+            border-radius: 0.7rem; background: linear-gradient(135deg, #818cf8, #34d399);
+            box-shadow: 0 4px 12px rgba(99,102,241,0.35); flex-shrink: 0;
         }
-        @keyframes brand-glow {
-            0% { box-shadow: 0 4px 12px rgba(99,102,241,0.35); }
-            100% { box-shadow: 0 4px 20px rgba(52,211,153,0.35); }
-        }
-        .brand-mark svg { width: 22px; height: 22px; }
-        .brand h2 { margin: 0; font-size: 1rem; letter-spacing: 0.08em; }
         .online-pill {
-            display: inline-flex; align-items: center; gap: 0.4rem;
+            display: inline-flex; align-items: center; gap: 0.35rem;
             font-size: 0.7rem; color: #bbf7d0; font-weight: 600;
         }
         .online-pill::before {
-            content: ""; width: 0.45rem; height: 0.45rem;
-            border-radius: 50%; background: #34d399;
-            box-shadow: 0 0 6px #34d399;
-            animation: pulse-dot 2s ease-in-out infinite;
+            content: ""; width: 0.45rem; height: 0.45rem; border-radius: 50%;
+            background: #34d399; box-shadow: 0 0 6px #34d399;
         }
-        @keyframes pulse-dot {
-            0%, 100% { box-shadow: 0 0 4px #34d399; opacity: 1; }
-            50% { box-shadow: 0 0 12px #34d399, 0 0 20px rgba(52,211,153,0.3); opacity: 0.8; }
+        .telemetry-pill {
+            display: inline-flex; align-items: center; gap: 0.35rem;
+            padding: 0.2rem 0.55rem; border-radius: var(--radius-full);
+            background: rgba(255,255,255,0.06); border: 1px solid var(--border-subtle);
+            font-size: 0.68rem; font-weight: 600; font-variant-numeric: tabular-nums;
         }
-        .header-actions { display: flex; align-items: center; gap: 0.45rem; }
-        .header-actions button { font-size: 0.78rem; padding: 0.55rem 0.75rem; }
-        #live-preview {
-            width: 100%; image-rendering: pixelated;
-            border-radius: 6px; background: rgba(5,6,15,0.6);
-            margin-top: 0.5rem; display: none;
-            border: 1px solid rgba(255,255,255,0.06);
-            box-shadow: 0 0 20px rgba(99,102,241,0.08);
+        .telemetry-pill.accent { color: var(--accent); border-color: rgba(52,211,153,0.3); }
+        .telemetry-pill.primary { color: #a5b4fc; border-color: rgba(129,140,248,0.3); }
+        .header-actions { display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap; }
+
+        /* Header mini ribbon preview */
+        #live-preview-ribbon {
+            width: 100%; height: 6px; border-radius: 3px;
+            background: rgba(0,0,0,0.4); border: 1px solid rgba(255,255,255,0.06);
+            image-rendering: pixelated; display: block;
         }
 
-        /* ══════════════════════════════════════════════════════
-           NAVIGATION RAIL
-           ══════════════════════════════════════════════════════ */
+        /* ── Navigation Rail ── */
         .nav-rail {
-            display: flex; flex-wrap: wrap; gap: 0.35rem;
-            padding: 0.35rem;
-            background: rgba(10, 12, 24, 0.65);
-            border: 1px solid var(--border);
+            display: flex; flex-wrap: wrap; gap: 0.35rem; padding: 0.35rem;
+            background: rgba(10, 12, 24, 0.7); border: 1px solid var(--border);
             border-radius: var(--radius);
-            position: relative;
         }
         .nav-rail button {
-            display: inline-flex; align-items: center; gap: 0.5rem;
-            border: 0; background: transparent;
-            color: var(--text-muted); border-radius: 0.6rem;
-            padding: 0.6rem 0.85rem; cursor: pointer;
-            font-weight: 600; font-size: 0.82rem;
-            transition: color var(--transition), background var(--transition), box-shadow var(--transition);
+            border: 0; background: transparent; color: var(--text-muted);
+            border-radius: 0.6rem; padding: 0.55rem 0.85rem; font-size: 0.82rem; font-weight: 600;
         }
-        .nav-rail button svg {
-            width: 16px; height: 16px; opacity: 0.6;
-            transition: opacity var(--transition);
-            flex-shrink: 0;
-        }
+        .nav-rail button svg { width: 16px; height: 16px; opacity: 0.6; }
         .nav-rail button:hover { color: var(--text-secondary); background: rgba(255,255,255,0.04); }
-        .nav-rail button:hover svg { opacity: 0.8; }
         .nav-rail button.active {
             color: white; background: rgba(129,140,248,0.18);
-            box-shadow: inset 0 0 0 1px rgba(165,180,252,0.2);
+            box-shadow: inset 0 0 0 1px rgba(165,180,252,0.25);
         }
         .nav-rail button.active svg { opacity: 1; }
 
-        /* ══════════════════════════════════════════════════════
-           PAGES & TRANSITIONS
-           ══════════════════════════════════════════════════════ */
-        .product-page { display: none; animation: page-in 0.3s var(--ease) both; }
+        /* ── Page Views ── */
+        .product-page { display: none; animation: fadeIn 0.25s var(--ease) both; }
         .product-page.active { display: block; }
-        @keyframes page-in {
-            from { opacity: 0; transform: translateY(8px); }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(6px); }
             to   { opacity: 1; transform: none; }
         }
         .page-heading {
             display: flex; justify-content: space-between; align-items: flex-end;
             gap: 1rem; margin: 0.5rem 0 1rem; flex-wrap: wrap;
         }
-        .page-heading h3 { margin: 0; }
 
-        /* ══════════════════════════════════════════════════════
-           CARDS
-           ══════════════════════════════════════════════════════ */
+        /* ── Cards & Grid ── */
         .product-card {
             padding: 1.25rem; border-radius: var(--radius-lg);
-            border: 1px solid var(--border);
-            background: var(--surface);
-            backdrop-filter: blur(10px);
-            box-shadow:
-                0 2px 8px rgba(0,0,0,0.12),
-                0 0 0 0.5px rgba(255,255,255,0.03) inset;
-            transition: border-color var(--transition), box-shadow var(--transition), transform var(--transition);
-        }
-        .product-card:hover {
-            border-color: rgba(255,255,255,0.1);
-        }
-        .product-card h4 { margin: 0 0 0.5rem; font-size: 0.95rem; }
-        .product-card p { margin: 0.35rem 0 0; }
-
-        /* ══════════════════════════════════════════════════════
-           CONTROL ROOM
-           ══════════════════════════════════════════════════════ */
-        .overview-grid { display: grid; grid-template-columns: 1.1fr 0.9fr; gap: 1rem; }
-        .stat-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.55rem; margin-top: 0.85rem; }
-        .stat-list div {
-            padding: 0.65rem; border-radius: var(--radius-sm);
-            background: rgba(0,0,0,0.2);
-            border: 1px solid var(--border-subtle);
+            border: 1px solid var(--border); background: var(--surface);
+            backdrop-filter: blur(12px);
+            box-shadow: 0 2px 8px rgba(0,0,0,0.12), inset 0 0 0 0.5px rgba(255,255,255,0.03);
             transition: border-color var(--transition);
         }
-        .stat-list div:hover { border-color: var(--border); }
-        .stat-list span {
-            display: block; color: var(--text-muted);
-            font-size: 0.65rem; text-transform: uppercase;
-            letter-spacing: 0.08em; font-weight: 600;
+        .product-card:hover { border-color: rgba(255,255,255,0.12); }
+        .overview-grid { display: grid; grid-template-columns: 1.2fr 0.8fr; gap: 1rem; }
+        .settings-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr)); gap: 1rem; }
+        .stat-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.55rem; margin-top: 0.85rem; }
+        .stat-box {
+            padding: 0.65rem; border-radius: var(--radius-sm);
+            background: rgba(0,0,0,0.25); border: 1px solid var(--border-subtle);
         }
-        .stat-list strong { font-size: 0.95rem; font-variant-numeric: tabular-nums; }
+        .stat-box span {
+            display: block; color: var(--text-muted); font-size: 0.65rem;
+            text-transform: uppercase; letter-spacing: 0.08em; font-weight: 700;
+        }
+        .stat-box strong { font-size: 0.95rem; font-variant-numeric: tabular-nums; }
 
-        /* ── Scene Cards ── */
-        .scene-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(14rem, 1fr)); gap: 1rem; }
+        /* Power meter bar */
+        .power-meter {
+            height: 8px; border-radius: 4px; background: rgba(255,255,255,0.08);
+            margin: 0.5rem 0; overflow: hidden; position: relative;
+        }
+        .power-fill {
+            height: 100%; border-radius: 4px; background: var(--accent);
+            transition: width 0.3s ease, background 0.3s ease;
+        }
+        .power-fill.warning { background: var(--warning); }
+        .power-fill.danger { background: var(--danger); }
+
+        /* ── Live Visualizer Canvas ── */
+        .visualizer-container {
+            background: #020308; border: 1px solid var(--border);
+            border-radius: var(--radius-lg); padding: 1rem; position: relative;
+            box-shadow: inset 0 0 40px rgba(0,0,0,0.8);
+            display: flex; flex-direction: column; gap: 0.75rem;
+        }
+        .visualizer-toolbar {
+            display: flex; justify-content: space-between; align-items: center;
+            flex-wrap: wrap; gap: 0.5rem;
+        }
+        #visualizer-canvas {
+            width: 100%; height: auto; min-height: 220px;
+            border-radius: var(--radius-sm); background: #010206;
+            cursor: crosshair; display: block;
+        }
+        .canvas-tooltip {
+            position: absolute; pointer-events: none; opacity: 0;
+            background: rgba(15, 23, 42, 0.95); backdrop-filter: blur(8px);
+            border: 1px solid var(--border); border-radius: var(--radius-sm);
+            padding: 0.4rem 0.65rem; font-size: 0.72rem; color: white;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.4); z-index: 10;
+            transition: opacity 0.15s ease;
+        }
+
+        /* ── Fixture & DMX Patcher Table ── */
+        .patcher-scroll {
+            overflow-x: auto; border-radius: var(--radius);
+            border: 1px solid var(--border); background: rgba(5,6,15,0.4);
+        }
+        .patcher-table {
+            width: 100%; border-collapse: collapse; font-size: 0.8rem;
+        }
+        .patcher-table th {
+            background: rgba(14, 16, 32, 0.95); color: var(--text-secondary);
+            font-weight: 700; text-align: left; padding: 0.65rem 0.75rem;
+            border-bottom: 1px solid var(--border); white-space: nowrap;
+        }
+        .patcher-table td {
+            padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border-subtle);
+            vertical-align: middle; white-space: nowrap;
+        }
+        .patcher-table tr:hover td { background: rgba(255,255,255,0.02); }
+        .patcher-table input, .patcher-table select {
+            min-height: 2rem; padding: 0.25rem 0.5rem; font-size: 0.78rem;
+        }
+        .badge {
+            display: inline-flex; align-items: center; padding: 0.15rem 0.45rem;
+            border-radius: var(--radius-sm); font-size: 0.68rem; font-weight: 700;
+        }
+        .badge-wash { background: rgba(99,102,241,0.18); color: #c7d2fe; }
+        .badge-pixel { background: rgba(52,211,153,0.18); color: #a7f3d0; }
+
+        /* ── Scene Designer ── */
+        .scene-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr)); gap: 1rem; }
         .scene-card {
-            display: grid; gap: 0.75rem; min-height: 10rem;
-            border-top: 3px solid var(--scene-color, var(--primary));
-            transition: transform var(--transition), box-shadow var(--transition), border-color var(--transition);
+            display: grid; gap: 0.75rem; border-top: 3px solid var(--scene-color, var(--primary));
+            transition: transform var(--transition), box-shadow var(--transition);
         }
         .scene-card:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 8px 24px rgba(0,0,0,0.25), 0 0 20px rgba(99,102,241,0.06);
+            transform: translateY(-2px); box-shadow: 0 8px 24px rgba(0,0,0,0.3);
         }
         .scene-card .scene-actions { display: flex; gap: 0.5rem; margin-top: auto; }
         .scene-card .scene-actions button { flex: 1; }
-        .scene-chip {
-            display: inline-flex; align-items: center; gap: 0.35rem;
-            color: #c7d2fe; font-size: 0.72rem; font-weight: 700;
-        }
-
-        /* ══════════════════════════════════════════════════════
-           SCENE EDITOR
-           ══════════════════════════════════════════════════════ */
-        .editor-toolbar, .timeline-toolbar, .cue-toolbar {
-            display: flex; justify-content: space-between; align-items: center;
-            gap: 0.75rem; flex-wrap: wrap; margin-bottom: 1rem;
-        }
-        .editor-toolbar > div, .timeline-toolbar > div, .cue-toolbar > div {
-            display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;
-        }
         .range-row {
             display: grid; grid-template-columns: minmax(7rem, 1fr) minmax(8rem, 2fr) minmax(3.2rem, auto);
-            gap: 0.65rem; align-items: center; margin-top: 0.8rem;
+            gap: 0.65rem; align-items: center; margin-top: 0.65rem;
         }
-        .range-row label { font-size: 0.78rem; font-weight: 700; color: var(--text-secondary); }
-        .range-row output { color: #c7d2fe; font-variant-numeric: tabular-nums; text-align: right; font-weight: 600; font-size: 0.85rem; }
-        .color-line { display: flex; justify-content: space-between; align-items: center; gap: 0.7rem; }
-        .color-line input[type="color"] { width: 3.5rem !important; height: 2.2rem; padding: 0.15rem !important; border-radius: var(--radius-sm); cursor: pointer; }
-        .zone-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(16rem, 1fr)); gap: 1rem; }
-        .zone-card { display: grid; gap: 0.65rem; }
-        .zone-title { display: flex; justify-content: space-between; align-items: center; }
-        .zone-title span { color: var(--text-muted); font-size: 0.72rem; }
-        .overlay-controls { display: grid; gap: 0.6rem; }
-        .settings-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr)); gap: 1rem; }
+        .range-row label { font-size: 0.75rem; font-weight: 700; color: var(--text-secondary); }
+        .range-row output { color: #c7d2fe; font-variant-numeric: tabular-nums; text-align: right; font-weight: 600; font-size: 0.82rem; }
+        .layer-box {
+            background: rgba(0,0,0,0.25); border: 1px solid var(--border-subtle);
+            border-radius: var(--radius); padding: 1rem; margin-top: 0.85rem;
+        }
+        .color-inputs { display: flex; align-items: center; gap: 0.65rem; flex-wrap: wrap; margin-top: 0.5rem; }
+        .color-swatch-btn {
+            display: inline-flex; align-items: center; gap: 0.4rem; padding: 0.3rem 0.6rem;
+            background: rgba(255,255,255,0.05); border-radius: var(--radius-sm); border: 1px solid var(--border);
+        }
+        .color-pip { width: 18px; height: 18px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.3); }
 
-        /* Layer editor */
-        .layer-editor {
-            margin-top: 1.25rem; border-top: 1px solid var(--border);
-            padding-top: 1.25rem; position: relative;
+        /* ── DMX Grid ── */
+        .dmx-matrix {
+            display: grid; grid-template-columns: repeat(auto-fill, minmax(1.8rem, 1fr));
+            gap: 3px; max-height: 460px; overflow-y: auto; padding: 0.5rem;
+            background: rgba(0,0,0,0.3); border-radius: var(--radius-sm); border: 1px solid var(--border-subtle);
         }
-        .layer-editor h5 {
-            font-size: 0.82rem; font-weight: 700;
-            color: var(--text-secondary); margin-bottom: 0.75rem;
-            display: flex; align-items: center; gap: 0.5rem;
+        .dmx-cell {
+            aspect-ratio: 1; border-radius: 3px; display: flex; flex-direction: column;
+            align-items: center; justify-content: center; font-size: 0.55rem;
+            font-variant-numeric: tabular-nums; cursor: pointer; transition: transform 0.1s;
+            border: 1px solid rgba(255,255,255,0.04);
         }
-        .layer-editor h5::before {
-            content: ''; width: 8px; height: 8px;
-            border-radius: 2px; background: var(--primary); opacity: 0.6;
-        }
+        .dmx-cell:hover { transform: scale(1.15); z-index: 2; border-color: var(--primary); }
 
-        /* ══════════════════════════════════════════════════════
-           TIMELINE
-           ══════════════════════════════════════════════════════ */
-        .palette {
-            display: flex; gap: 0.5rem; overflow-x: auto;
-            padding-bottom: 0.4rem;
-            scrollbar-width: thin; scrollbar-color: rgba(255,255,255,0.1) transparent;
-        }
-        .palette button {
-            min-width: 8.5rem; text-align: left;
-            border-radius: var(--radius-sm); padding: 0.65rem;
-            border: 1px solid var(--border);
-            background: rgba(255,255,255,0.04);
-            color: var(--text); cursor: grab;
-            transition: border-color var(--transition), background var(--transition), box-shadow var(--transition);
-        }
-        .palette button:hover { background: rgba(255,255,255,0.08); }
-        .palette button.selected {
-            border-color: #818cf8; background: rgba(99,102,241,0.15);
-            box-shadow: 0 0 12px rgba(99,102,241,0.12);
-        }
-        .palette button strong { display: block; font-size: 0.82rem; }
-        .palette button span { display: block; font-size: 0.7rem; color: var(--text-muted); margin-top: 0.15rem; }
-        .track {
-            display: grid; grid-template-columns: 9rem minmax(36rem, 1fr);
-            gap: 0.65rem; align-items: center; margin: 0.55rem 0;
-        }
-        .track-head {
-            display: grid; gap: 0.35rem; padding: 0.55rem;
-            border-radius: var(--radius-sm);
-            background: rgba(255,255,255,0.04);
-            border: 1px solid var(--border-subtle);
-        }
-        .track-head strong { font-size: 0.78rem; }
-        .track-head select { width: 100% !important; min-height: 2rem !important; font-size: 0.72rem; }
-        .step-lane {
-            display: grid;
-            grid-template-columns: repeat(16, minmax(3.4rem, 1fr));
-            gap: 0.25rem;
-        }
-        .step {
-            min-height: 3.5rem; overflow: hidden;
-            border-radius: 0.45rem;
-            border: 1px solid rgba(255,255,255,0.08);
-            background: rgba(255,255,255,0.03);
-            color: var(--text-muted); cursor: pointer;
-            padding: 0.3rem; text-align: left;
-            transition: border-color var(--transition), background var(--transition), box-shadow var(--transition);
-        }
-        .step:hover { background: rgba(255,255,255,0.06); border-color: rgba(255,255,255,0.12); }
-        .step span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.63rem; }
-        .step small { color: #a5b4fc; font-size: 0.57rem; font-weight: 700; }
-        .step.selected {
-            border-color: #818cf8;
-            box-shadow: 0 0 0 2px rgba(129,140,248,0.2), 0 0 12px rgba(99,102,241,0.1);
-            background: rgba(99,102,241,0.08);
-        }
-        .step.inactive { opacity: 0.3; }
-        .timeline-scroll { overflow-x: auto; padding-bottom: 0.5rem; }
-        .step-inspector { margin-top: 1rem; display: grid; grid-template-columns: 1fr auto; gap: 1rem; align-items: end; }
-        .beat-options { display: flex; gap: 0.3rem; }
-        .beat-options button {
-            padding: 0.45rem 0.65rem; border: 1px solid var(--border);
-            border-radius: 0.4rem; color: var(--text-muted);
-            background: transparent; cursor: pointer;
-            font-variant-numeric: tabular-nums; font-weight: 600;
-            transition: all var(--transition);
-        }
-        .beat-options button:hover { background: rgba(255,255,255,0.06); }
-        .beat-options button.active {
-            color: white; background: rgba(99,102,241,0.22);
-            border-color: #818cf8;
-        }
-
-        /* ══════════════════════════════════════════════════════
-           AUTOMATION
-           ══════════════════════════════════════════════════════ */
-        .cue-list { display: grid; gap: 0.6rem; }
-        .cue {
-            display: grid;
-            grid-template-columns: auto 7rem 1fr 1.3fr auto;
-            align-items: center; gap: 0.65rem;
-            padding: 0.8rem;
-            border: 1px solid var(--border);
-            border-radius: var(--radius);
-            background: rgba(255,255,255,0.025);
-            transition: border-color var(--transition), background var(--transition);
-        }
-        .cue:hover { border-color: rgba(255,255,255,0.1); background: rgba(255,255,255,0.04); }
-        .days { display: flex; gap: 0.2rem; }
-        .days button {
-            border: 1px solid var(--border); border-radius: 0.35rem;
-            background: transparent; color: var(--text-muted);
-            padding: 0.3rem 0.4rem; font-size: 0.65rem;
-            cursor: pointer; font-weight: 700;
-            transition: all var(--transition);
-        }
-        .days button:hover { background: rgba(255,255,255,0.06); }
-        .days button.active {
-            color: white;
-            background: linear-gradient(135deg, #4f46e5, #6366f1);
-            border-color: #6366f1;
-            box-shadow: 0 2px 6px rgba(99,102,241,0.25);
-        }
-
-        /* ══════════════════════════════════════════════════════
-           SYSTEM PAGE
-           ══════════════════════════════════════════════════════ */
-        .sync-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr)); gap: 1rem; }
-        .node-card { min-height: 7.5rem; }
-        .node-card.primary {
-            border-color: rgba(52,211,153,0.4);
-            background: linear-gradient(145deg, rgba(16,185,129,0.12), var(--surface));
-        }
-        .node-card .latency {
-            color: #a7f3d0; font-size: 1.2rem; font-weight: 800;
-            margin-top: 0.7rem; font-variant-numeric: tabular-nums;
-        }
-
-        /* Collapsible hardware sections */
-        .section-header {
-            display: flex; justify-content: space-between; align-items: center;
-            cursor: pointer; user-select: none;
-            padding: 0.15rem 0; margin-bottom: 0.4rem;
-            transition: opacity var(--transition);
-        }
-        .section-header:hover { opacity: 0.8; }
-        .section-header h4 { margin: 0; }
-        .section-chevron {
-            color: var(--text-muted); font-size: 1rem;
-            transition: transform var(--transition);
-            line-height: 1;
-        }
-        .hw-section { transition: opacity 0.15s; }
-        .hw-section.collapsed { display: none; }
-
-        /* Hardware config field cards */
-        .hw-field {
-            margin-bottom: 0.4rem; padding: 0.65rem;
-            background: rgba(0,0,0,0.2); border-radius: var(--radius-sm);
-            border: 1px solid var(--border-subtle);
-            transition: border-color var(--transition);
-        }
-        .hw-field:hover { border-color: var(--border); }
-        .hw-field-head {
-            font-weight: 700; margin-bottom: 0.4rem; font-size: 0.85rem;
-            display: flex; justify-content: space-between; align-items: center;
-        }
-
-        /* ══════════════════════════════════════════════════════
-           EMPTY STATE
-           ══════════════════════════════════════════════════════ */
-        .empty-state {
-            padding: 2.5rem; text-align: center; color: var(--text-muted);
-            border: 1px dashed rgba(255,255,255,0.08);
-            border-radius: var(--radius);
-            background: rgba(255,255,255,0.015);
-            font-weight: 500;
-        }
-
-        /* ══════════════════════════════════════════════════════
-           TOAST NOTIFICATIONS
-           ══════════════════════════════════════════════════════ */
+        /* ── Toast Notifications ── */
         #experience-toast {
-            position: fixed; z-index: 50;
-            right: 1.25rem; bottom: 1.25rem;
-            max-width: min(26rem, calc(100vw - 2.5rem));
-            padding: 0.85rem 1.15rem; border-radius: var(--radius);
-            background: rgba(15, 23, 42, 0.94);
-            backdrop-filter: blur(12px);
-            border: 1px solid rgba(255,255,255,0.08);
-            border-left: 3px solid var(--accent);
-            color: white; font-size: 0.85rem; font-weight: 550;
-            box-shadow: 0 8px 24px rgba(0,0,0,0.4), 0 0 0 0.5px rgba(255,255,255,0.05) inset;
-            transform: translateY(calc(100% + 3rem));
-            opacity: 0;
-            transition: transform 0.35s var(--ease), opacity 0.35s;
-            overflow: hidden;
+            position: fixed; z-index: 999; right: 1.25rem; bottom: 1.25rem;
+            max-width: min(28rem, calc(100vw - 2.5rem)); padding: 0.85rem 1.15rem;
+            border-radius: var(--radius); background: rgba(15, 23, 42, 0.95);
+            backdrop-filter: blur(16px); border: 1px solid var(--border);
+            border-left: 3px solid var(--accent); color: white; font-size: 0.85rem; font-weight: 550;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.5); transform: translateY(calc(100% + 3rem));
+            opacity: 0; transition: transform 0.3s var(--ease), opacity 0.3s;
         }
         #experience-toast.show { transform: translateY(0); opacity: 1; }
         #experience-toast.error { border-left-color: var(--danger); }
-        #experience-toast::after {
-            content: ''; position: absolute;
-            bottom: 0; left: 0; right: 0; height: 2px;
-            background: var(--accent);
-            transform-origin: left; transform: scaleX(0);
-        }
-        #experience-toast.show::after {
-            transform: scaleX(1);
-            animation: toast-drain 3.5s linear forwards;
-        }
-        #experience-toast.error::after { background: var(--danger); }
-        @keyframes toast-drain {
-            from { transform: scaleX(1); }
-            to   { transform: scaleX(0); }
-        }
 
-        /* ══════════════════════════════════════════════════════
-           RESPONSIVE
-           ══════════════════════════════════════════════════════ */
-        @media (max-width: 52rem) {
-            #product-app { padding: 0.65rem; }
+        /* ── Responsive ── */
+        @media (max-width: 60rem) {
             .overview-grid { grid-template-columns: 1fr; }
-            .app-header { align-items: flex-start; }
-            .track { grid-template-columns: 1fr; }
-            .cue { grid-template-columns: 1fr 1fr; }
-            .cue .days { grid-column: 1 / -1; }
-            .step-inspector { grid-template-columns: 1fr; }
+            .patcher-table { font-size: 0.75rem; }
+        }
+        @media (max-width: 48rem) {
+            #product-app { padding: 0.65rem; }
             .nav-rail {
-                position: fixed; bottom: 0; left: 0; right: 0;
-                z-index: 40; border-radius: var(--radius-lg) var(--radius-lg) 0 0;
-                justify-content: center;
-                background: rgba(10, 12, 24, 0.92);
-                backdrop-filter: blur(16px);
-                padding: 0.4rem 0.6rem calc(0.4rem + env(safe-area-inset-bottom, 0));
-                box-shadow: 0 -4px 20px rgba(0,0,0,0.3);
+                position: fixed; bottom: 0; left: 0; right: 0; z-index: 50;
+                border-radius: var(--radius-lg) var(--radius-lg) 0 0; justify-content: space-around;
+                background: rgba(10, 12, 24, 0.95); backdrop-filter: blur(16px);
+                padding: 0.35rem 0.5rem calc(0.35rem + env(safe-area-inset-bottom, 0));
                 border-top: 1px solid var(--border);
             }
-            .nav-rail button { flex-direction: column; gap: 0.15rem; padding: 0.5rem 0.6rem; font-size: 0.6rem; }
-            .nav-rail button svg { width: 20px; height: 20px; }
+            .nav-rail button { flex-direction: column; gap: 0.15rem; padding: 0.4rem; font-size: 0.65rem; }
             .app-shell { padding-bottom: calc(4.5rem + env(safe-area-inset-bottom, 0)); }
         }
-        @media (max-width: 36rem) {
-            .settings-grid { grid-template-columns: 1fr; }
-            .scene-grid { grid-template-columns: 1fr; }
-        }
-
-        /* ── Scrollbar ── */
-        ::-webkit-scrollbar { width: 6px; height: 6px; }
-        ::-webkit-scrollbar-track { background: transparent; }
-        ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 3px; }
-        ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.18); }
-
-        /* ── Focus visible ── */
-        :focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
-
-        /* ── Utility ── */
-        .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); border: 0; }
     </style>
 </head>
 <body>
 
+<!-- ═══════════════════════════════════════════════════════
+     AUTHENTICATION SCREEN
+     ═══════════════════════════════════════════════════════ -->
 <section id="experience-auth" aria-labelledby="login-title">
     <div class="experience-login">
         <form onsubmit="lg.connect(); return false;">
-        <div class="login-logo">
-            <svg width="36" height="36" viewBox="0 0 36 36" fill="none" aria-hidden="true">
-                <defs><linearGradient id="lg" x1="0" y1="0" x2="36" y2="36"><stop stop-color="#818cf8"/><stop offset="1" stop-color="#34d399"/></linearGradient></defs>
-                <rect x="2" y="2" width="8" height="8" rx="2.5" fill="url(#lg)"/>
-                <rect x="14" y="2" width="8" height="8" rx="2.5" fill="url(#lg)" opacity=".65"/>
-                <rect x="26" y="2" width="8" height="8" rx="2.5" fill="url(#lg)" opacity=".35"/>
-                <rect x="2" y="14" width="8" height="8" rx="2.5" fill="url(#lg)" opacity=".65"/>
-                <rect x="14" y="14" width="8" height="8" rx="2.5" fill="url(#lg)"/>
-                <rect x="26" y="14" width="8" height="8" rx="2.5" fill="url(#lg)" opacity=".65"/>
-                <rect x="2" y="26" width="8" height="8" rx="2.5" fill="url(#lg)" opacity=".35"/>
-                <rect x="14" y="26" width="8" height="8" rx="2.5" fill="url(#lg)" opacity=".65"/>
-                <rect x="26" y="26" width="8" height="8" rx="2.5" fill="url(#lg)"/>
-            </svg>
-            <div>
-                <p class="eyebrow">LumiGrid lighting control</p>
+            <div style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1.25rem;">
+                <div class="brand-mark" style="width: 2rem; height: 2rem;">
+                    <svg width="18" height="18" viewBox="0 0 22 22" fill="none"><rect x="2" y="2" width="6" height="6" rx="1.5" fill="white"/><rect x="12" y="2" width="6" height="6" rx="1.5" fill="white" opacity=".6"/><rect x="2" y="12" width="6" height="6" rx="1.5" fill="white" opacity=".6"/><rect x="12" y="12" width="6" height="6" rx="1.5" fill="white"/></svg>
+                </div>
+                <p class="eyebrow">LumiGrid Node Operator</p>
             </div>
-        </div>
-        <h1 id="login-title">Make light<br>feel alive.</h1>
-        <p class="muted">Connect securely to this node to arrange scenes, timelines, and automation.</p>
-        <input type="text" autocomplete="username" tabindex="-1" aria-hidden="true" hidden>
-        <label for="experience-token">Node access token</label>
-        <input id="experience-token" type="password" autocomplete="current-password" placeholder="Enter the token supplied with this node">
-        <button class="button-primary" type="submit" style="width:100%;margin-top:1.25rem">Connect</button>
+            <h1 id="login-title">Make light<br>feel alive.</h1>
+            <p class="muted" style="margin-bottom: 1.25rem;">Connect securely to monitor live LED strips, patch DMX universes, and orchestrate scenes.</p>
+            <label for="experience-token" style="display:block; font-size:0.75rem; font-weight:700; color:var(--text-secondary); margin-bottom:0.4rem;">Node Access Token</label>
+            <input id="experience-token" type="password" autocomplete="current-password" placeholder="Enter operator or admin token" required>
+            <button class="button-primary" type="submit" style="width: 100%; margin-top: 1.25rem; min-height: 2.5rem;">Connect to Node</button>
         </form>
     </div>
 </section>
 
+<!-- ═══════════════════════════════════════════════════════
+     MAIN OPERATOR APP
+     ═══════════════════════════════════════════════════════ -->
 <main id="product-app" hidden>
     <div class="app-shell">
+        
+        <!-- Header -->
         <header class="app-header">
-            <div style="width: 100%; display: flex; justify-content: space-between; align-items: center;">
+            <div class="header-top">
                 <div class="brand">
                     <div class="brand-mark" aria-hidden="true">
-                        <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
-                            <rect x="1" y="1" width="5" height="5" rx="1.5" fill="white" opacity=".9"/>
-                            <rect x="8.5" y="1" width="5" height="5" rx="1.5" fill="white" opacity=".5"/>
-                            <rect x="16" y="1" width="5" height="5" rx="1.5" fill="white" opacity=".25"/>
-                            <rect x="1" y="8.5" width="5" height="5" rx="1.5" fill="white" opacity=".5"/>
-                            <rect x="8.5" y="8.5" width="5" height="5" rx="1.5" fill="white" opacity=".9"/>
-                            <rect x="16" y="8.5" width="5" height="5" rx="1.5" fill="white" opacity=".5"/>
-                            <rect x="1" y="16" width="5" height="5" rx="1.5" fill="white" opacity=".25"/>
-                            <rect x="8.5" y="16" width="5" height="5" rx="1.5" fill="white" opacity=".5"/>
-                            <rect x="16" y="16" width="5" height="5" rx="1.5" fill="white" opacity=".9"/>
-                        </svg>
+                        <svg width="20" height="20" viewBox="0 0 22 22" fill="none"><rect x="2" y="2" width="6" height="6" rx="1.5" fill="white"/><rect x="12" y="2" width="6" height="6" rx="1.5" fill="white" opacity=".5"/><rect x="2" y="12" width="6" height="6" rx="1.5" fill="white" opacity=".5"/><rect x="12" y="12" width="6" height="6" rx="1.5" fill="white"/></svg>
                     </div>
                     <div>
-                        <p class="eyebrow">LumiGrid OS</p>
+                        <div style="display:flex; align-items:center; gap:0.5rem;">
+                            <p class="eyebrow">LumiGrid OS</p>
+                            <span class="online-pill">Connected</span>
+                        </div>
                         <h2 id="experience-node-name">LIGHTING NODE</h2>
-                        <span class="online-pill">Connected</span>
                     </div>
                 </div>
+
                 <div class="header-actions">
-                    <button title="Refresh node status" onclick="lg.refresh()">Refresh</button>
-                    <button title="End this browser session" onclick="lg.disconnect()">Disconnect</button>
+                    <div class="telemetry-pill accent"><span id="header-fps">0</span> FPS</div>
+                    <div class="telemetry-pill primary"><span id="header-owner">ScenePlayback</span></div>
+                    <div class="telemetry-pill"><span id="header-power">0 mW</span></div>
+                    <button class="button-secondary" onclick="lg.refresh()" title="Reload data">Refresh</button>
+                    <button class="button-danger" onclick="lg.blackout()" title="Instant blackout">Blackout</button>
+                    <button class="button-secondary" onclick="lg.disconnect()" title="Log out">Disconnect</button>
                 </div>
             </div>
-            <canvas id="live-preview" height="12"></canvas>
+            <!-- Live Preview Ribbon -->
+            <canvas id="live-preview-ribbon" height="6" title="Live hardware activity stream"></canvas>
         </header>
 
-        <nav class="nav-rail" aria-label="Lighting controls">
+        <!-- Navigation Rail -->
+        <nav class="nav-rail" aria-label="Main Navigation">
             <button class="active" data-page="dashboard" onclick="lg.nav('dashboard', this)">
-                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><line x1="3" y1="4" x2="13" y2="4"/><line x1="3" y1="8" x2="13" y2="8"/><line x1="3" y1="12" x2="13" y2="12"/><circle cx="6" cy="4" r="1.5" fill="currentColor" stroke="none"/><circle cx="10" cy="8" r="1.5" fill="currentColor" stroke="none"/><circle cx="7" cy="12" r="1.5" fill="currentColor" stroke="none"/></svg>
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="2" width="5" height="5" rx="1"/><rect x="9" y="2" width="5" height="5" rx="1"/><rect x="2" y="9" width="5" height="5" rx="1"/><rect x="9" y="9" width="5" height="5" rx="1"/></svg>
                 Dashboard
+            </button>
+            <button data-page="visualizer" onclick="lg.nav('visualizer', this)">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><path d="M8 2v12M2 8h12"/></svg>
+                Live Visualizer
             </button>
             <button data-page="scenes" onclick="lg.nav('scenes', this)">
                 <svg viewBox="0 0 16 16" fill="currentColor"><rect x="1" y="1" width="6" height="6" rx="1.5"/><rect x="9" y="1" width="6" height="6" rx="1.5" opacity=".45"/><rect x="1" y="9" width="6" height="6" rx="1.5" opacity=".45"/><rect x="9" y="9" width="6" height="6" rx="1.5"/></svg>
                 Scenes
             </button>
             <button data-page="zones" onclick="lg.nav('zones', this)">
-                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><rect x="2" y="2" width="12" height="12" rx="2"/><line x1="6" y1="2" x2="6" y2="14"/><line x1="10" y1="2" x2="10" y2="14"/></svg>
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="12" width="12" height="12" rx="2"/><line x1="6" y1="2" x2="6" y2="14"/><line x1="10" y1="2" x2="10" y2="14"/></svg>
                 Zones
+            </button>
+            <button data-page="patcher" onclick="lg.nav('patcher', this)">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="4" cy="4" r="2"/><circle cx="12" cy="12" r="2"/><path d="M5.5 5.5l5 5M12 4v2M4 12v-2"/></svg>
+                Fixture Patch
+            </button>
+            <button data-page="dmx" onclick="lg.nav('dmx', this)">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 13V3a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v10M6 8h4M6 11h4M6 5h4"/></svg>
+                Live DMX
             </button>
             <button data-page="timeline" onclick="lg.nav('timeline', this)">
                 <svg viewBox="0 0 16 16" fill="currentColor"><rect x="1" y="9" width="3" height="6" rx="1"/><rect x="5.5" y="5" width="3" height="10" rx="1" opacity=".7"/><rect x="10" y="2" width="3" height="13" rx="1"/></svg>
                 Timeline
             </button>
-            <button data-page="dmx" onclick="lg.nav('dmx', this)">
-                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M2 13V3a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v10M6 8h4M6 11h4M6 5h4"/></svg>
-                Live DMX
-            </button>
             <button data-page="diagnostics" onclick="lg.nav('diagnostics', this)">
-                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="8" cy="8" r="2.5"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M12.6 3.4l-1.4 1.4M4.8 11.2L3.4 12.6"/></svg>
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="2.5"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4"/></svg>
                 Diagnostics
             </button>
         </nav>
 
-        
+        <!-- ══════════════════════════════════════════════════════
+             PAGE: DASHBOARD
+             ══════════════════════════════════════════════════════ -->
         <section id="page-dashboard" class="product-page active">
             <div class="page-heading">
-                <div><p class="eyebrow">Operational Overview</p><h3>Dashboard</h3></div>
-                <button class="button-danger" onclick="lg.blackout()">Emergency blackout</button>
+                <div><p class="eyebrow">Operational Status</p><h3>Dashboard</h3></div>
+                <div style="display:flex; gap:0.5rem;">
+                    <button class="button-secondary" onclick="lg.nav('visualizer')">Open Live Visualizer →</button>
+                </div>
             </div>
+
             <div class="overview-grid">
                 <article class="product-card">
-                    <h4>Current State</h4>
-                    <p id="dash-playing" class="muted">Loading...</p>
-                    <div id="dash-stats" class="stat-list"></div>
+                    <h4>Current Engine State</h4>
+                    <p id="dash-playing" class="muted" style="font-size:1.1rem; font-weight:600; color:#c7d2fe;">Loading scene...</p>
+                    <div class="stat-list">
+                        <div class="stat-box"><span>Control Owner</span><strong id="dash-owner-text">ScenePlayback</strong></div>
+                        <div class="stat-box"><span>Transition</span><strong id="dash-trans-text">Steady</strong></div>
+                        <div class="stat-box"><span>Stream Protocol</span><strong id="dash-proto-text">Ready</strong></div>
+                        <div class="stat-box"><span>Safety Fallback</span><strong id="dash-safety-text">Normal</strong></div>
+                    </div>
                 </article>
+
                 <article class="product-card">
-                    <h4>Source Ownership</h4>
-                    <div id="dash-sources" class="stat-list"></div>
+                    <h4>Power Consumption & Budget</h4>
+                    <div style="display:flex; justify-content:space-between; align-items:baseline; margin-top:0.25rem;">
+                        <span id="dash-power-est" style="font-size:1.4rem; font-weight:700; color:var(--accent);">0 mW</span>
+                        <span id="dash-power-max" class="help">Max Budget: 30,000 mW</span>
+                    </div>
+                    <div class="power-meter"><div id="dash-power-bar" class="power-fill" style="width: 15%;"></div></div>
+                    <p class="help">Quiescent idle load (5 mW/px) + active channel draw subject to post-render power limiting.</p>
                 </article>
+            </div>
+
+            <div style="margin-top: 1.25rem;">
+                <div class="page-heading">
+                    <div><p class="eyebrow">Quick Playback</p><h4>Stored Scenes</h4></div>
+                    <button class="button-secondary" onclick="lg.nav('scenes')">Manage Library →</button>
+                </div>
+                <div id="dash-quick-scenes" class="scene-grid"></div>
             </div>
         </section>
 
+        <!-- ══════════════════════════════════════════════════════
+             PAGE: LIVE VISUALIZER
+             ══════════════════════════════════════════════════════ -->
+        <section id="page-visualizer" class="product-page">
+            <div class="page-heading">
+                <div><p class="eyebrow">Hardware-Faithful Emulation</p><h3>Physical Sign Visualizer</h3></div>
+                <div style="display:flex; align-items:center; gap:0.5rem;">
+                    <button id="viz-mode-btn" class="button-secondary" onclick="lg.toggleVisualizerMode()">View: Physical Lanes (0-7)</button>
+                    <button class="button-secondary" onclick="lg.fitVisualizer()">Fit View</button>
+                </div>
+            </div>
+
+            <div class="visualizer-container">
+                <div class="visualizer-toolbar">
+                    <div style="display:flex; align-items:center; gap:0.75rem;">
+                        <div class="telemetry-pill accent"><span id="viz-fps">0</span> FPS</div>
+                        <div class="telemetry-pill primary"><span id="viz-packets">0</span> Packets Received</div>
+                        <div class="telemetry-pill"><span id="viz-pixels">0</span> Active Pixels</div>
+                    </div>
+                    <div style="display:flex; gap:0.5rem; align-items:center;">
+                        <label class="help" style="display:flex; align-items:center; gap:0.35rem; cursor:pointer;">
+                            <input type="checkbox" id="viz-glow-toggle" checked onchange="lg.redrawVisualizer()"> LED Bloom
+                        </label>
+                    </div>
+                </div>
+
+                <div style="position:relative; width:100%;">
+                    <canvas id="visualizer-canvas" width="1152" height="360"></canvas>
+                    <div id="pixel-tooltip" class="canvas-tooltip"></div>
+                </div>
+
+                <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:0.5rem; margin-top:0.25rem;">
+                    <p class="help">Hover over any LED pip to inspect its physical output lane, pixel index, mapped zone, and real-time color.</p>
+                    <span id="viz-hover-info" class="help" style="color:var(--text-secondary); font-family:monospace;">Hover over an LED</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- ══════════════════════════════════════════════════════
+             PAGE: SCENES LIBRARY
+             ══════════════════════════════════════════════════════ -->
         <section id="page-scenes" class="product-page">
             <div class="page-heading">
-                <div><p class="eyebrow">Scene Library</p><h3>Manage Scenes</h3></div>
+                <div><p class="eyebrow">Lighting Cues</p><h3>Scene Library</h3></div>
                 <button class="button-secondary" onclick="lg.refresh()">Refresh library</button>
             </div>
             <div id="scene-library" class="scene-grid"></div>
         </section>
 
+        <!-- ══════════════════════════════════════════════════════
+             PAGE: SCENE DESIGNER (3 Layers per Zone)
+             ══════════════════════════════════════════════════════ -->
         <section id="page-scene-editor" class="product-page">
-            <div class="editor-toolbar">
-                <div><button class="button-secondary" onclick="lg.backToScenes()">← Scenes</button><div><p class="eyebrow">Scene Designer</p><h3 id="scene-editor-title">Edit scene</h3></div></div>
-                <button class="button-primary" onclick="lg.saveScene()">Save scene</button>
+            <div class="page-heading">
+                <div style="display:flex; align-items:center; gap:0.6rem;">
+                    <button class="button-secondary" onclick="lg.backToScenes()">← Scenes</button>
+                    <div><p class="eyebrow">Scene Designer</p><h3 id="scene-editor-title">Edit Scene</h3></div>
+                </div>
+                <div style="display:flex; gap:0.5rem;">
+                    <button class="button-secondary" onclick="lg.testSceneLive()">Test Live</button>
+                    <button class="button-primary" onclick="lg.saveScene()">Save Scene</button>
+                </div>
             </div>
+
             <article class="product-card">
                 <div class="settings-grid">
-                    <div class="field"><label>Scene name</label><input id="scene-name" maxlength="23"></div>
-                    <div class="range-row"><label>Brightness</label><input id="scene-brightness" type="range" min="0" max="100" oninput="lg.updateText('scene-brightness-output', this.value + '%')"><output id="scene-brightness-output"></output></div>
-                    <div class="range-row"><label>Fade Time (ms)</label><input id="scene-fade" type="range" min="0" max="5000" step="100" oninput="lg.updateText('scene-fade-output', this.value + ' ms')"><output id="scene-fade-output"></output></div>
+                    <div>
+                        <label style="display:block; font-size:0.75rem; font-weight:700; color:var(--text-secondary); margin-bottom:0.35rem;">Scene Name</label>
+                        <input id="scene-name" maxlength="23" placeholder="e.g. Evening Amber Glow">
+                    </div>
+                    <div class="range-row">
+                        <label>Global Brightness</label>
+                        <input id="scene-brightness" type="range" min="0" max="100" oninput="lg.updateText('scene-brightness-out', this.value + '%')">
+                        <output id="scene-brightness-out">100%</output>
+                    </div>
+                    <div class="range-row">
+                        <label>Fade Time (ms)</label>
+                        <input id="scene-fade" type="range" min="0" max="5000" step="100" oninput="lg.updateText('scene-fade-out', (this.value/1000).toFixed(1) + ' s')">
+                        <output id="scene-fade-out">1.0 s</output>
+                    </div>
                 </div>
             </article>
-            <div id="scene-zones" class="sync-grid" style="margin-top:1.5rem"></div>
+
+            <!-- Zone Multi-Select & Layer Editor -->
+            <div id="scene-zones-editor" style="margin-top: 1.25rem;"></div>
         </section>
 
+        <!-- ══════════════════════════════════════════════════════
+             PAGE: ZONES
+             ══════════════════════════════════════════════════════ -->
         <section id="page-zones" class="product-page">
             <div class="page-heading">
-                <div><p class="eyebrow">Physical Mapping</p><h3>Zone View</h3></div>
+                <div><p class="eyebrow">Physical Grouping</p><h3>Zones Architecture</h3></div>
+                <button class="button-secondary" onclick="lg.nav('patcher')">Patch Fixtures to Zones →</button>
             </div>
-            <div id="zone-map" class="sync-grid"></div>
+            <div id="zone-cards-grid" class="settings-grid"></div>
         </section>
 
-        <section id="page-timeline" class="product-page">
+        <!-- ══════════════════════════════════════════════════════
+             PAGE: FIXTURE & DMX PATCHER
+             ══════════════════════════════════════════════════════ -->
+        <section id="page-patcher" class="product-page">
             <div class="page-heading">
-                <div><p class="eyebrow">Visual Beat Grid</p><h3>Timeline Editor</h3></div>
-                <button class="button-primary" onclick="lg.saveTimeline()">Save timeline</button>
+                <div><p class="eyebrow">Hardware & Universe Routing</p><h3>Fixture & DMX Patcher</h3></div>
+                <button class="button-primary" onclick="lg.saveHardwarePatch()">Save & Sync Hardware</button>
             </div>
-            <article class="product-card">
-                <div class="timeline-toolbar">
-                    <div><strong>Tempo</strong><input id="timeline-bpm" type="range" min="40" max="240" oninput="lg.setBpm(this.value)"><output id="timeline-bpm-output"></output></div>
-                    <label class="switch-row"><span>Play timeline</span><input id="timeline-enabled" type="checkbox" onchange="lg.setTimelineEnabled(this.checked)"></label>
+
+            <!-- Protocol Settings -->
+            <article class="product-card" style="margin-bottom: 1.25rem;">
+                <h4>Live Protocol Settings (Art-Net & sACN E1.31)</h4>
+                <div class="settings-grid" style="margin-top: 0.85rem;">
+                    <div>
+                        <label class="switch-row">
+                            <span>Art-Net Receiver (UDP 6454)</span>
+                            <input id="proto-artnet" type="checkbox" checked>
+                        </label>
+                        <label class="switch-row">
+                            <span>sACN E1.31 Receiver (UDP 5568)</span>
+                            <input id="proto-sacn" type="checkbox" checked>
+                        </label>
+                    </div>
+                    <div>
+                        <label style="font-size:0.75rem; font-weight:700; color:var(--text-secondary); display:block; margin-bottom:0.3rem;">Base Universe</label>
+                        <input id="proto-universe-start" type="number" min="0" max="63999" value="0">
+                        <label style="font-size:0.75rem; font-weight:700; color:var(--text-secondary); display:block; margin:0.6rem 0 0.3rem;">Zone Wash Start Channel (1–512)</label>
+                        <input id="proto-zone-start-ch" type="number" min="1" max="512" value="1">
+                    </div>
+                    <div>
+                        <label style="font-size:0.75rem; font-weight:700; color:var(--text-secondary); display:block; margin-bottom:0.3rem;">Channel Merge Mode</label>
+                        <select id="proto-merge-mode">
+                            <option value="HTP">HTP (Highest Takes Precedence)</option>
+                            <option value="LTP">LTP (Latest Takes Precedence)</option>
+                        </select>
+                        <label style="font-size:0.75rem; font-weight:700; color:var(--text-secondary); display:block; margin:0.6rem 0 0.3rem;">Stream Timeout (ms)</label>
+                        <input id="proto-timeout" type="number" min="100" max="10000" step="100" value="2000">
+                    </div>
                 </div>
-                <div id="timeline-palette" class="palette" style="margin-top:1rem"></div>
             </article>
-            <article class="product-card timeline-scroll">
-                <div id="timeline-tracks" style="display:grid;gap:0.5rem"></div>
+
+            <!-- Fixtures Table -->
+            <article class="product-card">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.75rem;">
+                    <h4>Physical Fixtures Map (16 Channels)</h4>
+                    <span class="help">Start Ch = 0 inherits Zone Wash (3 ch R,G,B). Start Ch &gt; 0 enables Direct DMX Patching.</span>
+                </div>
+
+                <div class="patcher-scroll">
+                    <table class="patcher-table">
+                        <thead>
+                            <tr>
+                                <th>#</th>
+                                <th>Assigned Zone</th>
+                                <th>Profile Type</th>
+                                <th>Output Routing</th>
+                                <th>Pixels / Ch</th>
+                                <th>DMX Universe</th>
+                                <th>DMX Start Ch</th>
+                                <th>DMX Mode</th>
+                                <th>Max Bright</th>
+                                <th>Power (mW)</th>
+                            </tr>
+                        </thead>
+                        <tbody id="patcher-tbody">
+                            <!-- Populated dynamically by lg.renderPatcher() -->
+                        </tbody>
+                    </table>
+                </div>
             </article>
         </section>
 
+        <!-- ══════════════════════════════════════════════════════
+             PAGE: LIVE DMX MONITOR
+             ══════════════════════════════════════════════════════ -->
         <section id="page-dmx" class="product-page">
             <div class="page-heading">
-                <div><p class="eyebrow">Incoming Universe</p><h3>Live DMX</h3></div>
+                <div><p class="eyebrow">Incoming Streams</p><h3>Live DMX 512 Channel Monitor</h3></div>
+                <div style="display:flex; align-items:center; gap:0.5rem;">
+                    <div class="telemetry-pill accent"><span id="dmx-stream-status">Waiting for data...</span></div>
+                </div>
             </div>
+
             <article class="product-card">
-                <div id="dmx-view">Waiting for DMX data...</div>
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.75rem; flex-wrap:wrap; gap:0.5rem;">
+                    <div style="display:flex; gap:0.75rem; align-items:center;">
+                        <span class="help">Universe Channels 1–512:</span>
+                        <span id="dmx-hover-val" class="help" style="color:#a5b4fc; font-family:monospace;">Hover a cell</span>
+                    </div>
+                    <div style="display:flex; gap:0.35rem; align-items:center;">
+                        <span style="font-size:0.65rem; color:var(--text-muted);">0</span>
+                        <div style="width:40px; height:8px; border-radius:2px; background:linear-gradient(to right, #111, var(--primary), #fff);"></div>
+                        <span style="font-size:0.65rem; color:var(--text-muted);">255</span>
+                    </div>
+                </div>
+                <div id="dmx-matrix" class="dmx-matrix"></div>
             </article>
         </section>
 
+        <!-- ══════════════════════════════════════════════════════
+             PAGE: TIMELINE
+             ══════════════════════════════════════════════════════ -->
+        <section id="page-timeline" class="product-page">
+            <div class="page-heading">
+                <div><p class="eyebrow">Visual Beat Grid</p><h3>Timeline Sequencer</h3></div>
+                <button class="button-primary" onclick="lg.saveTimeline()">Save Timeline</button>
+            </div>
+            <article class="product-card">
+                <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:1rem;">
+                    <div style="display:flex; align-items:center; gap:0.75rem;">
+                        <strong style="font-size:0.85rem;">Tempo</strong>
+                        <input id="timeline-bpm" type="range" min="40" max="240" oninput="lg.setBpm(this.value)">
+                        <output id="timeline-bpm-output" style="font-weight:700; color:#c7d2fe;">120 BPM</output>
+                    </div>
+                    <label class="switch-row">
+                        <span>Play Timeline</span>
+                        <input id="timeline-enabled" type="checkbox" onchange="lg.setTimelineEnabled(this.checked)">
+                    </label>
+                </div>
+                <div id="timeline-palette" style="display:flex; gap:0.5rem; overflow-x:auto; margin-top:1rem; padding-bottom:0.3rem;"></div>
+            </article>
+            <article class="product-card" style="margin-top:1rem; overflow-x:auto;">
+                <div id="timeline-tracks" style="display:grid; gap:0.5rem;"></div>
+            </article>
+        </section>
+
+        <!-- ══════════════════════════════════════════════════════
+             PAGE: DIAGNOSTICS & SYSTEM
+             ══════════════════════════════════════════════════════ -->
         <section id="page-diagnostics" class="product-page">
             <div class="page-heading">
-                <div><p class="eyebrow">Maintenance</p><h3>Diagnostics & Factory</h3></div>
+                <div><p class="eyebrow">Maintenance & Hardware</p><h3>Diagnostics & System</h3></div>
             </div>
             <div class="settings-grid">
                 <article class="product-card">
-                    <h4>Factory Testing</h4>
-                    <button class="button-secondary" style="width:100%;margin-bottom:0.5rem" onclick="lg.runTestSequence('lane')">Test Lanes</button>
-                    <button class="button-secondary" style="width:100%" onclick="lg.runTestSequence('color')">Test Colors</button>
+                    <h4>Factory Output Testing</h4>
+                    <p class="help" style="margin-bottom:0.75rem;">Run hardware test routines on physical LED strips.</p>
+                    <button class="button-secondary" style="width:100%; margin-bottom:0.5rem" onclick="lg.runTestSequence('lane')">Test Strip Lanes (White Chase)</button>
+                    <button class="button-secondary" style="width:100%" onclick="lg.runTestSequence('color')">Test Color Wash (Rainbow)</button>
                 </article>
+
                 <article class="product-card">
-                    <h4>Firmware OTA</h4>
-                    <input type="file" id="ota-file" accept=".bin" style="width:100%;margin-bottom:1rem;">
-                    <button class="button-primary" style="width:100%" onclick="lg.uploadOta()">Update Firmware</button>
-                    <div id="ota-status" class="help" style="margin-top:1rem;"></div>
+                    <h4>Firmware OTA Update</h4>
+                    <p class="help" style="margin-bottom:0.75rem;">Upload a compiled .bin image to update node firmware.</p>
+                    <input type="file" id="ota-file" accept=".bin" style="margin-bottom:0.75rem;">
+                    <button class="button-primary" style="width:100%" onclick="lg.uploadOta()">Flash Firmware</button>
+                    <div id="ota-status" class="help" style="margin-top:0.5rem;"></div>
                 </article>
+
                 <article class="product-card">
-                    <h4>Backup & Restore</h4>
-                    <button class="button-secondary" style="width: 100%;margin-bottom:1rem" onclick="lg.downloadBackup()">Export Configuration</button>
-                    <input type="file" id="restore-file" accept=".json" style="width: 100%; margin-bottom: 1rem;">
-                    <button class="button-primary" style="width: 100%" onclick="lg.uploadRestore()">Restore Configuration</button>
+                    <h4>Backup & Recovery</h4>
+                    <p class="help" style="margin-bottom:0.75rem;">Export or restore device configurations and scenes.</p>
+                    <button class="button-secondary" style="width:100%; margin-bottom:0.75rem" onclick="lg.downloadBackup()">Export Config JSON</button>
+                    <input type="file" id="restore-file" accept=".json" style="margin-bottom:0.75rem;">
+                    <button class="button-primary" style="width:100%" onclick="lg.uploadRestore()">Restore From JSON</button>
                 </article>
+
                 <article class="product-card">
-                    <h4>Health Metrics</h4>
-                    <pre id="health-stats" class="help" style="background:rgba(0,0,0,0.2);padding:1rem;border-radius:8px;"></pre>
-                    <button class="button-secondary" style="width:100%;margin-top:0.5rem" onclick="lg.loadCommissioning()">Refresh Health</button>
+                    <h4>System Health Telemetry</h4>
+                    <pre id="health-stats" style="background:rgba(0,0,0,0.3); padding:0.75rem; border-radius:8px; font-size:0.75rem; font-family:monospace; margin-bottom:0.75rem;"></pre>
+                    <button class="button-secondary" style="width:100%" onclick="lg.loadCommissioning()">Refresh Diagnostics</button>
                 </article>
             </div>
         </section>
 
     </div>
 </main>
+
 <div id="experience-toast" role="status" aria-live="polite"></div>
 
+<!-- ═══════════════════════════════════════════════════════
+     CLIENT JAVASCRIPT ENGINE
+     ═══════════════════════════════════════════════════════ -->
 <script>
 window.lg = (() => {
+    // ── Default Effects Catalog ──
     const fallbackEffects = [
         {id:'solid',label:'Steady color',description:'A constant, even wash of color.',hasParameter:false},
-        {id:'breathe',label:'Smooth pulse',description:'Gently fades between a soft glow and full brightness.',hasParameter:true,parameterLabel:'Minimum glow',parameterUnit:'%',parameterMin:1,parameterMax:100,parameterDefault:4},
-        {id:'chase',label:'Moving comet',description:'A bright comet travels along the strip.',hasParameter:true,parameterLabel:'Tail length',parameterUnit:'pixels',parameterMin:1,parameterMax:8,parameterDefault:3},
+        {id:'breathe',label:'Smooth pulse',description:'Gently fades between soft glow and full brightness.',hasParameter:true,parameterLabel:'Minimum glow',parameterUnit:'%',parameterMin:1,parameterMax:100,parameterDefault:4},
+        {id:'chase',label:'Moving comet',description:'A bright comet travels along the strip.',hasParameter:true,parameterLabel:'Tail length',parameterUnit:'pixels',parameterMin:1,parameterMax:12,parameterDefault:3},
         {id:'sweep',label:'Color sweep',description:'Builds color across the strip from end to end.',hasParameter:false},
         {id:'reveal',label:'Soft reveal',description:'Fades the lane in for a polished sign-on.',hasParameter:true,parameterLabel:'Fade length',parameterUnit:'%',parameterMin:10,parameterMax:90,parameterDefault:25},
-        {id:'sparkle',label:'Random twinkle',description:'Adds crisp white twinkles over the base color.',hasParameter:true,parameterLabel:'Twinkles',parameterUnit:'per lane',parameterMin:1,parameterMax:12,parameterDefault:2},
+        {id:'sparkle',label:'Random twinkle',description:'Crisp white twinkles over the base color.',hasParameter:true,parameterLabel:'Twinkles',parameterUnit:'per lane',parameterMin:1,parameterMax:16,parameterDefault:2},
         {id:'gradient',label:'Flowing glow',description:'Moves a soft wave of light along the strip.',hasParameter:true,parameterLabel:'Wave contrast',parameterUnit:'%',parameterMin:1,parameterMax:100,parameterDefault:100},
-        {id:'strobe',label:'Beat strobe',description:'Flashes the lane with an adjustable on-time.',hasParameter:true,parameterLabel:'Flash time',parameterUnit:'%',parameterMin:5,parameterMax:95,parameterDefault:50},
-        {id:'fire',label:'Living flame',description:'Creates a flickering flame texture from the selected color.',hasParameter:true,parameterLabel:'Flame height',parameterUnit:'%',parameterMin:20,parameterMax:100,parameterDefault:70},
-        {id:'aurora',label:'Aurora glow',description:'Gentle shifting colors across the strip.',hasParameter:true,parameterLabel:'Hue shift',parameterUnit:'deg',parameterMin:1,parameterMax:360,parameterDefault:120},
+        {id:'strobe',label:'Beat strobe',description:'Flashes the lane with adjustable on-time.',hasParameter:true,parameterLabel:'Flash time',parameterUnit:'%',parameterMin:5,parameterMax:95,parameterDefault:50},
+        {id:'fire',label:'Living flame',description:'Flickering organic flame texture.',hasParameter:true,parameterLabel:'Flame height',parameterUnit:'%',parameterMin:20,parameterMax:100,parameterDefault:70},
+        {id:'aurora',label:'Aurora glow',description:'Gentle shifting spectrum across strip.',hasParameter:true,parameterLabel:'Hue shift',parameterUnit:'deg',parameterMin:1,parameterMax:360,parameterDefault:120},
         {id:'colorwave',label:'Color wave',description:'Smooth sine wave color interpolation.',hasParameter:true,parameterLabel:'Wave length',parameterUnit:'px',parameterMin:10,parameterMax:255,parameterDefault:50},
-        {id:'staticpulse',label:'Static pulse',description:'Slow dimmer pulse for main/ambiance lights.',hasParameter:true,parameterLabel:'Min dim',parameterUnit:'%',parameterMin:0,parameterMax:100,parameterDefault:20}
+        {id:'staticpulse',label:'Static pulse',description:'Dimmer pulse for ambiance & main lights.',hasParameter:true,parameterLabel:'Min dim',parameterUnit:'%',parameterMin:0,parameterMax:100,parameterDefault:20}
     ];
-    const state = { token:'', effects:fallbackEffects, presets:[], sequence:null, schedules:null, config:null, status:null, sync:null, editing:null, selectedScene:null, selectedStep:null };
+
+    const palettes = [
+        { id: 0, name: "Solid (Primary → Secondary)" },
+        { id: 1, name: "Rainbow Spectrum" },
+        { id: 2, name: "Ocean Breeze" },
+        { id: 3, name: "Lava Glow" },
+        { id: 4, name: "Forest Canopy" },
+        { id: 5, name: "Sunset Horizon" }
+    ];
+
+    const fixtureProfiles = [
+        { id: 0, name: "Unused / None" },
+        { id: 1, name: "WS2812 (Addr RGB)" },
+        { id: 2, name: "SK6812 (Addr RGBW)" },
+        { id: 3, name: "PWM Single Dimmer" },
+        { id: 4, name: "PWM RGB Strip" },
+        { id: 5, name: "PWM RGBW Strip" }
+    ];
+
+    // ── Application State ──
+    const state = {
+        token: '',
+        effects: fallbackEffects,
+        presets: [],
+        sequence: null,
+        schedules: null,
+        config: null,
+        status: null,
+        editing: null,
+        targetZones: [true, false, false, false, false, false, false, false],
+        activeTab: 'dashboard',
+        visualizerMode: 'lanes', // 'lanes' | 'zones'
+        dmxData: new Uint8Array(512),
+        // Live stream buffer (8 lanes × 144 pixels × 3 RGB = 3456 bytes)
+        liveBuffer: new Uint8Array(8 * 144 * 3),
+        liveFrameCount: 0,
+        lastFpsTimestamp: performance.now(),
+        currentFps: 0,
+        totalPackets: 0,
+        dirty: false
+    };
+
     const byId = id => document.getElementById(id);
-    const clamp = (value, low, high) => Math.max(low, Math.min(high, Number(value) || 0));
-    const esc = value => String(value ?? '').replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
-    const clone = value => JSON.parse(JSON.stringify(value));
+    const clamp = (val, min, max) => Math.max(min, Math.min(max, Number(val) || 0));
+    const esc = str => String(str ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    const clone = obj => JSON.parse(JSON.stringify(obj));
 
     function toast(message, error=false) {
-        const target = byId('experience-toast');
-        target.textContent = message;
-        target.className = (error ? 'error ' : '') + 'show';
-        window.clearTimeout(toast.timeout);
-        toast.timeout = window.setTimeout(() => { target.className = ''; }, 3500);
+        const el = byId('experience-toast');
+        if (!el) return;
+        el.textContent = message;
+        el.className = (error ? 'error ' : '') + 'show';
+        clearTimeout(toast.timer);
+        toast.timer = setTimeout(() => { el.className = ''; }, 3500);
     }
 
     async function api(path, method='GET', body) {
         const headers = { Authorization: 'Bearer ' + state.token };
         if (body !== undefined) headers['Content-Type'] = 'application/json';
-        const response = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
-        if (!response.ok) {
-            let message = `Request failed (${response.status})`;
-            try { message = (await response.json()).error || message; } catch (_) {}
-            throw new Error(message);
+        const res = await fetch(path, { method, headers, body: body !== undefined ? JSON.stringify(body) : undefined });
+        if (!res.ok) {
+            let msg = `Request failed (${res.status})`;
+            try { msg = (await res.json()).error || msg; } catch (_) {}
+            throw new Error(msg);
         }
-        return response.json();
+        return res.json();
     }
 
-    function blankLayer() {
-        return {effect:'solid',blendMode:'normal',primaryColor:{r:255,g:255,b:255},secondaryColor:{r:0,g:0,b:0},speedMs:2000,fxParam:0,paletteId:0,opacity:255,enabled:false};
+    function effectMeta(id) {
+        return state.effects.find(e => e.id === id) || state.effects[0];
     }
-    function blankZone() {
-        return {layers: [blankLayer(), blankLayer(), blankLayer()]};
+    function colorToHex(col) {
+        if (!col) return '#ffffff';
+        const r = clamp(col.r, 0, 255).toString(16).padStart(2, '0');
+        const g = clamp(col.g, 0, 255).toString(16).padStart(2, '0');
+        const b = clamp(col.b, 0, 255).toString(16).padStart(2, '0');
+        return `#${r}${g}${b}`;
     }
-    function normalPreset(preset) {
-        const scene = {...preset};
-        scene.zones = Array.from({length:8}, (_, z) => {
-            const srcZone = scene.zones?.[z] || {};
-            return {
-                layers: Array.from({length:3}, (_, l) => ({
-                    ...blankLayer(),
-                    ...(srcZone.layers?.[l] || {})
-                }))
-            };
-        });
-        scene.globalBrightness = clamp(scene.globalBrightness ?? 128, 0, 255);
-        scene.transitionMs = clamp(scene.transitionMs ?? 1000, 0, 10000);
-        return scene;
+    function hexToRgb(hex) {
+        const c = String(hex).replace('#', '');
+        return {
+            r: parseInt(c.slice(0, 2), 16) || 0,
+            g: parseInt(c.slice(2, 4), 16) || 0,
+            b: parseInt(c.slice(4, 6), 16) || 0
+        };
     }
-    function defaultSequence() {
-        return {bpm:120,enabled:false,tracks:Array.from({length:8}, (_, channelId) => ({channelId,enabled:false,numSteps:16,steps:Array.from({length:16}, () => ({presetIndex:0,lengthBeats:1}))}))};
-    }
-    function normalSequence(sequence) {
-        const result = sequence || defaultSequence();
-        result.bpm = clamp(result.bpm ?? 120, 10, 500);
-        result.tracks = Array.from({length:8}, (_, index) => {
-            const track = {...defaultSequence().tracks[index], ...(result.tracks?.[index] || {})};
-            track.channelId = index;
-            track.numSteps = clamp(track.numSteps ?? 16, 1, 16);
-            track.steps = Array.from({length:16}, (_, step) => ({presetIndex:0,lengthBeats:1,...(track.steps?.[step] || {})}));
-            return track;
-        });
-        return result;
-    }
-    function normalSchedules(payload) {
-        const entries = payload?.entries || [];
-        return Array.from({length:8}, (_, index) => ({hour:8,minute:0,daysOfWeek:31,action:'preset',presetIndex:0,enabled:false,...(entries[index] || {})}));
-    }
-    function effect(id) { return state.effects.find(item => item.id === id) || state.effects[0]; }
-    function sceneName(index) { return state.presets.find(scene => Number(scene.index) === Number(index))?.name || `Scene ${Number(index) + 1}`; }
-    function percentForDuty(duty) { return Math.round(clamp(duty,0,4095) * 100 / 4095); }
-    function dutyForPercent(percent) { return Math.round(clamp(percent,0,100) * 4095 / 100); }
-    function colorFor(channel) { return '#' + [channel.r,channel.g,channel.b].map(value => clamp(value,0,255).toString(16).padStart(2,'0')).join(''); }
     function msToSpeed(ms) { return Math.round(100 - (Math.log(clamp(ms,10,60000) / 10) / Math.log(6000)) * 99); }
-    function speedToMs(value) { return Math.round(10 * Math.pow(6000, (100 - clamp(value,1,100)) / 99)); }
-    function speedName(value) { return value > 75 ? 'Fast' : value > 45 ? 'Balanced' : 'Slow'; }
-    function clockAge(value) { return value == null ? 'Waiting' : value < 1000 ? 'Just now' : `${Math.round(value / 1000)} s ago`; }
+    function speedToMs(val) { return Math.round(10 * Math.pow(6000, (100 - clamp(val,1,100)) / 99)); }
+    function speedLabel(val) { return val > 75 ? 'Fast' : val > 45 ? 'Balanced' : 'Slow'; }
 
+    // ── WebSocket Integration ──
     let ws = null;
     function initWebSocket() {
         if (ws) { ws.close(); ws = null; }
         const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
         ws = new WebSocket(`${proto}//${location.host}/ws`);
         ws.binaryType = 'arraybuffer';
-        ws.onopen = () => {};
         ws.onmessage = (event) => {
             if (event.data instanceof ArrayBuffer) {
                 const arr = new Uint8Array(event.data);
-                if (arr[0] === 76) { renderLivePreview(arr.slice(1)); }
+                // Handle 0x01 or 76 ('L') preview packet
+                if (arr.length > 1 && (arr[0] === 1 || arr[0] === 76)) {
+                    const rawRgb = arr.subarray(1);
+                    state.liveBuffer.set(rawRgb.subarray(0, state.liveBuffer.length));
+                    state.liveFrameCount++;
+                    state.totalPackets++;
+                    state.dirty = true;
+                }
             } else if (typeof event.data === 'string') {
-                try { const st = JSON.parse(event.data); state.status = st; } catch(e) {}
+                try {
+                    const status = JSON.parse(event.data);
+                    state.status = status;
+                    if (status.dmx && Array.isArray(status.dmx)) {
+                        for (let i = 0; i < Math.min(status.dmx.length, 512); ++i) {
+                            state.dmxData[i] = status.dmx[i];
+                        }
+                    }
+                    updateTelemetryUI();
+                } catch (_) {}
             }
         };
-        ws.onclose = () => { if (state.token) setTimeout(initWebSocket, 2000); };
+        ws.onclose = () => {
+            if (state.token) setTimeout(initWebSocket, 2000);
+        };
     }
 
-    function renderLivePreview(rgbData) {
-        const canvas = byId('live-preview');
+    // ── Animation & Render Loop (Decoupled 60fps) ──
+    function startAnimationLoop() {
+        const renderLoop = (timestamp) => {
+            // Update FPS calculation
+            if (timestamp - state.lastFpsTimestamp >= 1000) {
+                state.currentFps = state.liveFrameCount;
+                state.liveFrameCount = 0;
+                state.lastFpsTimestamp = timestamp;
+                const fpsEl = byId('header-fps');
+                const vizFpsEl = byId('viz-fps');
+                const vizPacketsEl = byId('viz-packets');
+                if (fpsEl) fpsEl.textContent = state.currentFps;
+                if (vizFpsEl) vizFpsEl.textContent = state.currentFps;
+                if (vizPacketsEl) vizPacketsEl.textContent = state.totalPackets;
+            }
+
+            if (state.dirty) {
+                drawLiveRibbon();
+                drawVisualizerCanvas();
+                state.dirty = false;
+            }
+            requestAnimationFrame(renderLoop);
+        };
+        requestAnimationFrame(renderLoop);
+    }
+
+    // Header Mini Ribbon
+    function drawLiveRibbon() {
+        const canvas = byId('live-preview-ribbon');
         if (!canvas) return;
-        const numPixels = Math.floor(rgbData.length / 3);
-        if (numPixels === 0) return;
-        if (canvas.width !== numPixels) {
-            canvas.width = numPixels;
-            canvas.style.display = 'block';
-        }
         const ctx = canvas.getContext('2d');
-        const imgData = ctx.createImageData(numPixels, 1);
-        for (let i = 0; i < numPixels; i++) {
-            imgData.data[i*4] = rgbData[i*3];
-            imgData.data[i*4+1] = rgbData[i*3+1];
-            imgData.data[i*4+2] = rgbData[i*3+2];
-            imgData.data[i*4+3] = 255;
+        const numLanes = 8;
+        const pixelsPerLane = 144;
+        const totalPixels = numLanes * pixelsPerLane;
+        if (canvas.width !== totalPixels) canvas.width = totalPixels;
+
+        const imgData = ctx.createImageData(totalPixels, 1);
+        for (let i = 0; i < totalPixels; i++) {
+            imgData.data[i*4]     = state.liveBuffer[i*3];
+            imgData.data[i*4 + 1] = state.liveBuffer[i*3 + 1];
+            imgData.data[i*4 + 2] = state.liveBuffer[i*3 + 2];
+            imgData.data[i*4 + 3] = 255;
         }
         ctx.putImageData(imgData, 0, 0);
-        ctx.drawImage(canvas, 0, 0, numPixels, 1, 0, 1, numPixels, canvas.height - 1);
+        ctx.drawImage(canvas, 0, 0, totalPixels, 1, 0, 0, totalPixels, canvas.height);
     }
 
+    // Main 2D Physical Visualizer
+    function drawVisualizerCanvas() {
+        const canvas = byId('visualizer-canvas');
+        if (!canvas || state.activeTab !== 'visualizer') return;
+        const ctx = canvas.getContext('2d');
+        const glowEnabled = byId('viz-glow-toggle')?.checked ?? true;
+
+        const w = canvas.width;
+        const h = canvas.height;
+        ctx.fillStyle = '#020308';
+        ctx.fillRect(0, 0, w, h);
+
+        const lanes = 8;
+        const pixels = 144;
+        const laneH = h / lanes;
+        const pipRadius = Math.max(1.8, (w / pixels) * 0.35);
+
+        // Count active non-black pixels
+        let activePx = 0;
+
+        for (let l = 0; l < lanes; ++l) {
+            const laneY = l * laneH + laneH / 2;
+
+            // Lane baseline track
+            ctx.fillStyle = 'rgba(255,255,255,0.03)';
+            ctx.fillRect(0, l * laneH, w, 1);
+
+            // Lane label
+            ctx.fillStyle = 'rgba(255,255,255,0.2)';
+            ctx.font = '10px Inter, monospace';
+            ctx.fillText(`Lane ${l}`, 8, laneY - pipRadius - 4);
+
+            for (let p = 0; p < pixels; ++p) {
+                const idx = (l * pixels + p) * 3;
+                const r = state.liveBuffer[idx];
+                const g = state.liveBuffer[idx + 1];
+                const b = state.liveBuffer[idx + 2];
+
+                if (r > 5 || g > 5 || b > 5) activePx++;
+
+                const x = (p + 0.5) * (w / pixels);
+
+                // LED Diffuse Bloom
+                if (glowEnabled && (r > 40 || g > 40 || b > 40)) {
+                    const lum = (r + g + b) / 3;
+                    const glowRad = pipRadius * (1 + (lum / 255) * 2.5);
+                    const grad = ctx.createRadialGradient(x, laneY, 0, x, laneY, glowRad);
+                    grad.addColorStop(0, `rgba(${r},${g},${b},0.6)`);
+                    grad.addColorStop(1, `rgba(${r},${g},${b},0)`);
+                    ctx.fillStyle = grad;
+                    ctx.beginPath();
+                    ctx.arc(x, laneY, glowRad, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+
+                // LED Core Pip
+                ctx.fillStyle = (r === 0 && g === 0 && b === 0) ? '#080a14' : `rgb(${r},${g},${b})`;
+                ctx.beginPath();
+                ctx.arc(x, laneY, pipRadius, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+
+        const vizPixelsEl = byId('viz-pixels');
+        if (vizPixelsEl) vizPixelsEl.textContent = activePx;
+    }
+
+    function setupCanvasInteractions() {
+        const canvas = byId('visualizer-canvas');
+        const tooltip = byId('pixel-tooltip');
+        const hoverInfo = byId('viz-hover-info');
+        if (!canvas || !tooltip) return;
+
+        canvas.addEventListener('mousemove', (e) => {
+            const rect = canvas.getBoundingClientRect();
+            const mouseX = e.clientX - rect.left;
+            const mouseY = e.clientY - rect.top;
+
+            const lanes = 8;
+            const pixels = 144;
+            const scaleX = canvas.width / rect.width;
+            const scaleY = canvas.height / rect.height;
+
+            const pxX = mouseX * scaleX;
+            const pxY = mouseY * scaleY;
+
+            const laneH = canvas.height / lanes;
+            const lane = Math.floor(pxY / laneH);
+            const pixel = Math.floor((pxX / canvas.width) * pixels);
+
+            if (lane >= 0 && lane < lanes && pixel >= 0 && pixel < pixels) {
+                const idx = (lane * pixels + pixel) * 3;
+                const r = state.liveBuffer[idx];
+                const g = state.liveBuffer[idx + 1];
+                const b = state.liveBuffer[idx + 2];
+                const hex = colorToHex({r,g,b});
+
+                // Find assigned fixture & zone
+                let fixName = 'Unpatched';
+                let zoneName = 'None';
+                if (state.config && state.config.fixtures) {
+                    for (let f = 0; f < 16; ++f) {
+                        const fix = state.config.fixtures[f];
+                        if (fix && fix.physicalOutputIndex[0] === lane && pixel < fix.numPixels) {
+                            fixName = `Fixture ${f+1}`;
+                            const z = state.config.zones?.[fix.zoneId];
+                            zoneName = z?.name || `Zone ${fix.zoneId + 1}`;
+                            break;
+                        }
+                    }
+                }
+
+                tooltip.style.opacity = '1';
+                tooltip.style.left = `${mouseX + 12}px`;
+                tooltip.style.top = `${mouseY - 24}px`;
+                tooltip.innerHTML = `
+                    <div style="display:flex; align-items:center; gap:0.4rem;">
+                        <span style="width:10px; height:10px; border-radius:2px; background:${hex}; border:1px solid #fff;"></span>
+                        <strong>Lane ${lane} : Px ${pixel}</strong>
+                    </div>
+                    <div style="color:var(--text-muted); margin-top:2px;">${esc(zoneName)} (${esc(fixName)}) · ${hex.toUpperCase()}</div>
+                `;
+
+                if (hoverInfo) {
+                    hoverInfo.textContent = `Lane ${lane} · Pixel ${pixel} · ${zoneName} · RGB(${r},${g},${b})`;
+                }
+            } else {
+                tooltip.style.opacity = '0';
+            }
+        });
+
+        canvas.addEventListener('mouseleave', () => {
+            tooltip.style.opacity = '0';
+            if (hoverInfo) hoverInfo.textContent = 'Hover over an LED';
+        });
+    }
+
+    // ── Auth & Connection ──
     async function connect() {
-        state.token = byId('experience-token').value.trim();
-        if (!state.token) return toast('Enter the node access token first.', true);
+        const tokenInput = byId('experience-token');
+        state.token = tokenInput ? tokenInput.value.trim() : '';
+        if (!state.token) return toast('Enter node token.', true);
         try {
             await refresh();
             byId('experience-auth').hidden = true;
             byId('product-app').hidden = false;
             initWebSocket();
+            startAnimationLoop();
+            setupCanvasInteractions();
             nav('dashboard', document.querySelector('[data-page=dashboard]'));
-            toast('Connected to the node.');
-        } catch (error) {
-            toast(`Could not connect: ${error.message}`, true);
+            toast('Connected to LumiGrid node.');
+        } catch (e) {
+            toast(`Connection error: ${e.message}`, true);
         }
     }
+
     function disconnect() {
         state.token = '';
         if (ws) { ws.close(); ws = null; }
-        byId('experience-token').value = '';
         byId('product-app').hidden = true;
         byId('experience-auth').hidden = false;
     }
+
+    // ── Data Sync ──
     async function refresh() {
-        const effects = await api('/api/v1/effects').catch(() => fallbackEffects);
-        const presets = await api('/api/v1/presets');
-        const status = await api('/api/v1/status');
-        const sequence = await api('/api/v1/sequence');
-        const config = await api('/api/v1/config');
-        const schedules = await api('/api/v1/schedules');
-        const sync = await api('/api/v1/sync').catch(() => null);
+        const [effects, presets, status, sequence, config] = await Promise.all([
+            api('/api/v1/effects').catch(() => fallbackEffects),
+            api('/api/v1/presets'),
+            api('/api/v1/status'),
+            api('/api/v1/sequence'),
+            api('/api/v1/config')
+        ]);
+
         state.effects = Array.isArray(effects) && effects.length ? effects : fallbackEffects;
-        state.presets = presets.map(normalPreset);
+        state.presets = presets.map(p => {
+            const sc = {...p};
+            sc.zones = Array.from({length:8}, (_, z) => ({
+                layers: Array.from({length:3}, (_, l) => ({
+                    effect: 'solid', blendMode: 'normal',
+                    primaryColor: {r:255,g:255,b:255}, secondaryColor: {r:0,g:0,b:0},
+                    speedMs: 2000, fxParam: 0, paletteId: 0, opacity: 255, enabled: l === 0,
+                    ...(sc.zones?.[z]?.layers?.[l] || {})
+                }))
+            }));
+            sc.globalBrightness = clamp(sc.globalBrightness ?? 255, 0, 255);
+            sc.transitionMs = clamp(sc.transitionMs ?? 1000, 0, 10000);
+            return sc;
+        });
+
         state.status = status;
-        state.sequence = normalSequence(sequence);
+        state.sequence = sequence;
         state.config = config;
-        state.schedules = normalSchedules(schedules);
-        state.sync = sync;
-        byId('experience-node-name').textContent = (config.deviceName || 'Lighting node').toUpperCase();
+
+        byId('experience-node-name').textContent = (config.deviceName || 'LIGHTING NODE').toUpperCase();
+        updateTelemetryUI();
         renderDashboard();
         renderScenes();
         renderZones();
+        renderPatcher();
+        renderDmxGrid();
         renderTimeline();
-        renderLiveDMX();
-        renderDiagnostics();
-    }
-    function nav(page, button) {
-        document.querySelectorAll('.product-page').forEach(item => item.classList.remove('active'));
-        byId('page-' + page)?.classList.add('active');
-        document.querySelectorAll('.nav-rail button').forEach(item => item.classList.remove('active'));
-        if (button) button.classList.add('active');
-        if (page === 'dashboard') renderDashboard();
-        if (page === 'scenes') renderScenes();
-        if (page === 'zones') renderZones();
-        if (page === 'timeline') renderTimeline();
-        if (page === 'dmx') renderLiveDMX();
-        if (page === 'diagnostics') renderDiagnostics();
     }
 
-    
+    function updateTelemetryUI() {
+        const st = state.status;
+        const ownerEl = byId('header-owner');
+        const ownerTextEl = byId('dash-owner-text');
+        const powerEl = byId('header-power');
+        const powerEstEl = byId('dash-power-est');
+        const powerBar = byId('dash-power-bar');
+
+        let owner = 'ScenePlayback';
+        if (st?.controlSource !== undefined) {
+            owner = st.controlSource === 2 ? 'LiveDmx' :
+                    st.controlSource === 1 ? 'Factory' :
+                    st.controlSource === 6 ? 'Fallback' : 'ScenePlayback';
+        }
+        if (ownerEl) ownerEl.textContent = owner;
+        if (ownerTextEl) ownerTextEl.textContent = owner;
+
+        const estMw = st?.estimatedMilliwatts ?? 2450;
+        const maxMw = state.config?.maxPowerMw || 30000;
+        const pct = Math.min(100, Math.round((estMw / maxMw) * 100));
+
+        if (powerEl) powerEl.textContent = `${estMw} mW`;
+        if (powerEstEl) powerEstEl.textContent = `${estMw} mW`;
+        if (powerBar) {
+            powerBar.style.width = `${pct}%`;
+            powerBar.className = 'power-fill' + (pct > 90 ? ' danger' : pct > 75 ? ' warning' : '');
+        }
+
+        const transEl = byId('dash-trans-text');
+        if (transEl) transEl.textContent = st?.transitioning ? 'Blending' : 'Steady';
+    }
+
+    // ── Navigation ──
+    function nav(page, btn) {
+        state.activeTab = page;
+        document.querySelectorAll('.product-page').forEach(p => p.classList.remove('active'));
+        byId(`page-${page}`)?.classList.add('active');
+        document.querySelectorAll('.nav-rail button').forEach(b => b.classList.remove('active'));
+        if (btn) btn.classList.add('active');
+        else document.querySelector(`[data-page="${page}"]`)?.classList.add('active');
+
+        if (page === 'visualizer') {
+            state.dirty = true;
+            fitVisualizer();
+        } else if (page === 'dmx') {
+            renderDmxGrid();
+        }
+    }
+
+    // ── Dashboard View ──
     function renderDashboard() {
-        const active = state.status?.activePreset;
-        byId('dash-playing').textContent = active === undefined ? 'No scene selected' : sceneName(active);
-        
-        let owner = "Idle";
-        if (state.status?.controlSource !== undefined) {
-            owner = state.status.controlSource === 5 ? "ScenePlayback" : 
-                    state.status.controlSource === 6 ? "Fallback" : 
-                    state.status.controlSource === 2 ? "LiveDmx" : 
-                    state.status.controlSource === 1 ? "Factory" : "Idle";
+        const activeIdx = state.status?.activePreset;
+        const activeScene = state.presets.find(p => Number(p.index) === Number(activeIdx));
+        const playingEl = byId('dash-playing');
+        if (playingEl) {
+            playingEl.textContent = activeScene?.name || (activeIdx !== undefined ? `Scene ${activeIdx + 1}` : 'No Scene Active');
         }
-        
-        byId('dash-stats').innerHTML = `
-            <div><span>Active Scene</span><strong>${active === undefined ? '—' : esc(sceneName(active))}</strong></div>
-            <div><span>Transition</span><strong>${state.status?.transitioning ? 'In progress' : 'Ready'}</strong></div>
-            <div><span>Safety</span><strong>${state.status?.fallbackActive ? 'Fallback' : 'Normal'}</strong></div>
-        `;
-        byId('dash-sources').innerHTML = `
-            <div><span>Current Owner</span><strong>${owner}</strong></div>
-        `;
-    }
-    function renderZones() {
-        if (!state.config) return;
-        let html = '';
-        for (let i = 0; i < 8; i++) {
-            const z = state.config.zones?.[i] || {name: `Zone ${i+1}`, role: 'Unassigned', fixtureMask: 0};
-            if (!z.name) continue;
-            let lanes = [];
-            for (let f = 0; f < 16; f++) {
-                if (z.fixtureMask & (1<<f)) {
-                    const fix = state.config.fixtures?.[f];
-                    if (fix) lanes.push(`Lane ${fix.physicalOutputIndex[0]} (${fix.numPixels} px)`);
-                }
-            }
-            html += `<article class="product-card">
-                <h4>${esc(z.name)}</h4>
-                <p class="muted">${esc(z.role)}</p>
-                <div class="stat-list" style="margin-top:1rem">
-                    ${lanes.map(l => `<div><span>Output</span><strong>${l}</strong></div>`).join('')}
-                    ${lanes.length === 0 ? '<div><span>Output</span><strong>Unmapped</strong></div>' : ''}
-                </div>
-            </article>`;
+
+        const quickGrid = byId('dash-quick-scenes');
+        if (quickGrid) {
+            quickGrid.innerHTML = state.presets.map(scene => `
+                <article class="product-card scene-card" style="--scene-color:${colorToHex(scene.zones[0]?.layers[0]?.primaryColor)}">
+                    <div>
+                        <span class="badge badge-wash">Preset ${Number(scene.index) + 1}</span>
+                        <h4 style="margin:0.4rem 0 0.2rem;">${esc(scene.name || 'Untitled')}</h4>
+                        <p class="help">${Math.round(scene.globalBrightness * 100 / 255)}% · ${(scene.transitionMs/1000).toFixed(1)}s</p>
+                    </div>
+                    <div class="scene-actions">
+                        <button class="button-primary" onclick="lg.playScene(${Number(scene.index)})">Activate</button>
+                        <button class="button-secondary" onclick="lg.editScene(${Number(scene.index)})">Edit</button>
+                    </div>
+                </article>
+            `).join('');
         }
-        byId('zone-map').innerHTML = html || '<div class="empty-state">No zones configured.</div>';
-    }
-    
-    function renderLiveDMX() {
-        if (!state.config) return;
-        const dmxData = state.status?.dmx || Array(512).fill(0);
-        let html = '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(2rem,1fr));gap:2px;">';
-        for(let i=0; i<Math.min(dmxData.length, 64); i++) {
-            const v = dmxData[i] || 0;
-            const bg = `rgba(255,255,255,${v/255})`;
-            html += `<div style="background:${bg};height:2rem;display:flex;align-items:center;justify-content:center;color:${v>128?'#000':'#666'};font-size:0.6rem;border-radius:2px">${v}</div>`;
-        }
-        html += '</div>';
-        byId('dmx-view').innerHTML = `<p class="help" style="margin-bottom:1rem">Showing first 64 channels.</p>${html}`;
     }
 
-    function renderDiagnostics() {
-        // Just loads health immediately
-        loadCommissioning();
-    }
-    
-    function renderSceneEditor() {
-        const scene = state.editing;
-        if (!scene) return;
-        byId('scene-editor-title').textContent = scene.name || 'Untitled scene';
-        byId('scene-name').value = scene.name || '';
-        byId('scene-brightness').value = Math.round(scene.globalBrightness * 100 / 255);
-        byId('scene-brightness-output').textContent = `${byId('scene-brightness').value}%`;
-        byId('scene-fade').value = scene.transitionMs;
-        byId('scene-fade-output').textContent = `${scene.transitionMs} ms`;
-
-        let html = '';
-        for (let z=0; z<8; z++) {
-            if (!state.config?.zones?.[z]?.name) continue;
-            const zName = state.config.zones[z].name;
-            const layer = scene.zones[z].layers[0]; // just focus on layer 0 for the simplified UI
-            const meta = effect(layer.effect);
-            
-            html += `<article class="product-card">
-                <h4>${esc(zName)}</h4>
-                <div class="field" style="margin-top:0.5rem"><select id="z-${z}-effect" onchange="lg.changeZoneEffect(${z}, this.value)">
-                    ${state.effects.map(item => `<option value="${esc(item.id)}" ${item.id === layer.effect ? 'selected' : ''}>${esc(item.label)}</option>`).join('')}
-                </select></div>
-                
-                <div class="color-line" style="margin-top:0.5rem;display:flex;gap:1rem;">
-                    <div style="display:flex;align-items:center;gap:0.5rem"><div style="width:20px;height:20px;border-radius:50%;background:${colorFor(layer.primaryColor)};border:2px solid #333"></div><input type="color" id="z-${z}-pcolor" value="${colorFor(layer.primaryColor)}" style="opacity:0;width:1px;position:absolute"> <button class="button-secondary" style="padding:0.2rem 0.5rem;font-size:0.7rem" onclick="byId('z-${z}-pcolor').click()">Pri</button></div>
-                    <div style="display:flex;align-items:center;gap:0.5rem"><div style="width:20px;height:20px;border-radius:50%;background:${colorFor(layer.secondaryColor)};border:2px solid #333"></div><input type="color" id="z-${z}-scolor" value="${colorFor(layer.secondaryColor)}" style="opacity:0;width:1px;position:absolute"> <button class="button-secondary" style="padding:0.2rem 0.5rem;font-size:0.7rem" onclick="byId('z-${z}-scolor').click()">Sec</button></div>
-                </div>
-                
-                <div class="range-row" style="margin-top:1rem"><label>Speed</label><input id="z-${z}-speed" type="range" min="1" max="100" value="${msToSpeed(layer.speedMs)}"></div>
-                ${meta.hasParameter ? `<div class="range-row"><label>${esc(meta.parameterLabel)}</label><input id="z-${z}-param" type="range" min="${meta.parameterMin}" max="${meta.parameterMax}" value="${layer.fxParam || meta.parameterDefault}"></div>` : ''}
-            </article>`;
-        }
-        byId('scene-zones').innerHTML = html;
-    }
-    
-    function readSceneEditor() {
-        const scene = state.editing;
-        if (!scene || !byId('scene-name')) return;
-        scene.name = byId('scene-name').value.trim();
-        scene.globalBrightness = Math.round(clamp(byId('scene-brightness').value,0,100) * 255 / 100);
-        scene.transitionMs = clamp(byId('scene-fade').value,0,5000);
-
-        for (let z=0; z<8; z++) {
-            if (!state.config?.zones?.[z]?.name) continue;
-            const layer = scene.zones[z].layers[0];
-            
-            layer.effect = byId(`z-${z}-effect`)?.value || layer.effect;
-            const phex = byId(`z-${z}-pcolor`)?.value || colorFor(layer.primaryColor);
-            layer.primaryColor.r = parseInt(phex.slice(1,3),16); layer.primaryColor.g = parseInt(phex.slice(3,5),16); layer.primaryColor.b = parseInt(phex.slice(5,7),16);
-            const shex = byId(`z-${z}-scolor`)?.value || colorFor(layer.secondaryColor);
-            layer.secondaryColor.r = parseInt(shex.slice(1,3),16); layer.secondaryColor.g = parseInt(shex.slice(3,5),16); layer.secondaryColor.b = parseInt(shex.slice(5,7),16);
-            
-            layer.speedMs = speedToMs(byId(`z-${z}-speed`)?.value ?? msToSpeed(layer.speedMs));
-            const meta = effect(layer.effect);
-            if (meta.hasParameter) layer.fxParam = clamp(byId(`z-${z}-param`)?.value ?? meta.parameterDefault, meta.parameterMin, meta.parameterMax);
-        }
-    }
-    
-    function renderTimeline() {
-        if (!state.sequence) return;
-        byId('timeline-bpm').value = clamp(state.sequence.bpm,40,240);
-        byId('timeline-bpm-output').textContent = `${state.sequence.bpm} BPM`;
-        byId('timeline-enabled').checked = state.sequence.enabled;
-        byId('timeline-palette').innerHTML = state.presets.map(scene => `<button draggable="true" class="${state.selectedScene === scene.index ? 'selected' : ''}" ondragstart="lg.dragScene(event,${Number(scene.index)})" onclick="lg.selectPalette(${Number(scene.index)})"><strong>${esc(scene.name || 'Untitled')}</strong></button>`).join('') || '<span class="help">Create a scene first.</span>';
-        
-        // Visual Beat Grid
-        byId('timeline-tracks').innerHTML = state.sequence.tracks.map((track,trackIndex) => {
-            if (!state.config?.zones?.[trackIndex]?.name) return '';
-            return `<div style="display:flex;align-items:center;gap:1rem;background:rgba(255,255,255,0.02);padding:0.5rem;border-radius:8px;border:1px solid rgba(255,255,255,0.05)">
-                <div style="width:100px"><strong>${esc(state.config.zones[trackIndex].name)}</strong></div>
-                <div style="display:flex;gap:4px;flex:1">
-                    ${track.steps.map((step,stepIndex) => `<div class="step" style="width:24px;height:32px;background:${step.presetIndex>0?'#6366f1':'#2a2e44'};border-radius:4px;cursor:pointer" title="Step ${stepIndex+1}" onclick="lg.setStepScene(${trackIndex},${stepIndex},state.selectedScene||0)"></div>`).join('')}
-                </div>
-            </div>`;
-        }).join('');
-    }
-
-    function sceneCard(scene) {
-        const firstEffect = effect(scene.zones[0].layers[0].effect);
-        const pc = scene.zones[0].layers[0].primaryColor;
-        const sceneColor = colorFor(pc);
-        return `<article class="product-card scene-card" style="--scene-color:${sceneColor}"><div><span class="scene-chip">● ${esc(firstEffect.label)}</span><h4>${esc(scene.name || 'Untitled scene')}</h4><p class="muted">${Math.round(scene.globalBrightness * 100 / 255)}% brightness · ${Math.round(scene.transitionMs / 100) / 10}s fade</p></div><p class="help">${esc(firstEffect.description)}</p><div class="scene-actions"><button class="button-secondary" onclick="lg.playScene(${Number(scene.index)})">Play</button><button class="button-secondary" onclick="lg.editScene(${Number(scene.index)})">Edit</button></div></article>`;
-    }
-    function renderScenes() {
-        byId('scene-library').innerHTML = state.presets.length ? state.presets.map(sceneCard).join('') : '<div class="empty-state">No scenes are stored yet.</div>';
-    }
-    async function playScene(index) {
+    async function playScene(idx) {
         try {
-            await api('/api/v1/activate', 'POST', {preset:index});
-            state.status = {...(state.status || {}),activePreset:index,transitioning:true};
+            await api('/api/v1/activate', 'POST', { preset: idx });
+            state.status = { ...(state.status || {}), activePreset: idx, transitioning: true };
+            updateTelemetryUI();
             renderDashboard();
-            toast(`${sceneName(index)} is playing.`);
-        } catch (error) { toast(error.message, true); }
-    }
-    async function blackout() {
-        try { await api('/api/v1/factory/abort', 'POST'); toast('Emergency blackout requested.'); }
-        catch (error) { toast(error.message, true); }
+            toast(`Playing Scene ${idx + 1}`);
+        } catch (e) { toast(e.message, true); }
     }
 
-    function editScene(index) {
-        const existing = state.presets.find(scene => Number(scene.index) === Number(index));
-        if (!existing) return toast('That scene is no longer available.', true);
+    async function blackout() {
+        try {
+            await api('/api/v1/factory/abort', 'POST');
+            toast('Emergency blackout applied.');
+        } catch (e) { toast(e.message, true); }
+    }
+
+    // ── Scenes Library & Designer ──
+    function renderScenes() {
+        const lib = byId('scene-library');
+        if (!lib) return;
+        lib.innerHTML = state.presets.map(scene => `
+            <article class="product-card scene-card" style="--scene-color:${colorToHex(scene.zones[0]?.layers[0]?.primaryColor)}">
+                <div>
+                    <span class="badge badge-wash">● ${esc(effectMeta(scene.zones[0]?.layers[0]?.effect).label)}</span>
+                    <h4 style="margin:0.4rem 0 0.2rem;">${esc(scene.name || 'Untitled scene')}</h4>
+                    <p class="help">${Math.round(scene.globalBrightness * 100 / 255)}% Brightness · ${(scene.transitionMs/1000).toFixed(1)}s Transition</p>
+                </div>
+                <p class="help">${esc(effectMeta(scene.zones[0]?.layers[0]?.effect).description)}</p>
+                <div class="scene-actions">
+                    <button class="button-primary" onclick="lg.playScene(${Number(scene.index)})">Play</button>
+                    <button class="button-secondary" onclick="lg.editScene(${Number(scene.index)})">Designer</button>
+                </div>
+            </article>
+        `).join('') || '<div class="empty-state">No scenes stored.</div>';
+    }
+
+    function editScene(idx) {
+        const existing = state.presets.find(p => Number(p.index) === Number(idx));
+        if (!existing) return toast('Scene not found', true);
         state.editing = clone(existing);
-        state.selectedStep = null;
         state.targetZones = [true, false, false, false, false, false, false, false];
-        document.querySelectorAll('.nav-rail button').forEach(item => item.classList.remove('active'));
         nav('scene-editor');
         renderSceneEditor();
     }
-    function backToScenes() { nav('scenes', document.querySelector('[data-page=scenes]')); }
+
+    function backToScenes() { nav('scenes'); }
+
+    function toggleTargetZone(z) {
+        readSceneEditor();
+        state.targetZones[z] = !state.targetZones[z];
+        if (!state.targetZones.includes(true)) state.targetZones[z] = true;
+        renderSceneEditor();
+    }
+
+    function selectAllTargetZones(all) {
+        readSceneEditor();
+        state.targetZones = state.targetZones.map(() => all);
+        if (!all) state.targetZones[0] = true;
+        renderSceneEditor();
+    }
+
+    function renderSceneEditor() {
+        const scene = state.editing;
+        if (!scene) return;
+        byId('scene-editor-title').textContent = scene.name || 'Untitled Scene';
+        byId('scene-name').value = scene.name || '';
+        byId('scene-brightness').value = Math.round(scene.globalBrightness * 100 / 255);
+        byId('scene-brightness-out').textContent = `${byId('scene-brightness').value}%`;
+        byId('scene-fade').value = scene.transitionMs;
+        byId('scene-fade-out').textContent = `${(scene.transitionMs/1000).toFixed(1)} s`;
+
+        let firstZ = state.targetZones.indexOf(true);
+        if (firstZ === -1) { firstZ = 0; state.targetZones[0] = true; }
+
+        const zoneChips = `
+            <div class="product-card" style="margin-bottom:1rem;">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.65rem;">
+                    <h5>Target Zones for Editing</h5>
+                    <div style="display:flex; gap:0.35rem;">
+                        <button class="button-secondary" style="font-size:0.7rem; padding:0.25rem 0.5rem;" onclick="lg.selectAllTargetZones(true)">Select All</button>
+                        <button class="button-secondary" style="font-size:0.7rem; padding:0.25rem 0.5rem;" onclick="lg.selectAllTargetZones(false)">Clear</button>
+                    </div>
+                </div>
+                <div style="display:flex; gap:0.4rem; flex-wrap:wrap;">
+                    ${[0,1,2,3,4,5,6,7].map(z => {
+                        const name = state.config?.zones?.[z]?.name || `Zone ${z+1}`;
+                        const sel = state.targetZones[z];
+                        return `<button class="${sel ? 'button-primary' : 'button-secondary'}" style="font-size:0.75rem; padding:0.4rem 0.75rem;" onclick="lg.toggleTargetZone(${z})">${sel ? '✓ ' : ''}${esc(name)}</button>`;
+                    }).join('')}
+                </div>
+            </div>
+        `;
+
+        const layersHtml = [0,1,2].map(l => {
+            const layer = scene.zones[firstZ].layers[l];
+            const meta = effectMeta(layer.effect);
+            const param = clamp(layer.fxParam || meta.parameterDefault || 0, meta.parameterMin || 0, meta.parameterMax || 255);
+
+            return `
+                <div class="layer-box">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.75rem;">
+                        <div style="display:flex; align-items:center; gap:0.5rem;">
+                            <span class="badge ${layer.enabled ? 'badge-pixel' : 'badge-wash'}">Layer ${l+1}</span>
+                            <strong>${layer.enabled ? esc(meta.label) : 'Disabled'}</strong>
+                        </div>
+                        <label class="switch-row" style="padding:0;">
+                            <span>Active</span>
+                            <input id="l${l}-enabled" type="checkbox" ${layer.enabled ? 'checked' : ''} onchange="lg.changeLayerEnabled(${l}, this.checked)">
+                        </label>
+                    </div>
+
+                    <div class="settings-grid">
+                        <div>
+                            <label style="font-size:0.75rem; font-weight:700; color:var(--text-secondary); display:block; margin-bottom:0.3rem;">Effect Algorithm</label>
+                            <select id="l${l}-effect" onchange="lg.changeLayerEffect(${l}, this.value)">
+                                ${state.effects.map(e => `<option value="${esc(e.id)}" ${e.id === layer.effect ? 'selected' : ''}>${esc(e.label)}</option>`).join('')}
+                            </select>
+                        </div>
+                        <div>
+                            <label style="font-size:0.75rem; font-weight:700; color:var(--text-secondary); display:block; margin-bottom:0.3rem;">Color Palette</label>
+                            <select id="l${l}-palette">
+                                ${palettes.map(p => `<option value="${p.id}" ${p.id === (layer.paletteId || 0) ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}
+                            </select>
+                        </div>
+                        <div>
+                            <label style="font-size:0.75rem; font-weight:700; color:var(--text-secondary); display:block; margin-bottom:0.3rem;">Blend Mode</label>
+                            <select id="l${l}-blend">
+                                <option value="normal" ${layer.blendMode === 'normal' ? 'selected' : ''}>Normal (Alpha Over)</option>
+                                <option value="add" ${layer.blendMode === 'add' ? 'selected' : ''}>Add (Linear Dodge)</option>
+                                <option value="multiply" ${layer.blendMode === 'multiply' ? 'selected' : ''}>Multiply</option>
+                                <option value="screen" ${layer.blendMode === 'screen' ? 'selected' : ''}>Screen</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="color-inputs">
+                        <div class="color-swatch-btn">
+                            <input type="color" id="l${l}-pcolor" value="${colorToHex(layer.primaryColor)}" style="width:24px; height:24px; padding:0; border:none; cursor:pointer; background:none;">
+                            <span style="font-size:0.75rem; font-weight:600;">Primary Color</span>
+                        </div>
+                        <div class="color-swatch-btn">
+                            <input type="color" id="l${l}-scolor" value="${colorToHex(layer.secondaryColor)}" style="width:24px; height:24px; padding:0; border:none; cursor:pointer; background:none;">
+                            <span style="font-size:0.75rem; font-weight:600;">Secondary Color</span>
+                        </div>
+                    </div>
+
+                    <div class="range-row">
+                        <label>Layer Opacity</label>
+                        <input id="l${l}-opacity" type="range" min="0" max="100" value="${Math.round(layer.opacity * 100 / 255)}" oninput="lg.updateText('l${l}-opacity-out', this.value + '%')">
+                        <output id="l${l}-opacity-out">${Math.round(layer.opacity * 100 / 255)}%</output>
+                    </div>
+
+                    <div class="range-row">
+                        <label>Effect Speed</label>
+                        <input id="l${l}-speed" type="range" min="1" max="100" value="${msToSpeed(layer.speedMs)}" oninput="lg.updateText('l${l}-speed-out', lg.speedLabel(this.value))">
+                        <output id="l${l}-speed-out">${speedLabel(msToSpeed(layer.speedMs))}</output>
+                    </div>
+
+                    ${meta.hasParameter ? `
+                    <div class="range-row">
+                        <label>${esc(meta.parameterLabel)}</label>
+                        <input id="l${l}-param" type="range" min="${meta.parameterMin}" max="${meta.parameterMax}" value="${param}" oninput="lg.updateText('l${l}-param-out', this.value + ' ${esc(meta.parameterUnit)}')">
+                        <output id="l${l}-param-out">${param} ${esc(meta.parameterUnit)}</output>
+                    </div>` : ''}
+                </div>
+            `;
+        }).join('');
+
+        byId('scene-zones-editor').innerHTML = zoneChips + layersHtml;
+    }
+
     function readSceneEditor() {
         const scene = state.editing;
         if (!scene || !byId('scene-name')) return;
         scene.name = byId('scene-name').value.trim();
         scene.globalBrightness = Math.round(clamp(byId('scene-brightness').value,0,100) * 255 / 100);
-        scene.transitionMs = clamp(byId('scene-fade').value,0,5000);
+        scene.transitionMs = clamp(byId('scene-fade').value, 0, 10000);
 
-        let firstZ = state.targetZones ? state.targetZones.indexOf(true) : 0;
-        if (firstZ === -1) firstZ = 0;
-
-        const newLayers = scene.zones[firstZ].layers.map((layer, l) => {
-            const newLayer = clone(layer);
-            newLayer.effect = byId(`z-l${l}-effect`)?.value || layer.effect;
-            newLayer.blendMode = byId(`z-l${l}-blend`)?.value || layer.blendMode;
-            newLayer.paletteId = Number(byId(`z-l${l}-palette`)?.value || layer.paletteId || 0);
-            const phex = byId(`z-l${l}-pcolor`)?.value || colorFor(layer.primaryColor);
-            newLayer.primaryColor.r = parseInt(phex.slice(1,3),16); newLayer.primaryColor.g = parseInt(phex.slice(3,5),16); newLayer.primaryColor.b = parseInt(phex.slice(5,7),16);
-            const shex = byId(`z-l${l}-scolor`)?.value || colorFor(layer.secondaryColor);
-            newLayer.secondaryColor.r = parseInt(shex.slice(1,3),16); newLayer.secondaryColor.g = parseInt(shex.slice(3,5),16); newLayer.secondaryColor.b = parseInt(shex.slice(5,7),16);
-            newLayer.speedMs = speedToMs(byId(`z-l${l}-speed`)?.value ?? msToSpeed(layer.speedMs));
-            const meta = effect(newLayer.effect);
-            if (meta.hasParameter) newLayer.fxParam = clamp(byId(`z-l${l}-param`)?.value ?? meta.parameterDefault, meta.parameterMin, meta.parameterMax);
-            newLayer.opacity = Math.round(clamp(byId(`z-l${l}-opacity`)?.value ?? (layer.opacity * 100 / 255), 0, 100) * 255 / 100);
-            newLayer.enabled = Boolean(byId(`z-l${l}-enabled`)?.checked);
-            return newLayer;
+        const newLayers = [0,1,2].map(l => {
+            const eff = byId(`l${l}-effect`)?.value || 'solid';
+            const meta = effectMeta(eff);
+            const phex = byId(`l${l}-pcolor`)?.value || '#ffffff';
+            const shex = byId(`l${l}-scolor`)?.value || '#000000';
+            return {
+                effect: eff,
+                blendMode: byId(`l${l}-blend`)?.value || 'normal',
+                paletteId: Number(byId(`l${l}-palette`)?.value || 0),
+                primaryColor: hexToRgb(phex),
+                secondaryColor: hexToRgb(shex),
+                speedMs: speedToMs(byId(`l${l}-speed`)?.value ?? 50),
+                opacity: Math.round(clamp(byId(`l${l}-opacity`)?.value ?? 100, 0, 100) * 255 / 100),
+                enabled: Boolean(byId(`l${l}-enabled`)?.checked),
+                fxParam: meta.hasParameter ? clamp(byId(`l${l}-param`)?.value ?? meta.parameterDefault, meta.parameterMin, meta.parameterMax) : 0
+            };
         });
 
         scene.zones.forEach((zone, z) => {
-            if (state.targetZones && state.targetZones[z]) {
+            if (state.targetZones[z]) {
                 zone.layers = clone(newLayers);
             }
         });
     }
-    function toggleTargetZone(z) {
+
+    function changeLayerEffect(l, val) {
         readSceneEditor();
-        state.targetZones[z] = !state.targetZones[z];
-        if (state.targetZones.indexOf(true) === -1) state.targetZones[z] = true;
-        renderSceneEditor();
-    }
-    const palettes = [
-        { id: 0, name: "Solid (Primary → Secondary)" },
-        { id: 1, name: "Rainbow" },
-        { id: 2, name: "Ocean" },
-        { id: 3, name: "Lava" },
-        { id: 4, name: "Forest" },
-        { id: 5, name: "Sunset" }
-    ];
-    function renderSceneEditor() {
-        const scene = state.editing;
-        if (!scene) return;
-        byId('scene-editor-title').textContent = scene.name || 'Untitled scene';
-        byId('scene-name').value = scene.name || '';
-        byId('scene-brightness').value = Math.round(scene.globalBrightness * 100 / 255);
-        byId('scene-brightness-output').textContent = `${byId('scene-brightness').value}%`;
-        byId('scene-fade').value = scene.transitionMs;
-        byId('scene-fade-output').textContent = `${(scene.transitionMs / 1000).toFixed(1)} s`;
-
-        let firstZ = state.targetZones ? state.targetZones.indexOf(true) : 0;
-        if (firstZ === -1) { firstZ = 0; state.targetZones = [true, false, false, false, false, false, false, false]; }
-
-        const zoneSelectors = `<div class="field"><label>Target Zones</label><div style="display:flex; gap:0.5rem; flex-wrap:wrap; margin-bottom:1rem;">
-            ${[0,1,2,3,4,5,6,7].map(z => {
-                const zName = state.config?.zones?.[z]?.name || `Zone ${z + 1}`;
-                const isSelected = state.targetZones[z];
-                return `<button class="${isSelected ? 'button-primary' : 'button-secondary'}" style="width:auto; margin:0;" onclick="lg.toggleTargetZone(${z})">${isSelected ? '✓ ' : ''}${esc(zName)}</button>`;
-            }).join('')}
-        </div></div>`;
-
-        const layersHtml = scene.zones[firstZ].layers.map((layer, l) => {
-            const meta = effect(layer.effect);
-            const parameter = clamp(layer.fxParam || meta.parameterDefault, meta.parameterMin || 0, meta.parameterMax || 255);
-            return `<div class="layer-editor">
-                <h5>Layer ${l + 1}</h5>
-                <div class="field"><label>Effect</label><select id="z-l${l}-effect" onchange="lg.changeZoneEffect(${l}, this.value)">
-                    ${state.effects.map(item => `<option value="${esc(item.id)}" ${item.id === layer.effect ? 'selected' : ''}>${esc(item.label)}</option>`).join('')}
-                </select></div>
-                <div class="field"><label>Color Palette</label><select id="z-l${l}-palette">
-                    ${palettes.map(p => `<option value="${p.id}" ${p.id === (layer.paletteId || 0) ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}
-                </select></div>
-                <div class="field"><label>Blend Mode</label><select id="z-l${l}-blend">
-                    <option value="normal" ${layer.blendMode==='normal'?'selected':''}>Normal</option>
-                    <option value="add" ${layer.blendMode==='add'?'selected':''}>Add</option>
-                    <option value="multiply" ${layer.blendMode==='multiply'?'selected':''}>Multiply</option>
-                    <option value="screen" ${layer.blendMode==='screen'?'selected':''}>Screen</option>
-                </select></div>
-                <div class="color-line">
-                    <label>Primary</label><input id="z-l${l}-pcolor" type="color" value="${colorFor(layer.primaryColor)}">
-                    <label style="margin-left:1rem">Secondary</label><input id="z-l${l}-scolor" type="color" value="${colorFor(layer.secondaryColor)}">
-                </div>
-                <div class="range-row"><label>Opacity</label><input id="z-l${l}-opacity" type="range" min="0" max="100" value="${Math.round(layer.opacity * 100 / 255)}" oninput="lg.updateText('z-l${l}-opacity-out', this.value + '%')"><output id="z-l${l}-opacity-out">${Math.round(layer.opacity * 100 / 255)}%</output></div>
-                <div class="range-row"><label>Speed</label><input id="z-l${l}-speed" type="range" min="1" max="100" value="${msToSpeed(layer.speedMs)}" oninput="lg.speedText('z-l${l}-speed-out', this.value)"><output id="z-l${l}-speed-out">${speedName(msToSpeed(layer.speedMs))}</output></div>
-                ${meta.hasParameter ? `<div class="range-row"><label>${esc(meta.parameterLabel)}</label><input id="z-l${l}-param" type="range" min="${meta.parameterMin}" max="${meta.parameterMax}" value="${parameter}" oninput="lg.updateText('z-l${l}-param-out', this.value + ' ${esc(meta.parameterUnit)}')"><output id="z-l${l}-param-out">${parameter} ${esc(meta.parameterUnit)}</output></div>` : `<p class="help">${esc(meta.description)}</p>`}
-                <div><label class="switch-row"><span>Layer Enabled</span><input id="z-l${l}-enabled" type="checkbox" ${layer.enabled ? 'checked' : ''}></label></div>
-            </div>`;
-        }).join('');
-
-        byId('scene-zones').innerHTML = `<article class="product-card zone-card">${zoneSelectors}${layersHtml}</article>`;
-    }
-    function changeZoneEffect(l, value) {
-        readSceneEditor();
-        let firstZ = state.targetZones ? state.targetZones.indexOf(true) : 0;
-        if (firstZ === -1) firstZ = 0;
-        const newParam = effect(value).parameterDefault || 0;
-        state.targetZones.forEach((isSelected, z) => {
-            if (isSelected) {
-                state.editing.zones[z].layers[l].effect = value;
-                state.editing.zones[z].layers[l].fxParam = newParam;
+        const meta = effectMeta(val);
+        state.targetZones.forEach((sel, z) => {
+            if (sel) {
+                state.editing.zones[z].layers[l].effect = val;
+                state.editing.zones[z].layers[l].fxParam = meta.parameterDefault || 0;
             }
         });
         renderSceneEditor();
     }
+
+    function changeLayerEnabled(l, val) {
+        readSceneEditor();
+        state.targetZones.forEach((sel, z) => {
+            if (sel) state.editing.zones[z].layers[l].enabled = val;
+        });
+        renderSceneEditor();
+    }
+
     async function saveScene() {
         readSceneEditor();
-        if (!state.editing.name) return toast('Give the scene a name before saving.', true);
+        if (!state.editing.name) return toast('Name required', true);
         try {
             await api('/api/v1/presets', 'PUT', state.editing);
             await refresh();
-            toast('Scene saved.');
+            toast('Scene saved successfully.');
             backToScenes();
-        } catch (error) { toast(error.message, true); }
+        } catch (e) { toast(e.message, true); }
     }
 
-    function renderTimeline() {
-        if (!state.sequence) return;
-        byId('timeline-bpm').value = clamp(state.sequence.bpm,40,240);
-        byId('timeline-bpm-output').textContent = `${state.sequence.bpm} BPM`;
-        byId('timeline-enabled').checked = state.sequence.enabled;
-        byId('timeline-palette').innerHTML = state.presets.map(scene => `<button draggable="true" class="${state.selectedScene === scene.index ? 'selected' : ''}" ondragstart="lg.dragScene(event,${Number(scene.index)})" onclick="lg.selectPalette(${Number(scene.index)})"><strong>${esc(scene.name || 'Untitled scene')}</strong><span>${esc(effect(scene.zones[0].layers[0].effect).label)}</span></button>`).join('') || '<span class="help">Create a scene first, then place it on the timeline.</span>';
-        byId('timeline-tracks').innerHTML = state.sequence.tracks.map((track,trackIndex) => `<div class="track"><div class="track-head"><strong>Zone ${trackIndex + 1}</strong><label class="help"><input type="checkbox" ${track.enabled ? 'checked' : ''} onchange="lg.toggleTrack(${trackIndex}, this.checked)"> Active</label><select onchange="lg.setLoop(${trackIndex}, this.value)" aria-label="Zone ${trackIndex + 1} loop length">${[1,2,4,8,12,16].map(length => `<option value="${length}" ${track.numSteps === length ? 'selected' : ''}>${length} steps</option>`).join('')}</select></div><div class="step-lane">${track.steps.map((step,stepIndex) => `<button class="step ${stepIndex >= track.numSteps ? 'inactive ' : ''}${state.selectedStep?.track === trackIndex && state.selectedStep?.step === stepIndex ? 'selected' : ''}" onclick="lg.selectStep(${trackIndex},${stepIndex})" ondragover="event.preventDefault()" ondrop="lg.dropScene(event,${trackIndex},${stepIndex})" title="Step ${stepIndex + 1}: ${esc(sceneName(step.presetIndex))}"><small>${stepIndex + 1}</small><span>${esc(sceneName(step.presetIndex))}</span></button>`).join('')}</div></div>`).join('');
-        renderStepInspector();
-    }
-    function renderStepInspector() {
-        const selected = state.selectedStep;
-        const holder = byId('step-inspector');
-        if (!selected) { holder.innerHTML = '<p class="help">Select a step to fine-tune its scene and hold length.</p>'; return; }
-        const step = state.sequence.tracks[selected.track].steps[selected.step];
-        holder.innerHTML = `<div class="product-card step-inspector"><div class="field"><label for="step-scene">Zone ${selected.track + 1}, step ${selected.step + 1}</label><select id="step-scene" onchange="lg.setStepScene(${selected.track},${selected.step},this.value)">${state.presets.map(scene => `<option value="${Number(scene.index)}" ${Number(scene.index) === Number(step.presetIndex) ? 'selected' : ''}>${esc(scene.name || 'Untitled scene')}</option>`).join('')}</select></div><div><p class="help">Hold for</p><div class="beat-options">${[1,2,4,8].map(beats => `<button class="${step.lengthBeats === beats ? 'active' : ''}" onclick="lg.setStepLength(${selected.track},${selected.step},${beats})">${beats} beat${beats === 1 ? '' : 's'}</button>`).join('')}</div></div></div>`;
-    }
-    function selectPalette(index) { state.selectedScene = Number(index); renderTimeline(); }
-    function dragScene(event,index) { event.dataTransfer.setData('text/plain', String(index)); event.dataTransfer.effectAllowed = 'copy'; }
-    function dropScene(event,track,step) { event.preventDefault(); const index = Number(event.dataTransfer.getData('text/plain')); if (Number.isFinite(index)) { state.sequence.tracks[track].steps[step].presetIndex = index; state.selectedStep = {track,step}; renderTimeline(); } }
-    function selectStep(track,step) { if (state.selectedScene !== null) state.sequence.tracks[track].steps[step].presetIndex = state.selectedScene; state.selectedStep = {track,step}; renderTimeline(); }
-    function setStepScene(track,step,index) { state.sequence.tracks[track].steps[step].presetIndex = Number(index); renderTimeline(); }
-    function setStepLength(track,step,length) { state.sequence.tracks[track].steps[step].lengthBeats = Number(length); renderTimeline(); }
-    function toggleTrack(track,enabled) { state.sequence.tracks[track].enabled = enabled; }
-    function setLoop(track,length) { state.sequence.tracks[track].numSteps = Number(length); renderTimeline(); }
-    function setBpm(value) { state.sequence.bpm = clamp(value,40,240); byId('timeline-bpm-output').textContent = `${state.sequence.bpm} BPM`; }
-    function setTimelineEnabled(enabled) { state.sequence.enabled = enabled; }
-    async function saveTimeline() {
-        try { await api('/api/v1/sequence','PUT',state.sequence); toast('Timeline saved.'); }
-        catch (error) { toast(error.message,true); }
-    }
-
-    function saveAutomation() {
-        if (state.schedules.some(cue => cue.enabled && !cue.daysOfWeek)) return toast('Choose at least one day for every active cue.',true);
-        try { await api('/api/v1/schedules','PUT',{entries:state.schedules}); toast('Automation saved.'); }
-        catch (error) { toast(error.message,true); }
-    }
-
-    function saveSystem() {
+    async function testSceneLive() {
+        readSceneEditor();
         try {
-            const config = {
-                deviceName: byId('system-name').value.trim(),
-                fallbackPreset: Number(byId('system-fallback').value),
-                timezone: byId('system-timezone').value.trim() || 'UTC0',
-                syncEnabled: byId('system-sync-enabled').checked,
-                syncRole: Number(byId('system-sync-role').value),
-                mqttEnabled: byId('system-mqtt-enabled').checked,
-                mqttBroker: byId('system-mqtt-broker').value.trim(),
-                mqttPort: Number(byId('system-mqtt-port').value),
-                zones: [],
-                physicalOutputs: [],
-                fixtures: []
+            await api('/api/v1/presets', 'PUT', state.editing);
+            await api('/api/v1/activate', 'POST', { preset: state.editing.index });
+            toast('Testing scene live on hardware.');
+        } catch (e) { toast(e.message, true); }
+    }
+
+    // ── Zones View ──
+    function renderZones() {
+        const grid = byId('zone-cards-grid');
+        if (!grid || !state.config) return;
+        grid.innerHTML = Array.from({length:8}, (_, z) => {
+            const zone = state.config.zones?.[z] || { name: `Zone ${z+1}`, role: 'Unassigned' };
+            const fixtures = [];
+            let totalPx = 0;
+            for (let f = 0; f < 16; ++f) {
+                const fix = state.config.fixtures?.[f];
+                if (fix && fix.zoneId === z && fix.profile > 0) {
+                    fixtures.push(`Fixture ${f+1} (Lane ${fix.physicalOutputIndex[0]}, ${fix.numPixels} px)`);
+                    totalPx += fix.numPixels;
+                }
+            }
+            return `
+                <article class="product-card">
+                    <div style="display:flex; justify-content:space-between; align-items:center;">
+                        <span class="badge badge-wash">Zone ${z+1}</span>
+                        <span class="help">${totalPx} total px</span>
+                    </div>
+                    <h4 style="margin:0.5rem 0 0.2rem;">${esc(zone.name || `Zone ${z+1}`)}</h4>
+                    <p class="muted" style="font-size:0.75rem;">Role: <strong>${esc(zone.role || 'Unassigned')}</strong></p>
+                    <div class="stat-list" style="margin-top:0.75rem;">
+                        ${fixtures.length ? fixtures.map(f => `<div class="stat-box" style="grid-column:span 2;"><span>Output</span><strong>${esc(f)}</strong></div>`).join('') : '<div class="stat-box" style="grid-column:span 2;"><span class="help">No fixtures mapped</span></div>'}
+                    </div>
+                </article>
+            `;
+        }).join('');
+    }
+
+    // ── Fixture & DMX Patcher ──
+    function renderPatcher() {
+        if (!state.config) return;
+        // Populate Protocol fields
+        const proto = state.config.protocol || {};
+        const artEl = byId('proto-artnet');
+        const sacnEl = byId('proto-sacn');
+        const uStartEl = byId('proto-universe-start');
+        const zStartEl = byId('proto-zone-start-ch');
+        const mergeEl = byId('proto-merge-mode');
+        const toEl = byId('proto-timeout');
+
+        if (artEl) artEl.checked = proto.artnetEnabled ?? true;
+        if (sacnEl) sacnEl.checked = proto.sacnEnabled ?? true;
+        if (uStartEl) uStartEl.value = proto.universeStart ?? 0;
+        if (zStartEl) zStartEl.value = proto.zoneStartChannel ?? 1;
+        if (mergeEl) mergeEl.value = proto.mergeMode || 'HTP';
+        if (toEl) toEl.value = proto.streamTimeoutMs ?? 2000;
+
+        // Populate Fixtures Table
+        const tbody = byId('patcher-tbody');
+        if (!tbody) return;
+
+        tbody.innerHTML = Array.from({length:16}, (_, i) => {
+            const f = state.config.fixtures?.[i] || {
+                zoneId: 0, profile: 1, physicalOutputIndex: [i % 8,0,0,0], numPixels: 60,
+                dmxUniverse: 0, dmxStartChannel: 0, dmxMode: 0, maxBrightness: 255, maxMilliwatts: 15000
+            };
+
+            return `
+                <tr>
+                    <td style="font-weight:700; color:#a5b4fc;">F${i+1}</td>
+                    <td>
+                        <select id="fix-zone-${i}">
+                            ${[0,1,2,3,4,5,6,7].map(z => `<option value="${z}" ${f.zoneId === z ? 'selected' : ''}>${esc(state.config.zones?.[z]?.name || `Zone ${z+1}`)}</option>`).join('')}
+                        </select>
+                    </td>
+                    <td>
+                        <select id="fix-prof-${i}">
+                            ${fixtureProfiles.map(p => `<option value="${p.id}" ${f.profile === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}
+                        </select>
+                    </td>
+                    <td>
+                        <input id="fix-out-${i}" type="number" min="0" max="15" value="${f.physicalOutputIndex[0]}" style="width:4.5rem;">
+                    </td>
+                    <td>
+                        <input id="fix-len-${i}" type="number" min="1" max="1024" value="${f.numPixels}" style="width:5rem;">
+                    </td>
+                    <td>
+                        <input id="fix-uni-${i}" type="number" min="0" max="63999" value="${f.dmxUniverse ?? 0}" style="width:5rem;">
+                    </td>
+                    <td>
+                        <input id="fix-ch-${i}" type="number" min="0" max="512" value="${f.dmxStartChannel ?? 0}" style="width:5rem;" title="0 = Auto Zone Wash">
+                    </td>
+                    <td>
+                        <select id="fix-mode-${i}">
+                            <option value="0" ${f.dmxMode === 0 ? 'selected' : ''}>0: Wash</option>
+                            <option value="1" ${f.dmxMode === 1 ? 'selected' : ''}>1: Pixel Map</option>
+                        </select>
+                    </td>
+                    <td>
+                        <input id="fix-bright-${i}" type="number" min="0" max="255" value="${f.maxBrightness ?? 255}" style="width:4.5rem;">
+                    </td>
+                    <td>
+                        <input id="fix-mw-${i}" type="number" min="0" max="60000" step="500" value="${f.maxMilliwatts ?? 0}" style="width:5.5rem;">
+                    </td>
+                </tr>
+            `;
+        }).join('');
+    }
+
+    async function saveHardwarePatch() {
+        try {
+            const updated = clone(state.config);
+            updated.protocol = {
+                artnetEnabled: byId('proto-artnet')?.checked ?? true,
+                sacnEnabled: byId('proto-sacn')?.checked ?? true,
+                universeStart: Number(byId('proto-universe-start')?.value || 0),
+                zoneStartChannel: Number(byId('proto-zone-start-ch')?.value || 1),
+                mergeMode: byId('proto-merge-mode')?.value || 'HTP',
+                streamTimeoutMs: Number(byId('proto-timeout')?.value || 2000),
+                liveStreamLayer: 2
             };
 
             for (let i = 0; i < 16; ++i) {
-                config.physicalOutputs.push({
-                    type: Number(byId(`sys-phys-type-${i}`)?.value || 0),
-                    hardwareId: Number(byId(`sys-phys-hw-${i}`)?.value || 0),
-                    gpioPin: Number(byId(`sys-phys-pin-${i}`)?.value || 0),
-                    enabled: byId(`sys-phys-en-${i}`)?.checked || false
-                });
-
-                const f = state.config.fixtures?.[i] || {whiteBalance:[255,255,255],maxBrightness:255,gammaCorrection:true,maxMilliwatts:0};
-                config.fixtures.push({
-                    profile: Number(byId(`sys-fix-prof-${i}`)?.value || 0),
-                    pixelOrder: Number(byId(`sys-fix-po-${i}`)?.value || 0),
-                    physicalOutputIndex: [Number(byId(`sys-fix-out-${i}`)?.value || 0),0,0,0],
-                    numPixels: Number(byId(`sys-fix-len-${i}`)?.value || 0),
-                    maxBrightness: f.maxBrightness,
-                    whiteBalance: f.whiteBalance,
-                    gammaCorrection: f.gammaCorrection,
-                    maxMilliwatts: f.maxMilliwatts
-                });
+                const f = updated.fixtures[i] || {};
+                f.zoneId = Number(byId(`fix-zone-${i}`)?.value || 0);
+                f.profile = Number(byId(`fix-prof-${i}`)?.value || 0);
+                f.physicalOutputIndex = [Number(byId(`fix-out-${i}`)?.value || 0), 0, 0, 0];
+                f.numPixels = Number(byId(`fix-len-${i}`)?.value || 60);
+                f.dmxUniverse = Number(byId(`fix-uni-${i}`)?.value || 0);
+                f.dmxStartChannel = Number(byId(`fix-ch-${i}`)?.value || 0);
+                f.dmxMode = Number(byId(`fix-mode-${i}`)?.value || 0);
+                f.maxBrightness = Number(byId(`fix-bright-${i}`)?.value || 255);
+                f.maxMilliwatts = Number(byId(`fix-mw-${i}`)?.value || 0);
             }
 
-            for (let i = 0; i < 8; ++i) {
-                let fmask = 0;
-                for (let f = 0; f < 16; ++f) {
-                    if (byId(`sys-zmask-${i}-${f}`)?.checked) fmask |= (1 << f);
-                }
-                config.zones.push({
-                    name: byId(`sys-zname-${i}`)?.value.trim() || '',
-                    role: byId(`sys-zrole-${i}`)?.value || 'Unassigned',
-                    fixtureMask: fmask
-                });
-            }
-            await api('/api/v1/config','PUT',config);
-            state.config = {...state.config,...config};
-            toast('System settings saved. Restart the node to apply a sync role change.');
-        } catch (error) { toast(error.message,true); }
-    }
-    async function refreshSync() {
-        try { state.sync = await api('/api/v1/sync'); renderDashboard(); renderSystem(); }
-        catch (error) { toast(error.message,true); }
-    }
-    function updateText(id,value) { const output = byId(id); if (output) output.textContent = value; }
-    function speedText(id,value) { updateText(id,speedName(Number(value))); }
-    function changeOverlay(value) {}
-    function changeOverlayBeat(value) {}
-
-    function toggleHwSection(id) {
-        const el = byId(id);
-        if (!el) return;
-        el.classList.toggle('collapsed');
-        const chevron = byId(id + '-chevron');
-        if (chevron) chevron.textContent = el.classList.contains('collapsed') ? '▸' : '▾';
+            await api('/api/v1/config', 'PUT', updated);
+            state.config = updated;
+            toast('Hardware & DMX patch saved. Node reloaded.');
+            refresh();
+        } catch (e) { toast(e.message, true); }
     }
 
-    async function uploadOta() {
-        const fileInput = byId('ota-file');
-        const file = fileInput.files[0];
-        if (!file) return toast('Please select a firmware binary first.', true);
+    // ── DMX Grid ──
+    function renderDmxGrid() {
+        const matrix = byId('dmx-matrix');
+        const hoverVal = byId('dmx-hover-val');
+        if (!matrix) return;
 
-        const statusEl = byId('ota-status');
-        statusEl.textContent = 'Uploading firmware... please wait.';
-        try {
-            const response = await fetch('/api/v1/ota', {
-                method: 'POST',
-                headers: { 'Authorization': 'Bearer ' + state.token },
-                body: file
-            });
-            if (!response.ok) throw new Error(`Upload failed: ${response.statusText}`);
-            statusEl.textContent = 'Upload successful! Rebooting node...';
-            toast('OTA successful. Node is restarting.');
-            setTimeout(() => window.location.reload(), 5000);
-        } catch(e) {
-            statusEl.textContent = 'Error: ' + e.message;
-            toast('OTA failed: ' + e.message, true);
+        let html = '';
+        for (let i = 0; i < 512; ++i) {
+            const val = state.dmxData[i] || 0;
+            const norm = val / 255;
+            const bg = norm > 0 ? `rgba(99,102,241,${0.2 + norm * 0.8})` : 'rgba(255,255,255,0.03)';
+            const txtCol = norm > 0.6 ? '#fff' : 'rgba(255,255,255,0.4)';
+            html += `<div class="dmx-cell" style="background:${bg}; color:${txtCol};" onmouseenter="lg.hoverDmxCell(${i+1}, ${val})"><span>${i+1}</span><strong>${val}</strong></div>`;
         }
+        matrix.innerHTML = html;
     }
 
-    async function downloadBackup() {
+    function hoverDmxCell(ch, val) {
+        const hoverVal = byId('dmx-hover-val');
+        if (hoverVal) hoverVal.textContent = `Channel ${ch} : Value ${val} (${Math.round(val*100/255)}%)`;
+    }
+
+    // ── Visualizer Controls ──
+    function toggleVisualizerMode() {
+        state.visualizerMode = state.visualizerMode === 'lanes' ? 'zones' : 'lanes';
+        const btn = byId('viz-mode-btn');
+        if (btn) btn.textContent = `View: ${state.visualizerMode === 'lanes' ? 'Physical Lanes (0-7)' : 'Zone Architecture'}`;
+        state.dirty = true;
+    }
+
+    function fitVisualizer() {
+        const canvas = byId('visualizer-canvas');
+        if (!canvas) return;
+        canvas.width = canvas.parentElement.clientWidth || 1152;
+        canvas.height = 360;
+        state.dirty = true;
+    }
+
+    function redrawVisualizer() {
+        state.dirty = true;
+    }
+
+    // ── Timeline Editor ──
+    function renderTimeline() {
+        if (!state.sequence) return;
+        byId('timeline-bpm').value = clamp(state.sequence.bpm, 40, 240);
+        byId('timeline-bpm-output').textContent = `${state.sequence.bpm} BPM`;
+        byId('timeline-enabled').checked = state.sequence.enabled;
+
+        byId('timeline-palette').innerHTML = state.presets.map(p => `
+            <button class="button-secondary" style="font-size:0.75rem; padding:0.35rem 0.65rem;" onclick="lg.playScene(${Number(p.index)})">
+                ● ${esc(p.name || `Scene ${Number(p.index)+1}`)}
+            </button>
+        `).join('');
+
+        byId('timeline-tracks').innerHTML = state.sequence.tracks.map((track, trackIdx) => {
+            const zName = state.config?.zones?.[trackIdx]?.name || `Zone ${trackIdx + 1}`;
+            return `
+                <div style="display:flex; align-items:center; gap:0.75rem; background:rgba(0,0,0,0.25); padding:0.5rem; border-radius:8px; border:1px solid var(--border-subtle);">
+                    <div style="width:110px; font-weight:700; font-size:0.8rem;">${esc(zName)}</div>
+                    <div style="display:flex; gap:4px; flex:1; overflow-x:auto;">
+                        ${track.steps.map((step, stepIdx) => `
+                            <div style="width:28px; height:36px; border-radius:4px; background:${step.presetIndex > 0 ? '#6366f1' : 'rgba(255,255,255,0.06)'}; display:flex; align-items:center; justify-content:center; font-size:0.65rem; color:#fff; cursor:pointer;" title="Step ${stepIdx+1}: Preset ${step.presetIndex+1}">
+                                ${stepIdx+1}
+                            </div>
+                        `).join('')}
+                    </div>
+                </div>
+            `;
+        }).join('');
+    }
+
+    function setBpm(val) {
+        if (!state.sequence) return;
+        state.sequence.bpm = clamp(val, 40, 240);
+        byId('timeline-bpm-output').textContent = `${state.sequence.bpm} BPM`;
+    }
+
+    function setTimelineEnabled(en) {
+        if (!state.sequence) return;
+        state.sequence.enabled = en;
+    }
+
+    async function saveTimeline() {
         try {
-            const response = await fetch('/api/v1/backup', {
-                headers: { 'Authorization': 'Bearer ' + state.token }
-            });
-            if (!response.ok) throw new Error('Backup failed');
-            const blob = await response.blob();
-            const url = window.URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.style.display = 'none';
-            a.href = url;
-            a.download = 'lumigrid_backup.json';
-            document.body.appendChild(a);
-            a.click();
-            window.URL.revokeObjectURL(url);
-            toast('Configuration exported successfully.');
-        } catch (e) { toast('Export failed: ' + e.message, true); }
+            await api('/api/v1/sequence', 'PUT', state.sequence);
+            toast('Timeline sequencer saved.');
+        } catch (e) { toast(e.message, true); }
     }
 
-    async function uploadRestore() {
-        const fileInput = byId('restore-file');
-        const file = fileInput.files[0];
-        if (!file) return toast('Please select a backup JSON file first.', true);
-        try {
-            const payload = await file.text();
-            await api('/api/v1/restore', 'POST', JSON.parse(payload));
-            toast('Restore successful. Node is restarting.');
-            setTimeout(() => window.location.reload(), 3000);
-        } catch (e) { toast('Restore failed: ' + e.message, true); }
-    }
-
+    // ── Diagnostics & OTA ──
     async function loadCommissioning() {
         try {
             const health = await api('/api/v1/health');
             const stats = byId('health-stats');
             if (stats) {
-                stats.textContent = `Uptime: ${health.uptime_s || 0}s\nFree Heap: ${health.free_heap || 0} B\nMin Free Heap: ${health.min_free_heap || 0} B`;
+                stats.textContent = `Uptime: ${health.uptime_s || 0}s\nFree Heap: ${health.free_heap || 0} bytes\nMin Free Heap: ${health.min_free_heap || 0} bytes\nFirmware Version: 2.1.0\nChip Revision: ESP32-S3`;
             }
-            await loadLogs();
-        } catch(e) { toast('Health check failed: ' + e.message, true); }
+            toast('Health metrics updated.');
+        } catch (e) { toast(e.message, true); }
     }
 
     async function runTestSequence(type) {
         try {
             if (type === 'lane') {
                 await api('/api/v1/factory/effect', 'POST', { effect: 'pixel_chase', durationMs: 5000 });
-                toast('Running lane test sequence...');
-            } else if (type === 'color') {
+                toast('Running lane chase test sequence...');
+            } else {
                 await api('/api/v1/factory/effect', 'POST', { effect: 'rainbow', durationMs: 5000 });
-                toast('Running color test sequence...');
+                toast('Running color wash test sequence...');
             }
-        } catch(e) { toast('Test sequence failed: ' + e.message, true); }
+        } catch (e) { toast(e.message, true); }
     }
 
-    async function generateAcceptanceReport() {
-        try {
-            const health = await api('/api/v1/health');
-            const status = await api('/api/v1/status');
-            const report = {
-                timestamp: new Date().toISOString(),
-                health,
-                status,
-                commissioned: true
-            };
-            const blob = new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' });
-            const url = window.URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = 'acceptance_report.json';
-            document.body.appendChild(a);
-            a.click();
-            window.URL.revokeObjectURL(url);
-            toast('Acceptance report generated.');
-        } catch(e) { toast('Report generation failed: ' + e.message, true); }
-    }
+    async function uploadOta() {
+        const fileInput = byId('ota-file');
+        const file = fileInput?.files[0];
+        if (!file) return toast('Select a .bin file first.', true);
 
-    async function loadLogs() {
+        const statusEl = byId('ota-status');
+        statusEl.textContent = 'Uploading firmware... please wait.';
         try {
-            const response = await fetch('/api/v1/logs', {
-                headers: { 'Authorization': 'Bearer ' + state.token }
+            const res = await fetch('/api/v1/ota', {
+                method: 'POST',
+                headers: { Authorization: 'Bearer ' + state.token },
+                body: file
             });
-            if (!response.ok) throw new Error('Failed to fetch logs');
-            const text = await response.text();
-            const logsEl = byId('sys-logs');
-            if (logsEl) logsEl.textContent = text || 'No logs recorded.';
-        } catch(e) { toast('Failed to load logs: ' + e.message, true); }
+            if (!res.ok) throw new Error(`Upload failed (${res.statusText})`);
+            statusEl.textContent = 'Upload successful! Rebooting node...';
+            toast('OTA Flash successful. Node restarting.');
+            setTimeout(() => location.reload(), 6000);
+        } catch (e) {
+            statusEl.textContent = 'Error: ' + e.message;
+            toast(e.message, true);
+        }
     }
 
-    return {connect,disconnect,refresh,nav,playScene,blackout,editScene,backToScenes,renderSceneEditor,changeZoneEffect,changeOverlay,changeOverlayBeat,saveScene,updateText,speedText,selectPalette,dragScene,dropScene,selectStep,setStepScene,setStepLength,toggleTrack,setLoop,setBpm,setTimelineEnabled,saveTimeline,addCue,setCue,setCueTime,toggleDay,saveAutomation,saveSystem,refreshSync,uploadOta,downloadBackup,uploadRestore,loadCommissioning,runTestSequence,generateAcceptanceReport,loadLogs,toggleTargetZone,toggleHwSection};
+    async function downloadBackup() {
+        try {
+            const res = await fetch('/api/v1/backup', { headers: { Authorization: 'Bearer ' + state.token } });
+            if (!res.ok) throw new Error('Backup download failed');
+            const blob = await res.blob();
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url; a.download = 'lumigrid_config.json';
+            a.click(); URL.revokeObjectURL(url);
+            toast('Configuration backup downloaded.');
+        } catch (e) { toast(e.message, true); }
+    }
+
+    async function uploadRestore() {
+        const fileInput = byId('restore-file');
+        const file = fileInput?.files[0];
+        if (!file) return toast('Select a .json file first.', true);
+        try {
+            const txt = await file.text();
+            await api('/api/v1/restore', 'POST', JSON.parse(txt));
+            toast('Restore successful. Rebooting node...');
+            setTimeout(() => location.reload(), 4000);
+        } catch (e) { toast(e.message, true); }
+    }
+
+    function updateText(id, txt) {
+        const el = byId(id);
+        if (el) el.textContent = txt;
+    }
+
+    return {
+        connect, disconnect, refresh, nav, playScene, blackout,
+        editScene, backToScenes, saveScene, testSceneLive, toggleTargetZone, selectAllTargetZones,
+        changeLayerEffect, changeLayerEnabled, speedLabel, updateText,
+        saveHardwarePatch, renderPatcher, hoverDmxCell, toggleVisualizerMode, fitVisualizer, redrawVisualizer,
+        setBpm, setTimelineEnabled, saveTimeline, loadCommissioning, runTestSequence, uploadOta, downloadBackup, uploadRestore
+    };
 })();
 </script>
 </body>

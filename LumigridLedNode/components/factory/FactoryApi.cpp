@@ -373,6 +373,10 @@ esp_err_t post_abort(httpd_req_t* request) {
         return send_error(request, "409 Conflict", "command_queue_full");
     }
 
+    if (api_ptr->signage()) {
+        api_ptr->signage()->acquire_control(ControlSource::EStop, 0);
+    }
+
     return send_json(request, R"({"accepted":true,"action":"blackout"})");
 }
 
@@ -444,13 +448,26 @@ esp_err_t get_health(httpd_req_t* request) {
     
     float fps = 0.0f;
     uint16_t active_preset = 0;
+    uint32_t clipping_events = 0;
+    uint32_t current_power_mw = 0;
+    bool watchdog_fallback = false;
+    int control_source = 0;
     if (api_ptr->signage()) {
         fps = api_ptr->signage()->get_fps();
         active_preset = api_ptr->signage()->active_scene_index();
+        clipping_events = api_ptr->signage()->power_budget().throttling_events();
+        current_power_mw = api_ptr->signage()->power_budget().current_power_mw();
+        watchdog_fallback = api_ptr->signage()->is_fallback_active();
+        control_source = static_cast<int>(api_ptr->signage()->current_control_source());
+    }
+
+    uint32_t packet_loss = 0;
+    if (api_ptr->node_sync()) {
+        packet_loss = api_ptr->node_sync()->status().packets_missed;
     }
 
     snprintf(body, sizeof(body),
-        "{\"uptime_s\":%lu,\"free_heap\":%lu,\"min_free_heap\":%lu,\"reset_reason\":%d,\"wifi_rssi\":%d,\"nvs_used\":%d,\"nvs_free\":%d,\"fps\":%.1f,\"active_preset\":%u,\"packet_loss_count\":0,\"clipping_events\":0,\"wifi_disconnects\":0}",
+        "{\"uptime_s\":%lu,\"free_heap\":%lu,\"min_free_heap\":%lu,\"reset_reason\":%d,\"wifi_rssi\":%d,\"nvs_used\":%d,\"nvs_free\":%d,\"fps\":%.1f,\"active_preset\":%u,\"packet_loss_count\":%lu,\"clipping_events\":%lu,\"current_power_mw\":%lu,\"control_source\":%d,\"watchdog_fallback\":%s,\"wifi_disconnects\":0}",
         (unsigned long)(esp_timer_get_time() / 1000000ULL),
         (unsigned long)esp_get_free_heap_size(),
         (unsigned long)esp_get_minimum_free_heap_size(),
@@ -459,7 +476,12 @@ esp_err_t get_health(httpd_req_t* request) {
         (int)nvs_stats.used_entries,
         (int)nvs_stats.free_entries,
         fps,
-        active_preset);
+        active_preset,
+        (unsigned long)packet_loss,
+        (unsigned long)clipping_events,
+        (unsigned long)current_power_mw,
+        control_source,
+        watchdog_fallback ? "true" : "false");
 
     return send_json(request, body);
 }
@@ -736,9 +758,14 @@ esp_err_t post_activate(httpd_req_t* request) {
         cJSON_Delete(root);
         return send_error(request, "400 Bad Request", "missing_preset_index");
     }
+
+    uint32_t duration_ms = 60000;
+    json_u32(root, "durationMs", 0, 86400000, duration_ms);
     cJSON_Delete(root);
 
     api_ptr->signage()->feed_watchdog();
+    api_ptr->signage()->release_control(ControlSource::EStop);
+    api_ptr->signage()->acquire_control(ControlSource::ManualOverride, duration_ms);
     api_ptr->signage()->activate_scene(index);
 
     return send_json(request, R"({"activated":true})", "202 Accepted");
@@ -779,7 +806,6 @@ esp_err_t get_device_config(httpd_req_t* request) {
         cJSON* z = cJSON_CreateObject();
         cJSON_AddStringToObject(z, "name", cfg.zones[i].name);
         cJSON_AddStringToObject(z, "role", zone_role_name(cfg.zones[i].role));
-        cJSON_AddNumberToObject(z, "fixtureMask", cfg.zones[i].fixture_mask);
         cJSON_AddItemToArray(zones, z);
     }
     cJSON_AddItemToObject(response, "zones", zones);
@@ -810,9 +836,23 @@ esp_err_t get_device_config(httpd_req_t* request) {
         cJSON_AddItemToObject(f, "whiteBalance", wb);
         cJSON_AddBoolToObject(f, "gammaCorrection", cfg.fixtures[i].gamma_correction);
         cJSON_AddNumberToObject(f, "maxMilliwatts", cfg.fixtures[i].max_milliwatts);
+        cJSON_AddNumberToObject(f, "zoneId", cfg.fixtures[i].zone_id);
+        cJSON_AddNumberToObject(f, "dmxUniverse", cfg.fixtures[i].dmx_universe);
+        cJSON_AddNumberToObject(f, "dmxStartChannel", cfg.fixtures[i].dmx_start_channel);
+        cJSON_AddNumberToObject(f, "dmxMode", cfg.fixtures[i].dmx_mode);
         cJSON_AddItemToArray(fixt, f);
     }
     cJSON_AddItemToObject(response, "fixtures", fixt);
+
+    cJSON* prot_json = cJSON_CreateObject();
+    cJSON_AddBoolToObject(prot_json, "artnetEnabled", cfg.protocol.artnet_enabled);
+    cJSON_AddBoolToObject(prot_json, "sacnEnabled", cfg.protocol.sacn_enabled);
+    cJSON_AddNumberToObject(prot_json, "universeStart", cfg.protocol.universe_start);
+    cJSON_AddStringToObject(prot_json, "mergeMode", cfg.protocol.merge_mode == MergeMode::HTP ? "HTP" : "LTP");
+    cJSON_AddNumberToObject(prot_json, "streamTimeoutMs", cfg.protocol.stream_timeout_ms);
+    cJSON_AddNumberToObject(prot_json, "liveStreamLayer", cfg.protocol.live_stream_layer);
+    cJSON_AddNumberToObject(prot_json, "zoneStartChannel", cfg.protocol.zone_start_channel);
+    cJSON_AddItemToObject(response, "protocol", prot_json);
 
     char* json = cJSON_PrintUnformatted(response);
     cJSON_Delete(response);
@@ -948,10 +988,6 @@ esp_err_t put_device_config(httpd_req_t* request) {
                     return send_error(request, "400 Bad Request", "invalid_field_zones_role");
                 }
             }
-            const cJSON* z_fm = cJSON_GetObjectItemCaseSensitive(z_item, "fixtureMask");
-            if (z_fm && cJSON_IsNumber(z_fm)) {
-                cfg.zones[z_idx].fixture_mask = static_cast<uint32_t>(z_fm->valueint);
-            }
             ++z_idx;
         }
     }
@@ -1024,8 +1060,47 @@ esp_err_t put_device_config(httpd_req_t* request) {
             const cJSON* f_mm = cJSON_GetObjectItemCaseSensitive(f_item, "maxMilliwatts");
             if (f_mm && cJSON_IsNumber(f_mm)) cfg.fixtures[f_idx].max_milliwatts = static_cast<uint16_t>(f_mm->valueint);
             
+            const cJSON* f_zi = cJSON_GetObjectItemCaseSensitive(f_item, "zoneId");
+            if (f_zi && cJSON_IsNumber(f_zi)) cfg.fixtures[f_idx].zone_id = static_cast<uint8_t>(f_zi->valueint);
+
+            const cJSON* f_du = cJSON_GetObjectItemCaseSensitive(f_item, "dmxUniverse");
+            if (f_du && cJSON_IsNumber(f_du)) cfg.fixtures[f_idx].dmx_universe = static_cast<uint16_t>(f_du->valueint);
+
+            const cJSON* f_dc = cJSON_GetObjectItemCaseSensitive(f_item, "dmxStartChannel");
+            if (f_dc && cJSON_IsNumber(f_dc)) cfg.fixtures[f_idx].dmx_start_channel = static_cast<uint16_t>(f_dc->valueint);
+
+            const cJSON* f_dm = cJSON_GetObjectItemCaseSensitive(f_item, "dmxMode");
+            if (f_dm && cJSON_IsNumber(f_dm)) cfg.fixtures[f_idx].dmx_mode = static_cast<uint8_t>(f_dm->valueint);
+            
             ++f_idx;
         }
+    }
+
+    const cJSON* prot = cJSON_GetObjectItemCaseSensitive(root, "protocol");
+    if (prot && cJSON_IsObject(prot)) {
+        const cJSON* item = cJSON_GetObjectItemCaseSensitive(prot, "artnetEnabled");
+        if (item && cJSON_IsBool(item)) cfg.protocol.artnet_enabled = cJSON_IsTrue(item);
+
+        item = cJSON_GetObjectItemCaseSensitive(prot, "sacnEnabled");
+        if (item && cJSON_IsBool(item)) cfg.protocol.sacn_enabled = cJSON_IsTrue(item);
+
+        item = cJSON_GetObjectItemCaseSensitive(prot, "universeStart");
+        if (item && cJSON_IsNumber(item)) cfg.protocol.universe_start = static_cast<uint16_t>(item->valueint);
+
+        item = cJSON_GetObjectItemCaseSensitive(prot, "mergeMode");
+        if (item && cJSON_IsString(item)) {
+            if (strcmp(item->valuestring, "LTP") == 0) cfg.protocol.merge_mode = MergeMode::LTP;
+            else cfg.protocol.merge_mode = MergeMode::HTP;
+        }
+
+        item = cJSON_GetObjectItemCaseSensitive(prot, "streamTimeoutMs");
+        if (item && cJSON_IsNumber(item)) cfg.protocol.stream_timeout_ms = static_cast<uint16_t>(item->valueint);
+
+        item = cJSON_GetObjectItemCaseSensitive(prot, "liveStreamLayer");
+        if (item && cJSON_IsNumber(item)) cfg.protocol.live_stream_layer = static_cast<uint8_t>(item->valueint);
+
+        item = cJSON_GetObjectItemCaseSensitive(prot, "zoneStartChannel");
+        if (item && cJSON_IsNumber(item)) cfg.protocol.zone_start_channel = static_cast<uint16_t>(item->valueint);
     }
 #undef VALIDATE_U8
 #undef VALIDATE_U16
@@ -1035,6 +1110,10 @@ esp_err_t put_device_config(httpd_req_t* request) {
 
     if (api_ptr->config()->save_config(cfg) != ESP_OK) {
         return send_error(request, "500 Internal Server Error", "nvs_write_failed");
+    }
+
+    if (api_ptr->signage()) {
+        api_ptr->signage()->reload_device_config();
     }
     
     api::AuditLog::instance().log(api::ApiRole::Admin, "device_config", "Config updated");
@@ -1515,7 +1594,6 @@ esp_err_t get_backup(httpd_req_t* request) {
         cJSON* zj = cJSON_CreateObject();
         cJSON_AddStringToObject(zj, "name", cfg.zones[z].name);
         cJSON_AddStringToObject(zj, "role", zone_role_name(cfg.zones[z].role));
-        cJSON_AddNumberToObject(zj, "fixtureMask", cfg.zones[z].fixture_mask);
         cJSON_AddItemToArray(zones_arr, zj);
     }
     cJSON_AddItemToObject(cfg_json, "zones", zones_arr);
@@ -1649,7 +1727,6 @@ esp_err_t post_restore(httpd_req_t* request) {
                 if (z_idx >= 8) break;
                 item = cJSON_GetObjectItem(zj, "name"); if (item && item->valuestring) strncpy(cfg.zones[z_idx].name, item->valuestring, sizeof(cfg.zones[z_idx].name));
                 item = cJSON_GetObjectItem(zj, "role"); if (item && item->valuestring) parse_zone_role(item->valuestring, cfg.zones[z_idx].role);
-                item = cJSON_GetObjectItem(zj, "fixtureMask"); if (item) cfg.zones[z_idx].fixture_mask = item->valueint;
                 z_idx++;
             }
         }

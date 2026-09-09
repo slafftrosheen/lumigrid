@@ -2,10 +2,13 @@ idf_component_register(
     SRCS
         "ArtnetDiscovery.cpp"
         "SacnReceiver.cpp"
+        "DmxRouter.cpp"
     INCLUDE_DIRS
         "include"
     REQUIRES
         lwip
         esp_netif
         factory
+        signage
+        config
 )

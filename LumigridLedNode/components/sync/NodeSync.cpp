@@ -224,7 +224,9 @@ NodeRole NodeSync::master_loop(int socket, bool auto_mode) {
             packet.sequence = sequence++;
             packet.bpm = sequence_state.bpm;
             packet.sequence_enabled = sequence_state.enabled;
-            packet.flags = clock_.has_epoch() ? 0x01 : 0x00;
+            const uint8_t active_preset = engine_.active_scene_index();
+            packet.flags = (clock_.has_epoch() ? 0x01 : 0x00) |
+                           (cfg.sync_enabled ? (0x02 | ((active_preset & 0x1F) << 2)) : 0x00);
             packet.global_clock_ms = clock_.now_ms();
             packet.sent_monotonic_ms = now;
             packet.token = cfg.sync_token;
@@ -379,6 +381,14 @@ bool NodeSync::handle_heartbeat(
 
     clock_.discipline(packet.global_clock_ms, (packet.flags & 0x01) != 0);
     engine_.feed_watchdog();
+
+    // Multi-node fleet preset synchronization
+    if ((packet.flags & 0x02) != 0) {
+        const uint8_t master_preset = (packet.flags >> 2) & 0x1F;
+        if (master_preset < kMaxPresets && engine_.active_scene_index() != master_preset) {
+            engine_.activate_scene(master_preset);
+        }
+    }
     return true;
 }
 

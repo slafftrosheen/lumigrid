@@ -32,11 +32,15 @@ struct FixtureConfig {
     FixtureProfile profile = FixtureProfile::WS2812;
     PixelOrder pixel_order = PixelOrder::GRB;
     uint8_t physical_output_index[4] = {}; // Indices into PhysicalOutputs array
+    uint8_t zone_id = 0; // Which zone this fixture belongs to (0-7)
     uint16_t num_pixels = 0;
     uint8_t max_brightness = 255;
     uint8_t white_balance[3] = {255, 255, 255};
     bool gamma_correction = true;
     uint16_t max_milliwatts = 0; // 0 = no local limit
+    uint16_t dmx_universe = 0;      // DMX Universe (0-63999)
+    uint16_t dmx_start_channel = 0; // 1-512 (0 = unpatched / follows zone wash)
+    uint8_t  dmx_mode = 0;          // 0 = Wash, 1 = Direct Pixel Map
 };
 
 enum class BlendMode : uint8_t {
@@ -265,7 +269,6 @@ inline bool parse_zone_role(const char* name, ZoneRole& out) {
 struct ZoneConfig {
     char name[24] = "";
     ZoneRole role = ZoneRole::Unassigned;
-    uint32_t fixture_mask = 0; // Bitmask of which fixtures belong to this zone
 };
 
 enum class MergeMode : uint8_t {
@@ -280,6 +283,7 @@ struct ProtocolConfig {
     MergeMode merge_mode          = MergeMode::HTP;
     uint16_t stream_timeout_ms    = 2000;
     uint8_t  live_stream_layer    = 2;
+    uint16_t zone_start_channel   = 1; // 1-512 (default 1: Zone 0 = Ch 1..3, Zone 1 = Ch 4..6, etc.)
 };
 
 struct DeviceConfig {

@@ -10,6 +10,7 @@
 #include "MdnsService.hpp"
 #include "ArtnetDiscovery.hpp"
 #include "SacnReceiver.hpp"
+#include "DmxRouter.hpp"
 #include "MqttService.hpp"
 #include "FactoryRunner.hpp"
 #include "FactoryApi.hpp"
@@ -38,6 +39,7 @@ private:
     ArtnetDiscovery artnet_;
     SacnReceiver sacn_;
     LightingRuntime lighting_;
+    DmxRouter dmx_router_;
     ClockDiscipline clock_;
     Scheduler scheduler_;
     NodeSync node_sync_;

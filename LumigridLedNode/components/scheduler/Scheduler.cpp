@@ -88,6 +88,7 @@ void Scheduler::task() {
 
         if (sequence_.bpm == 0 ||
             (!sequence_.enabled && !calendar_sequence_active_)) {
+            engine_.release_control(ControlSource::Scheduler);
             continue;
         }
 
@@ -151,6 +152,8 @@ void Scheduler::evaluate_calendar(
             ESP_LOGI(TAG, "Calendar started sequence");
         } else {
             calendar_sequence_active_ = false;
+            engine_.release_control(ControlSource::Scheduler);
+            engine_.release_control(ControlSource::ManualOverride);
             engine_.activate_scene(entry.preset_index);
             ESP_LOGI(TAG, "Calendar activated preset %u", entry.preset_index);
         }
@@ -218,8 +221,13 @@ void Scheduler::evaluate(const Sequence& seq, uint64_t clock_ms) {
         }
     }
 
-    if (any_track_enabled && state_changed) {
-        engine_.activate_scene_direct(active_composite, true);
+    if (any_track_enabled) {
+        engine_.acquire_control(ControlSource::Scheduler, 200);
+        if (state_changed) {
+            engine_.activate_scene_direct(active_composite, true);
+        }
+    } else {
+        engine_.release_control(ControlSource::Scheduler);
     }
 }
 

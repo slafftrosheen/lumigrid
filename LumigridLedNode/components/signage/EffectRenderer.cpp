@@ -92,7 +92,7 @@ void EffectRenderer::render_layer(
     for (uint16_t i = 0; i < num_pixels; ++i) {
         out_frame.pixels[i] = {0, 0, 0};
     }
-    out_frame.pwm = 0;
+    out_frame.pwm.fill(0);
 
     auto apply_color = [&](uint16_t px, const Rgb& color) {
         if (px < num_pixels && px < MAX_PIXELS) {
@@ -104,7 +104,7 @@ void EffectRenderer::render_layer(
         for (uint16_t px = 0; px < pcount; ++px) out_frame.pixels[px] = color;
     };
     auto set_pwm = [&](uint16_t duty) {
-        out_frame.pwm = duty;
+        out_frame.pwm[0] = duty;
     };
     auto set_solid = [&]() {
         fill_pixels(scale_rgb(layer.primary_color, b));

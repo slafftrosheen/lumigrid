@@ -19,8 +19,13 @@ LumigridRuntime::LumigridRuntime()
       factory_runner_(source_manager_),
       api_(factory_runner_),
       lighting_(source_manager_, config_),
+      dmx_router_(lighting_),
+      clock_(),
       scheduler_(config_, lighting_, clock_),
       node_sync_(lighting_, config_, clock_) {
+    lighting_.set_config_reload_callback([this](const DeviceConfig& cfg) {
+        dmx_router_.update_config(cfg);
+    });
 }
 
 void LumigridRuntime::recovery_task(void* arg) {
@@ -150,6 +155,7 @@ esp_err_t LumigridRuntime::start() {
 
                 DeviceConfig current_cfg;
                 config_.load_config(current_cfg);
+                dmx_router_.update_config(current_cfg);
 
                 ESP_LOGI("lumigrid", "Step 7: mdns.start()...");
                 ESP_ERROR_CHECK(mdns_.start(current_cfg.device_name, "LumiGrid Signage", 80));
@@ -158,54 +164,14 @@ esp_err_t LumigridRuntime::start() {
                 ESP_ERROR_CHECK(artnet_.start(
                     node,
                     [this](const ArtnetDmxPacket& packet) {
-                        DeviceConfig cfg;
-                        config_.load_config(cfg);
-
-                        if (!cfg.protocol.artnet_enabled) return;
-                        if (packet.universe != cfg.protocol.universe_start) return;
-
-                        lighting_.update_dmx_data(packet.data, packet.length);
-
-                        uint8_t live_layer = cfg.protocol.live_stream_layer < 3 ? cfg.protocol.live_stream_layer : 2;
-                        for (uint8_t zone = 0; zone < 8; ++zone) {
-                            const size_t offset = zone * 3;
-                            if (offset + 2 >= packet.length) break;
-
-                            BrandColor color{
-                                packet.data[offset + 0],
-                                packet.data[offset + 1],
-                                packet.data[offset + 2]
-                            };
-                            
-                            lighting_.inject_live_data(zone, live_layer, color, 255);
-                        }
+                        dmx_router_.handle_artnet_dmx(packet);
                     }
                 ));
 
                 ESP_LOGI("lumigrid", "Step 8.5: sacn.start()...");
                 ESP_ERROR_CHECK(sacn_.start(
                     [this](const SacnDmxPacket& packet) {
-                        DeviceConfig cfg;
-                        config_.load_config(cfg);
-
-                        if (!cfg.protocol.sacn_enabled) return;
-                        if (packet.universe != cfg.protocol.universe_start) return;
-
-                        lighting_.update_dmx_data(packet.data, packet.length);
-
-                        uint8_t live_layer = cfg.protocol.live_stream_layer < 3 ? cfg.protocol.live_stream_layer : 2;
-                        for (uint8_t zone = 0; zone < 8; ++zone) {
-                            const size_t offset = zone * 3;
-                            if (offset + 2 >= packet.length) break;
-
-                            BrandColor color{
-                                packet.data[offset + 0],
-                                packet.data[offset + 1],
-                                packet.data[offset + 2]
-                            };
-                            
-                            lighting_.inject_live_data(zone, live_layer, color, 255);
-                        }
+                        dmx_router_.handle_sacn_dmx(packet);
                     }
                 ));
 

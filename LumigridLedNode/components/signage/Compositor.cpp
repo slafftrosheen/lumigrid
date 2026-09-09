@@ -5,67 +5,70 @@
 namespace lg {
 namespace {
 
-Rgb blend_rgb(const Rgb& bg, const Rgb& fg, BlendMode mode, uint8_t fg_opacity) {
+LightValue blend_light(const LightValue& bg, const LightValue& fg, BlendMode mode, uint8_t fg_opacity) {
     if (fg_opacity == 0) return bg;
-    
-    Rgb blended = fg;
-    switch (mode) {
-        case BlendMode::Normal: {
-            if (fg_opacity == 255) return fg;
-            blended.r = bg.r + (((fg.r - bg.r) * fg_opacity) >> 8);
-            blended.g = bg.g + (((fg.g - bg.g) * fg_opacity) >> 8);
-            blended.b = bg.b + (((fg.b - bg.b) * fg_opacity) >> 8);
-            break;
+
+    auto blend_channel = [mode, fg_opacity](uint8_t b_val, uint8_t f_val) -> uint8_t {
+        switch (mode) {
+            case BlendMode::Normal: {
+                if (fg_opacity == 255) return f_val;
+                int32_t delta = static_cast<int32_t>(f_val) - static_cast<int32_t>(b_val);
+                int32_t result = static_cast<int32_t>(b_val) + ((delta * static_cast<int32_t>(fg_opacity)) / 255);
+                return static_cast<uint8_t>(std::clamp<int32_t>(result, 0, 255));
+            }
+            case BlendMode::Add: {
+                uint32_t add = static_cast<uint32_t>(b_val) + (static_cast<uint32_t>(f_val) * fg_opacity) / 255;
+                return static_cast<uint8_t>(std::min<uint32_t>(add, 255));
+            }
+            case BlendMode::Multiply: {
+                uint32_t mult = (static_cast<uint32_t>(b_val) * f_val) / 255;
+                int32_t delta = static_cast<int32_t>(mult) - static_cast<int32_t>(b_val);
+                int32_t result = static_cast<int32_t>(b_val) + ((delta * static_cast<int32_t>(fg_opacity)) / 255);
+                return static_cast<uint8_t>(std::clamp<int32_t>(result, 0, 255));
+            }
+            case BlendMode::Screen: {
+                uint32_t screen = 255 - ((static_cast<uint32_t>(255 - b_val) * (255 - f_val)) / 255);
+                int32_t delta = static_cast<int32_t>(screen) - static_cast<int32_t>(b_val);
+                int32_t result = static_cast<int32_t>(b_val) + ((delta * static_cast<int32_t>(fg_opacity)) / 255);
+                return static_cast<uint8_t>(std::clamp<int32_t>(result, 0, 255));
+            }
         }
-        case BlendMode::Add: {
-            uint16_t r = bg.r + ((fg.r * fg_opacity) >> 8);
-            uint16_t g = bg.g + ((fg.g * fg_opacity) >> 8);
-            uint16_t b = bg.b + ((fg.b * fg_opacity) >> 8);
-            blended.r = r > 255 ? 255 : r;
-            blended.g = g > 255 ? 255 : g;
-            blended.b = b > 255 ? 255 : b;
-            break;
-        }
-        case BlendMode::Multiply: {
-            uint16_t mr = (bg.r * fg.r) >> 8;
-            uint16_t mg = (bg.g * fg.g) >> 8;
-            uint16_t mb = (bg.b * fg.b) >> 8;
-            blended.r = bg.r + (((mr - bg.r) * fg_opacity) >> 8);
-            blended.g = bg.g + (((mg - bg.g) * fg_opacity) >> 8);
-            blended.b = bg.b + (((mb - bg.b) * fg_opacity) >> 8);
-            break;
-        }
-        case BlendMode::Screen: {
-            uint16_t sr = 255 - (((255 - bg.r) * (255 - fg.r)) >> 8);
-            uint16_t sg = 255 - (((255 - bg.g) * (255 - fg.g)) >> 8);
-            uint16_t sb = 255 - (((255 - bg.b) * (255 - fg.b)) >> 8);
-            blended.r = bg.r + (((sr - bg.r) * fg_opacity) >> 8);
-            blended.g = bg.g + (((sg - bg.g) * fg_opacity) >> 8);
-            blended.b = bg.b + (((sb - bg.b) * fg_opacity) >> 8);
-            break;
-        }
-    }
-    return blended;
+        return f_val;
+    };
+
+    return {
+        blend_channel(bg.r, fg.r),
+        blend_channel(bg.g, fg.g),
+        blend_channel(bg.b, fg.b),
+        blend_channel(bg.w, fg.w)
+    };
 }
 
 uint16_t blend_pwm(uint16_t bg, uint16_t fg, BlendMode mode, uint8_t fg_opacity) {
     if (fg_opacity == 0) return bg;
     
     switch (mode) {
-        case BlendMode::Normal:
+        case BlendMode::Normal: {
             if (fg_opacity == 255) return fg;
-            return bg + (((fg - bg) * fg_opacity) >> 8);
+            int32_t delta = static_cast<int32_t>(fg) - static_cast<int32_t>(bg);
+            int32_t result = static_cast<int32_t>(bg) + ((delta * static_cast<int32_t>(fg_opacity)) / 255);
+            return static_cast<uint16_t>(std::clamp<int32_t>(result, 0, 4095));
+        }
         case BlendMode::Add: {
-            uint32_t a = bg + ((fg * fg_opacity) >> 8);
-            return a > 4095 ? 4095 : a;
+            uint32_t a = bg + (static_cast<uint32_t>(fg) * fg_opacity) / 255;
+            return static_cast<uint16_t>(std::min<uint32_t>(a, 4095));
         }
         case BlendMode::Multiply: {
-            uint16_t m = (uint32_t(bg) * fg) / 4095;
-            return bg + (((m - bg) * fg_opacity) >> 8);
+            uint32_t m = (static_cast<uint32_t>(bg) * fg) / 4095;
+            int32_t delta = static_cast<int32_t>(m) - static_cast<int32_t>(bg);
+            int32_t result = static_cast<int32_t>(bg) + ((delta * static_cast<int32_t>(fg_opacity)) / 255);
+            return static_cast<uint16_t>(std::clamp<int32_t>(result, 0, 4095));
         }
         case BlendMode::Screen: {
-            uint32_t s = 4095 - (((4095 - bg) * (4095 - fg)) / 4095);
-            return bg + (((s - bg) * fg_opacity) >> 8);
+            uint32_t s = 4095 - ((static_cast<uint32_t>(4095 - bg) * (4095 - fg)) / 4095);
+            int32_t delta = static_cast<int32_t>(s) - static_cast<int32_t>(bg);
+            int32_t result = static_cast<int32_t>(bg) + ((delta * static_cast<int32_t>(fg_opacity)) / 255);
+            return static_cast<uint16_t>(std::clamp<int32_t>(result, 0, 4095));
         }
     }
     return fg;
@@ -84,9 +87,11 @@ void Compositor::blend(
 
     uint16_t pcount = std::min<uint16_t>(num_pixels, MAX_PIXELS);
     for (uint16_t i = 0; i < pcount; ++i) {
-        dest.pixels[i] = blend_rgb(dest.pixels[i], src.pixels[i], mode, opacity);
+        dest.pixels[i] = blend_light(dest.pixels[i], src.pixels[i], mode, opacity);
     }
-    dest.pwm = blend_pwm(dest.pwm, src.pwm, mode, opacity);
+    for (uint8_t ch = 0; ch < 4; ++ch) {
+        dest.pwm[ch] = blend_pwm(dest.pwm[ch], src.pwm[ch], mode, opacity);
+    }
 }
 
 } // namespace lg

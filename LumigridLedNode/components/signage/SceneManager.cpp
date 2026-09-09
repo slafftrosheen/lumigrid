@@ -2,6 +2,7 @@
 #include "SceneManager.hpp"
 #include "esp_log.h"
 #include <algorithm>
+#include <cstring>
 
 static const char* TAG = "SceneManager";
 
@@ -12,24 +13,23 @@ uint8_t lerp8(uint8_t a, uint8_t b, uint8_t t) {
     return static_cast<uint8_t>(a + (int16_t(b) - a) * t / 255);
 }
 
-SceneConfig blend_scenes(const SceneConfig& from, const SceneConfig& to, uint8_t t) {
-    SceneConfig result = to; // Copy target's structure/metadata
-    result.global_brightness = lerp8(from.global_brightness, to.global_brightness, t);
+void blend_scenes_into(SceneConfig& dest, const SceneConfig& from, const SceneConfig& to, uint8_t t) {
+    dest = to; // Copy target's structure/metadata
+    dest.global_brightness = lerp8(from.global_brightness, to.global_brightness, t);
 
     for (uint8_t z = 0; z < 8; ++z) {
         for (uint8_t l = 0; l < 3; ++l) {
-            result.zones[z].layers[l].primary_color.r = lerp8(from.zones[z].layers[l].primary_color.r, to.zones[z].layers[l].primary_color.r, t);
-            result.zones[z].layers[l].primary_color.g = lerp8(from.zones[z].layers[l].primary_color.g, to.zones[z].layers[l].primary_color.g, t);
-            result.zones[z].layers[l].primary_color.b = lerp8(from.zones[z].layers[l].primary_color.b, to.zones[z].layers[l].primary_color.b, t);
+            dest.zones[z].layers[l].primary_color.r = lerp8(from.zones[z].layers[l].primary_color.r, to.zones[z].layers[l].primary_color.r, t);
+            dest.zones[z].layers[l].primary_color.g = lerp8(from.zones[z].layers[l].primary_color.g, to.zones[z].layers[l].primary_color.g, t);
+            dest.zones[z].layers[l].primary_color.b = lerp8(from.zones[z].layers[l].primary_color.b, to.zones[z].layers[l].primary_color.b, t);
                 
-            result.zones[z].layers[l].secondary_color.r = lerp8(from.zones[z].layers[l].secondary_color.r, to.zones[z].layers[l].secondary_color.r, t);
-            result.zones[z].layers[l].secondary_color.g = lerp8(from.zones[z].layers[l].secondary_color.g, to.zones[z].layers[l].secondary_color.g, t);
-            result.zones[z].layers[l].secondary_color.b = lerp8(from.zones[z].layers[l].secondary_color.b, to.zones[z].layers[l].secondary_color.b, t);
+            dest.zones[z].layers[l].secondary_color.r = lerp8(from.zones[z].layers[l].secondary_color.r, to.zones[z].layers[l].secondary_color.r, t);
+            dest.zones[z].layers[l].secondary_color.g = lerp8(from.zones[z].layers[l].secondary_color.g, to.zones[z].layers[l].secondary_color.g, t);
+            dest.zones[z].layers[l].secondary_color.b = lerp8(from.zones[z].layers[l].secondary_color.b, to.zones[z].layers[l].secondary_color.b, t);
                 
-            result.zones[z].layers[l].opacity = lerp8(from.zones[z].layers[l].opacity, to.zones[z].layers[l].opacity, t);
+            dest.zones[z].layers[l].opacity = lerp8(from.zones[z].layers[l].opacity, to.zones[z].layers[l].opacity, t);
         }
     }
-    return result;
 }
 }
 
@@ -52,7 +52,9 @@ void SceneManager::init() {
     }
 
     current_scene_ = scene;
+    render_scene_ = scene;
     active_index_ = active_idx;
+    saved_active_index_ = active_idx;
     scene_started_ms_ = 0;
     last_command_ms_ = 0;
     ESP_LOGI(TAG, "SceneManager starting with scene %u: \"%s\"", active_idx, scene.name);
@@ -72,7 +74,7 @@ void SceneManager::activate_scene(uint8_t index, uint32_t current_ms) {
     if (transitioning_) {
         const uint32_t elapsed = current_ms - transition_start_ms_;
         const uint8_t t = std::min(uint8_t(255), static_cast<uint8_t>((uint32_t(elapsed) * 255) / transition_duration_ms_));
-        current_scene_ = blend_scenes(current_scene_, target_scene_, t);
+        blend_scenes_into(current_scene_, current_scene_, target_scene_, t);
     }
 
     target_scene_ = scene;
@@ -100,57 +102,29 @@ void SceneManager::activate_scene_direct(const SceneConfig& scene, uint32_t curr
     fallback_active_ = false;
 }
 
-void SceneManager::inject_live_data(uint8_t zone_idx, uint8_t layer_idx, const BrandColor& color, uint8_t opacity, uint32_t current_ms) {
-    if (zone_idx >= 8 || layer_idx >= 3) return;
-    
-    if (!live_stream_active_ || !current_scene_.zones[zone_idx].layers[layer_idx].enabled) {
-        current_scene_.zones[zone_idx].layers[layer_idx].enabled = true;
-        if (current_scene_.zones[zone_idx].layers[layer_idx].effect != 0 /* Solid */) {
-            current_scene_.zones[zone_idx].layers[layer_idx].effect = 0;
-            current_scene_.zones[zone_idx].layers[layer_idx].blend_mode = BlendMode::Add;
-        }
-    }
-
-    current_scene_.zones[zone_idx].layers[layer_idx].primary_color = color;
-    current_scene_.zones[zone_idx].layers[layer_idx].opacity = opacity;
-    
-    fallback_active_ = false;
-    live_stream_active_ = true;
-    last_live_stream_ms_ = current_ms;
-    last_command_ms_ = current_ms;
-}
-
 void SceneManager::feed_watchdog(uint32_t current_ms) {
     last_command_ms_ = current_ms;
     if (fallback_active_) {
-        fallback_active_ = false;
-        ESP_LOGI(TAG, "Watchdog fed, exiting fallback mode");
+        ESP_LOGI(TAG, "Watchdog fed, recovering from fallback to preset %u", saved_active_index_);
+        activate_scene(saved_active_index_, current_ms);
     }
 }
 
-SceneConfig SceneManager::process_frame(uint32_t current_ms) {
+const SceneConfig& SceneManager::process_frame(uint32_t current_ms) {
     // 1. Process Watchdog
     if (device_cfg_.watchdog_timeout_s > 0 && !fallback_active_) {
         const uint32_t elapsed_s = (current_ms - last_command_ms_) / 1000;
-        const uint32_t live_elapsed_ms = (current_ms - last_live_stream_ms_);
         
-        bool trigger_fallback = false;
         if (elapsed_s > device_cfg_.watchdog_timeout_s) {
-            trigger_fallback = true;
-        } else if (live_stream_active_ && live_elapsed_ms > device_cfg_.protocol.stream_timeout_ms) {
-            trigger_fallback = true;
-            live_stream_active_ = false;
-        }
-
-        if (trigger_fallback) {
             if (active_index_ != device_cfg_.fallback_preset_index) {
                 ESP_LOGW(TAG, "Watchdog timeout: activating fallback %u", device_cfg_.fallback_preset_index);
                 SceneConfig fallback;
                 if (config_.load_scene(device_cfg_.fallback_preset_index, fallback) == ESP_OK) {
+                    saved_active_index_ = active_index_;
                     if (transitioning_) {
                         const uint32_t elapsed = current_ms - transition_start_ms_;
                         const uint8_t t = std::min(uint8_t(255), static_cast<uint8_t>((uint32_t(elapsed) * 255) / transition_duration_ms_));
-                        current_scene_ = blend_scenes(current_scene_, target_scene_, t);
+                        blend_scenes_into(current_scene_, current_scene_, target_scene_, t);
                     }
                     target_scene_ = fallback;
                     transition_start_ms_ = current_ms;
@@ -168,24 +142,22 @@ SceneConfig SceneManager::process_frame(uint32_t current_ms) {
     }
 
     // 2. Process Transition
-    SceneConfig render_scene;
     if (transitioning_) {
         const uint32_t elapsed = current_ms - transition_start_ms_;
         if (elapsed >= transition_duration_ms_) {
             current_scene_ = target_scene_;
             transitioning_ = false;
             scene_started_ms_ = current_ms;
-            render_scene = current_scene_;
             ESP_LOGI(TAG, "Transition complete -> \"%s\"", current_scene_.name);
+            return current_scene_;
         } else {
             const uint8_t t = static_cast<uint8_t>((uint32_t(elapsed) * 255) / transition_duration_ms_);
-            render_scene = blend_scenes(current_scene_, target_scene_, t);
+            blend_scenes_into(render_scene_, current_scene_, target_scene_, t);
+            return render_scene_;
         }
-    } else {
-        render_scene = current_scene_;
     }
 
-    return render_scene;
+    return current_scene_;
 }
 
 } // namespace lg

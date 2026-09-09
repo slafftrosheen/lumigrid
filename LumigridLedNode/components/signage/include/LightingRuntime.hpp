@@ -7,6 +7,7 @@
 #include "SceneManager.hpp"
 #include "RenderTypes.hpp"
 #include <functional>
+#include <vector>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -23,6 +24,7 @@ public:
     void activate_scene(uint8_t index);
     void activate_scene_direct(const SceneConfig& scene, bool immediate = false);
     void inject_live_data(uint8_t zone_idx, uint8_t layer_idx, const BrandColor& color, uint8_t opacity);
+    void inject_live_fixture(uint8_t fixture_idx, const LightValue* pixels, uint16_t count, const uint16_t* pwm_duties, uint8_t opacity);
     void update_dmx_data(const uint8_t* data, size_t length);
     void feed_watchdog();
     
@@ -31,16 +33,25 @@ public:
     bool is_transitioning() const;
 
     PowerBudget& power_budget() { return power_budget_; }
+    const PowerBudget& power_budget() const { return power_budget_; }
     float get_fps() const { return current_fps_; }
     void set_beat_period(uint16_t period_ms);
     void reload_device_config();
+
+    bool acquire_control(ControlSource source, uint32_t lease_ms = 0, uint8_t zone_mask = 0xFF, uint8_t layer_mask = 0x07);
+    void release_control(ControlSource source);
+    ControlSource current_control_source() const;
 
     const std::array<uint8_t, 512>& last_dmx_data() const { return dmx_data_; }
 
     using PreviewCallback = std::function<void(const AddressableDriver& leds)>;
     void set_preview_callback(PreviewCallback cb) { preview_cb_ = std::move(cb); }
 
+    using ConfigReloadCallback = std::function<void(const DeviceConfig& cfg)>;
+    void set_config_reload_callback(ConfigReloadCallback cb) { config_reload_cb_ = std::move(cb); }
+
 private:
+    ConfigReloadCallback config_reload_cb_;
     static void task_entry(void* arg);
     void task();
     void render_frame(uint32_t current_ms);
@@ -52,6 +63,24 @@ private:
 
     DeviceConfig device_cfg_{};
     std::array<uint8_t, 512> dmx_data_{};
+
+    struct LiveLayerData {
+        BrandColor color{0, 0, 0};
+        uint8_t opacity = 0;
+        uint32_t timestamp_ms = 0;
+        bool active = false;
+    };
+    std::array<std::array<LiveLayerData, 3>, 8> live_layers_{};
+
+    struct LiveFixtureData {
+        std::vector<LightValue> pixels;
+        std::array<uint16_t, 4> pwm{};
+        uint8_t opacity = 0;
+        uint32_t timestamp_ms = 0;
+        bool active = false;
+    };
+    std::array<LiveFixtureData, 16> live_fixtures_{};
+    uint32_t last_live_stream_ms_ = 0;
 
     RenderFrame current_render_frame_;
     FixtureFrame current_composited_zone_;
