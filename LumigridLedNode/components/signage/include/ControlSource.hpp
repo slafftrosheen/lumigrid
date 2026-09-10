@@ -1,6 +1,6 @@
-// components/signage/include/ControlSource.hpp
 #pragma once
 #include <cstdint>
+#include <array>
 
 namespace lg {
 
@@ -15,6 +15,33 @@ enum class ControlSource : uint8_t {
     EStop = 7
 };
 
+/// Explicit centralized priority function (Item 8)
+inline constexpr uint8_t source_priority(ControlSource s) {
+    switch (s) {
+        case ControlSource::EStop:          return 100;
+        case ControlSource::Factory:        return 60;
+        case ControlSource::LiveDmx:        return 50;
+        case ControlSource::ManualOverride: return 40;
+        case ControlSource::Scheduler:      return 30;
+        case ControlSource::ScenePlayback:  return 20;
+        case ControlSource::Fallback:       return 10;
+        case ControlSource::Idle:           return 0;
+        default:                            return 0;
+    }
+}
+
+/// Explicit descending priority table ordering
+inline constexpr std::array<ControlSource, 8> kPriorityOrder = {
+    ControlSource::EStop,
+    ControlSource::Factory,
+    ControlSource::LiveDmx,
+    ControlSource::ManualOverride,
+    ControlSource::Scheduler,
+    ControlSource::ScenePlayback,
+    ControlSource::Fallback,
+    ControlSource::Idle
+};
+
 struct ControlState {
     ControlSource source = ControlSource::Idle;
     uint32_t timestamp_ms = 0;
@@ -27,3 +54,4 @@ struct ControlState {
 };
 
 } // namespace lg
+

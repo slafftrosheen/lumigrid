@@ -59,6 +59,13 @@ public:
     bool is_output_fault() const {
         return output_fault_.load(std::memory_order_relaxed);
     }
+    bool output_fault() const {
+        return output_fault_.load(std::memory_order_relaxed);
+    }
+    uint32_t output_fault_count() const {
+        return output_fault_count_.load(std::memory_order_relaxed);
+    }
+    uint8_t active_dmx_sources() const;
 
     std::array<uint8_t, 512> last_dmx_data() const;
 
@@ -88,10 +95,14 @@ private:
 
     std::atomic<EstopState> estop_state_{EstopState::Inactive};
     std::atomic<bool> output_fault_{false};
+    std::atomic<uint32_t> output_fault_count_{0};
 
     DeviceConfig device_cfg_{};
 
-    LiveDmxFrame live_dmx_frame_{};
+    // Double buffering for LiveDmxFrame (Item 5)
+    LiveDmxFrame live_pending_{};
+    LiveDmxFrame live_active_{};
+    bool live_pending_dirty_{false};
     uint32_t last_live_stream_ms_ = 0;
 
     RenderFrame current_render_frame_;

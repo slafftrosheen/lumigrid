@@ -211,6 +211,86 @@ esp_err_t ConfigStore::save_config(const DeviceConfig& config) {
     return nvs_commit(handle_);
 }
 
+bool ConfigStore::migrate_v1_to_v2(const DeviceConfigV1& v1, DeviceConfig& v2) {
+    auto def = std::make_unique<DeviceConfig>();
+    v2 = *def;
+    v2.schema_version = 2;
+    std::strncpy(v2.device_name, v1.device_name, sizeof(v2.device_name));
+    v2.active_preset_index = v1.active_preset_index;
+    v2.fallback_preset_index = v1.fallback_preset_index;
+    v2.watchdog_timeout_s = v1.watchdog_timeout_s;
+    v2.max_power_mw = v1.max_power_mw;
+    v2.gamma_x10 = v1.gamma_x10;
+    v2.soft_start_enabled = v1.soft_start_enabled;
+    v2.soft_start_ms = v1.soft_start_ms;
+    v2.mqtt_enabled = v1.mqtt_enabled;
+    std::strncpy(v2.mqtt_broker, v1.mqtt_broker, sizeof(v2.mqtt_broker));
+    v2.mqtt_port = v1.mqtt_port;
+    std::strncpy(v2.timezone, v1.timezone, sizeof(v2.timezone));
+    v2.sync_enabled = v1.sync_enabled;
+    v2.sync_role = v1.sync_role;
+    v2.sync_token = v1.sync_token;
+
+    std::strncpy(v2.admin_token, v1.admin_token, sizeof(v2.admin_token));
+    std::strncpy(v2.installer_token, v1.installer_token, sizeof(v2.installer_token));
+    std::strncpy(v2.operator_token, v1.operator_token, sizeof(v2.operator_token));
+
+    std::strncpy(v2.serial_number, v1.serial_number, sizeof(v2.serial_number));
+    std::strncpy(v2.hardware_revision, v1.hardware_revision, sizeof(v2.hardware_revision));
+    std::strncpy(v2.site_label, v1.site_label, sizeof(v2.site_label));
+    std::strncpy(v2.group_label, v1.group_label, sizeof(v2.group_label));
+
+    for (size_t i = 0; i < 16; ++i) {
+        v2.physical_outputs[i].type = v1.physical_outputs[i].type;
+        v2.physical_outputs[i].hardware_id = v1.physical_outputs[i].hardware_id;
+        v2.physical_outputs[i].gpio_pin = v1.physical_outputs[i].gpio_pin;
+        v2.physical_outputs[i].enabled = v1.physical_outputs[i].enabled;
+    }
+
+    for (size_t i = 0; i < 8; ++i) {
+        std::strncpy(v2.zones[i].name, v1.zones[i].name, sizeof(v2.zones[i].name));
+        v2.zones[i].role = v1.zones[i].role;
+    }
+
+    for (size_t f = 0; f < 16; ++f) {
+        v2.fixtures[f].profile = v1.fixtures[f].profile;
+        v2.fixtures[f].pixel_order = v1.fixtures[f].pixel_order;
+        for (int p = 0; p < 4; ++p) {
+            v2.fixtures[f].physical_output_index[p] = v1.fixtures[f].physical_output_index[p];
+        }
+        v2.fixtures[f].num_pixels = v1.fixtures[f].num_pixels;
+        v2.fixtures[f].max_brightness = v1.fixtures[f].max_brightness;
+        for (int w = 0; w < 3; ++w) {
+            v2.fixtures[f].white_balance[w] = v1.fixtures[f].white_balance[w];
+        }
+        v2.fixtures[f].gamma_correction = v1.fixtures[f].gamma_correction;
+        v2.fixtures[f].max_milliwatts = v1.fixtures[f].max_milliwatts;
+
+        // Map fixture_mask from zones into fixture.zone_id
+        v2.fixtures[f].zone_id = 0;
+        for (uint8_t z = 0; z < 8; ++z) {
+            if (v1.zones[z].fixture_mask & (1U << f)) {
+                v2.fixtures[f].zone_id = z;
+                break;
+            }
+        }
+        v2.fixtures[f].dmx_universe = 0;
+        v2.fixtures[f].dmx_start_channel = 0;
+        v2.fixtures[f].dmx_mode = 0;
+    }
+
+    v2.protocol.artnet_enabled = v1.protocol.artnet_enabled;
+    v2.protocol.sacn_enabled = v1.protocol.sacn_enabled;
+    v2.protocol.universe_start = v1.protocol.universe_start;
+    v2.protocol.merge_mode = v1.protocol.merge_mode;
+    v2.protocol.stream_timeout_ms = v1.protocol.stream_timeout_ms;
+    v2.protocol.live_stream_layer = 2;
+    v2.protocol.zone_start_channel = 1;
+
+    v2.checksum = calc_device_crc(v2);
+    return true;
+}
+
 esp_err_t ConfigStore::load_config(DeviceConfig& config) {
     bool needs_persist = false;
 
@@ -218,7 +298,7 @@ esp_err_t ConfigStore::load_config(DeviceConfig& config) {
         size_t len = 0;
         esp_err_t err = nvs_get_blob(handle_, k, nullptr, &len);
         if (err == ESP_OK && len > 0) {
-            if (len <= sizeof(DeviceConfig)) {
+            if (len == sizeof(DeviceConfig)) {
                 auto temp = std::make_unique<DeviceConfig>();
                 err = nvs_get_blob(handle_, k, temp.get(), &len);
                 if (err == ESP_OK) {
@@ -227,15 +307,30 @@ esp_err_t ConfigStore::load_config(DeviceConfig& config) {
                         return ESP_ERR_NVS_INVALID_STATE;
                     }
                     if (temp->schema_version < 2) {
-                        ESP_LOGI(TAG, "Migrating DeviceConfig %s from schema v%u to v2", k, temp->schema_version);
+                        ESP_LOGI(TAG, "Migrating DeviceConfig %s from in-memory schema v%u to v2", k, temp->schema_version);
                         temp->schema_version = 2;
                         temp->checksum = calc_device_crc(*temp);
                         needs_persist = true;
                     }
                     out = *temp;
                 }
+            } else if (len == sizeof(DeviceConfigV1)) {
+                // Real schema migration: decode legacy v1 structure (Item 16)
+                auto v1 = std::make_unique<DeviceConfigV1>();
+                err = nvs_get_blob(handle_, k, v1.get(), &len);
+                if (err == ESP_OK) {
+                    uint32_t expected_crc = esp_rom_crc32_le(0, (const uint8_t*)v1.get(), sizeof(DeviceConfigV1) - sizeof(uint32_t));
+                    if (v1->checksum != expected_crc) {
+                        ESP_LOGW(TAG, "Legacy DeviceConfigV1 %s CRC mismatch", k);
+                        return ESP_ERR_NVS_INVALID_STATE;
+                    }
+                    ESP_LOGI(TAG, "Explicitly migrating legacy v1 blob %s to v2", k);
+                    migrate_v1_to_v2(*v1, out);
+                    needs_persist = true;
+                }
             } else {
-                ESP_LOGW(TAG, "DeviceConfig size mismatch (len=%u, expected=%u)", (unsigned)len, (unsigned)sizeof(DeviceConfig));
+                ESP_LOGW(TAG, "DeviceConfig size mismatch (len=%u, expected=%u or %u)",
+                         (unsigned)len, (unsigned)sizeof(DeviceConfig), (unsigned)sizeof(DeviceConfigV1));
                 err = ESP_ERR_NVS_INVALID_LENGTH;
             }
         }
@@ -261,7 +356,8 @@ esp_err_t ConfigStore::load_config(DeviceConfig& config) {
     };
 
     if (err == ESP_ERR_NVS_NOT_FOUND || err == ESP_ERR_NVS_INVALID_STATE || err == ESP_ERR_NVS_INVALID_LENGTH) {
-        config = DeviceConfig{};
+        auto def = std::make_unique<DeviceConfig>();
+        config = *def;
         generate_token(config.admin_token, sizeof(config.admin_token));
         generate_token(config.installer_token, sizeof(config.installer_token));
         generate_token(config.operator_token, sizeof(config.operator_token));

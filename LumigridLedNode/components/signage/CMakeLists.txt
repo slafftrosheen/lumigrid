@@ -8,5 +8,7 @@ idf_component_register(SRCS "GammaLut.cpp"
                             "OutputScheduler.cpp" 
                             "LightingRuntime.cpp"
                             "ControlSourceManager.cpp"
+                            "RuntimeHardeningTests.cpp"
                        INCLUDE_DIRS "include"
                        REQUIRES output config board esp_timer)
+

@@ -1,4 +1,5 @@
 #include "LumigridRuntime.hpp"
+#include "RuntimeHardeningTests.hpp"
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_netif.h"
@@ -96,6 +97,9 @@ esp_err_t LumigridRuntime::init() {
     if (config_.load_config(dev_cfg) == ESP_OK) {
         api::update_tokens(dev_cfg.admin_token, dev_cfg.installer_token, dev_cfg.operator_token);
     }
+
+    // Run Stage 2 Runtime Hardening Verification (Items 2, 16, 21, 22)
+    run_runtime_hardening_tests();
 
     if (!safe_mode_) {
         ESP_LOGI("lumigrid", "Step 3: lighting.start()...");

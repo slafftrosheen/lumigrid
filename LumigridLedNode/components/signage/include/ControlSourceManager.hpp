@@ -15,13 +15,14 @@ struct ControlSnapshot {
         const uint8_t z_bit = (zone_idx < 8) ? (1 << zone_idx) : 0;
         const uint8_t l_bit = (layer_idx < 3) ? (1 << layer_idx) : 0;
 
-        for (int i = 7; i >= 0; --i) {
+        for (ControlSource src : kPriorityOrder) {
+            uint8_t i = static_cast<uint8_t>(src);
             if (states[i].active) {
                 if (states[i].expires_ms != 0 && current_ms >= states[i].expires_ms) {
                     continue;
                 }
                 if ((states[i].zone_mask & z_bit) && (states[i].layer_mask & l_bit)) {
-                    return static_cast<ControlSource>(i);
+                    return src;
                 }
             }
         }
@@ -32,26 +33,29 @@ struct ControlSnapshot {
         const uint16_t f_bit = (fixture_idx < 16) ? (1U << fixture_idx) : 0;
         const uint8_t  z_bit = (zone_idx < 8) ? (1U << zone_idx) : 0;
 
-        // 1. Direct fixture-level override takes precedence
-        for (int i = 7; i >= 0; --i) {
+        // Resolution order per Item 7:
+        // 1. Explicit fixture LiveDmx / fixture overrides take precedence
+        for (ControlSource src : kPriorityOrder) {
+            uint8_t i = static_cast<uint8_t>(src);
             if (states[i].active) {
                 if (states[i].expires_ms != 0 && current_ms >= states[i].expires_ms) {
                     continue;
                 }
                 if (states[i].fixture_mask & f_bit) {
-                    return static_cast<ControlSource>(i);
+                    return src;
                 }
             }
         }
 
-        // 2. Fallback to zone-level ownership
-        for (int i = 7; i >= 0; --i) {
+        // 2. Zone/layer LiveDmx / zone ownership fallback
+        for (ControlSource src : kPriorityOrder) {
+            uint8_t i = static_cast<uint8_t>(src);
             if (states[i].active) {
                 if (states[i].expires_ms != 0 && current_ms >= states[i].expires_ms) {
                     continue;
                 }
                 if (states[i].zone_mask & z_bit) {
-                    return static_cast<ControlSource>(i);
+                    return src;
                 }
             }
         }
@@ -92,12 +96,11 @@ public:
     // Resolve which source owns a specific fixture at this moment (fixture override takes precedence).
     ControlSource resolve_fixture(uint8_t fixture_idx, uint8_t zone_idx, uint32_t current_ms) const;
 
-    // Returns the highest active owner across the node.
-    ControlSource current_owner() const { return current_owner_; }
+    // Returns the highest active owner across the node (thread-safe by value, Item 9).
+    ControlSource current_owner() const;
 
-    const ControlState& state(ControlSource source) const {
-        return states_[static_cast<uint8_t>(source)];
-    }
+    // Returns the control state snapshot for a source (thread-safe by value, Item 9).
+    ControlState state(ControlSource source) const;
 
 private:
     SemaphoreHandle_t mutex_ = nullptr;

@@ -130,15 +130,18 @@ void LightingRuntime::render_frame(uint32_t current_ms) {
         return;
     }
 
-    // 1. Snapshot shared state under short critical section (< 10 µs)
-    LiveDmxFrame active_live;
+    // 1. Snapshot shared state under short critical section (< 10 µs, Item 10)
     SceneConfig render_scene;
     DeviceConfig local_cfg;
 
     if (!mutex_ || xSemaphoreTake(mutex_, pdMS_TO_TICKS(5)) != pdTRUE) {
         return;
     }
-    active_live = live_dmx_frame_;
+    // Promote pending -> active at frame boundary under router/runtime lock (Item 5)
+    if (live_pending_dirty_) {
+        live_active_ = live_pending_;
+        live_pending_dirty_ = false;
+    }
     render_scene = scene_manager_.process_frame(current_ms);
     local_cfg = device_cfg_;
     xSemaphoreGive(mutex_);
@@ -146,12 +149,12 @@ void LightingRuntime::render_frame(uint32_t current_ms) {
     // 2. Snapshot control arbitration states (lock-free evaluation)
     ControlSnapshot ctrl_snapshot = source_manager_.get_snapshot(current_ms);
 
-    // 3. Local pruning of expired live streams
+    // 3. Local pruning of expired live streams on live_active_
     const uint16_t timeout_ms = local_cfg.protocol.stream_timeout_ms > 0 ? local_cfg.protocol.stream_timeout_ms : 2000;
     bool any_live_active = false;
     for (uint8_t z = 0; z < 8; ++z) {
         for (uint8_t l = 0; l < 3; ++l) {
-            auto& layer = active_live.layers[z][l];
+            auto& layer = live_active_.layers[z][l];
             if (layer.active) {
                 if (current_ms - layer.timestamp_ms > timeout_ms) {
                     layer.active = false;
@@ -164,7 +167,7 @@ void LightingRuntime::render_frame(uint32_t current_ms) {
     }
 
     for (uint8_t f = 0; f < 16; ++f) {
-        auto& fix = active_live.fixtures[f];
+        auto& fix = live_active_.fixtures[f];
         if (fix.active) {
             if (current_ms - fix.timestamp_ms > timeout_ms) {
                 fix.active = false;
@@ -198,15 +201,14 @@ void LightingRuntime::render_frame(uint32_t current_ms) {
 
         ControlSource fx_owner = ctrl_snapshot.resolve_fixture(f, target_zone, current_ms);
 
-        if (fx_owner == ControlSource::LiveDmx && active_live.fixtures[f].active && active_live.fixtures[f].opacity > 0) {
-            // Direct fixture DMX override takes precedence
-            FixtureFrame live_mapped;
+        if (fx_owner == ControlSource::LiveDmx && live_active_.fixtures[f].active && live_active_.fixtures[f].opacity > 0) {
+            // Direct fixture DMX override takes precedence (Item 7)
             FixtureFrame live_src;
-            const uint16_t pcount = std::min<uint16_t>(active_live.fixtures[f].pixel_count, fixture.num_pixels);
+            const uint16_t pcount = std::min<uint16_t>(live_active_.fixtures[f].pixel_count, fixture.num_pixels);
             for (uint16_t p = 0; p < pcount; ++p) {
-                live_src.pixels[p] = active_live.fixtures[f].pixels[p];
+                live_src.pixels[p] = live_active_.fixtures[f].pixels[p];
             }
-            live_src.pwm = active_live.fixtures[f].pwm;
+            live_src.pwm = live_active_.fixtures[f].pwm;
             FixtureMapper::map(render_frame.fixtures[f], live_src, fixture, render_scene.global_brightness);
         } else {
             // Zone compositing
@@ -221,8 +223,8 @@ void LightingRuntime::render_frame(uint32_t current_ms) {
                 layer_frame.pixels.fill(LightValue{0,0,0,0});
                 layer_frame.pwm.fill(0);
 
-                if (owner == ControlSource::LiveDmx && active_live.layers[target_zone][l].active) {
-                    const auto& live = active_live.layers[target_zone][l];
+                if (owner == ControlSource::LiveDmx && live_active_.layers[target_zone][l].active) {
+                    const auto& live = live_active_.layers[target_zone][l];
                     if (live.opacity == 0) continue;
                     
                     uint16_t pcount = std::min<uint16_t>(fixture.num_pixels, MAX_PIXELS);
@@ -246,10 +248,12 @@ void LightingRuntime::render_frame(uint32_t current_ms) {
     // 5. Power Limiting
     power_budget_.enforce(render_frame, local_cfg, current_ms);
 
-    // 6. Physical Output Scheduling & Error Handling
+    // 6. Physical Output Scheduling & Error Handling (Item 11)
     const esp_err_t sched_err = OutputScheduler::schedule(render_frame, local_cfg, controller_);
     if (sched_err != ESP_OK) {
         output_fault_.store(true, std::memory_order_relaxed);
+        output_fault_count_.fetch_add(1, std::memory_order_relaxed);
+        controller_.blackout();
     } else if (output_fault_.load(std::memory_order_relaxed)) {
         output_fault_.store(false, std::memory_order_relaxed);
     }
@@ -276,24 +280,26 @@ void LightingRuntime::submit_live_frame(const LiveDmxFrame& frame) {
     if (!mutex_) return;
     xSemaphoreTake(mutex_, portMAX_DELAY);
     const uint32_t now = now_ms();
-    live_dmx_frame_ = frame;
-    live_dmx_frame_.timestamp_ms = now;
+    live_pending_ = frame;
+    live_pending_.timestamp_ms = now;
+    live_pending_dirty_ = true;
     last_live_stream_ms_ = now;
 
+    // Aggregate ownership calculation (Item 6)
     uint8_t live_zone_mask = 0;
     uint8_t live_layer_mask = 0;
     uint16_t live_fixture_mask = 0;
 
     for (uint8_t z = 0; z < 8; ++z) {
         for (uint8_t l = 0; l < 3; ++l) {
-            if (live_dmx_frame_.layers[z][l].active) {
+            if (live_pending_.layers[z][l].active) {
                 live_zone_mask |= (1 << z);
                 live_layer_mask |= (1 << l);
             }
         }
     }
     for (uint8_t f = 0; f < 16; ++f) {
-        if (live_dmx_frame_.fixtures[f].active) {
+        if (live_pending_.fixtures[f].active) {
             live_fixture_mask |= (1 << f);
         }
     }
@@ -308,10 +314,11 @@ void LightingRuntime::inject_live_data(uint8_t zone_idx, uint8_t layer_idx, cons
     if (!mutex_) return;
     xSemaphoreTake(mutex_, portMAX_DELAY);
     const uint32_t now = now_ms();
-    live_dmx_frame_.layers[zone_idx][layer_idx].color = color;
-    live_dmx_frame_.layers[zone_idx][layer_idx].opacity = opacity;
-    live_dmx_frame_.layers[zone_idx][layer_idx].timestamp_ms = now;
-    live_dmx_frame_.layers[zone_idx][layer_idx].active = true;
+    live_pending_.layers[zone_idx][layer_idx].color = color;
+    live_pending_.layers[zone_idx][layer_idx].opacity = opacity;
+    live_pending_.layers[zone_idx][layer_idx].timestamp_ms = now;
+    live_pending_.layers[zone_idx][layer_idx].active = true;
+    live_pending_dirty_ = true;
     last_live_stream_ms_ = now;
 
     const uint16_t timeout_ms = device_cfg_.protocol.stream_timeout_ms > 0 ? device_cfg_.protocol.stream_timeout_ms : 2000;
@@ -330,7 +337,7 @@ void LightingRuntime::inject_live_fixture(
     if (!mutex_) return;
     xSemaphoreTake(mutex_, portMAX_DELAY);
     const uint32_t now = now_ms();
-    auto& lf = live_dmx_frame_.fixtures[fixture_idx];
+    auto& lf = live_pending_.fixtures[fixture_idx];
     uint16_t pcount = std::min<uint16_t>(count, MAX_PIXELS);
     lf.pixel_count = pcount;
     if (pixels && pcount > 0) {
@@ -342,6 +349,7 @@ void LightingRuntime::inject_live_fixture(
     lf.opacity = opacity;
     lf.timestamp_ms = now;
     lf.active = true;
+    live_pending_dirty_ = true;
     last_live_stream_ms_ = now;
 
     const uint16_t timeout_ms = device_cfg_.protocol.stream_timeout_ms > 0 ? device_cfg_.protocol.stream_timeout_ms : 2000;
@@ -352,9 +360,22 @@ void LightingRuntime::inject_live_fixture(
 std::array<uint8_t, 512> LightingRuntime::last_dmx_data() const {
     if (!mutex_) return {};
     xSemaphoreTake(mutex_, portMAX_DELAY);
-    std::array<uint8_t, 512> dmx = live_dmx_frame_.dmx_telemetry;
+    std::array<uint8_t, 512> dmx = live_active_.dmx_telemetry;
     xSemaphoreGive(mutex_);
     return dmx;
+}
+
+uint8_t LightingRuntime::active_dmx_sources() const {
+    uint8_t count = 0;
+    for (uint8_t z = 0; z < 8; ++z) {
+        for (uint8_t l = 0; l < 3; ++l) {
+            if (live_active_.layers[z][l].active) count++;
+        }
+    }
+    for (uint8_t f = 0; f < 16; ++f) {
+        if (live_active_.fixtures[f].active) count++;
+    }
+    return count;
 }
 
 void LightingRuntime::feed_watchdog() {

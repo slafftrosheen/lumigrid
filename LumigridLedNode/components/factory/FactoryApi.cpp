@@ -434,56 +434,100 @@ esp_err_t get_health(httpd_req_t* request) {
     if (!api::authorize(request, api::ApiRole::Installer)) return ESP_OK;
     
     FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
-    
-    char body[512];
-    
+
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "schema_version", 1);
+    cJSON_AddNumberToObject(root, "uptime_s", static_cast<uint32_t>(esp_timer_get_time() / 1000000ULL));
+    cJSON_AddNumberToObject(root, "free_heap", static_cast<uint32_t>(esp_get_free_heap_size()));
+    cJSON_AddNumberToObject(root, "min_free_heap", static_cast<uint32_t>(esp_get_minimum_free_heap_size()));
+    cJSON_AddNumberToObject(root, "reset_reason", static_cast<int>(esp_reset_reason()));
+
     wifi_ap_record_t ap_info;
     int rssi = 0;
     if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) {
         rssi = ap_info.rssi;
     }
+    cJSON_AddNumberToObject(root, "wifi_rssi", rssi);
 
-    nvs_stats_t nvs_stats;
+    nvs_stats_t nvs_stats{};
     nvs_get_stats(NULL, &nvs_stats);
-    
+    cJSON_AddNumberToObject(root, "nvs_used", static_cast<int>(nvs_stats.used_entries));
+    cJSON_AddNumberToObject(root, "nvs_free", static_cast<int>(nvs_stats.free_entries));
+
+    bool output_fault = false;
+    uint32_t output_fault_count = 0;
+    bool estop_active = false;
+    int control_source = 0;
+    uint8_t active_dmx_sources = 0;
+    uint32_t throttling_events = 0;
+    uint32_t current_power_mw = 0;
     float fps = 0.0f;
     uint16_t active_preset = 0;
-    uint32_t clipping_events = 0;
-    uint32_t current_power_mw = 0;
     bool watchdog_fallback = false;
-    int control_source = 0;
+
     if (api_ptr->signage()) {
+        output_fault = api_ptr->signage()->output_fault();
+        output_fault_count = api_ptr->signage()->output_fault_count();
+        estop_active = api_ptr->signage()->is_estop_active();
+        control_source = static_cast<int>(api_ptr->signage()->current_control_source());
+        active_dmx_sources = api_ptr->signage()->active_dmx_sources();
+        throttling_events = api_ptr->signage()->power_budget().throttling_events();
+        current_power_mw = api_ptr->signage()->power_budget().current_power_mw();
         fps = api_ptr->signage()->get_fps();
         active_preset = api_ptr->signage()->active_scene_index();
-        clipping_events = api_ptr->signage()->power_budget().throttling_events();
-        current_power_mw = api_ptr->signage()->power_budget().current_power_mw();
         watchdog_fallback = api_ptr->signage()->is_fallback_active();
-        control_source = static_cast<int>(api_ptr->signage()->current_control_source());
     }
+
+    cJSON_AddBoolToObject(root, "output_fault", output_fault);
+    cJSON_AddNumberToObject(root, "output_fault_count", output_fault_count);
+    cJSON_AddBoolToObject(root, "estop_active", estop_active);
+    cJSON_AddNumberToObject(root, "control_source", control_source);
+    cJSON_AddNumberToObject(root, "active_control_source", control_source);
+    cJSON_AddNumberToObject(root, "active_dmx_sources", active_dmx_sources);
+    cJSON_AddNumberToObject(root, "throttling_events", throttling_events);
+    cJSON_AddNumberToObject(root, "clipping_events", throttling_events);
+    cJSON_AddNumberToObject(root, "current_power_mw", current_power_mw);
+    cJSON_AddNumberToObject(root, "current_estimated_power", current_power_mw);
+    cJSON_AddNumberToObject(root, "fps", fps);
+    cJSON_AddNumberToObject(root, "active_preset", active_preset);
+    cJSON_AddBoolToObject(root, "watchdog_fallback", watchdog_fallback);
+
+    cJSON* univ_arr = cJSON_CreateArray();
+    if (api_ptr->config()) {
+        DeviceConfig cfg;
+        if (api_ptr->config()->load_config(cfg) == ESP_OK) {
+            std::vector<uint16_t> univs;
+            univs.push_back(cfg.protocol.universe_start);
+            for (const auto& fix : cfg.fixtures) {
+                if (fix.dmx_start_channel > 0) {
+                    bool exists = false;
+                    for (uint16_t u : univs) {
+                        if (u == fix.dmx_universe) { exists = true; break; }
+                    }
+                    if (!exists) univs.push_back(fix.dmx_universe);
+                }
+            }
+            for (uint16_t u : univs) {
+                cJSON_AddItemToArray(univ_arr, cJSON_CreateNumber(u));
+            }
+        }
+    }
+    cJSON_AddItemToObject(root, "configured_universes", univ_arr);
 
     uint32_t packet_loss = 0;
     if (api_ptr->node_sync()) {
         packet_loss = api_ptr->node_sync()->status().packets_missed;
     }
+    cJSON_AddNumberToObject(root, "packet_loss_count", packet_loss);
 
-    snprintf(body, sizeof(body),
-        "{\"uptime_s\":%lu,\"free_heap\":%lu,\"min_free_heap\":%lu,\"reset_reason\":%d,\"wifi_rssi\":%d,\"nvs_used\":%d,\"nvs_free\":%d,\"fps\":%.1f,\"active_preset\":%u,\"packet_loss_count\":%lu,\"clipping_events\":%lu,\"current_power_mw\":%lu,\"control_source\":%d,\"watchdog_fallback\":%s,\"wifi_disconnects\":0}",
-        (unsigned long)(esp_timer_get_time() / 1000000ULL),
-        (unsigned long)esp_get_free_heap_size(),
-        (unsigned long)esp_get_minimum_free_heap_size(),
-        (int)esp_reset_reason(),
-        rssi,
-        (int)nvs_stats.used_entries,
-        (int)nvs_stats.free_entries,
-        fps,
-        active_preset,
-        (unsigned long)packet_loss,
-        (unsigned long)clipping_events,
-        (unsigned long)current_power_mw,
-        control_source,
-        watchdog_fallback ? "true" : "false");
-
-    return send_json(request, body);
+    char* json = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (!json) {
+        return send_error(request, "500 Internal Server Error", "json_encode_failed");
+    }
+    esp_err_t ret = send_json(request, json);
+    cJSON_free(json);
+    return ret;
 }
 
 esp_err_t get_logs(httpd_req_t* request) {
@@ -1168,7 +1212,25 @@ esp_err_t get_signage_status(httpd_req_t* request) {
     cJSON_AddNumberToObject(
         response,
         "controlSource",
-        static_cast<int>(api_ptr->runner().output().current_owner())
+        static_cast<int>(api_ptr->signage() ? api_ptr->signage()->current_control_source() : api_ptr->runner().output().current_owner())
+    );
+
+    cJSON_AddBoolToObject(
+        response,
+        "estopActive",
+        api_ptr->signage() && api_ptr->signage()->is_estop_active()
+    );
+
+    cJSON_AddBoolToObject(
+        response,
+        "outputFault",
+        api_ptr->signage() && api_ptr->signage()->output_fault()
+    );
+
+    cJSON_AddNumberToObject(
+        response,
+        "outputFaultCount",
+        api_ptr->signage() ? api_ptr->signage()->output_fault_count() : 0
     );
 
     cJSON_AddBoolToObject(

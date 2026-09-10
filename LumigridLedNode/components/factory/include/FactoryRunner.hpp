@@ -12,6 +12,16 @@
 
 namespace lg {
 
+/// @brief Factory hardware test runner.
+///
+/// ARCHITECTURAL EXCEPTION NOTE (Batch 2, Item 23):
+/// FactoryRunner directly commands OutputController hardware for factory bring-up,
+/// manufacturing lane testing, PWM diagnostics, and board burn-in. This direct hardware
+/// access is an INTENTIONAL EXCEPTION to the standard rendering pipeline.
+///
+/// DO NOT copy this direct-hardware pattern for any application features, user effects,
+/// or protocol handlers. All operational lighting features MUST render into RenderFrame
+/// via LightingRuntime and be scheduled through OutputScheduler and Compositor.
 class FactoryRunner {
 public:
     FactoryRunner(ControlSourceManager& source_manager, OutputController& controller);

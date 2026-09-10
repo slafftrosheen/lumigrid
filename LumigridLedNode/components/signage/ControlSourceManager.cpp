@@ -32,23 +32,30 @@ esp_err_t ControlSourceManager::init() {
 }
 
 void ControlSourceManager::evaluate_priority(uint32_t current_ms) {
-    ControlSource highest = ControlSource::Idle;
+    ControlSource dominant = ControlSource::Idle;
     
-    for (int i = 7; i >= 0; --i) {
+    for (ControlSource src : kPriorityOrder) {
+        if (src == ControlSource::Idle) continue;
+        uint8_t i = static_cast<uint8_t>(src);
         if (states_[i].active) {
             if (states_[i].expires_ms != 0 && current_ms >= states_[i].expires_ms) {
                 states_[i].active = false; // Lease expired
             } else {
-                highest = static_cast<ControlSource>(i);
-                break;
+                // Converged control model: source is dominant owner if it actively claims at least one zone or fixture
+                const bool claims_scope = ((states_[i].zone_mask != 0 && states_[i].layer_mask != 0) ||
+                                           states_[i].fixture_mask != 0);
+                if (claims_scope) {
+                    dominant = src;
+                    break;
+                }
             }
         }
     }
     
-    if (highest != current_owner_) {
+    if (dominant != current_owner_) {
         ESP_LOGI(TAG, "Control transitioned from %d to %d", 
-                 static_cast<int>(current_owner_), static_cast<int>(highest));
-        current_owner_ = highest;
+                 static_cast<int>(current_owner_), static_cast<int>(dominant));
+        current_owner_ = dominant;
     }
 }
 
@@ -118,6 +125,24 @@ ControlSource ControlSourceManager::resolve(uint8_t zone_idx, uint8_t layer_idx,
 
 ControlSource ControlSourceManager::resolve_fixture(uint8_t fixture_idx, uint8_t zone_idx, uint32_t current_ms) const {
     return const_cast<ControlSourceManager*>(this)->get_snapshot(current_ms).resolve_fixture(fixture_idx, zone_idx, current_ms);
+}
+
+ControlSource ControlSourceManager::current_owner() const {
+    if (!mutex_) return current_owner_;
+    xSemaphoreTake(mutex_, portMAX_DELAY);
+    ControlSource owner = current_owner_;
+    xSemaphoreGive(mutex_);
+    return owner;
+}
+
+ControlState ControlSourceManager::state(ControlSource source) const {
+    uint8_t index = static_cast<uint8_t>(source);
+    if (index >= 8) return ControlState{};
+    if (!mutex_) return states_[index];
+    xSemaphoreTake(mutex_, portMAX_DELAY);
+    ControlState st = states_[index];
+    xSemaphoreGive(mutex_);
+    return st;
 }
 
 } // namespace lg
