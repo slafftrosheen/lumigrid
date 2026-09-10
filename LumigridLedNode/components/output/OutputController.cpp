@@ -1,5 +1,6 @@
 #include "OutputController.hpp"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "lg_board_pins.hpp"
 
 namespace lg {
@@ -113,19 +114,24 @@ esp_err_t OutputController::try_commit() {
     if (estop_latched_.load(std::memory_order_acquire) ||
         !output_enabled_.load(std::memory_order_acquire)) {
         esp_err_t b_err = blackout_locked();
+        esp_err_t err = (b_err != ESP_OK) ? b_err : ESP_ERR_INVALID_STATE;
+        last_commit_error_.store(err, std::memory_order_release);
+        last_commit_time_ms_.store(static_cast<uint32_t>(esp_timer_get_time() / 1000), std::memory_order_release);
         unlock();
-        return (b_err != ESP_OK) ? b_err : ESP_ERR_INVALID_STATE;
+        return err;
     }
 
     esp_err_t err1 = pixels_.show();
     esp_err_t err2 = pwm_.commit();
 
-    unlock();
-
     esp_err_t final_err = (err1 != ESP_OK) ? err1 : err2;
+    last_commit_error_.store(final_err, std::memory_order_release);
+    last_commit_time_ms_.store(static_cast<uint32_t>(esp_timer_get_time() / 1000), std::memory_order_release);
     if (final_err != ESP_OK) {
         commit_fault_count_.fetch_add(1, std::memory_order_relaxed);
     }
+
+    unlock();
     return final_err;
 }
 

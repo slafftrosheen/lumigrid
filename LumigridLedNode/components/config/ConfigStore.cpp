@@ -250,6 +250,34 @@ bool ConfigStore::calculate_dmx_span(const FixtureConfig& fixture, uint32_t& req
     return true;
 }
 
+bool ConfigStore::is_fixture_configured(const FixtureConfig& fix, const DeviceConfig& cfg) {
+    const bool is_addressable = (fix.profile == FixtureProfile::WS2812 || fix.profile == FixtureProfile::SK6812);
+    const bool is_pwm = (fix.profile == FixtureProfile::PWM_Single ||
+                         fix.profile == FixtureProfile::PWM_RGB ||
+                         fix.profile == FixtureProfile::PWM_RGBW);
+    if (!is_addressable && !is_pwm) {
+        return false;
+    }
+    if (is_addressable) {
+        // Addressable fixture: num_pixels == 0 -> disabled/unconfigured (Batch 6 Item 10)
+        return fix.num_pixels > 0;
+    }
+    // PWM fixture: physical outputs determined by profile channel count. num_pixels is irrelevant.
+    // Configured if dmx_start_channel > 0 or at least one referenced physical output is valid & enabled.
+    if (fix.dmx_start_channel > 0) {
+        return true;
+    }
+    uint8_t channels = (fix.profile == FixtureProfile::PWM_Single) ? 1 :
+                       (fix.profile == FixtureProfile::PWM_RGB ? 3 : 4);
+    for (uint8_t ch = 0; ch < channels; ++ch) {
+        uint8_t p_idx = fix.physical_output_index[ch];
+        if (p_idx < 16 && cfg.physical_outputs[p_idx].enabled) {
+            return true;
+        }
+    }
+    return false;
+}
+
 esp_err_t ConfigStore::validate_config(const DeviceConfig& config, ConfigValidationResult* out_result) {
     ConfigValidationResult res;
     auto add_error = [&](const char* fmt, ...) {
@@ -283,25 +311,37 @@ esp_err_t ConfigStore::validate_config(const DeviceConfig& config, ConfigValidat
                   (unsigned)config.protocol.zone_start_channel);
     }
 
-    // 3. Physical Outputs validation (Batch 5 Item 11)
+    // 3. Physical Outputs validation (Batch 6 Items 1 & 2: Enabled/Unused semantics)
     for (uint8_t p = 0; p < 16; ++p) {
         const auto& phys = config.physical_outputs[p];
+        if (!phys.enabled) {
+            // Output slot is unused; hardware_id / type fields do not need to be valid
+            continue;
+        }
         if (phys.type == OutputType::RMT) {
-            if (phys.hardware_id >= 8) {
-                add_error("physical_output[%u] RMT hardware_id (%u) >= 8", p, (unsigned)phys.hardware_id);
+            if (phys.hardware_id >= MAX_RMT_LANES) {
+                add_error("physical_output[%u] RMT hardware_id (%u) >= %u",
+                          p, (unsigned)phys.hardware_id, (unsigned)MAX_RMT_LANES);
             }
         } else if (phys.type == OutputType::PWM) {
-            if (phys.hardware_id >= 8) {
-                add_error("physical_output[%u] PWM hardware_id (%u) >= 8", p, (unsigned)phys.hardware_id);
+            if (phys.hardware_id >= MAX_PWM_CHANNELS) {
+                add_error("physical_output[%u] PWM hardware_id (%u) >= %u",
+                          p, (unsigned)phys.hardware_id, (unsigned)MAX_PWM_CHANNELS);
             }
         } else {
             add_error("physical_output[%u] unsupported output type (%u)", p, (unsigned)phys.type);
         }
     }
 
-    // 4. Fixture configuration
+    // 4. Fixture configuration (Batch 6 Items 10 & 11: Configured vs Unused semantics)
     for (uint8_t f = 0; f < 16; ++f) {
         const auto& fix = config.fixtures[f];
+
+        // An unused fixture with default/stale fields must not fail validation
+        if (!is_fixture_configured(fix, config)) {
+            continue;
+        }
+
         if (fix.zone_id >= 8) {
             add_error("fixture[%u].zone_id (%u) must be < 8", (unsigned)f, (unsigned)fix.zone_id);
         }
@@ -321,24 +361,18 @@ esp_err_t ConfigStore::validate_config(const DeviceConfig& config, ConfigValidat
                 add_error("fixture[%u].num_pixels (%u) exceeds MAX_PIXELS (%u)",
                           (unsigned)f, (unsigned)fix.num_pixels, (unsigned)MAX_PIXELS);
             }
-            // Addressable fixture with num_pixels == 0 is disabled/unconfigured.
-            // When num_pixels > 0, it is active and its referenced physical output must be valid & enabled.
-            if (fix.num_pixels > 0) {
-                uint8_t p_idx = fix.physical_output_index[0];
-                if (p_idx < 16) {
-                    const auto& phys = config.physical_outputs[p_idx];
-                    if (!phys.enabled) {
-                        add_error("fixture[%u] references disabled physical_output[%u]", (unsigned)f, (unsigned)p_idx);
-                    }
-                    if (phys.type != OutputType::RMT) {
-                        add_error("fixture[%u] addressable profile requires RMT physical output, got %u",
-                                  (unsigned)f, (unsigned)phys.type);
-                    }
+            uint8_t p_idx = fix.physical_output_index[0];
+            if (p_idx < 16) {
+                const auto& phys = config.physical_outputs[p_idx];
+                if (!phys.enabled) {
+                    add_error("fixture[%u] references disabled physical_output[%u]", (unsigned)f, (unsigned)p_idx);
+                }
+                if (phys.type != OutputType::RMT) {
+                    add_error("fixture[%u] addressable profile requires RMT physical output, got %u",
+                              (unsigned)f, (unsigned)phys.type);
                 }
             }
         } else if (is_pwm) {
-            // PWM fixture may still have num_pixels == 0 without being invalid.
-            // When configured, verify referenced physical outputs are enabled and of PWM type.
             uint8_t channels_used = (fix.profile == FixtureProfile::PWM_Single) ? 1 :
                                     (fix.profile == FixtureProfile::PWM_RGB ? 3 : 4);
             for (uint8_t ch = 0; ch < channels_used; ++ch) {
@@ -354,11 +388,9 @@ esp_err_t ConfigStore::validate_config(const DeviceConfig& config, ConfigValidat
                     }
                 }
             }
-        } else {
-            add_error("fixture[%u] unknown profile (%u)", (unsigned)f, (unsigned)fix.profile);
         }
 
-        // DMX patching checks via single authoritative helper (Batch 5 Item 9)
+        // DMX patching checks for configured fixture (Batch 5 Item 9 & Batch 6 Item 11)
         if (fix.dmx_start_channel > 0) {
             uint32_t req_channels = 0;
             if (!calculate_dmx_span(fix, req_channels)) {
@@ -391,17 +423,34 @@ esp_err_t ConfigStore::save_config(const DeviceConfig& config) {
     auto to_save = std::make_unique<DeviceConfig>(config);
     to_save->checksum = calc_device_crc(*to_save);
 
-    auto current = std::make_unique<DeviceConfig>();
-    size_t cur_len = sizeof(DeviceConfig);
-    if (nvs_get_blob(handle_, "device_cfg", current.get(), &cur_len) == ESP_OK && cur_len == sizeof(DeviceConfig)) {
-        nvs_set_blob(handle_, "device_cfg_bak", current.get(), sizeof(DeviceConfig));
+    // 1. Transactional primary write & commit (Batch 6 Item 18)
+    esp_err_t err = nvs_set_blob(handle_, "device_cfg", to_save.get(), sizeof(DeviceConfig));
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to write primary device_cfg: %s", esp_err_to_name(err));
+        return err;
+    }
+    err = nvs_commit(handle_);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to commit primary device_cfg: %s", esp_err_to_name(err));
+        return err;
     }
 
-    ESP_RETURN_ON_ERROR(
-        nvs_set_blob(handle_, "device_cfg", to_save.get(), sizeof(DeviceConfig)),
-        TAG, "save config"
-    );
-    return nvs_commit(handle_);
+    // 2. Verify primary read-back and checksum before touching backup
+    auto verify_buf = std::make_unique<DeviceConfig>();
+    size_t verify_len = sizeof(DeviceConfig);
+    err = nvs_get_blob(handle_, "device_cfg", verify_buf.get(), &verify_len);
+    if (err != ESP_OK || verify_len != sizeof(DeviceConfig) ||
+        verify_buf->checksum != to_save->checksum ||
+        calc_device_crc(*verify_buf) != to_save->checksum) {
+        ESP_LOGE(TAG, "Primary device_cfg read-back verification failed! Preserving backup intact.");
+        return ESP_ERR_NVS_INVALID_STATE;
+    }
+
+    // 3. Primary confirmed valid -> update backup slot
+    nvs_set_blob(handle_, "device_cfg_bak", to_save.get(), sizeof(DeviceConfig));
+    nvs_commit(handle_);
+
+    return ESP_OK;
 }
 
 bool ConfigStore::migrate_v1_to_v2(const DeviceConfigV1& v1, DeviceConfig& v2, uint32_t* out_warning_count) {
@@ -545,6 +594,12 @@ esp_err_t ConfigStore::load_config(DeviceConfig& config) {
                     }
                     ESP_LOGI(TAG, "Explicitly migrating legacy v1 blob %s to v2", k);
                     migrate_v1_to_v2(*v1, out);
+                    ConfigValidationResult vres;
+                    if (validate_config(out, &vres) != ESP_OK) {
+                        ESP_LOGE(TAG, "Migration validation failed (%u errors): %s",
+                                 (unsigned)vres.error_count, vres.first_error);
+                        return ESP_ERR_NVS_INVALID_STATE;
+                    }
                     needs_persist = true;
                 }
             } else {

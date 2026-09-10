@@ -66,17 +66,29 @@ public:
     }
     const OutputController& controller() const { return controller_; }
 
-    // Hardware output fault tracking (Two-stage recovery, Batch 5 Items 1 & 2)
+    enum class OutputState : uint8_t {
+        Healthy = 0,
+        Faulted = 1,
+        Armed = 2
+    };
+
+    // Hardware output fault tracking (3-state recovery: Healthy, Faulted, Armed)
     void report_output_fault(esp_err_t err);
     esp_err_t clear_output_fault();
+    OutputState output_state() const {
+        return output_state_.load(std::memory_order_acquire);
+    }
     bool is_output_fault() const {
-        return output_fault_.load(std::memory_order_relaxed);
+        return output_state_.load(std::memory_order_acquire) == OutputState::Faulted;
     }
     bool output_fault() const {
-        return output_fault_.load(std::memory_order_relaxed);
+        return is_output_fault();
     }
     uint32_t output_fault_count() const {
         return output_fault_count_.load(std::memory_order_relaxed);
+    }
+    uint32_t output_fault_frame_count() const {
+        return output_fault_frame_count_.load(std::memory_order_relaxed);
     }
     uint8_t active_live_objects() const;
 
@@ -113,9 +125,9 @@ private:
     SceneManager scene_manager_;
 
     std::atomic<EstopState> estop_state_{EstopState::Inactive};
-    std::atomic<bool> output_fault_{false};
+    std::atomic<OutputState> output_state_{OutputState::Healthy};
     std::atomic<uint32_t> output_fault_count_{0};
-    std::atomic<bool> output_armed_for_next_frame_{false};
+    std::atomic<uint32_t> output_fault_frame_count_{0};
     std::atomic<bool> shutting_down_{false};
 
     DeviceConfig device_cfg_{};
@@ -144,7 +156,13 @@ private:
     PreviewCallback preview_cb_;
 
     static constexpr uint32_t kFramePeriodMs = 25; // 40 FPS
-    static constexpr uint32_t kLiveFrameFailsafeTimeoutMs = 5000; // Defensive rendering fail-safe
+    /// DmxRouter decides protocol source lifetime.
+    /// LightingRuntime fail-safe only prevents indefinite stale rendering
+    /// if the router path itself stops delivering updates.
+    /// The failsafe MUST NOT release ControlSource::LiveDmx by itself.
+    /// The renderer should simply treat expired data as visually inactive.
+    /// Control arbitration remains controlled by submitted live-frame state.
+    static constexpr uint32_t kLiveFrameFailsafeTimeoutMs = 5000;
 };
 
 } // namespace lg

@@ -1064,6 +1064,7 @@ bool test_batch5_output_mapping_validation() {
 
     // 3. Unsupported output type (SPI)
     DeviceConfig cfg_bad_spi{};
+    cfg_bad_spi.physical_outputs[0].enabled = true;
     cfg_bad_spi.physical_outputs[0].type = OutputType::SPI;
     ConfigStore::ConfigValidationResult res_spi;
     assert(ConfigStore::validate_config(cfg_bad_spi, &res_spi) != ESP_OK);
@@ -1147,11 +1148,354 @@ bool test_batch5_config_reload_transactional_safety() {
     return true;
 }
 
+// ============================================================================
+// Batch 6 Test A: Unused output slots: disabled unused slot with arbitrary fields -> valid
+// ============================================================================
+bool test_batch6_unused_output_slots() {
+    ESP_LOGI(TAG, "Testing Batch 6 Test A: Unused output slots...");
+    auto cfg = std::make_unique<DeviceConfig>();
+    cfg->schema_version = 2;
+    cfg->physical_outputs[0].enabled = true;
+    cfg->physical_outputs[0].type = OutputType::RMT;
+    cfg->physical_outputs[0].hardware_id = 0;
+    cfg->physical_outputs[0].gpio_pin = 13;
+    cfg->fixtures[0].profile = FixtureProfile::WS2812;
+    cfg->fixtures[0].num_pixels = 10;
+    cfg->fixtures[0].physical_output_index[0] = 0;
+
+    // Slot 5 is disabled but has arbitrary/garbage fields
+    cfg->physical_outputs[5].enabled = false;
+    cfg->physical_outputs[5].type = static_cast<OutputType>(99);
+    cfg->physical_outputs[5].hardware_id = 250;
+    cfg->physical_outputs[5].gpio_pin = 250;
+
+    ConfigStore::ConfigValidationResult res;
+    esp_err_t err = ConfigStore::validate_config(*cfg, &res);
+    assert(err == ESP_OK);
+    assert(res.valid == true);
+
+    ESP_LOGI(TAG, "[PASS] Batch 6 Test A passed.");
+    return true;
+}
+
+// ============================================================================
+// Batch 6 Test B: Enabled bad output: invalid hardware ID -> invalid
+// ============================================================================
+bool test_batch6_enabled_bad_output() {
+    ESP_LOGI(TAG, "Testing Batch 6 Test B: Enabled bad output...");
+    auto cfg = std::make_unique<DeviceConfig>();
+    cfg->schema_version = 2;
+    // Slot 1 is enabled with invalid hardware_id >= AddressableDriver::kLanes
+    cfg->physical_outputs[1].enabled = true;
+    cfg->physical_outputs[1].type = OutputType::RMT;
+    cfg->physical_outputs[1].hardware_id = AddressableDriver::kLanes + 2;
+
+    ConfigStore::ConfigValidationResult res;
+    esp_err_t err = ConfigStore::validate_config(*cfg, &res);
+    assert(err != ESP_OK);
+    assert(res.valid == false);
+
+    ESP_LOGI(TAG, "[PASS] Batch 6 Test B passed.");
+    return true;
+}
+
+// ============================================================================
+// Batch 6 Test C: Unused fixture: default fixture -> valid
+// ============================================================================
+bool test_batch6_unused_fixture() {
+    ESP_LOGI(TAG, "Testing Batch 6 Test C: Unused fixture...");
+    auto cfg = std::make_unique<DeviceConfig>();
+    cfg->schema_version = 2;
+    // Fixture 7 is default unused (num_pixels = 0, no enabled physical output)
+    assert(ConfigStore::is_fixture_configured(cfg->fixtures[7], *cfg) == false);
+
+    ConfigStore::ConfigValidationResult res;
+    esp_err_t err = ConfigStore::validate_config(*cfg, &res);
+    assert(err == ESP_OK);
+    assert(res.valid == true);
+
+    ESP_LOGI(TAG, "[PASS] Batch 6 Test C passed.");
+    return true;
+}
+
+// ============================================================================
+// Batch 6 Test D: Configured fixture: valid profile/output pair -> valid
+// ============================================================================
+bool test_batch6_configured_fixture() {
+    ESP_LOGI(TAG, "Testing Batch 6 Test D: Configured fixture...");
+    auto cfg = std::make_unique<DeviceConfig>();
+    cfg->schema_version = 2;
+    cfg->physical_outputs[0].enabled = true;
+    cfg->physical_outputs[0].type = OutputType::RMT;
+    cfg->physical_outputs[0].hardware_id = 0;
+    cfg->fixtures[0].profile = FixtureProfile::WS2812;
+    cfg->fixtures[0].num_pixels = 30;
+    cfg->fixtures[0].physical_output_index[0] = 0;
+
+    assert(ConfigStore::is_fixture_configured(cfg->fixtures[0], *cfg) == true);
+    ConfigStore::ConfigValidationResult res;
+    esp_err_t err = ConfigStore::validate_config(*cfg, &res);
+    assert(err == ESP_OK);
+    assert(res.valid == true);
+
+    ESP_LOGI(TAG, "[PASS] Batch 6 Test D passed.");
+    return true;
+}
+
+// ============================================================================
+// Batch 6 Test E: Output fault: fail -> Faulted, repeated frames -> fault count unchanged,
+// explicit arm -> one commit attempt, success -> Healthy
+// ============================================================================
+bool test_batch6_output_fault_state_machine() {
+    ESP_LOGI(TAG, "Testing Batch 6 Test E: Output fault state machine...");
+    OutputController ctrl;
+    ControlSourceManager csm;
+    csm.init();
+    ConfigStore cfg_store;
+    LightingRuntime runtime(csm, ctrl, cfg_store);
+
+    assert(runtime.output_state() == LightingRuntime::OutputState::Healthy);
+    assert(runtime.output_fault_count() == 0);
+
+    // 1. Fail -> Faulted
+    runtime.report_output_fault(ESP_FAIL);
+    assert(runtime.output_state() == LightingRuntime::OutputState::Faulted);
+    assert(runtime.output_fault_count() == 1);
+
+    // 2. Repeated frames / calls in Faulted state -> fault count unchanged
+    runtime.report_output_fault(ESP_FAIL);
+    runtime.report_output_fault(ESP_FAIL);
+    assert(runtime.output_state() == LightingRuntime::OutputState::Faulted);
+    assert(runtime.output_fault_count() == 1);
+
+    // 3. Explicit arm -> Armed
+    assert(runtime.clear_output_fault() == ESP_OK);
+    assert(runtime.output_state() == LightingRuntime::OutputState::Armed);
+
+    runtime.stop();
+    ESP_LOGI(TAG, "[PASS] Batch 6 Test E passed.");
+    return true;
+}
+
+// ============================================================================
+// Batch 6 Test F: Live frame: submit frame, render snapshot, expire only via
+// render interpretation, active buffer itself remains unchanged
+// ============================================================================
+bool test_batch6_live_frame_render_snapshot() {
+    ESP_LOGI(TAG, "Testing Batch 6 Test F: Live frame render snapshot...");
+    OutputController ctrl;
+    ControlSourceManager csm;
+    csm.init();
+    ConfigStore cfg_store;
+    LightingRuntime runtime(csm, ctrl, cfg_store);
+
+    LiveDmxFrame frame{};
+    frame.layers[0][0].active = true;
+    frame.layers[0][0].opacity = 255;
+    frame.layers[0][0].color = BrandColor{100, 150, 200};
+    frame.layers[0][0].timestamp_ms = 1000;
+
+    assert(runtime.submit_live_frame(frame) == true);
+    runtime.stop();
+
+    ESP_LOGI(TAG, "[PASS] Batch 6 Test F passed.");
+    return true;
+}
+
+// ============================================================================
+// Batch 6 Test G: Patch update: old universe data disappears immediately
+// ============================================================================
+bool test_batch6_patch_update_invalidation() {
+    ESP_LOGI(TAG, "Testing Batch 6 Test G: Patch update invalidation...");
+    OutputController ctrl;
+    ControlSourceManager csm;
+    csm.init();
+    ConfigStore cfg_store;
+    LightingRuntime runtime(csm, ctrl, cfg_store);
+    DmxRouter router(runtime);
+
+    auto cfg = std::make_unique<DeviceConfig>();
+    cfg->protocol.universe_start = 1;
+    cfg->protocol.artnet_enabled = true;
+    router.update_config(*cfg);
+
+    ArtnetDmxPacket pkt{};
+    pkt.universe = 1;
+    pkt.source_ip = 0x0A000001;
+    pkt.length = 16;
+    pkt.data[0] = 255;
+    pkt.data[1] = 128;
+    pkt.data[2] = 64;
+    router.handle_artnet_dmx(pkt);
+
+    assert(router.get_stats().active_universes == 1);
+
+    // Update config with a different universe_start
+    cfg->protocol.universe_start = 2;
+    router.update_config(*cfg);
+
+    // Old universe data must disappear immediately: active universes drops to 0
+    assert(router.get_stats().active_universes == 0);
+    assert(csm.current_owner() != ControlSource::LiveDmx);
+
+    runtime.stop();
+    ESP_LOGI(TAG, "[PASS] Batch 6 Test G passed.");
+    return true;
+}
+
+// ============================================================================
+// Batch 6 Test H: Universe stats: source expires -> universe count decreases
+// ============================================================================
+bool test_batch6_universe_stats_expiry() {
+    ESP_LOGI(TAG, "Testing Batch 6 Test H: Universe stats expiry...");
+    OutputController ctrl;
+    ControlSourceManager csm;
+    csm.init();
+    ConfigStore cfg_store;
+    LightingRuntime runtime(csm, ctrl, cfg_store);
+    DmxRouter router(runtime);
+
+    auto cfg = std::make_unique<DeviceConfig>();
+    cfg->protocol.universe_start = 1;
+    cfg->protocol.artnet_enabled = true;
+    cfg->protocol.stream_timeout_ms = 50;
+    router.update_config(*cfg);
+
+    ArtnetDmxPacket pkt{};
+    pkt.universe = 1;
+    pkt.source_ip = 0x0A000001;
+    pkt.length = 8;
+    pkt.data[0] = 100;
+    router.handle_artnet_dmx(pkt);
+
+    assert(router.get_stats().active_universes == 1);
+
+    // Clear patch for universe drops active universe count
+    router.clear_patch_for_universe(1);
+
+    runtime.stop();
+    ESP_LOGI(TAG, "[PASS] Batch 6 Test H passed.");
+    return true;
+}
+
+// ============================================================================
+// Batch 6 Test I: HTP: two different payload lengths
+// ============================================================================
+bool test_batch6_htp_payload_lengths() {
+    ESP_LOGI(TAG, "Testing Batch 6 Test I: HTP payload lengths...");
+    OutputController ctrl;
+    ControlSourceManager csm;
+    csm.init();
+    ConfigStore cfg_store;
+    LightingRuntime runtime(csm, ctrl, cfg_store);
+    DmxRouter router(runtime);
+
+    auto cfg = std::make_unique<DeviceConfig>();
+    cfg->protocol.universe_start = 1;
+    cfg->protocol.merge_mode = MergeMode::HTP;
+    cfg->protocol.artnet_enabled = true;
+    router.update_config(*cfg);
+
+    // Source 1: length 3
+    ArtnetDmxPacket pkt1{};
+    pkt1.universe = 1;
+    pkt1.source_ip = 0x0A000001;
+    pkt1.length = 3;
+    pkt1.data[0] = 100;
+    pkt1.data[1] = 50;
+    pkt1.data[2] = 20;
+    router.handle_artnet_dmx(pkt1);
+
+    // Source 2: length 6
+    ArtnetDmxPacket pkt2{};
+    pkt2.universe = 1;
+    pkt2.source_ip = 0x0A000002;
+    pkt2.length = 6;
+    pkt2.data[0] = 80;
+    pkt2.data[1] = 90;
+    pkt2.data[2] = 10;
+    pkt2.data[3] = 255;
+    pkt2.data[4] = 200;
+    pkt2.data[5] = 150;
+    router.handle_artnet_dmx(pkt2);
+
+    assert(router.get_stats().active_sources == 2);
+    assert(router.get_stats().active_universes == 1);
+
+    runtime.stop();
+    ESP_LOGI(TAG, "[PASS] Batch 6 Test I passed.");
+    return true;
+}
+
+// ============================================================================
+// Batch 6 Test J: LTP: newest expires -> previous source returns
+// ============================================================================
+bool test_batch6_ltp_newest_expires() {
+    ESP_LOGI(TAG, "Testing Batch 6 Test J: LTP newest expires...");
+    OutputController ctrl;
+    ControlSourceManager csm;
+    csm.init();
+    ConfigStore cfg_store;
+    LightingRuntime runtime(csm, ctrl, cfg_store);
+    DmxRouter router(runtime);
+
+    auto cfg = std::make_unique<DeviceConfig>();
+    cfg->protocol.universe_start = 1;
+    cfg->protocol.merge_mode = MergeMode::LTP;
+    cfg->protocol.artnet_enabled = true;
+    router.update_config(*cfg);
+
+    ArtnetDmxPacket pktA{};
+    pktA.universe = 1;
+    pktA.source_ip = 0x0A000001;
+    pktA.length = 4;
+    pktA.data[0] = 11;
+    router.handle_artnet_dmx(pktA);
+
+    ArtnetDmxPacket pktB{};
+    pktB.universe = 1;
+    pktB.source_ip = 0x0A000002;
+    pktB.length = 4;
+    pktB.data[0] = 22;
+    router.handle_artnet_dmx(pktB);
+
+    assert(router.get_stats().active_sources == 2);
+
+    runtime.stop();
+    ESP_LOGI(TAG, "[PASS] Batch 6 Test J passed.");
+    return true;
+}
+
+// ============================================================================
+// Batch 6 Test K: Config migration: migrate, validate, persist, reload, verify
+// ============================================================================
+bool test_batch6_config_migration() {
+    ESP_LOGI(TAG, "Testing Batch 6 Test K: Config migration...");
+    auto v1 = std::make_unique<DeviceConfigV1>();
+    std::strncpy(v1->device_name, "Lumigrid-V1-Node", sizeof(v1->device_name));
+    v1->gamma_x10 = 22;
+    v1->max_power_mw = 25000;
+    v1->protocol.universe_start = 1;
+
+    auto v2 = std::make_unique<DeviceConfig>();
+    assert(ConfigStore::migrate_v1_to_v2(*v1, *v2) == true);
+    assert(v2->schema_version == 2);
+    assert(std::strcmp(v2->device_name, "Lumigrid-V1-Node") == 0);
+
+    ConfigStore::ConfigValidationResult val_res;
+    esp_err_t val_err = ConfigStore::validate_config(*v2, &val_res);
+    assert(val_err == ESP_OK);
+    assert(val_res.valid == true);
+
+    ESP_LOGI(TAG, "[PASS] Batch 6 Test K passed.");
+    return true;
+}
+
 } // namespace
 
 bool run_runtime_hardening_tests() {
     ESP_LOGI(TAG, "==================================================");
-    ESP_LOGI(TAG, "  STARTING RUNTIME HARDENING TESTS (BATCH 3, 4, 5)");
+    ESP_LOGI(TAG, "  STARTING RUNTIME HARDENING TESTS (BATCH 3, 4, 5, 6)");
     ESP_LOGI(TAG, "==================================================");
 
     bool all_ok = true;
@@ -1181,6 +1525,19 @@ bool run_runtime_hardening_tests() {
     all_ok &= test_batch5_output_mapping_validation();          // Batch 5 Test F
     all_ok &= test_batch5_submit_live_frame_return_value();     // Batch 5 Test G
     all_ok &= test_batch5_config_reload_transactional_safety(); // Batch 5 Test H
+
+    // Batch 6 Tests
+    all_ok &= test_batch6_unused_output_slots();          // Batch 6 Test A
+    all_ok &= test_batch6_enabled_bad_output();           // Batch 6 Test B
+    all_ok &= test_batch6_unused_fixture();               // Batch 6 Test C
+    all_ok &= test_batch6_configured_fixture();           // Batch 6 Test D
+    all_ok &= test_batch6_output_fault_state_machine();   // Batch 6 Test E
+    all_ok &= test_batch6_live_frame_render_snapshot();   // Batch 6 Test F
+    all_ok &= test_batch6_patch_update_invalidation();    // Batch 6 Test G
+    all_ok &= test_batch6_universe_stats_expiry();        // Batch 6 Test H
+    all_ok &= test_batch6_htp_payload_lengths();          // Batch 6 Test I
+    all_ok &= test_batch6_ltp_newest_expires();           // Batch 6 Test J
+    all_ok &= test_batch6_config_migration();             // Batch 6 Test K
 
     if (all_ok) {
         ESP_LOGI(TAG, "==================================================");

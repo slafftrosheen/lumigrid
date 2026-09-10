@@ -16,6 +16,8 @@ struct BrandColor {
 // ──────────────────────────── Constants ────────────────────────────
 constexpr uint16_t MAX_FIXTURE_PIXELS = 256;
 constexpr uint16_t MAX_PIXELS = MAX_FIXTURE_PIXELS;
+constexpr uint8_t MAX_RMT_LANES = 8;
+constexpr uint8_t MAX_PWM_CHANNELS = 8;
 
 // ──────────────────────────── New Product Schema ─────────────────────────
 

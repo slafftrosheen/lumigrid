@@ -55,11 +55,18 @@ void DmxRouter::update_config(const DeviceConfig& config) {
         if (patch_changed) {
             for (auto& u : tracked_universes_) {
                 u.active = false;
+                u.last_packet_ms = 0;
                 u.merged_data.fill(0);
                 u.merged_length = 0;
                 for (auto& s : u.sources) {
-                    s.active = false;
+                    s.source_id = {};
+                    s.priority = 100;
+                    s.last_packet_ms = 0;
+                    s.length = 0;
+                    s.last_sequence = 0;
                     s.sequence_valid = false;
+                    s.data.fill(0);
+                    s.active = false;
                 }
             }
             assembled_frame_ = {};
@@ -128,13 +135,24 @@ uint32_t DmxRouter::stream_timeout_ms() const {
     return stream_timeout_ms_locked();
 }
 
+bool DmxRouter::is_universe_live(const UniverseState& u, uint32_t now) const {
+    if (!u.active) return false;
+    const uint32_t timeout = stream_timeout_ms_locked();
+    for (const auto& src : u.sources) {
+        if (src.active && (now - src.last_packet_ms <= timeout)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 DmxRouter::DmxStats DmxRouter::get_stats() const {
     std::lock_guard<std::mutex> lock(frame_mutex_);
     DmxStats s;
     const uint32_t now = now_ms();
     const uint32_t timeout = stream_timeout_ms_locked();
     for (const auto& u : tracked_universes_) {
-        if (!u.active) continue;
+        if (!is_universe_live(u, now)) continue;
         s.active_universes++;
         for (const auto& src : u.sources) {
             if (src.active && (now - src.last_packet_ms <= timeout)) {
@@ -215,24 +233,16 @@ void DmxRouter::recompute_merge(UniverseState& state, uint32_t current_ms) {
     const uint32_t stream_timeout = stream_timeout_ms_locked();
 
     // Prune timed-out sources
-    uint8_t highest_priority = 0;
-    bool any_active = false;
-
     for (auto& src : state.sources) {
         if (src.active) {
             if (current_ms - src.last_packet_ms > stream_timeout) {
                 src.active = false;
                 src.sequence_valid = false;
-            } else {
-                any_active = true;
-                if (src.priority > highest_priority) {
-                    highest_priority = src.priority;
-                }
             }
         }
     }
 
-    if (!any_active) {
+    if (!is_universe_live(state, current_ms)) {
         state.merged_data.fill(0);
         state.merged_length = 0;
         if (state.active) {
@@ -240,6 +250,15 @@ void DmxRouter::recompute_merge(UniverseState& state, uint32_t current_ms) {
             clear_patch_for_universe(state.universe);
         }
         return;
+    }
+
+    uint8_t highest_priority = 0;
+    for (const auto& src : state.sources) {
+        if (src.active && (current_ms - src.last_packet_ms <= stream_timeout)) {
+            if (src.priority > highest_priority) {
+                highest_priority = src.priority;
+            }
+        }
     }
 
     state.merged_data.fill(0);
@@ -377,7 +396,7 @@ void DmxRouter::process_frame(uint16_t universe, const uint8_t* data, uint16_t l
 
         bool any_active = false;
         for (const auto& u : tracked_universes_) {
-            if (u.active) {
+            if (is_universe_live(u, current_ms)) {
                 any_active = true;
                 break;
             }

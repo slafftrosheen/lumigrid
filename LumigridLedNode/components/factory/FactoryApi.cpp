@@ -457,6 +457,7 @@ esp_err_t get_health(httpd_req_t* request) {
 
     bool output_fault = false;
     uint32_t output_fault_count = 0;
+    int output_last_error = 0;
     bool output_controller_estop_latched = false;
     bool runtime_estop = false;
     int dominant_control_source = 0;
@@ -472,6 +473,7 @@ esp_err_t get_health(httpd_req_t* request) {
     if (api_ptr->signage()) {
         output_fault = api_ptr->signage()->output_fault();
         output_fault_count = api_ptr->signage()->output_fault_count();
+        output_last_error = static_cast<int>(api_ptr->signage()->controller().last_commit_error());
         output_controller_estop_latched = api_ptr->signage()->is_output_controller_estop_latched();
         runtime_estop = api_ptr->signage()->is_estop_active();
         dominant_control_source = static_cast<int>(api_ptr->signage()->current_control_source());
@@ -491,6 +493,7 @@ esp_err_t get_health(httpd_req_t* request) {
 
     cJSON_AddBoolToObject(root, "output_fault", output_fault);
     cJSON_AddNumberToObject(root, "output_fault_count", output_fault_count);
+    cJSON_AddNumberToObject(root, "output_last_error", output_last_error);
     cJSON_AddBoolToObject(root, "output_controller_estop_latched", output_controller_estop_latched);
     cJSON_AddBoolToObject(root, "runtime_estop", runtime_estop);
     cJSON_AddNumberToObject(root, "dominant_control_source", dominant_control_source);
@@ -501,6 +504,7 @@ esp_err_t get_health(httpd_req_t* request) {
     cJSON_AddNumberToObject(root, "packets_accepted", dmx_stats.packets_accepted);
     cJSON_AddNumberToObject(root, "packets_rejected_sequence", dmx_stats.packets_rejected_sequence);
     cJSON_AddNumberToObject(root, "packets_ignored_unpatched", dmx_stats.packets_ignored_unpatched);
+    cJSON_AddNumberToObject(root, "submission_failures", dmx_stats.submission_failures);
     cJSON_AddNumberToObject(root, "current_power_mw", current_power_mw);
     cJSON_AddNumberToObject(root, "throttling_events", throttling_events);
     cJSON_AddNumberToObject(root, "fps", fps);

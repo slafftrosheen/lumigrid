@@ -18,6 +18,10 @@ enum class DmxSourceProtocol : uint8_t {
     Sacn = 2
 };
 
+/// Source identity for DMX streams (Batch 6 Item 15):
+/// - Art-Net: uses IPv4 identity (first 4 bytes). Two controllers sharing the same
+///   source IP are treated as one logical Art-Net source stream.
+/// - sACN: uses the full 16-byte CID (Component Identifier per ANSI E1.31).
 struct DmxSourceId {
     DmxSourceProtocol protocol{DmxSourceProtocol::ArtNet};
     std::array<uint8_t, 16> identity{};
@@ -163,6 +167,7 @@ private:
     LiveDmxFrame submission_frame_{};
 
     UniverseState* get_or_create_universe(uint16_t universe);
+    bool is_universe_live(const UniverseState& u, uint32_t now) const;
     void recompute_merge(UniverseState& state, uint32_t current_ms);
     void dispatch_patch(uint16_t universe, const uint8_t* data, uint16_t length);
 };

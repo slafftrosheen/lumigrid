@@ -10,7 +10,7 @@ namespace lg {
 
 class AddressableDriver {
 public:
-    static constexpr uint8_t kLanes = 8;
+    static constexpr uint8_t kLanes = MAX_RMT_LANES;
     static constexpr uint16_t kPixels = 144; // Max pixels for factory preview
 
     esp_err_t init();

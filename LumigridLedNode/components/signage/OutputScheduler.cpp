@@ -1,5 +1,6 @@
 // components/signage/OutputScheduler.cpp
 #include "OutputScheduler.hpp"
+#include "ConfigStore.hpp"
 #include <algorithm>
 
 namespace lg {
@@ -9,9 +10,16 @@ esp_err_t OutputScheduler::schedule(
     const DeviceConfig& device_cfg,
     OutputController& controller
 ) {
-    // ── Pass 1: Validate entire render/output mapping before modifying driver state (Batch 5 Item 12) ──
+    // ── Pass 1: Validate entire render/output mapping before modifying driver state (Batch 6 Item 9) ──
+    uint16_t rmt_lanes_claimed = 0;
+    uint16_t pwm_channels_claimed = 0;
+
     for (uint8_t f = 0; f < 16; ++f) {
         const FixtureConfig& fixture = device_cfg.fixtures[f];
+        if (!ConfigStore::is_fixture_configured(fixture, device_cfg)) {
+            continue;
+        }
+
         const bool is_pwm = (fixture.profile == FixtureProfile::PWM_Single ||
                              fixture.profile == FixtureProfile::PWM_RGB ||
                              fixture.profile == FixtureProfile::PWM_RGBW);
@@ -22,13 +30,8 @@ esp_err_t OutputScheduler::schedule(
             return ESP_ERR_INVALID_ARG;
         }
 
-        if (fixture.num_pixels == 0 && !is_pwm) {
-            // Disabled / unconfigured addressable fixture
-            continue;
-        }
-
         if (is_addressable) {
-            if (fixture.num_pixels > MAX_PIXELS) {
+            if (fixture.num_pixels == 0 || fixture.num_pixels > MAX_PIXELS) {
                 return ESP_ERR_INVALID_ARG;
             }
             uint8_t p_idx = fixture.physical_output_index[0];
@@ -39,6 +42,10 @@ esp_err_t OutputScheduler::schedule(
             if (!phys.enabled || phys.type != OutputType::RMT || phys.hardware_id >= AddressableDriver::kLanes) {
                 return ESP_ERR_INVALID_ARG;
             }
+            if (rmt_lanes_claimed & (1U << phys.hardware_id)) {
+                return ESP_ERR_INVALID_ARG; // Duplicate incompatible physical mapping
+            }
+            rmt_lanes_claimed |= (1U << phys.hardware_id);
         } else if (is_pwm) {
             uint8_t pwm_chans = (fixture.profile == FixtureProfile::PWM_Single) ? 1 :
                                 (fixture.profile == FixtureProfile::PWM_RGB ? 3 : 4);
@@ -51,6 +58,10 @@ esp_err_t OutputScheduler::schedule(
                 if (!phys.enabled || phys.type != OutputType::PWM || phys.hardware_id >= Pca9685Driver::kChannels) {
                     return ESP_ERR_INVALID_ARG;
                 }
+                if (pwm_channels_claimed & (1U << phys.hardware_id)) {
+                    return ESP_ERR_INVALID_ARG; // Duplicate incompatible physical mapping
+                }
+                pwm_channels_claimed |= (1U << phys.hardware_id);
             }
         }
     }
@@ -61,12 +72,13 @@ esp_err_t OutputScheduler::schedule(
 
     for (uint8_t f = 0; f < 16; ++f) {
         const FixtureConfig& fixture = device_cfg.fixtures[f];
+        if (!ConfigStore::is_fixture_configured(fixture, device_cfg)) {
+            continue;
+        }
+
         bool is_pwm = (fixture.profile == FixtureProfile::PWM_Single ||
                        fixture.profile == FixtureProfile::PWM_RGB ||
                        fixture.profile == FixtureProfile::PWM_RGBW);
-        if (fixture.num_pixels == 0 && !is_pwm) {
-            continue;
-        }
 
         const FixtureFrame& fx_frame = frame.fixtures[f];
 
@@ -92,4 +104,5 @@ esp_err_t OutputScheduler::schedule(
 }
 
 } // namespace lg
+
 

@@ -110,7 +110,6 @@ void LightingRuntime::clear_live_frame() {
     if (!mutex_) return;
     xSemaphoreTake(mutex_, portMAX_DELAY);
     live_pending_ = {};
-    live_active_ = {};
     live_pending_dirty_ = true;
     last_live_stream_ms_ = 0;
     source_manager_.release(ControlSource::LiveDmx);
@@ -202,28 +201,23 @@ void LightingRuntime::render_frame(uint32_t current_ms) {
     // 2. Snapshot control arbitration states (lock-free evaluation)
     ControlSnapshot ctrl_snapshot = source_manager_.get_snapshot(current_ms);
 
-    // 3. Defensive rendering fail-safe timeout (Batch 5 Item 3: DmxRouter owns protocol/source timeout authority)
-    for (uint8_t z = 0; z < 8; ++z) {
-        for (uint8_t l = 0; l < 3; ++l) {
-            auto& layer = live_active_.layers[z][l];
-            if (layer.active) {
-                if (current_ms - layer.timestamp_ms > kLiveFrameFailsafeTimeoutMs) {
-                    layer.active = false;
-                    layer.opacity = 0;
-                }
-            }
+    // 3. Defensive rendering fail-safe timeout (Batch 6 Items 3 & 5: DmxRouter owns protocol/source timeout authority)
+    // Render task MUST NOT mutate live_active_ after frame promotion. Local expiration evaluation only.
+    auto live_layer_is_valid = [current_ms](const LiveDmxLayer& layer) -> bool {
+        if (!layer.active || layer.opacity == 0) return false;
+        if (current_ms - layer.timestamp_ms > kLiveFrameFailsafeTimeoutMs) {
+            return false; // Inactive for this render frame only
         }
-    }
+        return true;
+    };
 
-    for (uint8_t f = 0; f < 16; ++f) {
-        auto& fix = live_active_.fixtures[f];
-        if (fix.active) {
-            if (current_ms - fix.timestamp_ms > kLiveFrameFailsafeTimeoutMs) {
-                fix.active = false;
-                fix.opacity = 0;
-            }
+    auto live_fixture_is_valid = [current_ms](const LiveDmxFixture& fix) -> bool {
+        if (!fix.active || fix.opacity == 0) return false;
+        if (current_ms - fix.timestamp_ms > kLiveFrameFailsafeTimeoutMs) {
+            return false; // Inactive for this render frame only
         }
-    }
+        return true;
+    };
 
     // 4. Render Pipeline (Completely lock-free!)
     RenderFrame& render_frame = current_render_frame_;
@@ -244,7 +238,7 @@ void LightingRuntime::render_frame(uint32_t current_ms) {
 
         ControlSource fx_owner = ctrl_snapshot.resolve_fixture(f, target_zone, current_ms);
 
-        if (fx_owner == ControlSource::LiveDmx && live_active_.fixtures[f].active && live_active_.fixtures[f].opacity > 0) {
+        if (fx_owner == ControlSource::LiveDmx && live_fixture_is_valid(live_active_.fixtures[f])) {
             // Direct fixture DMX override takes precedence (Item 7)
             FixtureFrame live_src;
             const uint16_t pcount = std::min<uint16_t>(live_active_.fixtures[f].pixel_count, fixture.num_pixels);
@@ -266,9 +260,8 @@ void LightingRuntime::render_frame(uint32_t current_ms) {
                 layer_frame.pixels.fill(LightValue{0,0,0,0});
                 layer_frame.pwm.fill(0);
 
-                if (owner == ControlSource::LiveDmx && live_active_.layers[target_zone][l].active) {
+                if (owner == ControlSource::LiveDmx && live_layer_is_valid(live_active_.layers[target_zone][l])) {
                     const auto& live = live_active_.layers[target_zone][l];
-                    if (live.opacity == 0) continue;
                     
                     uint16_t pcount = std::min<uint16_t>(fixture.num_pixels, MAX_PIXELS);
                     for (uint16_t px = 0; px < pcount; ++px) {
@@ -291,20 +284,22 @@ void LightingRuntime::render_frame(uint32_t current_ms) {
     // 5. Power Limiting
     power_budget_.enforce(render_frame, local_cfg, current_ms);
 
-    // 6. Physical Output Scheduling & Error Handling (Two-stage recovery, Batch 5 Items 1 & 2)
-    if (output_fault_.load(std::memory_order_acquire)) {
-        // While output_fault_ is true: runtime continues rendering internally,
-        // BUT MUST NOT restore physical output automatically.
+    // 6. Physical Output Scheduling & Error Handling (Batch 6 Items 6 & 7)
+    OutputState state = output_state_.load(std::memory_order_acquire);
+    if (state == OutputState::Faulted) {
+        // Faulted: rendering continues internally, physical output remains blacked out, commits are NOT attempted
+        output_fault_frame_count_.fetch_add(1, std::memory_order_relaxed);
         controller_.blackout();
     } else {
-        if (output_armed_for_next_frame_.load(std::memory_order_acquire)) {
-            // First frame after fault clear: consume arm flag and allow commit
-            output_armed_for_next_frame_.store(false, std::memory_order_release);
-        }
+        // Armed or Healthy:
         const esp_err_t sched_err = OutputScheduler::schedule(render_frame, local_cfg, controller_);
         if (sched_err != ESP_OK) {
             report_output_fault(sched_err);
             return;
+        } else if (state == OutputState::Armed) {
+            // Commit succeeded from Armed state -> transition to Healthy!
+            output_state_.store(OutputState::Healthy, std::memory_order_release);
+            ESP_LOGI(TAG, "Armed commit succeeded: output state restored to HEALTHY");
         }
     }
     
@@ -370,11 +365,10 @@ esp_err_t LightingRuntime::clear_output_fault() {
         ESP_LOGW(TAG, "Cannot clear output fault: E-stop is currently active/latched");
         return ESP_ERR_INVALID_STATE;
     }
-    // Stage 1: Reset fault latch, force blackout, and arm output awaiting next clean frame (Batch 5 Item 2)
-    output_fault_.store(false, std::memory_order_release);
+    // Explicit operator cleared fault: transitions to Armed (Batch 6 Item 6)
     controller_.blackout();
-    output_armed_for_next_frame_.store(true, std::memory_order_release);
-    ESP_LOGI(TAG, "Output fault latch cleared: output armed awaiting next clean render frame");
+    output_state_.store(OutputState::Armed, std::memory_order_release);
+    ESP_LOGI(TAG, "Output fault cleared: output state is ARMED awaiting next rendered frame commit");
     return ESP_OK;
 }
 
@@ -443,13 +437,20 @@ std::array<uint8_t, 512> LightingRuntime::last_dmx_data() const {
 
 uint8_t LightingRuntime::active_live_objects() const {
     uint8_t count = 0;
+    const uint32_t now = now_ms();
     for (uint8_t z = 0; z < 8; ++z) {
         for (uint8_t l = 0; l < 3; ++l) {
-            if (live_active_.layers[z][l].active) count++;
+            const auto& layer = live_active_.layers[z][l];
+            if (layer.active && layer.opacity > 0 && (now - layer.timestamp_ms <= kLiveFrameFailsafeTimeoutMs)) {
+                count++;
+            }
         }
     }
     for (uint8_t f = 0; f < 16; ++f) {
-        if (live_active_.fixtures[f].active) count++;
+        const auto& fix = live_active_.fixtures[f];
+        if (fix.active && fix.opacity > 0 && (now - fix.timestamp_ms <= kLiveFrameFailsafeTimeoutMs)) {
+            count++;
+        }
     }
     return count;
 }
@@ -536,9 +537,11 @@ ControlSource LightingRuntime::current_control_source() const {
 }
 
 void LightingRuntime::report_output_fault(esp_err_t err) {
-    output_armed_for_next_frame_.store(false, std::memory_order_release);
-    output_fault_.store(true, std::memory_order_release);
-    output_fault_count_.fetch_add(1, std::memory_order_relaxed);
+    OutputState prev = output_state_.exchange(OutputState::Faulted, std::memory_order_acq_rel);
+    if (prev != OutputState::Faulted) {
+        output_fault_count_.fetch_add(1, std::memory_order_relaxed);
+        ESP_LOGE(TAG, "Hardware output transitioned to FAULTED (err=%s)", esp_err_to_name(err));
+    }
     controller_.blackout();
 }
 
