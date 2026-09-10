@@ -44,6 +44,7 @@ LightingRuntime::LightingRuntime(ControlSourceManager& source_manager, OutputCon
 }
 
 LightingRuntime::~LightingRuntime() {
+    controller_.set_commit_observer(nullptr);
     stop();
     if (shutdown_sem_) {
         vSemaphoreDelete(shutdown_sem_);
@@ -61,11 +62,21 @@ void LightingRuntime::stop() {
     // 1. Cooperative task termination wait (Batch 8 Item 3: no vTaskDelete from outside)
     if (task_handle_) {
         xTaskAbortDelay(task_handle_);
+        bool ack = false;
         if (shutdown_sem_) {
-            xSemaphoreTake(shutdown_sem_, pdMS_TO_TICKS(1000));
+            ack = (xSemaphoreTake(shutdown_sem_, pdMS_TO_TICKS(1000)) == pdTRUE);
+        }
+        if (!ack) {
+            ESP_LOGE(TAG, "LightingRuntime task did not exit within 1000ms timeout! Halting cleanup to prevent UAF");
+            lifecycle_state_.store(LifecycleState::Faulted, std::memory_order_release);
+            controller_.set_commit_observer(nullptr);
+            return;
         }
         task_handle_ = nullptr;
     }
+
+    // Always detach commit observer before any resource destruction
+    controller_.set_commit_observer(nullptr);
 
     // 2. Force blackout
     controller_.blackout();
@@ -99,6 +110,19 @@ esp_err_t LightingRuntime::start() {
     lifecycle_state_.store(LifecycleState::Starting, std::memory_order_release);
     shutting_down_.store(false, std::memory_order_release);
 
+    // Ensure commit observer is active for this runtime lifecycle
+    controller_.set_commit_observer([this](esp_err_t commit_result) {
+        if (commit_result != ESP_OK) {
+            report_output_fault(commit_result);
+        } else {
+            OutputState st = output_state_.load(std::memory_order_acquire);
+            if (st == OutputState::Armed) {
+                output_state_.store(OutputState::Healthy, std::memory_order_release);
+                ESP_LOGI(TAG, "Armed commit succeeded: output state restored to HEALTHY");
+            }
+        }
+    });
+
     config_.load_config(device_cfg_);
     power_budget_.set_limit_mw(device_cfg_.max_power_mw);
     power_budget_.set_soft_start(device_cfg_.soft_start_enabled, device_cfg_.soft_start_ms);
@@ -108,6 +132,7 @@ esp_err_t LightingRuntime::start() {
         mutex_ = xSemaphoreCreateMutex();
         if (!mutex_) {
             ESP_LOGE(TAG, "Failed to create mutex");
+            controller_.set_commit_observer(nullptr);
             lifecycle_state_.store(LifecycleState::Faulted, std::memory_order_release);
             return ESP_ERR_NO_MEM;
         }
@@ -130,6 +155,7 @@ esp_err_t LightingRuntime::start() {
 
     if (ret != pdPASS) {
         ESP_LOGE(TAG, "Failed to create task");
+        controller_.set_commit_observer(nullptr);
         lifecycle_state_.store(LifecycleState::Faulted, std::memory_order_release);
         return ESP_FAIL;
     }

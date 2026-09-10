@@ -83,6 +83,9 @@ public:
 
     bool is_topology_valid() const { return topology_valid_.load(std::memory_order_acquire); }
 
+    bool is_pwm_available() const { return pwm_available_.load(std::memory_order_acquire); }
+    void set_pwm_available(bool available) { pwm_available_.store(available, std::memory_order_release); }
+
     void latch_estop();
     void clear_estop();
     bool is_estop_latched() const { return estop_latched_.load(std::memory_order_acquire); }
@@ -112,6 +115,7 @@ private:
     std::atomic<bool> output_enabled_{true};
     std::atomic<bool> estop_latched_{false};
     std::atomic<bool> topology_valid_{true};
+    std::atomic<bool> pwm_available_{false};
     std::atomic<uint32_t> failed_commit_count_{0};
     std::atomic<esp_err_t> last_commit_error_{ESP_OK};
     std::atomic<uint32_t> last_commit_time_ms_{0};

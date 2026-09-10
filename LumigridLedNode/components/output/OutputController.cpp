@@ -24,7 +24,10 @@ esp_err_t OutputController::init() {
 
     err = pwm_.init();
     if (err != ESP_OK) {
-        ESP_LOGW("output", "Failed to init PCA9685 PWM driver (%s). Addressable LEDs will still work.", esp_err_to_name(err));
+        pwm_available_.store(false, std::memory_order_release);
+        ESP_LOGW("output", "Failed to init PCA9685 PWM driver (%s). Addressable LEDs will still work, but PWM configurations will be rejected.", esp_err_to_name(err));
+    } else {
+        pwm_available_.store(true, std::memory_order_release);
     }
     unlock();
 
@@ -34,6 +37,20 @@ esp_err_t OutputController::init() {
 esp_err_t OutputController::reconfigure(const DeviceConfig& cfg) {
     lock();
     ESP_LOGI("output", "Reconfiguring OutputController drivers based on DeviceConfig...");
+
+    const bool pwm_ok = pwm_available_.load(std::memory_order_acquire);
+
+    // 0. Physical Output PWM Availability Validation
+    for (uint8_t p = 0; p < 16; ++p) {
+        const PhysicalOutput& phys = cfg.physical_outputs[p];
+        if (phys.enabled && phys.type == OutputType::PWM) {
+            if (!pwm_ok) {
+                ESP_LOGE("output", "Reconfigure validation: physical_output[%u] is enabled PWM, but PCA9685 driver is unavailable", p);
+                unlock();
+                return ESP_ERR_NOT_FOUND;
+            }
+        }
+    }
 
     // 1. Transactional Candidate Validation (Batch 7 Item 5)
     uint16_t rmt_lanes_claimed = 0;
@@ -71,6 +88,11 @@ esp_err_t OutputController::reconfigure(const DeviceConfig& cfg) {
             }
             rmt_lanes_claimed |= (1U << phys.hardware_id);
         } else if (is_pwm) {
+            if (!pwm_ok) {
+                ESP_LOGE("output", "Reconfigure validation: fixture[%u] requires PWM, but PCA9685 driver is unavailable", f);
+                unlock();
+                return ESP_ERR_NOT_FOUND;
+            }
             uint8_t pwm_chans = (fix.profile == FixtureProfile::PWM_Single) ? 1 :
                                 (fix.profile == FixtureProfile::PWM_RGB ? 3 : 4);
             for (uint8_t ch = 0; ch < pwm_chans; ++ch) {
@@ -235,7 +257,7 @@ esp_err_t OutputController::try_commit_locked() {
     }
 
     esp_err_t err1 = pixels_.show();
-    esp_err_t err2 = pwm_.commit();
+    esp_err_t err2 = pwm_available_.load(std::memory_order_acquire) ? pwm_.commit() : ESP_OK;
 
 #if defined(CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS) && CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS
     if (mock_failure_injections_ > 0) {

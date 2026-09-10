@@ -2410,11 +2410,111 @@ bool test_batch8_observational_health_and_lifecycle_rollback() {
     return true;
 }
 
+// ============================================================================
+// Batch 9 Test: Pre-Burn-In Certification Blockers
+// ============================================================================
+bool test_batch9_burnin_blockers() {
+    ESP_LOGI(TAG, "Testing Batch 9 Pre-Burn-In Blockers...");
+
+    // 1. FactoryRunner Cooperative Lifecycle & Stop
+    {
+        ControlSourceManager sm;
+        OutputController ctrl;
+        FactoryRunner runner(sm, ctrl);
+
+        assert(runner.lifecycle_state() == FactoryRunner::LifecycleState::Constructed);
+        esp_err_t err = runner.start();
+        assert(err == ESP_OK);
+        assert(runner.lifecycle_state() == FactoryRunner::LifecycleState::Running);
+
+        // Double start rejected
+        assert(runner.start() == ESP_ERR_INVALID_STATE);
+
+        // Cooperative stop
+        runner.stop();
+        assert(runner.lifecycle_state() == FactoryRunner::LifecycleState::Stopped);
+
+        // Idempotent stop
+        runner.stop();
+        assert(runner.lifecycle_state() == FactoryRunner::LifecycleState::Stopped);
+    }
+
+    // 2. LightingRuntime Commit Observer Detachment on Stop
+    {
+        ControlSourceManager sm;
+        OutputController ctrl;
+        ConfigStore cfg;
+
+        {
+            LightingRuntime runtime(sm, ctrl, cfg);
+            esp_err_t err = runtime.start();
+            assert(err == ESP_OK);
+
+            // Commit should invoke runtime's observer without crash
+            ctrl.try_commit();
+
+            // Stop runtime: observer must be detached
+            runtime.stop();
+            assert(runtime.lifecycle_state() == LightingRuntime::LifecycleState::Stopped);
+
+            // Committing after runtime.stop() must not crash or trigger dangling observer
+            ctrl.try_commit();
+        }
+        // Destruction of LightingRuntime: commits after destruction must not invoke dangling pointer
+        ctrl.try_commit();
+    }
+
+    // 3. OutputController PCA9685 Availability & PWM Configuration Rejection
+    {
+        OutputController ctrl;
+        ctrl.init();
+
+        // Simulate PCA9685 unavailable
+        ctrl.set_pwm_available(false);
+        assert(ctrl.is_pwm_available() == false);
+
+        DeviceConfig cfg{};
+        // Setup 1 addressable fixture
+        cfg.fixtures[0].profile = FixtureProfile::WS2812;
+        cfg.fixtures[0].num_pixels = 30;
+        cfg.fixtures[0].physical_output_index[0] = 0;
+        cfg.physical_outputs[0].enabled = true;
+        cfg.physical_outputs[0].type = OutputType::RMT;
+        cfg.physical_outputs[0].hardware_id = 0;
+
+        // Addressable-only configuration MUST SUCCEED even when PCA9685 is unavailable
+        esp_err_t err = ctrl.reconfigure(cfg);
+        assert(err == ESP_OK);
+        assert(ctrl.is_topology_valid() == true);
+
+        // Now configure a PWM fixture while PCA9685 is unavailable
+        cfg.fixtures[1].profile = FixtureProfile::PWM_Single;
+        cfg.fixtures[1].num_pixels = 1;
+        cfg.fixtures[1].physical_output_index[0] = 1;
+        cfg.physical_outputs[1].enabled = true;
+        cfg.physical_outputs[1].type = OutputType::PWM;
+        cfg.physical_outputs[1].hardware_id = 0;
+
+        // MUST BE REJECTED with ESP_ERR_NOT_FOUND
+        err = ctrl.reconfigure(cfg);
+        assert(err == ESP_ERR_NOT_FOUND);
+
+        // When PCA9685 becomes available, configuration MUST SUCCEED
+        ctrl.set_pwm_available(true);
+        assert(ctrl.is_pwm_available() == true);
+        err = ctrl.reconfigure(cfg);
+        assert(err == ESP_OK);
+    }
+
+    ESP_LOGI(TAG, "[PASS] Batch 9 Pre-Burn-In Blockers passed.");
+    return true;
+}
+
 } // namespace
 
 bool run_runtime_hardening_tests() {
     ESP_LOGI(TAG, "==================================================");
-    ESP_LOGI(TAG, "  STARTING RUNTIME HARDENING TESTS (BATCH 3..8)");
+    ESP_LOGI(TAG, "  STARTING RUNTIME HARDENING TESTS (BATCH 3..9)");
     ESP_LOGI(TAG, "==================================================");
 
     bool all_ok = true;
@@ -2473,6 +2573,9 @@ bool run_runtime_hardening_tests() {
     all_ok &= test_batch8_protocol_consistency_and_artnet_serialization(); // Batch 8 Test F
     all_ok &= test_batch8_observational_health_and_lifecycle_rollback();   // Batch 8 Test G
     all_ok &= test_batch8_dmx_partial_expiration_both_directions_and_reuse(); // Batch 8 Test H
+
+    // Batch 9 Tests
+    all_ok &= test_batch9_burnin_blockers();
 
     if (all_ok) {
         ESP_LOGI(TAG, "==================================================");

@@ -5,6 +5,7 @@
 #include "esp_err.h"
 #include "esp_check.h"
 #include "esp_timer.h"
+#include "esp_log.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -49,22 +50,34 @@ uint32_t clamp_duration(uint32_t duration_ms) {
 } // namespace
 
 FactoryRunner::FactoryRunner(ControlSourceManager& source_manager, OutputController& controller)
-    : source_manager_(source_manager), controller_(controller) {}
+    : source_manager_(source_manager), controller_(controller) {
+    shutdown_sem_ = xSemaphoreCreateBinary();
+}
 
 FactoryRunner::~FactoryRunner() {
     stop();
+    if (shutdown_sem_) {
+        vSemaphoreDelete(shutdown_sem_);
+        shutdown_sem_ = nullptr;
+    }
 }
 
 esp_err_t FactoryRunner::start() {
-    if (lifecycle_state_ == LifecycleState::Running || lifecycle_state_ == LifecycleState::Starting) {
+    LifecycleState current = lifecycle_state_.load(std::memory_order_acquire);
+    if (current == LifecycleState::Running || current == LifecycleState::Starting) {
         return ESP_ERR_INVALID_STATE;
     }
-    lifecycle_state_ = LifecycleState::Starting;
+    lifecycle_state_.store(LifecycleState::Starting, std::memory_order_release);
+    shutting_down_.store(false, std::memory_order_release);
+
+    if (shutdown_sem_ == nullptr) {
+        shutdown_sem_ = xSemaphoreCreateBinary();
+    }
 
     // Stage 1: Queue allocation (Batch 8 Item 5)
     queue_ = xQueueCreate(kQueueDepth, sizeof(FactoryCommand));
     if (queue_ == nullptr) {
-        lifecycle_state_ = LifecycleState::Faulted;
+        lifecycle_state_.store(LifecycleState::Faulted, std::memory_order_release);
         source_manager_.release(ControlSource::Factory);
         return ESP_ERR_NO_MEM;
     }
@@ -74,7 +87,7 @@ esp_err_t FactoryRunner::start() {
     if (status_mutex_ == nullptr) {
         vQueueDelete(queue_);
         queue_ = nullptr;
-        lifecycle_state_ = LifecycleState::Faulted;
+        lifecycle_state_.store(LifecycleState::Faulted, std::memory_order_release);
         source_manager_.release(ControlSource::Factory);
         return ESP_ERR_NO_MEM;
     }
@@ -103,24 +116,36 @@ esp_err_t FactoryRunner::start() {
         queue_ = nullptr;
         task_handle_ = nullptr;
         source_manager_.release(ControlSource::Factory);
-        lifecycle_state_ = LifecycleState::Faulted;
+        lifecycle_state_.store(LifecycleState::Faulted, std::memory_order_release);
         return ESP_FAIL;
     }
 
-    lifecycle_state_ = LifecycleState::Running;
+    lifecycle_state_.store(LifecycleState::Running, std::memory_order_release);
     return ESP_OK;
 }
 
 void FactoryRunner::stop() {
-    if (lifecycle_state_ == LifecycleState::Stopping || lifecycle_state_ == LifecycleState::Stopped) {
+    LifecycleState prev = lifecycle_state_.exchange(LifecycleState::Stopping, std::memory_order_acq_rel);
+    if (prev == LifecycleState::Stopping || prev == LifecycleState::Stopped) {
         return;
     }
-    lifecycle_state_ = LifecycleState::Stopping;
+    shutting_down_.store(true, std::memory_order_release);
+
     if (task_handle_) {
-        TaskHandle_t th = task_handle_;
+        xTaskAbortDelay(task_handle_);
+        bool ack = false;
+        if (shutdown_sem_) {
+            ack = (xSemaphoreTake(shutdown_sem_, pdMS_TO_TICKS(1000)) == pdTRUE);
+        }
+        if (!ack) {
+            ESP_LOGE("FactoryRunner", "Shutdown ACK timeout! Factory task did not exit cleanly within 1000ms");
+            lifecycle_state_.store(LifecycleState::Faulted, std::memory_order_release);
+            // Do not delete shared mutex or queue while task is running to avoid UAF
+            return;
+        }
         task_handle_ = nullptr;
-        vTaskDelete(th);
     }
+
     blackout();
     if (status_mutex_) {
         vSemaphoreDelete(status_mutex_);
@@ -130,7 +155,7 @@ void FactoryRunner::stop() {
         vQueueDelete(queue_);
         queue_ = nullptr;
     }
-    lifecycle_state_ = LifecycleState::Stopped;
+    lifecycle_state_.store(LifecycleState::Stopped, std::memory_order_release);
 }
 
 bool FactoryRunner::enqueue(const FactoryCommand& command) {
@@ -325,7 +350,7 @@ void FactoryRunner::task() {
     }
 
     TickType_t xLastWakeTime = xTaskGetTickCount();
-    for (;;) {
+    while (!shutting_down_.load(std::memory_order_acquire)) {
         const uint32_t current_ms = now_ms();
 
         FactoryCommand command;
@@ -500,6 +525,12 @@ void FactoryRunner::task() {
 
         vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(kFramePeriodMs));
     }
+
+    blackout();
+    if (shutdown_sem_) {
+        xSemaphoreGive(shutdown_sem_);
+    }
+    vTaskDelete(NULL);
 }
 
 } // namespace lg

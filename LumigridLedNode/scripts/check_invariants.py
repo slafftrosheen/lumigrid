@@ -46,13 +46,17 @@ lifecycle_files = [
 for f in lifecycle_files:
     check_file_contains(f, [("ESP_ERROR_CHECK(", "Forbidden ESP_ERROR_CHECK in runtime lifecycle code")])
 
-# 2. No uncontrolled external vTaskDelete(task_handle_)
+# 2. No uncontrolled external vTaskDelete in runtime lifecycle tasks (only vTaskDelete(NULL) allowed)
 task_delete_files = [
     NODE_DIR / "components" / "signage" / "LightingRuntime.cpp",
     NODE_DIR / "components" / "factory" / "FactoryRunner.cpp",
 ]
 for f in task_delete_files:
-    check_file_contains(f, [("vTaskDelete(task_handle_", "Forbidden external vTaskDelete on runtime task handle")])
+    check_file_contains(
+        f,
+        [("vTaskDelete(", "Forbidden external vTaskDelete in runtime lifecycle code (only vTaskDelete(NULL) allowed)")],
+        exception_patterns=["vTaskDelete(NULL)"]
+    )
 
 # 3. No process-global static bool services_started across codebase
 for ext in ["*.cpp", "*.hpp", "*.h", "*.c"]:

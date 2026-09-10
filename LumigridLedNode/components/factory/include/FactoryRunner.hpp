@@ -2,6 +2,7 @@
 #pragma once
 #include "FactoryEffects.hpp"
 #include "FactoryTypes.hpp"
+#include <atomic>
 #include <functional>
 #include "ControlSourceManager.hpp"
 #include "OutputController.hpp"
@@ -36,7 +37,9 @@ public:
 
     esp_err_t start();
     void stop();
-    LifecycleState lifecycle_state() const { return lifecycle_state_; }
+    LifecycleState lifecycle_state() const {
+        return lifecycle_state_.load(std::memory_order_acquire);
+    }
 
     bool enqueue(const FactoryCommand& command);
     bool abort() {
@@ -97,7 +100,9 @@ private:
     uint32_t stream_last_ms_ = 0;
 
     StatusCallback status_callback_{};
-    LifecycleState lifecycle_state_{LifecycleState::Constructed};
+    std::atomic<LifecycleState> lifecycle_state_{LifecycleState::Constructed};
+    std::atomic<bool> shutting_down_{false};
+    SemaphoreHandle_t shutdown_sem_ = nullptr;
 };
 
 } // namespace lg
