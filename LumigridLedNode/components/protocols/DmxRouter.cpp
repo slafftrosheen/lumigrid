@@ -56,7 +56,10 @@ size_t DmxRouter::get_active_universes(uint16_t* out_universes, size_t max_count
 }
 
 void DmxRouter::handle_artnet_dmx(const ArtnetDmxPacket& packet) {
-    if (!protocol_cfg_.artnet_enabled) return;
+    {
+        std::lock_guard<std::mutex> lock(frame_mutex_);
+        if (!protocol_cfg_.artnet_enabled) return;
+    }
     DmxSourceId src;
     src.protocol = DmxSourceProtocol::ArtNet;
     src.identity[0] = static_cast<uint8_t>((packet.source_ip >> 24) & 0xFF);
@@ -68,7 +71,10 @@ void DmxRouter::handle_artnet_dmx(const ArtnetDmxPacket& packet) {
 }
 
 void DmxRouter::handle_sacn_dmx(const SacnDmxPacket& packet) {
-    if (!protocol_cfg_.sacn_enabled) return;
+    {
+        std::lock_guard<std::mutex> lock(frame_mutex_);
+        if (!protocol_cfg_.sacn_enabled) return;
+    }
     DmxSourceId src;
     src.protocol = DmxSourceProtocol::Sacn;
     src.identity = packet.cid;
@@ -76,9 +82,65 @@ void DmxRouter::handle_sacn_dmx(const SacnDmxPacket& packet) {
                   src, packet.sequence);
 }
 
+uint32_t DmxRouter::stream_timeout_ms() const {
+    std::lock_guard<std::mutex> lock(frame_mutex_);
+    return stream_timeout_ms_locked();
+}
+
+uint32_t DmxRouter::active_source_count() const {
+    std::lock_guard<std::mutex> lock(frame_mutex_);
+    const uint32_t now = now_ms();
+    const uint32_t timeout = stream_timeout_ms_locked();
+    uint32_t count = 0;
+    for (const auto& u : tracked_universes_) {
+        if (!u.active) continue;
+        for (const auto& s : u.sources) {
+            if (s.active && (now - s.last_packet_ms <= timeout)) {
+                count++;
+            }
+        }
+    }
+    return count;
+}
+
+uint32_t DmxRouter::dmx_universes_active() const {
+    std::lock_guard<std::mutex> lock(frame_mutex_);
+    uint32_t count = 0;
+    for (const auto& u : tracked_universes_) {
+        if (u.active) count++;
+    }
+    return count;
+}
+
+void DmxRouter::clear_patch_for_universe(uint16_t universe) {
+    const uint8_t live_layer = protocol_cfg_.live_stream_layer < 3 ? protocol_cfg_.live_stream_layer : 2;
+
+    // 1. Zone Wash
+    if (universe == protocol_cfg_.universe_start) {
+        for (uint8_t zone = 0; zone < 8; ++zone) {
+            auto& layer = assembled_frame_.layers[zone][live_layer];
+            layer.active = false;
+            layer.opacity = 0;
+            layer.color = BrandColor{0, 0, 0};
+        }
+    }
+
+    // 2. Direct Fixtures
+    for (uint8_t f = 0; f < 16; ++f) {
+        const auto& fix = fixtures_[f];
+        if (fix.dmx_start_channel > 0 && fix.dmx_universe == universe) {
+            auto& lf = assembled_frame_.fixtures[f];
+            lf.active = false;
+            lf.opacity = 0;
+            for (auto& px : lf.pixels) px = {0, 0, 0, 0};
+            lf.pwm.fill(0);
+        }
+    }
+}
+
 DmxRouter::UniverseState* DmxRouter::get_or_create_universe(uint16_t universe) {
     const uint32_t current_ms = now_ms();
-    const uint32_t stream_timeout = stream_timeout_ms();
+    const uint32_t stream_timeout = stream_timeout_ms_locked();
 
     UniverseState* oldest_slot = nullptr;
     uint32_t oldest_age = 0xFFFFFFFF;
@@ -112,7 +174,7 @@ DmxRouter::UniverseState* DmxRouter::get_or_create_universe(uint16_t universe) {
 }
 
 void DmxRouter::recompute_merge(UniverseState& state, uint32_t current_ms) {
-    const uint32_t stream_timeout = stream_timeout_ms();
+    const uint32_t stream_timeout = stream_timeout_ms_locked();
 
     // Prune timed-out sources
     uint8_t highest_priority = 0;
@@ -135,7 +197,10 @@ void DmxRouter::recompute_merge(UniverseState& state, uint32_t current_ms) {
     if (!any_active) {
         state.merged_data.fill(0);
         state.merged_length = 0;
-        state.active = false;
+        if (state.active) {
+            state.active = false;
+            clear_patch_for_universe(state.universe);
+        }
         return;
     }
 
@@ -180,77 +245,98 @@ void DmxRouter::process_frame(uint16_t universe, const uint8_t* data, uint16_t l
     if (!data || length == 0) return;
     if (length > 512) length = 512;
 
-    bool relevant = (universe == protocol_cfg_.universe_start);
+    bool relevant = false;
+    {
+        std::lock_guard<std::mutex> lock(frame_mutex_);
+        relevant = (universe == protocol_cfg_.universe_start);
+        if (!relevant) {
+            for (const auto& fix : fixtures_) {
+                if (fix.dmx_start_channel > 0 && fix.dmx_universe == universe) {
+                    relevant = true;
+                    break;
+                }
+            }
+        }
+    }
+
     if (!relevant) {
-        for (const auto& fix : fixtures_) {
-            if (fix.dmx_start_channel > 0 && fix.dmx_universe == universe) {
-                relevant = true;
-                break;
-            }
-        }
-    }
-    if (!relevant) return;
-
-    std::lock_guard<std::mutex> lock(frame_mutex_);
-
-    const uint32_t current_ms = now_ms();
-    UniverseState* state = get_or_create_universe(universe);
-    if (!state) return;
-
-    const uint32_t timeout = stream_timeout_ms();
-
-    // 1. Locate existing active source or allocate a free/timed-out slot
-    SourceStream* target_src = nullptr;
-
-    for (auto& src : state->sources) {
-        if (src.active && src.source_id == source_id) {
-            target_src = &src;
-            break;
-        }
-    }
-
-    if (!target_src) {
-        for (auto& src : state->sources) {
-            if (!src.active || (current_ms - src.last_packet_ms > timeout)) {
-                target_src = &src;
-                target_src->active = false;
-                target_src->sequence_valid = false;
-                break;
-            }
-        }
-    }
-
-    // If bounded capacity exceeded, drop newest source and increment counter; never overwrite active source
-    if (!target_src) {
-        dropped_sources_count_++;
+        packets_ignored_unpatched_++;
         return;
     }
 
-    // 2. Sequence handling MUST happen before merge state mutation (Batch 3 Item 7)
-    if (target_src->active && target_src->sequence_valid) {
-        if (source_id.protocol == DmxSourceProtocol::ArtNet && sequence == 0) {
-            // Sequence 0 in Art-Net means unsequenced/disabled, accept without sequence check
-        } else {
-            if (!is_sequence_newer(sequence, target_src->last_sequence)) {
-                return; // Stale or duplicate packet rejected
+    LiveDmxFrame submission;
+    bool should_submit = false;
+
+    {
+        std::lock_guard<std::mutex> lock(frame_mutex_);
+
+        const uint32_t current_ms = now_ms();
+        UniverseState* state = get_or_create_universe(universe);
+        if (!state) return;
+
+        const uint32_t timeout = stream_timeout_ms_locked();
+
+        // 1. Locate existing active source or allocate a free/timed-out slot
+        SourceStream* target_src = nullptr;
+
+        for (auto& src : state->sources) {
+            if (src.active && src.source_id == source_id) {
+                target_src = &src;
+                break;
             }
         }
+
+        if (!target_src) {
+            for (auto& src : state->sources) {
+                if (!src.active || (current_ms - src.last_packet_ms > timeout)) {
+                    target_src = &src;
+                    target_src->active = false;
+                    target_src->sequence_valid = false;
+                    break;
+                }
+            }
+        }
+
+        // If bounded capacity exceeded, drop newest source and increment counter; never overwrite active source
+        if (!target_src) {
+            dropped_sources_count_++;
+            return;
+        }
+
+        // 2. Sequence handling MUST happen before merge state mutation (Batch 3 Item 7 / Batch 4 Item 9)
+        if (target_src->active && target_src->sequence_valid) {
+            if (sequence_check_required(source_id.protocol, sequence)) {
+                if (!is_sequence_newer(sequence, target_src->last_sequence)) {
+                    packets_rejected_sequence_++;
+                    return; // Stale or duplicate packet rejected
+                }
+            }
+        }
+
+        target_src->last_sequence = sequence;
+        target_src->sequence_valid = true;
+        target_src->source_id = source_id;
+        target_src->priority = priority;
+        target_src->last_packet_ms = current_ms;
+        target_src->length = length;
+        std::memcpy(target_src->data.data(), data, length);
+        target_src->active = true;
+
+        state->last_packet_ms = current_ms;
+        recompute_merge(*state, current_ms);
+
+        // Dispatch patched output into assembled_frame_
+        dispatch_patch(universe, state->merged_data.data(), state->merged_length);
+
+        packets_accepted_++;
+
+        submission = assembled_frame_;
+        should_submit = true;
     }
 
-    target_src->last_sequence = sequence;
-    target_src->sequence_valid = true;
-    target_src->source_id = source_id;
-    target_src->priority = priority;
-    target_src->last_packet_ms = current_ms;
-    target_src->length = length;
-    std::memcpy(target_src->data.data(), data, length);
-    target_src->active = true;
-
-    state->last_packet_ms = current_ms;
-    recompute_merge(*state, current_ms);
-
-    // Dispatch patched output
-    dispatch_patch(universe, state->merged_data.data(), state->merged_length);
+    if (should_submit) {
+        lighting_.submit_live_frame(submission);
+    }
 }
 
 void DmxRouter::dispatch_patch(uint16_t universe, const uint8_t* data, uint16_t length) {
@@ -264,7 +350,7 @@ void DmxRouter::dispatch_patch(uint16_t universe, const uint8_t* data, uint16_t 
             const size_t offset = base_ch + (zone * 3);
             if (offset + 2 >= length) break;
 
-            auto& layer = live_frame_.layers[zone][live_layer];
+            auto& layer = assembled_frame_.layers[zone][live_layer];
             layer.color = BrandColor{
                 data[offset + 0],
                 data[offset + 1],
@@ -285,7 +371,7 @@ void DmxRouter::dispatch_patch(uint16_t universe, const uint8_t* data, uint16_t 
         const size_t ch_offset = fix.dmx_start_channel - 1; // 0-indexed
         if (ch_offset >= length) continue;
 
-        auto& lf = live_frame_.fixtures[f];
+        auto& lf = assembled_frame_.fixtures[f];
         const uint16_t pcount = std::min<uint16_t>(fix.num_pixels, MAX_PIXELS);
         lf.pixel_count = pcount;
         lf.timestamp_ms = now;
@@ -337,14 +423,12 @@ void DmxRouter::dispatch_patch(uint16_t universe, const uint8_t* data, uint16_t 
         }
     }
 
-    // 3. Single authoritative DMX telemetry buffer & atomic submission to LightingRuntime
+    // 3. Single authoritative DMX telemetry buffer
     const uint16_t copy_len = std::min<uint16_t>(length, 512);
-    std::memcpy(live_frame_.dmx_telemetry.data(), data, copy_len);
-    live_frame_.dmx_telemetry_len = copy_len;
-    live_frame_.timestamp_ms = now;
-    live_frame_.active = true;
-
-    lighting_.submit_live_frame(live_frame_);
+    std::memcpy(assembled_frame_.dmx_telemetry.data(), data, copy_len);
+    assembled_frame_.dmx_telemetry_len = copy_len;
+    assembled_frame_.timestamp_ms = now;
+    assembled_frame_.active = true;
 }
 
 } // namespace lg

@@ -11,6 +11,7 @@ class ConfigStore;
 class LightingRuntime;
 class Scheduler;
 class NodeSync;
+class DmxRouter;
 }
 
 namespace lg {
@@ -25,7 +26,8 @@ public:
                     ConfigStore* config = nullptr,
                     LightingRuntime* signage = nullptr,
                     Scheduler* scheduler = nullptr,
-                    NodeSync* node_sync = nullptr);
+                    NodeSync* node_sync = nullptr,
+                    DmxRouter* dmx_router = nullptr);
     void stop();
 
     FactoryRunner& runner() { return runner_; }
@@ -33,6 +35,7 @@ public:
     LightingRuntime* signage() { return signage_; }
     Scheduler* scheduler() { return scheduler_; }
     NodeSync* node_sync() { return node_sync_; }
+    DmxRouter* dmx_router() { return dmx_router_; }
 
     void notify_status_async();
 
@@ -45,6 +48,7 @@ public:
     LightingRuntime* signage_ = nullptr;
     Scheduler* scheduler_ = nullptr;
     NodeSync* node_sync_ = nullptr;
+    DmxRouter* dmx_router_ = nullptr;
     httpd_handle_t signage_server_ = nullptr;
     httpd_handle_t factory_server_ = nullptr;
     size_t max_open_sockets_ = 0;

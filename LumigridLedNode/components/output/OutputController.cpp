@@ -67,45 +67,59 @@ esp_err_t OutputController::reconfigure(const DeviceConfig& cfg) {
     return ESP_OK;
 }
 
-esp_err_t OutputController::blackout() {
-    lock();
+esp_err_t OutputController::blackout_locked() {
     esp_err_t err1 = pixels_.blackout();
     esp_err_t err2 = pwm_.clear();
+    return (err1 != ESP_OK) ? err1 : err2;
+}
+
+esp_err_t OutputController::blackout() {
+    lock();
+    esp_err_t err = blackout_locked();
     unlock();
-    return err1 != ESP_OK ? err1 : err2;
+    return err;
 }
 
 void OutputController::latch_estop() {
+    lock();
     estop_latched_.store(true, std::memory_order_release);
     output_enabled_.store(false, std::memory_order_release);
-    blackout();
+    blackout_locked();
+    unlock();
 }
 
 void OutputController::clear_estop() {
     // Clearing the physical latch only re-arms the controller.
     // It must NOT immediately restore previous output.
+    lock();
     estop_latched_.store(false, std::memory_order_release);
     output_enabled_.store(true, std::memory_order_release);
-    blackout();
+    blackout_locked();
+    unlock();
 }
 
 void OutputController::set_output_enabled(bool enabled) {
+    lock();
     output_enabled_.store(enabled, std::memory_order_release);
     if (!enabled) {
-        blackout();
+        blackout_locked();
     }
+    unlock();
 }
 
 esp_err_t OutputController::try_commit() {
+    lock();
+
     if (estop_latched_.load(std::memory_order_acquire) ||
         !output_enabled_.load(std::memory_order_acquire)) {
-        blackout();
-        return ESP_ERR_INVALID_STATE;
+        esp_err_t b_err = blackout_locked();
+        unlock();
+        return (b_err != ESP_OK) ? b_err : ESP_ERR_INVALID_STATE;
     }
 
-    lock();
     esp_err_t err1 = pixels_.show();
     esp_err_t err2 = pwm_.commit();
+
     unlock();
 
     esp_err_t final_err = (err1 != ESP_OK) ? err1 : err2;

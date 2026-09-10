@@ -123,25 +123,27 @@ void LightingRuntime::render_frame(uint32_t current_ms) {
         controller_.blackout();
         if (preview_cb_) {
             RenderFrame blank{};
-            DeviceConfig local_cfg;
-            if (mutex_ && xSemaphoreTake(mutex_, pdMS_TO_TICKS(5)) == pdTRUE) {
-                local_cfg = device_cfg_;
-                xSemaphoreGive(mutex_);
-                preview_cb_(blank, local_cfg);
-            }
+            DeviceConfig local_cfg = get_config_snapshot();
+            preview_cb_(blank, local_cfg);
         }
         return;
     } else if (es == EstopState::PendingReset) {
-        // Enforce 1-frame blackout acknowledgement before normal scene rendering resumes
-        controller_.clear_estop(); // Re-arms controller, but keeps output blacked out
+        // Frame N: Controller remains latched/disabled; force blackout; advance to ReArmedBlackout
+        controller_.blackout();
         if (preview_cb_) {
             RenderFrame blank{};
-            DeviceConfig local_cfg;
-            if (mutex_ && xSemaphoreTake(mutex_, pdMS_TO_TICKS(5)) == pdTRUE) {
-                local_cfg = device_cfg_;
-                xSemaphoreGive(mutex_);
-                preview_cb_(blank, local_cfg);
-            }
+            DeviceConfig local_cfg = get_config_snapshot();
+            preview_cb_(blank, local_cfg);
+        }
+        estop_state_.store(EstopState::ReArmedBlackout, std::memory_order_release);
+        return;
+    } else if (es == EstopState::ReArmedBlackout) {
+        // Frame N+1: Re-arms controller hardware, but keeps output blacked out (do NOT render/commit)
+        controller_.clear_estop();
+        if (preview_cb_) {
+            RenderFrame blank{};
+            DeviceConfig local_cfg = get_config_snapshot();
+            preview_cb_(blank, local_cfg);
         }
         estop_state_.store(EstopState::Inactive, std::memory_order_release);
         ESP_LOGI(TAG, "EMERGENCY STOP RESET: Controller re-armed, resuming output on subsequent frame");
@@ -258,17 +260,17 @@ void LightingRuntime::render_frame(uint32_t current_ms) {
     power_budget_.enforce(render_frame, local_cfg, current_ms);
 
     // 6. Physical Output Scheduling & Error Handling
-    const esp_err_t sched_err = OutputScheduler::schedule(render_frame, local_cfg, controller_);
-    if (sched_err != ESP_OK) {
-        consecutive_successful_commits_ = 0;
-        output_fault_.store(true, std::memory_order_release);
-        output_fault_count_.fetch_add(1, std::memory_order_relaxed);
+    if (output_fault_.load(std::memory_order_acquire)) {
+        // While output_fault_ is true: runtime continues rendering internally,
+        // BUT MUST NOT restore physical output automatically.
         controller_.blackout();
-        return;
     } else {
-        consecutive_successful_commits_++;
-        if (consecutive_successful_commits_ >= 3 && output_fault_.load(std::memory_order_relaxed)) {
-            output_fault_.store(false, std::memory_order_release);
+        const esp_err_t sched_err = OutputScheduler::schedule(render_frame, local_cfg, controller_);
+        if (sched_err != ESP_OK) {
+            report_output_fault(sched_err);
+            return;
+        } else {
+            consecutive_successful_commits_++;
         }
     }
     
@@ -327,6 +329,26 @@ void LightingRuntime::submit_live_frame(const LiveDmxFrame& frame) {
     xSemaphoreGive(mutex_);
 }
 
+esp_err_t LightingRuntime::clear_output_fault() {
+    if (controller_.is_estop_latched() || is_estop_active()) {
+        ESP_LOGW(TAG, "Cannot clear output fault: E-stop is currently active/latched");
+        return ESP_ERR_INVALID_STATE;
+    }
+    consecutive_successful_commits_ = 0;
+    output_fault_.store(false, std::memory_order_release);
+    ESP_LOGI(TAG, "Output fault cleared by explicit request");
+    return ESP_OK;
+}
+
+DeviceConfig LightingRuntime::get_config_snapshot() const {
+    DeviceConfig cfg{};
+    if (!mutex_) return cfg;
+    xSemaphoreTake(mutex_, portMAX_DELAY);
+    cfg = device_cfg_;
+    xSemaphoreGive(mutex_);
+    return cfg;
+}
+
 void LightingRuntime::inject_live_data(uint8_t zone_idx, uint8_t layer_idx, const BrandColor& color, uint8_t opacity) {
     if (zone_idx >= 8 || layer_idx >= 3) return;
     if (!mutex_) return;
@@ -383,7 +405,7 @@ std::array<uint8_t, 512> LightingRuntime::last_dmx_data() const {
     return dmx;
 }
 
-uint8_t LightingRuntime::active_dmx_sources() const {
+uint8_t LightingRuntime::active_live_objects() const {
     uint8_t count = 0;
     for (uint8_t z = 0; z < 8; ++z) {
         for (uint8_t l = 0; l < 3; ++l) {
@@ -459,6 +481,13 @@ void LightingRuntime::release_control(ControlSource source) {
 
 ControlSource LightingRuntime::current_control_source() const {
     return source_manager_.current_owner();
+}
+
+void LightingRuntime::report_output_fault(esp_err_t err) {
+    consecutive_successful_commits_ = 0;
+    output_fault_.store(true, std::memory_order_release);
+    output_fault_count_.fetch_add(1, std::memory_order_relaxed);
+    controller_.blackout();
 }
 
 } // namespace lg

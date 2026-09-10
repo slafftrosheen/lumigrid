@@ -89,6 +89,15 @@ public:
     esp_err_t save_config(const DeviceConfig& config);
     esp_err_t load_config(DeviceConfig& config);
 
+    struct ConfigValidationResult {
+        bool valid = true;
+        uint32_t error_count = 0;
+        char first_error[128] = "";
+    };
+
+    /// Pure configuration validator (Batch 4 Items 10 & 11)
+    static esp_err_t validate_config(const DeviceConfig& config, ConfigValidationResult* out_result = nullptr);
+
     // Explicit Schema v1 -> v2 Migration (Item 16, Batch 3 Item 11)
     static bool migrate_v1_to_v2(const DeviceConfigV1& v1, DeviceConfig& v2, uint32_t* out_warning_count = nullptr);
 

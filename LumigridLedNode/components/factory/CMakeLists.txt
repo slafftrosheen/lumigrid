@@ -12,6 +12,7 @@ idf_component_register(
         signage
         scheduler
         sync
+        protocols
         esp_http_server
         cjson
         esp_timer

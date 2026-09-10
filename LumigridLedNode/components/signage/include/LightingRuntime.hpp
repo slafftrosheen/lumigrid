@@ -61,6 +61,8 @@ public:
     const OutputController& controller() const { return controller_; }
 
     // Hardware output fault tracking
+    void report_output_fault(esp_err_t err);
+    esp_err_t clear_output_fault();
     bool is_output_fault() const {
         return output_fault_.load(std::memory_order_relaxed);
     }
@@ -70,7 +72,10 @@ public:
     uint32_t output_fault_count() const {
         return output_fault_count_.load(std::memory_order_relaxed);
     }
-    uint8_t active_dmx_sources() const;
+    uint8_t active_live_objects() const;
+    uint8_t active_dmx_sources() const { return active_live_objects(); } // Deprecated alias
+
+    DeviceConfig get_config_snapshot() const;
 
     std::array<uint8_t, 512> last_dmx_data() const;
 
@@ -81,10 +86,14 @@ public:
     void set_config_reload_callback(ConfigReloadCallback cb) { config_reload_cb_ = std::move(cb); }
 
 private:
+    /// State machine for deterministic E-stop reset:
+    /// Tripped -> PendingReset -> ReArmedBlackout -> Inactive
+    /// Guarantees 2 full frame boundaries of blacked-out hardware before visible output resumes.
     enum class EstopState : uint8_t {
         Inactive = 0,
         Tripped = 1,
-        PendingReset = 2
+        PendingReset = 2,
+        ReArmedBlackout = 3
     };
 
     ConfigReloadCallback config_reload_cb_;

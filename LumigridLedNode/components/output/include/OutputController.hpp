@@ -57,6 +57,8 @@ public:
     void unlock() { xSemaphoreGiveRecursive(mutex_); }
 
 private:
+    esp_err_t blackout_locked();
+
     AddressableDriver pixels_;
     Pca9685Driver pwm_;
     SemaphoreHandle_t mutex_ = nullptr;

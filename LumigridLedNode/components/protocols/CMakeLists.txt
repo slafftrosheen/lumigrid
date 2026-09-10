@@ -8,7 +8,6 @@ idf_component_register(
     REQUIRES
         lwip
         esp_netif
-        factory
         signage
         config
 )

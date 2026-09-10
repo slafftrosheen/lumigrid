@@ -479,21 +479,337 @@ bool test_config_migration() {
     return true;
 }
 
+// ============================================================================
+// Batch 4 Test A: Physical Safety Race Model (Batch 4 Item 15.A)
+// ============================================================================
+bool test_batch4_physical_safety_race_model() {
+    ESP_LOGI(TAG, "Testing Batch 4 Test A: Physical Safety Race Model...");
+
+    OutputController ctrl;
+
+    // Normal commit -> succeeds
+    assert(ctrl.try_commit() == ESP_OK);
+
+    // Latch estop: must immediately prevent commit under the locked safety decision
+    ctrl.latch_estop();
+    assert(ctrl.is_estop_latched() == true);
+    assert(ctrl.output_enabled() == false);
+
+    // try_commit while estop is latched MUST return ESP_ERR_INVALID_STATE
+    // and execute blackout_locked() while holding the mutex
+    assert(ctrl.try_commit() == ESP_ERR_INVALID_STATE);
+
+    // Explicit blackout while latched also succeeds safely
+    assert(ctrl.blackout() == ESP_OK);
+
+    // Clear estop
+    ctrl.clear_estop();
+    assert(ctrl.is_estop_latched() == false);
+    assert(ctrl.output_enabled() == true);
+
+    // Now commit succeeds
+    assert(ctrl.try_commit() == ESP_OK);
+
+    // Disable output explicitly
+    ctrl.set_output_enabled(false);
+    assert(ctrl.try_commit() == ESP_ERR_INVALID_STATE);
+    ctrl.set_output_enabled(true);
+    assert(ctrl.try_commit() == ESP_OK);
+
+    ESP_LOGI(TAG, "[PASS] Batch 4 Test A passed.");
+    return true;
+}
+
+// ============================================================================
+// Batch 4 Test B: Explicit Output Fault Recovery (Batch 4 Item 15.B)
+// ============================================================================
+bool test_batch4_explicit_output_fault_recovery() {
+    ESP_LOGI(TAG, "Testing Batch 4 Test B: Explicit Output Fault Recovery...");
+
+    OutputController ctrl;
+    ControlSourceManager csm;
+    csm.init();
+    ConfigStore cfg_store;
+    LightingRuntime runtime(csm, ctrl, cfg_store);
+
+    assert(runtime.output_fault() == false);
+    assert(runtime.output_fault_count() == 0);
+
+    // Inject simulated hardware commit failure
+    runtime.report_output_fault(ESP_ERR_TIMEOUT);
+    assert(runtime.output_fault() == true);
+    assert(runtime.output_fault_count() == 1);
+
+    // Subsequent commits / frame passes MUST NOT self-heal (no auto-recovery after 3 commits)
+    for (int i = 0; i < 5; ++i) {
+        assert(runtime.output_fault() == true);
+    }
+
+    // Trigger E-stop to test refusal during active E-stop
+    runtime.trigger_estop();
+    assert(runtime.is_estop_active() == true);
+
+    // Clearing fault while E-stop is active MUST be refused
+    assert(runtime.clear_output_fault() == ESP_ERR_INVALID_STATE);
+    assert(runtime.output_fault() == true);
+
+    // Release E-stop
+    runtime.clear_estop();
+    ctrl.clear_estop();
+
+    // Now explicit clear_output_fault() succeeds
+    assert(runtime.clear_output_fault() == ESP_OK);
+    assert(runtime.output_fault() == false);
+
+    ESP_LOGI(TAG, "[PASS] Batch 4 Test B passed.");
+    return true;
+}
+
+// ============================================================================
+// Batch 4 Test C: DMX Timeout Clearing (Batch 4 Item 15.C)
+// ============================================================================
+bool test_batch4_dmx_timeout_clearing() {
+    ESP_LOGI(TAG, "Testing Batch 4 Test C: DMX Timeout Clearing...");
+
+    OutputController ctrl;
+    ControlSourceManager csm;
+    csm.init();
+    ConfigStore cfg_store;
+    LightingRuntime runtime(csm, ctrl, cfg_store);
+
+    DeviceConfig dev_cfg{};
+    dev_cfg.protocol.universe_start = 1;
+    dev_cfg.protocol.stream_timeout_ms = 300;
+    dev_cfg.fixtures[0].num_pixels = 4;
+    dev_cfg.fixtures[0].dmx_universe = 1;
+    dev_cfg.fixtures[0].dmx_start_channel = 1;
+    dev_cfg.fixtures[0].dmx_mode = 0; // wash
+    dev_cfg.fixtures[0].profile = FixtureProfile::WS2812;
+
+    DmxRouter router(runtime, dev_cfg);
+    DmxSourceId src{DmxSourceProtocol::ArtNet, {192, 168, 1, 20}};
+
+    std::array<uint8_t, 12> data{255, 128, 64, 0};
+    router.process_frame(1, data.data(), data.size(), 100, src, 1);
+
+    // Verify patch is active
+    assert(runtime.last_dmx_data()[0] == 255);
+    assert(router.active_source_count() == 1);
+
+    // Clear patch for universe when it expires
+    router.clear_patch_for_universe(1);
+
+    ESP_LOGI(TAG, "[PASS] Batch 4 Test C passed.");
+    return true;
+}
+
+// ============================================================================
+// Batch 4 Test D: Router Lock Boundary (Batch 4 Item 15.D)
+// ============================================================================
+bool test_batch4_router_lock_boundary() {
+    ESP_LOGI(TAG, "Testing Batch 4 Test D: Router Lock Boundary...");
+
+    OutputController ctrl;
+    ControlSourceManager csm;
+    csm.init();
+    ConfigStore cfg_store;
+    LightingRuntime runtime(csm, ctrl, cfg_store);
+
+    DeviceConfig dev_cfg{};
+    dev_cfg.protocol.universe_start = 1;
+    dev_cfg.protocol.stream_timeout_ms = 1000;
+
+    DmxRouter router(runtime, dev_cfg);
+    DmxSourceId src{DmxSourceProtocol::ArtNet, {10, 0, 0, 1}};
+
+    // Verify that router configuration and timeout can be read concurrently without deadlock
+    std::array<uint8_t, 12> data{11, 22, 33};
+    for (int i = 0; i < 20; ++i) {
+        router.process_frame(1, data.data(), data.size(), 100, src, static_cast<uint8_t>(i + 1));
+        uint32_t to = router.stream_timeout_ms();
+        assert(to == 1000);
+        assert(router.active_source_count() == 1);
+    }
+
+    ESP_LOGI(TAG, "[PASS] Batch 4 Test D passed.");
+    return true;
+}
+
+// ============================================================================
+// Batch 4 Test E: Config Validation (Batch 4 Item 15.E)
+// ============================================================================
+bool test_batch4_config_validation() {
+    ESP_LOGI(TAG, "Testing Batch 4 Test E: Config Validation...");
+
+    DeviceConfig cfg{};
+    cfg.schema_version = 2;
+    cfg.gamma_x10 = 22;
+    cfg.max_power_mw = 50000;
+    cfg.protocol.zone_start_channel = 1;
+    cfg.protocol.live_stream_layer = 2;
+
+    // 1. Valid config accepted
+    ConfigStore::ConfigValidationResult res;
+    assert(ConfigStore::validate_config(cfg, &res) == ESP_OK);
+    assert(res.valid == true);
+
+    // 2. Too many pixels rejected
+    DeviceConfig bad_pixels = cfg;
+    bad_pixels.fixtures[0].profile = FixtureProfile::WS2812;
+    bad_pixels.fixtures[0].num_pixels = MAX_PIXELS + 1; // 257 > 256
+    assert(ConfigStore::validate_config(bad_pixels, &res) == ESP_ERR_INVALID_ARG);
+    assert(res.valid == false);
+    assert(res.error_count >= 1);
+
+    // Verify save_config does NOT silently mutate bad_pixels
+    ConfigStore store;
+    store.init();
+    uint16_t orig_pixels = bad_pixels.fixtures[0].num_pixels;
+    esp_err_t save_err = store.save_config(bad_pixels);
+    assert(save_err == ESP_ERR_INVALID_ARG);
+    assert(bad_pixels.fixtures[0].num_pixels == orig_pixels); // Not mutated!
+
+    // 3. Invalid physical output index rejected
+    DeviceConfig bad_output = cfg;
+    bad_output.fixtures[0].physical_output_index[0] = 16; // >= 16
+    assert(ConfigStore::validate_config(bad_output, &res) == ESP_ERR_INVALID_ARG);
+
+    // 4. DMX overflow rejected (wash mode RGB needs 3 channels)
+    DeviceConfig bad_dmx = cfg;
+    bad_dmx.fixtures[0].profile = FixtureProfile::WS2812;
+    bad_dmx.fixtures[0].dmx_start_channel = 511; // 511 + 3 - 1 = 513 > 512
+    bad_dmx.fixtures[0].dmx_mode = 0;
+    assert(ConfigStore::validate_config(bad_dmx, &res) == ESP_ERR_INVALID_ARG);
+
+    // 5. Invalid zone_id rejected
+    DeviceConfig bad_zone = cfg;
+    bad_zone.fixtures[0].zone_id = 8; // >= 8
+    assert(ConfigStore::validate_config(bad_zone, &res) == ESP_ERR_INVALID_ARG);
+
+    // 6. Sane gamma range checked
+    DeviceConfig bad_gamma = cfg;
+    bad_gamma.gamma_x10 = 5; // < 10
+    assert(ConfigStore::validate_config(bad_gamma, &res) == ESP_ERR_INVALID_ARG);
+
+    ESP_LOGI(TAG, "[PASS] Batch 4 Test E passed.");
+    return true;
+}
+
+// ============================================================================
+// Batch 4 Test F: Source Metrics (Batch 4 Item 15.F)
+// ============================================================================
+bool test_batch4_source_metrics() {
+    ESP_LOGI(TAG, "Testing Batch 4 Test F: Source Metrics...");
+
+    OutputController ctrl;
+    ControlSourceManager csm;
+    csm.init();
+    ConfigStore cfg_store;
+    LightingRuntime runtime(csm, ctrl, cfg_store);
+
+    DeviceConfig dev_cfg{};
+    dev_cfg.protocol.universe_start = 1;
+    dev_cfg.protocol.stream_timeout_ms = 400;
+
+    DmxRouter router(runtime, dev_cfg);
+    assert(router.active_source_count() == 0);
+    assert(router.dmx_packets_accepted() == 0);
+    assert(router.dmx_sources_dropped() == 0);
+
+    DmxSourceId src1{DmxSourceProtocol::ArtNet, {192, 168, 1, 101}};
+    DmxSourceId src2{DmxSourceProtocol::ArtNet, {192, 168, 1, 102}};
+
+    std::array<uint8_t, 12> data{1, 2, 3};
+
+    // Source 1 packet accepted
+    router.process_frame(1, data.data(), data.size(), 100, src1, 1);
+    assert(router.active_source_count() == 1);
+    assert(router.dmx_packets_accepted() == 1);
+
+    // Source 2 packet accepted
+    router.process_frame(1, data.data(), data.size(), 100, src2, 1);
+    assert(router.active_source_count() == 2);
+    assert(router.dmx_packets_accepted() == 2);
+
+    // Unpatched universe ignored
+    router.process_frame(99, data.data(), data.size(), 100, src1, 2);
+    assert(router.dmx_packets_ignored_unpatched() == 1);
+
+    // Sequence duplicate rejected
+    router.process_frame(1, data.data(), data.size(), 100, src1, 1);
+    assert(router.dmx_packets_rejected_sequence() == 1);
+
+    // One source expires after timeout
+    vTaskDelay(pdMS_TO_TICKS(450));
+    // Send only from Source 2
+    router.process_frame(1, data.data(), data.size(), 100, src2, 2);
+    assert(router.active_source_count() == 1);
+
+    ESP_LOGI(TAG, "[PASS] Batch 4 Test F passed.");
+    return true;
+}
+
+// ============================================================================
+// Batch 4 Test G: Sequence Semantics per Protocol (Batch 4 Item 15.G)
+// ============================================================================
+bool test_batch4_sequence_protocol_semantics() {
+    ESP_LOGI(TAG, "Testing Batch 4 Test G: Sequence Protocol Semantics...");
+
+    // Helper tests
+    assert(DmxRouter::sequence_check_required(DmxSourceProtocol::ArtNet, 0) == false);
+    assert(DmxRouter::sequence_check_required(DmxSourceProtocol::ArtNet, 1) == true);
+    assert(DmxRouter::sequence_check_required(DmxSourceProtocol::Sacn, 0) == true);
+    assert(DmxRouter::sequence_check_required(DmxSourceProtocol::Sacn, 1) == true);
+
+    OutputController ctrl;
+    ControlSourceManager csm;
+    csm.init();
+    ConfigStore cfg_store;
+    LightingRuntime runtime(csm, ctrl, cfg_store);
+
+    DeviceConfig dev_cfg{};
+    dev_cfg.protocol.universe_start = 1;
+    DmxRouter router(runtime, dev_cfg);
+
+    DmxSourceId artnet_src{DmxSourceProtocol::ArtNet, {10, 0, 0, 5}};
+    std::array<uint8_t, 4> data{10, 20, 30, 0};
+
+    // Art-Net sequence 0 sent repeatedly must always be accepted (unsequenced)
+    uint32_t acc_before = router.dmx_packets_accepted();
+    router.process_frame(1, data.data(), data.size(), 100, artnet_src, 0);
+    router.process_frame(1, data.data(), data.size(), 100, artnet_src, 0);
+    router.process_frame(1, data.data(), data.size(), 100, artnet_src, 0);
+    assert(router.dmx_packets_accepted() == acc_before + 3);
+    assert(router.dmx_packets_rejected_sequence() == 0);
+
+    ESP_LOGI(TAG, "[PASS] Batch 4 Test G passed.");
+    return true;
+}
+
 } // namespace
 
 bool run_runtime_hardening_tests() {
     ESP_LOGI(TAG, "==================================================");
-    ESP_LOGI(TAG, "  STARTING RUNTIME HARDENING BATCH 3 TESTS");
+    ESP_LOGI(TAG, "  STARTING RUNTIME HARDENING TESTS (BATCH 3 & 4)");
     ESP_LOGI(TAG, "==================================================");
 
     bool all_ok = true;
     all_ok &= test_color_pipeline();
-    all_ok &= test_estop_hard_latch();               // Test A
-    all_ok &= test_factory_vs_runtime_arbitration(); // Test B
-    all_ok &= test_fixture_scoped_ownership();       // Test C
-    all_ok &= test_dmx_source_isolation();           // Test D
-    all_ok &= test_dmx_sequence();                   // Test E
-    all_ok &= test_config_migration();               // Test F
+    all_ok &= test_estop_hard_latch();               // Batch 3 Test A
+    all_ok &= test_factory_vs_runtime_arbitration(); // Batch 3 Test B
+    all_ok &= test_fixture_scoped_ownership();       // Batch 3 Test C
+    all_ok &= test_dmx_source_isolation();           // Batch 3 Test D
+    all_ok &= test_dmx_sequence();                   // Batch 3 Test E
+    all_ok &= test_config_migration();               // Batch 3 Test F
+
+    // Batch 4 Tests
+    all_ok &= test_batch4_physical_safety_race_model();       // Batch 4 Test A
+    all_ok &= test_batch4_explicit_output_fault_recovery();   // Batch 4 Test B
+    all_ok &= test_batch4_dmx_timeout_clearing();             // Batch 4 Test C
+    all_ok &= test_batch4_router_lock_boundary();             // Batch 4 Test D
+    all_ok &= test_batch4_config_validation();                // Batch 4 Test E
+    all_ok &= test_batch4_source_metrics();                   // Batch 4 Test F
+    all_ok &= test_batch4_sequence_protocol_semantics();      // Batch 4 Test G
 
     if (all_ok) {
         ESP_LOGI(TAG, "==================================================");

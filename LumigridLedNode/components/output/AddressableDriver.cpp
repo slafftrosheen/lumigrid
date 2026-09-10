@@ -78,6 +78,14 @@ void AddressableDriver::clear() {
     }
 }
 
+void AddressableDriver::clear_buffer() {
+    for (uint8_t lane = 0; lane < kLanes; ++lane) {
+        for (uint16_t p = 0; p < kPixels; ++p) {
+            buffer_[lane][p] = {0, 0, 0};
+        }
+    }
+}
+
 void AddressableDriver::set(uint8_t lane, uint16_t pixel, uint8_t r, uint8_t g, uint8_t b, uint8_t w) {
     if (lane >= kLanes || strips_[lane] == nullptr) return;
     

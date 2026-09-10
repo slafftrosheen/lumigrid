@@ -171,7 +171,7 @@ esp_err_t LumigridRuntime::start() {
                 std::memcpy(node.mac, mac, 6);
 
                 ESP_LOGI("lumigrid", "Step 6: api.start(80, 8080)...");
-                ESP_ERROR_CHECK(api_.start(80, 8080, &config_, &lighting_, &scheduler_, &node_sync_));
+                ESP_ERROR_CHECK(api_.start(80, 8080, &config_, &lighting_, &scheduler_, &node_sync_, &dmx_router_));
 
                 ESP_LOGI("lumigrid", "Step 7: mdns.start()...");
                 ESP_ERROR_CHECK(mdns_.start(current_cfg.device_name, "LumiGrid Signage", 80));

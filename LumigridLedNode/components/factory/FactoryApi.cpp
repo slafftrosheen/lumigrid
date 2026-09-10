@@ -15,6 +15,7 @@
 #include "SignageTypes.hpp"
 #include "Scheduler.hpp"
 #include "NodeSync.hpp"
+#include "DmxRouter.hpp"
 #include "esp_check.h"
 #include <inttypes.h>
 
@@ -459,12 +460,19 @@ esp_err_t get_health(httpd_req_t* request) {
     bool output_controller_estop_latched = false;
     bool runtime_estop = false;
     int dominant_control_source = 0;
-    uint8_t active_dmx_sources = 0;
+    uint8_t active_live_objects = 0;
     uint32_t throttling_events = 0;
     uint32_t current_power_mw = 0;
     float fps = 0.0f;
     uint16_t active_preset = 0;
     bool watchdog_fallback = false;
+
+    uint32_t dmx_sources_active = 0;
+    uint32_t dmx_universes_active = 0;
+    uint32_t dmx_sources_dropped = 0;
+    uint32_t dmx_packets_accepted = 0;
+    uint32_t dmx_packets_rejected_sequence = 0;
+    uint32_t dmx_packets_ignored_unpatched = 0;
 
     if (api_ptr->signage()) {
         output_fault = api_ptr->signage()->output_fault();
@@ -472,7 +480,7 @@ esp_err_t get_health(httpd_req_t* request) {
         output_controller_estop_latched = api_ptr->signage()->is_output_controller_estop_latched();
         runtime_estop = api_ptr->signage()->is_estop_active();
         dominant_control_source = static_cast<int>(api_ptr->signage()->current_control_source());
-        active_dmx_sources = api_ptr->signage()->active_dmx_sources();
+        active_live_objects = api_ptr->signage()->active_live_objects();
         throttling_events = api_ptr->signage()->power_budget().throttling_events();
         current_power_mw = api_ptr->signage()->power_budget().current_power_mw();
         fps = api_ptr->signage()->get_fps();
@@ -482,12 +490,28 @@ esp_err_t get_health(httpd_req_t* request) {
         dominant_control_source = static_cast<int>(api_ptr->runner().control_sources().current_owner());
     }
 
+    if (api_ptr->dmx_router()) {
+        dmx_sources_active = api_ptr->dmx_router()->active_source_count();
+        dmx_universes_active = api_ptr->dmx_router()->dmx_universes_active();
+        dmx_sources_dropped = api_ptr->dmx_router()->dmx_sources_dropped();
+        dmx_packets_accepted = api_ptr->dmx_router()->dmx_packets_accepted();
+        dmx_packets_rejected_sequence = api_ptr->dmx_router()->dmx_packets_rejected_sequence();
+        dmx_packets_ignored_unpatched = api_ptr->dmx_router()->dmx_packets_ignored_unpatched();
+    }
+
     cJSON_AddBoolToObject(root, "output_fault", output_fault);
     cJSON_AddNumberToObject(root, "output_fault_count", output_fault_count);
     cJSON_AddBoolToObject(root, "output_controller_estop_latched", output_controller_estop_latched);
     cJSON_AddBoolToObject(root, "runtime_estop", runtime_estop);
     cJSON_AddNumberToObject(root, "dominant_control_source", dominant_control_source);
-    cJSON_AddNumberToObject(root, "active_dmx_sources", active_dmx_sources);
+    cJSON_AddNumberToObject(root, "active_live_objects", active_live_objects);
+    cJSON_AddNumberToObject(root, "active_dmx_sources", dmx_sources_active);
+    cJSON_AddNumberToObject(root, "dmx_sources_active", dmx_sources_active);
+    cJSON_AddNumberToObject(root, "dmx_universes_active", dmx_universes_active);
+    cJSON_AddNumberToObject(root, "dmx_sources_dropped", dmx_sources_dropped);
+    cJSON_AddNumberToObject(root, "dmx_packets_accepted", dmx_packets_accepted);
+    cJSON_AddNumberToObject(root, "dmx_packets_rejected_sequence", dmx_packets_rejected_sequence);
+    cJSON_AddNumberToObject(root, "dmx_packets_ignored_unpatched", dmx_packets_ignored_unpatched);
     cJSON_AddNumberToObject(root, "current_power_mw", current_power_mw);
     cJSON_AddNumberToObject(root, "throttling_events", throttling_events);
     cJSON_AddNumberToObject(root, "fps", fps);
@@ -1892,12 +1916,14 @@ esp_err_t FactoryApi::start(
     ConfigStore* config,
     LightingRuntime* signage,
     Scheduler* scheduler,
-    NodeSync* node_sync
+    NodeSync* node_sync,
+    DmxRouter* dmx_router
 ) {
     config_ = config;
     signage_ = signage;
     scheduler_ = scheduler;
     node_sync_ = node_sync;
+    dmx_router_ = dmx_router;
 
     httpd_config_t http_config = HTTPD_DEFAULT_CONFIG();
     http_config.max_uri_handlers = 24;

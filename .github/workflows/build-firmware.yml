@@ -1,21 +1,20 @@
-name: Build Firmware
+name: CI & Build
 
 on:
   push:
     branches:
       - main
-    paths:
-      - 'LumigridLedNode/**'
   pull_request:
-    paths:
-      - 'LumigridLedNode/**'
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-  build:
+  firmware-build:
+    name: Firmware Build (PlatformIO / ESP-IDF)
     runs-on: ubuntu-latest
 
     steps:
@@ -32,10 +31,28 @@ jobs:
           python -m pip install --upgrade pip
           pip install platformio esptool
 
+      # The project uses PlatformIO with the official ESP-IDF framework (espressif32 @ 6.7.0, ESP-IDF 5.2.1)
+      # and pre_build.py to generate production dashboard headers from dashboard.html.
       - name: Build Firmware
+        id: pio_build
         run: |
           cd LumigridLedNode
           pio run -e factory
+
+      - name: Firmware Build Success Status
+        if: success()
+        run: |
+          echo "=================================================="
+          echo "BUILD PASSED: Firmware compilation successful."
+          echo "=================================================="
+
+      - name: Firmware Build Failure Status
+        if: failure()
+        run: |
+          echo "=================================================="
+          echo "BUILD FAILED: Firmware compilation failed."
+          echo "=================================================="
+          exit 1
 
       - name: Merge Binaries
         run: |
@@ -49,9 +66,47 @@ jobs:
           cp LumigridLedNode/merged_firmware.bin lumigrid-lander-main/static/latest_builds/
           cp LumigridLedNode/.pio/build/factory/firmware.bin lumigrid-lander-main/static/latest_builds/
 
-      - name: Commit and Push Firmware
+      - name: Commit and Push Firmware (Main branch only)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "chore: auto-build latest firmware binaries [skip ci]"
           file_pattern: 'lumigrid-lander-main/static/latest_builds/*.bin'
+
+  web-build:
+    name: Web Application Build (SvelteKit)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: |
+          cd lumigrid-lander-main
+          npm install
+
+      - name: Build SvelteKit Web App
+        run: |
+          cd lumigrid-lander-main
+          npm run build
+
+      - name: Web Build Success Status
+        if: success()
+        run: |
+          echo "=================================================="
+          echo "BUILD PASSED: Web application build successful."
+          echo "=================================================="
+
+      - name: Web Build Failure Status
+        if: failure()
+        run: |
+          echo "=================================================="
+          echo "BUILD FAILED: Web application build failed."
+          echo "=================================================="
+          exit 1

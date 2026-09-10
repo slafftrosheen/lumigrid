@@ -5,6 +5,7 @@
 #include "esp_random.h"
 #include <cstring>
 #include <cstdio>
+#include <cstdarg>
 #include <memory>
 #include "esp_rom_crc.h"
 
@@ -195,20 +196,110 @@ uint8_t ConfigStore::scene_count() {
 
 // ── Device config ───────────────────────────────────────────────────
 
-esp_err_t ConfigStore::save_config(const DeviceConfig& config) {
-    auto to_save = std::make_unique<DeviceConfig>(config);
+esp_err_t ConfigStore::validate_config(const DeviceConfig& config, ConfigValidationResult* out_result) {
+    ConfigValidationResult res;
+    auto add_error = [&](const char* fmt, ...) {
+        res.valid = false;
+        res.error_count++;
+        if (res.first_error[0] == '\0') {
+            va_list args;
+            va_start(args, fmt);
+            vsnprintf(res.first_error, sizeof(res.first_error), fmt, args);
+            va_end(args);
+        }
+    };
 
-    // Validate fixture pixel counts (Batch 3 Item 10)
+    // 1. General device checks
+    if (config.gamma_x10 < 10 || config.gamma_x10 > 30) {
+        add_error("gamma_x10 (%u) out of sane range [10, 30]", (unsigned)config.gamma_x10);
+    }
+    if (config.max_power_mw > 65000) {
+        add_error("max_power_mw (%u) exceeds sane limit 65000", (unsigned)config.max_power_mw);
+    }
+
+    // 2. Protocol configuration
+    if (config.protocol.live_stream_layer >= 3) {
+        add_error("protocol.live_stream_layer (%u) must be < 3", (unsigned)config.protocol.live_stream_layer);
+    }
+    if (config.protocol.zone_start_channel < 1 || config.protocol.zone_start_channel > 512) {
+        add_error("protocol.zone_start_channel (%u) must be in 1..512", (unsigned)config.protocol.zone_start_channel);
+    }
+    if (config.protocol.zone_start_channel > 0 && (config.protocol.zone_start_channel + 24 - 1 > 512)) {
+        add_error("protocol.zone_start_channel (%u) + 24 channels exceeds universe boundary 512",
+                  (unsigned)config.protocol.zone_start_channel);
+    }
+
+    // 3. Fixture configuration
     for (uint8_t f = 0; f < 16; ++f) {
-        bool is_addressable = (to_save->fixtures[f].profile == FixtureProfile::WS2812 ||
-                               to_save->fixtures[f].profile == FixtureProfile::SK6812);
-        if (is_addressable && to_save->fixtures[f].num_pixels > MAX_PIXELS) {
-            ESP_LOGE(TAG, "Config save error: Fixture %u num_pixels (%u) exceeds MAX_PIXELS (%u). Marking invalid.",
-                     (unsigned)f, (unsigned)to_save->fixtures[f].num_pixels, (unsigned)MAX_PIXELS);
-            to_save->fixtures[f].num_pixels = 0;
+        const auto& fix = config.fixtures[f];
+        if (fix.zone_id >= 8) {
+            add_error("fixture[%u].zone_id (%u) must be < 8", (unsigned)f, (unsigned)fix.zone_id);
+        }
+        for (int p = 0; p < 4; ++p) {
+            if (fix.physical_output_index[p] >= 16) {
+                add_error("fixture[%u].physical_output_index[%d] (%u) must be < 16",
+                          (unsigned)f, p, (unsigned)fix.physical_output_index[p]);
+            }
+        }
+        bool is_addressable = (fix.profile == FixtureProfile::WS2812 || fix.profile == FixtureProfile::SK6812);
+        if (is_addressable) {
+            if (fix.num_pixels > MAX_PIXELS) {
+                add_error("fixture[%u].num_pixels (%u) exceeds MAX_PIXELS (%u)",
+                          (unsigned)f, (unsigned)fix.num_pixels, (unsigned)MAX_PIXELS);
+            }
+        }
+
+        // DMX patching checks
+        if (fix.dmx_start_channel > 0) {
+            if (fix.dmx_start_channel > 512) {
+                add_error("fixture[%u].dmx_start_channel (%u) must be in 1..512",
+                          (unsigned)f, (unsigned)fix.dmx_start_channel);
+            }
+            if (fix.dmx_universe > 63999) {
+                add_error("fixture[%u].dmx_universe (%u) exceeds valid range 63999",
+                          (unsigned)f, (unsigned)fix.dmx_universe);
+            }
+
+            if (fix.dmx_mode == 0) {
+                // Wash mode
+                uint16_t req_channels = 0;
+                if (fix.profile == FixtureProfile::PWM_Single) req_channels = 1;
+                else if (fix.profile == FixtureProfile::PWM_RGB || fix.profile == FixtureProfile::WS2812) req_channels = 3;
+                else if (fix.profile == FixtureProfile::PWM_RGBW || fix.profile == FixtureProfile::SK6812) req_channels = 4;
+
+                if (req_channels > 0 && (fix.dmx_start_channel + req_channels - 1 > 512)) {
+                    add_error("fixture[%u] wash patch (%u + %u ch) exceeds universe boundary 512",
+                              (unsigned)f, (unsigned)fix.dmx_start_channel, (unsigned)req_channels);
+                }
+            } else if (fix.dmx_mode == 1) {
+                // Direct Pixel Map mode
+                uint16_t ch_per_pixel = (fix.profile == FixtureProfile::SK6812 || fix.profile == FixtureProfile::PWM_RGBW) ? 4 : 3;
+                uint32_t total_channels = static_cast<uint32_t>(fix.num_pixels) * ch_per_pixel;
+                if (fix.dmx_start_channel + total_channels - 1 > 512) {
+                    add_error("fixture[%u] direct pixel map (%u + %u ch) exceeds universe boundary 512",
+                              (unsigned)f, (unsigned)fix.dmx_start_channel, (unsigned)total_channels);
+                }
+            }
         }
     }
 
+    if (out_result) {
+        *out_result = res;
+    }
+
+    return res.valid ? ESP_OK : ESP_ERR_INVALID_ARG;
+}
+
+esp_err_t ConfigStore::save_config(const DeviceConfig& config) {
+    ConfigValidationResult result;
+    esp_err_t val_err = validate_config(config, &result);
+    if (val_err != ESP_OK) {
+        ESP_LOGE(TAG, "Config save rejected due to validation failure (%u error(s)): %s",
+                 (unsigned)result.error_count, result.first_error);
+        return val_err;
+    }
+
+    auto to_save = std::make_unique<DeviceConfig>(config);
     to_save->checksum = calc_device_crc(*to_save);
 
     auto current = std::make_unique<DeviceConfig>();

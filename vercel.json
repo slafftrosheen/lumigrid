@@ -1,0 +1,7 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "sveltekit",
+  "buildCommand": "cd lumigrid-lander-main && npm run build",
+  "outputDirectory": "lumigrid-lander-main/.vercel/output",
+  "installCommand": "cd lumigrid-lander-main && npm install"
+}

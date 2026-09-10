@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <array>
 #include <mutex>
+#include <atomic>
 #include "ArtnetDiscovery.hpp"
 #include "SacnReceiver.hpp"
 #include "SignageTypes.hpp"
@@ -43,6 +44,16 @@ inline bool is_sequence_newer(uint8_t incoming, uint8_t previous) {
     return (diff > 0 && diff <= 127) || (diff < -127);
 }
 
+/// Helper determining whether sequence validation is required per protocol.
+/// - Art-Net 4: sequence == 0 explicitly disables sequence checking (OpDmx specification).
+/// - ANSI E1.31 (sACN): sequence 0 is a standard sequenced value; sequence check is always required.
+inline bool sequence_check_required(DmxSourceProtocol protocol, uint8_t sequence) {
+    if (protocol == DmxSourceProtocol::ArtNet && sequence == 0) {
+        return false;
+    }
+    return true;
+}
+
 /// Dedicated DMX routing engine for Art-Net and sACN protocols.
 ///
 /// Features:
@@ -72,19 +83,40 @@ public:
     /// Extract list of active universes patched across zone wash and fixtures
     size_t get_active_universes(uint16_t* out_universes, size_t max_count) const;
 
-    /// Unified stream timeout helper
-    uint32_t stream_timeout_ms() const {
+    /// Thread-safe stream timeout helper (acquires frame_mutex_)
+    uint32_t stream_timeout_ms() const;
+
+    /// Observable diagnostic counters
+    uint32_t active_source_count() const;
+    uint32_t dmx_universes_active() const;
+    uint32_t dropped_sources_count() const { return dropped_sources_count_.load(std::memory_order_relaxed); }
+    uint32_t dmx_sources_dropped() const { return dropped_sources_count_.load(std::memory_order_relaxed); }
+    uint32_t dmx_packets_accepted() const { return packets_accepted_.load(std::memory_order_relaxed); }
+    uint32_t dmx_packets_rejected_sequence() const { return packets_rejected_sequence_.load(std::memory_order_relaxed); }
+    uint32_t dmx_packets_ignored_unpatched() const { return packets_ignored_unpatched_.load(std::memory_order_relaxed); }
+
+    /// Static protocol sequence validation helper
+    static bool sequence_check_required(DmxSourceProtocol protocol, uint8_t sequence) {
+        return lg::sequence_check_required(protocol, sequence);
+    }
+
+    /// Dedicated universe patch clearing when universe sources expire
+    void clear_patch_for_universe(uint16_t universe);
+
+private:
+    uint32_t stream_timeout_ms_locked() const {
         return protocol_cfg_.stream_timeout_ms > 0 ? protocol_cfg_.stream_timeout_ms : 2000;
     }
 
-    uint32_t dropped_sources_count() const { return dropped_sources_count_; }
-
-private:
     LightingRuntime& lighting_;
     mutable std::mutex frame_mutex_;
     ProtocolConfig protocol_cfg_{};
     std::array<FixtureConfig, 16> fixtures_{};
-    uint32_t dropped_sources_count_ = 0;
+
+    std::atomic<uint32_t> dropped_sources_count_{0};
+    std::atomic<uint32_t> packets_accepted_{0};
+    std::atomic<uint32_t> packets_rejected_sequence_{0};
+    std::atomic<uint32_t> packets_ignored_unpatched_{0};
 
     // Tracking state per active stream contributor within a universe
     struct SourceStream {
@@ -112,7 +144,7 @@ private:
     std::array<UniverseState, kMaxTrackedUniverses> tracked_universes_{};
 
     // Pre-allocated live frame buffer to eliminate stack/heap allocation in streaming path
-    LiveDmxFrame live_frame_{};
+    LiveDmxFrame assembled_frame_{};
 
     UniverseState* get_or_create_universe(uint16_t universe);
     void recompute_merge(UniverseState& state, uint32_t current_ms);

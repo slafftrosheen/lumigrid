@@ -9,8 +9,8 @@ esp_err_t OutputScheduler::schedule(
     const DeviceConfig& device_cfg,
     OutputController& controller
 ) {
-    controller.pixels().clear();
-    controller.pwm().clear();
+    controller.pixels().clear_buffer();
+    controller.pwm().set_all(0);
 
     for (uint8_t f = 0; f < 16; ++f) {
         const FixtureConfig& fixture = device_cfg.fixtures[f];
