@@ -90,13 +90,18 @@ public:
     // Get instantaneous thread-safe snapshot for lock-free frame rendering
     ControlSnapshot get_snapshot(uint32_t current_ms);
 
+    // ACTUAL RENDERING AUTHORITY:
     // Resolve which source owns a specific zone and layer at this moment.
     ControlSource resolve(uint8_t zone_idx, uint8_t layer_idx, uint32_t current_ms) const;
 
+    // ACTUAL RENDERING AUTHORITY:
     // Resolve which source owns a specific fixture at this moment (fixture override takes precedence).
     ControlSource resolve_fixture(uint8_t fixture_idx, uint8_t zone_idx, uint32_t current_ms) const;
 
-    // Returns the highest active owner across the node (thread-safe by value, Item 9).
+    // DIAGNOSTIC DOMINANT SOURCE ONLY:
+    // Returns the highest active owner across the node (thread-safe by value).
+    // NOTE: This is a diagnostic dominant winner, NOT an authority for rendering decisions.
+    // Use resolve() or resolve_fixture() for rendering.
     ControlSource current_owner() const;
 
     // Returns the control state snapshot for a source (thread-safe by value, Item 9).

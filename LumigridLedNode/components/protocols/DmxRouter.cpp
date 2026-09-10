@@ -57,14 +57,23 @@ size_t DmxRouter::get_active_universes(uint16_t* out_universes, size_t max_count
 
 void DmxRouter::handle_artnet_dmx(const ArtnetDmxPacket& packet) {
     if (!protocol_cfg_.artnet_enabled) return;
+    DmxSourceId src;
+    src.protocol = DmxSourceProtocol::ArtNet;
+    src.identity[0] = static_cast<uint8_t>((packet.source_ip >> 24) & 0xFF);
+    src.identity[1] = static_cast<uint8_t>((packet.source_ip >> 16) & 0xFF);
+    src.identity[2] = static_cast<uint8_t>((packet.source_ip >> 8) & 0xFF);
+    src.identity[3] = static_cast<uint8_t>(packet.source_ip & 0xFF);
     process_frame(packet.universe, packet.data, packet.length, 100,
-                  SourceId{DmxProtocol::ArtNet, packet.source_ip}, 0);
+                  src, packet.sequence);
 }
 
 void DmxRouter::handle_sacn_dmx(const SacnDmxPacket& packet) {
     if (!protocol_cfg_.sacn_enabled) return;
+    DmxSourceId src;
+    src.protocol = DmxSourceProtocol::Sacn;
+    src.identity = packet.cid;
     process_frame(packet.universe, packet.data, packet.length, packet.priority,
-                  SourceId{DmxProtocol::sACN, packet.cid_hash}, packet.sequence);
+                  src, packet.sequence);
 }
 
 DmxRouter::UniverseState* DmxRouter::get_or_create_universe(uint16_t universe) {
@@ -167,7 +176,7 @@ void DmxRouter::recompute_merge(UniverseState& state, uint32_t current_ms) {
 }
 
 void DmxRouter::process_frame(uint16_t universe, const uint8_t* data, uint16_t length,
-                              uint8_t priority, SourceId source_id, uint8_t sequence) {
+                              uint8_t priority, DmxSourceId source_id, uint8_t sequence) {
     if (!data || length == 0) return;
     if (length > 512) length = 512;
 
@@ -190,45 +199,46 @@ void DmxRouter::process_frame(uint16_t universe, const uint8_t* data, uint16_t l
 
     const uint32_t timeout = stream_timeout_ms();
 
-    // Locate or allocate source slot
+    // 1. Locate existing active source or allocate a free/timed-out slot
     SourceStream* target_src = nullptr;
-    SourceStream* oldest_src = nullptr;
-    uint32_t oldest_src_age = 0xFFFFFFFF;
 
     for (auto& src : state->sources) {
         if (src.active && src.source_id == source_id) {
             target_src = &src;
             break;
         }
-        if (!src.active || (current_ms - src.last_packet_ms > timeout)) {
-            if (!oldest_src || src.last_packet_ms < oldest_src_age) {
-                oldest_src = &src;
-                oldest_src_age = src.last_packet_ms;
-            }
-        }
     }
 
     if (!target_src) {
-        target_src = oldest_src;
-        if (target_src) {
-            target_src->sequence_valid = false;
-        }
-    }
-    if (!target_src) return;
-
-    // ANSI E1.31-2016 sACN sequence filtering
-    if (source_id.protocol == DmxProtocol::sACN) {
-        if (target_src->active && target_src->sequence_valid) {
-            const int8_t diff = static_cast<int8_t>(sequence - target_src->last_sequence);
-            // Stale or out-of-order packet: diff <= 0 && diff > -20
-            if (diff <= 0 && diff > -20) {
-                return;
+        for (auto& src : state->sources) {
+            if (!src.active || (current_ms - src.last_packet_ms > timeout)) {
+                target_src = &src;
+                target_src->active = false;
+                target_src->sequence_valid = false;
+                break;
             }
         }
-        target_src->last_sequence = sequence;
-        target_src->sequence_valid = true;
     }
 
+    // If bounded capacity exceeded, drop newest source and increment counter; never overwrite active source
+    if (!target_src) {
+        dropped_sources_count_++;
+        return;
+    }
+
+    // 2. Sequence handling MUST happen before merge state mutation (Batch 3 Item 7)
+    if (target_src->active && target_src->sequence_valid) {
+        if (source_id.protocol == DmxSourceProtocol::ArtNet && sequence == 0) {
+            // Sequence 0 in Art-Net means unsequenced/disabled, accept without sequence check
+        } else {
+            if (!is_sequence_newer(sequence, target_src->last_sequence)) {
+                return; // Stale or duplicate packet rejected
+            }
+        }
+    }
+
+    target_src->last_sequence = sequence;
+    target_src->sequence_valid = true;
     target_src->source_id = source_id;
     target_src->priority = priority;
     target_src->last_packet_ms = current_ms;

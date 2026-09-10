@@ -25,7 +25,20 @@ LightingRuntime::LightingRuntime(ControlSourceManager& source_manager, OutputCon
     : source_manager_(source_manager),
       controller_(controller),
       config_(config),
-      scene_manager_(config) {}
+      scene_manager_(config) {
+    mutex_ = xSemaphoreCreateMutex();
+}
+
+LightingRuntime::~LightingRuntime() {
+    if (task_handle_) {
+        vTaskDelete(task_handle_);
+        task_handle_ = nullptr;
+    }
+    if (mutex_) {
+        vSemaphoreDelete(mutex_);
+        mutex_ = nullptr;
+    }
+}
 
 esp_err_t LightingRuntime::start() {
     config_.load_config(device_cfg_);
@@ -33,10 +46,12 @@ esp_err_t LightingRuntime::start() {
     power_budget_.set_soft_start(device_cfg_.soft_start_enabled, device_cfg_.soft_start_ms);
     ColorPipeline::set_gamma(device_cfg_.gamma_x10);
 
-    mutex_ = xSemaphoreCreateMutex();
     if (!mutex_) {
-        ESP_LOGE(TAG, "Failed to create mutex");
-        return ESP_ERR_NO_MEM;
+        mutex_ = xSemaphoreCreateMutex();
+        if (!mutex_) {
+            ESP_LOGE(TAG, "Failed to create mutex");
+            return ESP_ERR_NO_MEM;
+        }
     }
 
     scene_manager_.init();
@@ -62,8 +77,11 @@ esp_err_t LightingRuntime::start() {
 
 void LightingRuntime::trigger_estop() {
     estop_state_.store(EstopState::Tripped, std::memory_order_release);
+    controller_.latch_estop();
+    source_manager_.release(ControlSource::Factory);
+    source_manager_.release(ControlSource::LiveDmx);
     controller_.blackout();
-    ESP_LOGW(TAG, "EMERGENCY STOP TRIGGERED: Hardware output blacked out (latched)");
+    ESP_LOGW(TAG, "EMERGENCY STOP TRIGGERED: Hardware output blacked out and latched");
 }
 
 void LightingRuntime::clear_estop() {
@@ -115,7 +133,7 @@ void LightingRuntime::render_frame(uint32_t current_ms) {
         return;
     } else if (es == EstopState::PendingReset) {
         // Enforce 1-frame blackout acknowledgement before normal scene rendering resumes
-        controller_.blackout();
+        controller_.clear_estop(); // Re-arms controller, but keeps output blacked out
         if (preview_cb_) {
             RenderFrame blank{};
             DeviceConfig local_cfg;
@@ -126,7 +144,7 @@ void LightingRuntime::render_frame(uint32_t current_ms) {
             }
         }
         estop_state_.store(EstopState::Inactive, std::memory_order_release);
-        ESP_LOGI(TAG, "EMERGENCY STOP RESET: Resuming lighting output");
+        ESP_LOGI(TAG, "EMERGENCY STOP RESET: Controller re-armed, resuming output on subsequent frame");
         return;
     }
 
@@ -151,7 +169,6 @@ void LightingRuntime::render_frame(uint32_t current_ms) {
 
     // 3. Local pruning of expired live streams on live_active_
     const uint16_t timeout_ms = local_cfg.protocol.stream_timeout_ms > 0 ? local_cfg.protocol.stream_timeout_ms : 2000;
-    bool any_live_active = false;
     for (uint8_t z = 0; z < 8; ++z) {
         for (uint8_t l = 0; l < 3; ++l) {
             auto& layer = live_active_.layers[z][l];
@@ -159,8 +176,6 @@ void LightingRuntime::render_frame(uint32_t current_ms) {
                 if (current_ms - layer.timestamp_ms > timeout_ms) {
                     layer.active = false;
                     layer.opacity = 0;
-                } else {
-                    any_live_active = true;
                 }
             }
         }
@@ -172,14 +187,8 @@ void LightingRuntime::render_frame(uint32_t current_ms) {
             if (current_ms - fix.timestamp_ms > timeout_ms) {
                 fix.active = false;
                 fix.opacity = 0;
-            } else {
-                any_live_active = true;
             }
         }
-    }
-
-    if (!any_live_active && ctrl_snapshot.current_owner == ControlSource::LiveDmx) {
-        source_manager_.release(ControlSource::LiveDmx);
     }
 
     // 4. Render Pipeline (Completely lock-free!)
@@ -248,14 +257,19 @@ void LightingRuntime::render_frame(uint32_t current_ms) {
     // 5. Power Limiting
     power_budget_.enforce(render_frame, local_cfg, current_ms);
 
-    // 6. Physical Output Scheduling & Error Handling (Item 11)
+    // 6. Physical Output Scheduling & Error Handling
     const esp_err_t sched_err = OutputScheduler::schedule(render_frame, local_cfg, controller_);
     if (sched_err != ESP_OK) {
-        output_fault_.store(true, std::memory_order_relaxed);
+        consecutive_successful_commits_ = 0;
+        output_fault_.store(true, std::memory_order_release);
         output_fault_count_.fetch_add(1, std::memory_order_relaxed);
         controller_.blackout();
-    } else if (output_fault_.load(std::memory_order_relaxed)) {
-        output_fault_.store(false, std::memory_order_relaxed);
+        return;
+    } else {
+        consecutive_successful_commits_++;
+        if (consecutive_successful_commits_ >= 3 && output_fault_.load(std::memory_order_relaxed)) {
+            output_fault_.store(false, std::memory_order_release);
+        }
     }
     
     // 7. Logical RenderFrame Preview
@@ -304,8 +318,12 @@ void LightingRuntime::submit_live_frame(const LiveDmxFrame& frame) {
         }
     }
 
-    const uint16_t timeout_ms = device_cfg_.protocol.stream_timeout_ms > 0 ? device_cfg_.protocol.stream_timeout_ms : 2000;
-    source_manager_.acquire(ControlSource::LiveDmx, timeout_ms, live_zone_mask, live_layer_mask, live_fixture_mask);
+    if (live_zone_mask == 0 && live_fixture_mask == 0) {
+        source_manager_.release(ControlSource::LiveDmx);
+    } else {
+        const uint16_t timeout_ms = device_cfg_.protocol.stream_timeout_ms > 0 ? device_cfg_.protocol.stream_timeout_ms : 2000;
+        source_manager_.acquire(ControlSource::LiveDmx, timeout_ms, live_zone_mask, live_layer_mask, live_fixture_mask);
+    }
     xSemaphoreGive(mutex_);
 }
 

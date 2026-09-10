@@ -110,7 +110,6 @@ void FactoryRunner::task_entry(void* argument) {
 
 void FactoryRunner::blackout() {
     source_manager_.release(ControlSource::Factory);
-    source_manager_.release(ControlSource::LiveDmx);
     controller_.blackout();
 
     xSemaphoreTake(status_mutex_, portMAX_DELAY);
@@ -276,7 +275,7 @@ void FactoryRunner::task() {
         xSemaphoreGive(status_mutex_);
 
         if (is_streaming) {
-            source_manager_.acquire(ControlSource::LiveDmx, 1000); // Re-acquire lease for 1 second
+            source_manager_.acquire(ControlSource::Factory, 1000); // Factory ownership only!
 
             const uint8_t b = local_stream_brightness;
 
@@ -298,7 +297,11 @@ void FactoryRunner::task() {
                 controller_.pwm().set(lane, duty);
             }
 
-            controller_.commit();
+            if (controller_.try_commit() != ESP_OK) {
+                blackout();
+                vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(kFramePeriodMs));
+                continue;
+            }
 
             if (current_ms - local_stream_last_ms > 1000) {
                 xSemaphoreTake(status_mutex_, portMAX_DELAY);
@@ -338,7 +341,11 @@ void FactoryRunner::task() {
                 );
             }
 
-            controller_.commit();
+            if (controller_.try_commit() != ESP_OK) {
+                blackout();
+                vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(kFramePeriodMs));
+                continue;
+            }
 
             if (elapsed >= current.effect_duration_ms) {
                 direct_test_active_ = false;
@@ -397,7 +404,11 @@ void FactoryRunner::task() {
                 current.brightness
             );
 
-            controller_.commit();
+            if (controller_.try_commit() != ESP_OK) {
+                blackout();
+                vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(kFramePeriodMs));
+                continue;
+            }
         }
 
         vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(kFramePeriodMs));

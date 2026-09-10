@@ -13,6 +13,10 @@ struct BrandColor {
     uint8_t b = 0;
 };
 
+// ──────────────────────────── Constants ────────────────────────────
+constexpr uint16_t MAX_FIXTURE_PIXELS = 256;
+constexpr uint16_t MAX_PIXELS = MAX_FIXTURE_PIXELS;
+
 // ──────────────────────────── New Product Schema ─────────────────────────
 
 enum class OutputType : uint8_t { RMT = 0, PWM = 1, SPI = 2 };

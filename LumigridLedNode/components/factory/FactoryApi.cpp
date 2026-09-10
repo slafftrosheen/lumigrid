@@ -456,8 +456,9 @@ esp_err_t get_health(httpd_req_t* request) {
 
     bool output_fault = false;
     uint32_t output_fault_count = 0;
-    bool estop_active = false;
-    int control_source = 0;
+    bool output_controller_estop_latched = false;
+    bool runtime_estop = false;
+    int dominant_control_source = 0;
     uint8_t active_dmx_sources = 0;
     uint32_t throttling_events = 0;
     uint32_t current_power_mw = 0;
@@ -468,26 +469,27 @@ esp_err_t get_health(httpd_req_t* request) {
     if (api_ptr->signage()) {
         output_fault = api_ptr->signage()->output_fault();
         output_fault_count = api_ptr->signage()->output_fault_count();
-        estop_active = api_ptr->signage()->is_estop_active();
-        control_source = static_cast<int>(api_ptr->signage()->current_control_source());
+        output_controller_estop_latched = api_ptr->signage()->is_output_controller_estop_latched();
+        runtime_estop = api_ptr->signage()->is_estop_active();
+        dominant_control_source = static_cast<int>(api_ptr->signage()->current_control_source());
         active_dmx_sources = api_ptr->signage()->active_dmx_sources();
         throttling_events = api_ptr->signage()->power_budget().throttling_events();
         current_power_mw = api_ptr->signage()->power_budget().current_power_mw();
         fps = api_ptr->signage()->get_fps();
         active_preset = api_ptr->signage()->active_scene_index();
         watchdog_fallback = api_ptr->signage()->is_fallback_active();
+    } else {
+        dominant_control_source = static_cast<int>(api_ptr->runner().control_sources().current_owner());
     }
 
     cJSON_AddBoolToObject(root, "output_fault", output_fault);
     cJSON_AddNumberToObject(root, "output_fault_count", output_fault_count);
-    cJSON_AddBoolToObject(root, "estop_active", estop_active);
-    cJSON_AddNumberToObject(root, "control_source", control_source);
-    cJSON_AddNumberToObject(root, "active_control_source", control_source);
+    cJSON_AddBoolToObject(root, "output_controller_estop_latched", output_controller_estop_latched);
+    cJSON_AddBoolToObject(root, "runtime_estop", runtime_estop);
+    cJSON_AddNumberToObject(root, "dominant_control_source", dominant_control_source);
     cJSON_AddNumberToObject(root, "active_dmx_sources", active_dmx_sources);
-    cJSON_AddNumberToObject(root, "throttling_events", throttling_events);
-    cJSON_AddNumberToObject(root, "clipping_events", throttling_events);
     cJSON_AddNumberToObject(root, "current_power_mw", current_power_mw);
-    cJSON_AddNumberToObject(root, "current_estimated_power", current_power_mw);
+    cJSON_AddNumberToObject(root, "throttling_events", throttling_events);
     cJSON_AddNumberToObject(root, "fps", fps);
     cJSON_AddNumberToObject(root, "active_preset", active_preset);
     cJSON_AddBoolToObject(root, "watchdog_fallback", watchdog_fallback);
@@ -1212,7 +1214,7 @@ esp_err_t get_signage_status(httpd_req_t* request) {
     cJSON_AddNumberToObject(
         response,
         "controlSource",
-        static_cast<int>(api_ptr->signage() ? api_ptr->signage()->current_control_source() : api_ptr->runner().output().current_owner())
+        static_cast<int>(api_ptr->signage() ? api_ptr->signage()->current_control_source() : api_ptr->runner().control_sources().current_owner())
     );
 
     cJSON_AddBoolToObject(

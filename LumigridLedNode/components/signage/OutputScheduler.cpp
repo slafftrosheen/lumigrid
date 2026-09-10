@@ -31,8 +31,11 @@ esp_err_t OutputScheduler::schedule(
             if (!phys.enabled) continue;
 
             if (phys.type == OutputType::RMT) {
-                uint16_t pcount = std::min<uint16_t>(fixture.num_pixels, MAX_PIXELS);
-                for (uint16_t px = 0; px < pcount; ++px) {
+                if (fixture.num_pixels > MAX_PIXELS) {
+                    // Malformed configured size must not be silently clamped at runtime
+                    continue;
+                }
+                for (uint16_t px = 0; px < fixture.num_pixels; ++px) {
                     const LightValue& lv = fx_frame.pixels[px];
                     controller.pixels().set(phys.hardware_id, px, lv.r, lv.g, lv.b, lv.w);
                 }
@@ -42,7 +45,7 @@ esp_err_t OutputScheduler::schedule(
         }
     }
 
-    return controller.commit();
+    return controller.try_commit();
 }
 
 } // namespace lg

@@ -89,8 +89,8 @@ public:
     esp_err_t save_config(const DeviceConfig& config);
     esp_err_t load_config(DeviceConfig& config);
 
-    // Explicit Schema v1 -> v2 Migration (Item 16)
-    static bool migrate_v1_to_v2(const DeviceConfigV1& v1, DeviceConfig& v2);
+    // Explicit Schema v1 -> v2 Migration (Item 16, Batch 3 Item 11)
+    static bool migrate_v1_to_v2(const DeviceConfigV1& v1, DeviceConfig& v2, uint32_t* out_warning_count = nullptr);
 
     // ── Sequences ──
     esp_err_t save_sequence(const Sequence& seq);

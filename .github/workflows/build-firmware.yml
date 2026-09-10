@@ -6,6 +6,9 @@ on:
       - main
     paths:
       - 'LumigridLedNode/**'
+  pull_request:
+    paths:
+      - 'LumigridLedNode/**'
   workflow_dispatch:
 
 permissions:
@@ -40,12 +43,14 @@ jobs:
           esptool.py --chip esp32 merge_bin -o merged_firmware.bin --flash_mode dio --flash_freq 40m --flash_size 4MB 0x1000 .pio/build/factory/bootloader.bin 0x8000 .pio/build/factory/partitions.bin 0x10000 .pio/build/factory/firmware.bin
 
       - name: Prepare Latest Builds
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
           mkdir -p lumigrid-lander-main/static/latest_builds
           cp LumigridLedNode/merged_firmware.bin lumigrid-lander-main/static/latest_builds/
           cp LumigridLedNode/.pio/build/factory/firmware.bin lumigrid-lander-main/static/latest_builds/
 
       - name: Commit and Push Firmware
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "chore: auto-build latest firmware binaries [skip ci]"

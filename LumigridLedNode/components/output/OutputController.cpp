@@ -7,9 +7,11 @@ namespace lg {
 esp_err_t OutputController::init() {
     ESP_LOGI("output", "Initializing OutputController...");
 
-    mutex_ = xSemaphoreCreateRecursiveMutex();
     if (mutex_ == nullptr) {
-        return ESP_ERR_NO_MEM;
+        mutex_ = xSemaphoreCreateRecursiveMutex();
+        if (mutex_ == nullptr) {
+            return ESP_ERR_NO_MEM;
+        }
     }
 
     lock();
@@ -73,28 +75,44 @@ esp_err_t OutputController::blackout() {
     return err1 != ESP_OK ? err1 : err2;
 }
 
-esp_err_t OutputController::commit() {
-    if (!enabled_) return ESP_OK;
+void OutputController::latch_estop() {
+    estop_latched_.store(true, std::memory_order_release);
+    output_enabled_.store(false, std::memory_order_release);
+    blackout();
+}
+
+void OutputController::clear_estop() {
+    // Clearing the physical latch only re-arms the controller.
+    // It must NOT immediately restore previous output.
+    estop_latched_.store(false, std::memory_order_release);
+    output_enabled_.store(true, std::memory_order_release);
+    blackout();
+}
+
+void OutputController::set_output_enabled(bool enabled) {
+    output_enabled_.store(enabled, std::memory_order_release);
+    if (!enabled) {
+        blackout();
+    }
+}
+
+esp_err_t OutputController::try_commit() {
+    if (estop_latched_.load(std::memory_order_acquire) ||
+        !output_enabled_.load(std::memory_order_acquire)) {
+        blackout();
+        return ESP_ERR_INVALID_STATE;
+    }
 
     lock();
     esp_err_t err1 = pixels_.show();
     esp_err_t err2 = pwm_.commit();
     unlock();
-    
-    return err1 != ESP_OK ? err1 : err2;
-}
 
-void OutputController::enable() {
-    lock();
-    enabled_ = true;
-    unlock();
-}
-
-void OutputController::disable() {
-    lock();
-    enabled_ = false;
-    blackout();
-    unlock();
+    esp_err_t final_err = (err1 != ESP_OK) ? err1 : err2;
+    if (final_err != ESP_OK) {
+        commit_fault_count_.fetch_add(1, std::memory_order_relaxed);
+    }
+    return final_err;
 }
 
 } // namespace lg

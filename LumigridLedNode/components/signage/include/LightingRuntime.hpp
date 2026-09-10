@@ -21,6 +21,7 @@ namespace lg {
 class LightingRuntime {
 public:
     LightingRuntime(ControlSourceManager& source_manager, OutputController& controller, ConfigStore& config);
+    ~LightingRuntime();
 
     esp_err_t start();
 
@@ -54,6 +55,10 @@ public:
     bool is_estop_active() const {
         return estop_state_.load(std::memory_order_relaxed) != EstopState::Inactive;
     }
+    bool is_output_controller_estop_latched() const {
+        return controller_.is_estop_latched();
+    }
+    const OutputController& controller() const { return controller_; }
 
     // Hardware output fault tracking
     bool is_output_fault() const {
@@ -96,6 +101,7 @@ private:
     std::atomic<EstopState> estop_state_{EstopState::Inactive};
     std::atomic<bool> output_fault_{false};
     std::atomic<uint32_t> output_fault_count_{0};
+    uint32_t consecutive_successful_commits_{0};
 
     DeviceConfig device_cfg_{};
 

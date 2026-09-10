@@ -60,6 +60,7 @@ esp_err_t init_i2c_once() {
 }
 
 esp_err_t Pca9685Driver::write_register(uint8_t reg, uint8_t value) {
+    if (s_dev == nullptr || s_i2c_mutex == nullptr) return ESP_ERR_INVALID_STATE;
     xSemaphoreTake(s_i2c_mutex, portMAX_DELAY);
     const uint8_t packet[] = {reg, value};
     esp_err_t ret = i2c_master_transmit(s_dev, packet, sizeof(packet), 100);
@@ -70,6 +71,7 @@ esp_err_t Pca9685Driver::write_register(uint8_t reg, uint8_t value) {
 esp_err_t Pca9685Driver::write_bytes(uint8_t start_reg,
                                const uint8_t* data,
                                size_t len) {
+    if (s_dev == nullptr || s_i2c_mutex == nullptr) return ESP_ERR_INVALID_STATE;
     uint8_t packet[1 + kChannels * 4] = {};
     packet[0] = start_reg;
 
@@ -146,6 +148,9 @@ esp_err_t Pca9685Driver::clear() {
 }
 
 esp_err_t Pca9685Driver::commit() {
+    if (s_dev == nullptr || s_i2c_mutex == nullptr) {
+        return ESP_OK;
+    }
     uint8_t bytes[kChannels * 4] = {};
 
     for (uint8_t channel = 0; channel < kChannels; ++channel) {

@@ -15,7 +15,7 @@ struct SacnDmxPacket {
     uint8_t sequence = 0;
     uint8_t priority = 0;
     uint32_t cid_hash = 0;
-    uint8_t cid[16] = {};
+    std::array<uint8_t, 16> cid{};
     uint8_t data[512] = {};
 };
 

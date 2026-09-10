@@ -12,22 +12,36 @@ namespace lg {
 
 class LightingRuntime;
 
-enum class DmxProtocol : uint8_t {
+enum class DmxSourceProtocol : uint8_t {
     ArtNet = 1,
-    sACN = 2
+    Sacn = 2
 };
 
-struct SourceId {
-    DmxProtocol protocol = DmxProtocol::ArtNet;
-    uint32_t identifier = 0; // Source IP for Art-Net, CID hash for sACN
+struct DmxSourceId {
+    DmxSourceProtocol protocol{DmxSourceProtocol::ArtNet};
+    std::array<uint8_t, 16> identity{};
 
-    bool operator==(const SourceId& other) const {
-        return protocol == other.protocol && identifier == other.identifier;
+    bool operator==(const DmxSourceId& other) const {
+        return protocol == other.protocol && identity == other.identity;
     }
-    bool operator!=(const SourceId& other) const {
+    bool operator!=(const DmxSourceId& other) const {
         return !(*this == other);
     }
 };
+
+using DmxProtocol = DmxSourceProtocol;
+using SourceId = DmxSourceId;
+
+/// Shared sequence validation helper per Batch 3 Item 7:
+/// Returns true if incoming sequence is strictly newer than previous.
+/// - duplicate -> reject (false)
+/// - old packet -> reject (false)
+/// - forward packet -> accept (true)
+/// - wrap 255 -> 0 -> accept (true)
+inline bool is_sequence_newer(uint8_t incoming, uint8_t previous) {
+    int16_t diff = static_cast<int16_t>(incoming) - static_cast<int16_t>(previous);
+    return (diff > 0 && diff <= 127) || (diff < -127);
+}
 
 /// Dedicated DMX routing engine for Art-Net and sACN protocols.
 ///
@@ -53,7 +67,7 @@ public:
 
     /// Process a generic DMX frame with source identification, sequence, and priority
     void process_frame(uint16_t universe, const uint8_t* data, uint16_t length,
-                       uint8_t priority, SourceId source_id, uint8_t sequence = 0);
+                       uint8_t priority, DmxSourceId source_id, uint8_t sequence = 0);
 
     /// Extract list of active universes patched across zone wash and fixtures
     size_t get_active_universes(uint16_t* out_universes, size_t max_count) const;
@@ -63,15 +77,18 @@ public:
         return protocol_cfg_.stream_timeout_ms > 0 ? protocol_cfg_.stream_timeout_ms : 2000;
     }
 
+    uint32_t dropped_sources_count() const { return dropped_sources_count_; }
+
 private:
     LightingRuntime& lighting_;
     mutable std::mutex frame_mutex_;
     ProtocolConfig protocol_cfg_{};
     std::array<FixtureConfig, 16> fixtures_{};
+    uint32_t dropped_sources_count_ = 0;
 
     // Tracking state per active stream contributor within a universe
     struct SourceStream {
-        SourceId source_id{};
+        DmxSourceId source_id{};
         uint8_t  priority = 100;
         uint32_t last_packet_ms = 0;
         uint16_t length = 0;

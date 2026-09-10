@@ -47,11 +47,10 @@ esp_err_t SacnReceiver::start(SacnDmxCallback callback) {
 
 void SacnReceiver::set_subscribed_universes(const uint16_t* universes, size_t count) {
     std::lock_guard<std::mutex> lock(mtx_);
-    if (sock_ >= 0) {
-        leave_multicast_groups(sock_);
-    }
 
-    subscribed_count_ = 0;
+    std::array<uint16_t, 16> new_unis{};
+    size_t new_count = 0;
+
     if (universes && count > 0) {
         for (size_t i = 0; i < count; ++i) {
             uint16_t u = universes[i];
@@ -59,21 +58,66 @@ void SacnReceiver::set_subscribed_universes(const uint16_t* universes, size_t co
 
             // Deduplicate
             bool duplicate = false;
-            for (size_t j = 0; j < subscribed_count_; ++j) {
-                if (subscribed_universes_[j] == u) {
+            for (size_t j = 0; j < new_count; ++j) {
+                if (new_unis[j] == u) {
                     duplicate = true;
                     break;
                 }
             }
-            if (!duplicate && subscribed_count_ < subscribed_universes_.size()) {
-                subscribed_universes_[subscribed_count_++] = u;
+            if (!duplicate && new_count < new_unis.size()) {
+                new_unis[new_count++] = u;
             }
         }
     }
 
     if (sock_ >= 0) {
-        join_multicast_groups(sock_);
+        // 1. Leave groups no longer required
+        for (size_t i = 0; i < subscribed_count_; ++i) {
+            uint16_t old_u = subscribed_universes_[i];
+            bool still_needed = false;
+            for (size_t j = 0; j < new_count; ++j) {
+                if (new_unis[j] == old_u) {
+                    still_needed = true;
+                    break;
+                }
+            }
+            if (!still_needed) {
+                struct ip_mreq mreq = {};
+                mreq.imr_multiaddr.s_addr = htonl((239U << 24) | (255U << 16) | old_u);
+                mreq.imr_interface.s_addr = htonl(INADDR_ANY);
+                int res = ::setsockopt(sock_, IPPROTO_IP, IP_DROP_MEMBERSHIP, &mreq, sizeof(mreq));
+                if (res == 0) {
+                    ESP_LOGI(kTag, "Left sACN multicast group 239.255.%u.%u for universe %u", (old_u >> 8) & 0xFF, old_u & 0xFF, old_u);
+                }
+            }
+        }
+
+        // 2. Join newly required groups
+        for (size_t i = 0; i < new_count; ++i) {
+            uint16_t new_u = new_unis[i];
+            bool already_joined = false;
+            for (size_t j = 0; j < subscribed_count_; ++j) {
+                if (subscribed_universes_[j] == new_u) {
+                    already_joined = true;
+                    break;
+                }
+            }
+            if (!already_joined) {
+                struct ip_mreq mreq = {};
+                mreq.imr_multiaddr.s_addr = htonl((239U << 24) | (255U << 16) | new_u);
+                mreq.imr_interface.s_addr = htonl(INADDR_ANY);
+                int res = ::setsockopt(sock_, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq));
+                if (res < 0) {
+                    ESP_LOGW(kTag, "Failed to join multicast for universe %u (errno %d)", new_u, errno);
+                } else {
+                    ESP_LOGI(kTag, "Joined sACN multicast group 239.255.%u.%u for universe %u", (new_u >> 8) & 0xFF, new_u & 0xFF, new_u);
+                }
+            }
+        }
     }
+
+    subscribed_universes_ = new_unis;
+    subscribed_count_ = new_count;
 }
 
 void SacnReceiver::leave_multicast_groups(int sock) {
@@ -180,9 +224,9 @@ bool SacnReceiver::handle_packet(const uint8_t* packet, size_t length) {
     if (packet[18] != 0 || packet[19] != 0 || packet[20] != 0 || packet[21] != 4) return false;
 
     // Extract CID (bytes 22..37)
-    uint8_t cid[16];
-    std::memcpy(cid, packet + 22, 16);
-    uint32_t cid_hash = fnv1a_32(cid, 16);
+    std::array<uint8_t, 16> cid{};
+    std::memcpy(cid.data(), packet + 22, 16);
+    uint32_t cid_hash = fnv1a_32(cid.data(), 16);
 
     // Framing Layer Vector (0x00000002)
     if (packet[40] != 0 || packet[41] != 0 || packet[42] != 0 || packet[43] != 2) return false;
@@ -211,7 +255,7 @@ bool SacnReceiver::handle_packet(const uint8_t* packet, size_t length) {
     out.sequence = sequence;
     out.priority = priority;
     out.cid_hash = cid_hash;
-    std::memcpy(out.cid, cid, 16);
+    out.cid = cid;
     out.length = prop_val_count - 1; // Subtract start code
     
     if (out.length > 512) out.length = 512;

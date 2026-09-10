@@ -14,14 +14,12 @@ namespace lg {
 
 /// @brief Factory hardware test runner.
 ///
-/// ARCHITECTURAL EXCEPTION NOTE (Batch 2, Item 23):
+/// ARCHITECTURAL EXCEPTION NOTE:
 /// FactoryRunner directly commands OutputController hardware for factory bring-up,
 /// manufacturing lane testing, PWM diagnostics, and board burn-in. This direct hardware
 /// access is an INTENTIONAL EXCEPTION to the standard rendering pipeline.
-///
-/// DO NOT copy this direct-hardware pattern for any application features, user effects,
-/// or protocol handlers. All operational lighting features MUST render into RenderFrame
-/// via LightingRuntime and be scheduled through OutputScheduler and Compositor.
+/// However, it MUST STILL PASS the same final hardware safety gate (OutputController::try_commit()).
+/// FactoryRunner can NEVER physically output while the controller is estop-latched or output-disabled.
 class FactoryRunner {
 public:
     FactoryRunner(ControlSourceManager& source_manager, OutputController& controller);
@@ -31,7 +29,9 @@ public:
     void set_stream_frame(const StreamFramePayload& payload, uint8_t brightness, uint32_t duration_ms);
     FactoryStatus status() const;
 
-    ControlSourceManager& output() { return source_manager_; }
+    ControlSourceManager& control_sources() { return source_manager_; }
+    // Deprecated alias for backwards compatibility
+    ControlSourceManager& output() { return control_sources(); }
 
     using StatusCallback = std::function<void()>;
     void set_status_callback(StatusCallback cb) { status_callback_ = std::move(cb); }

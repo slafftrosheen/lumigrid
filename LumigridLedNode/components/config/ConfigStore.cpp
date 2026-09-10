@@ -197,10 +197,23 @@ uint8_t ConfigStore::scene_count() {
 
 esp_err_t ConfigStore::save_config(const DeviceConfig& config) {
     auto to_save = std::make_unique<DeviceConfig>(config);
+
+    // Validate fixture pixel counts (Batch 3 Item 10)
+    for (uint8_t f = 0; f < 16; ++f) {
+        bool is_addressable = (to_save->fixtures[f].profile == FixtureProfile::WS2812 ||
+                               to_save->fixtures[f].profile == FixtureProfile::SK6812);
+        if (is_addressable && to_save->fixtures[f].num_pixels > MAX_PIXELS) {
+            ESP_LOGE(TAG, "Config save error: Fixture %u num_pixels (%u) exceeds MAX_PIXELS (%u). Marking invalid.",
+                     (unsigned)f, (unsigned)to_save->fixtures[f].num_pixels, (unsigned)MAX_PIXELS);
+            to_save->fixtures[f].num_pixels = 0;
+        }
+    }
+
     to_save->checksum = calc_device_crc(*to_save);
 
     auto current = std::make_unique<DeviceConfig>();
-    if (load_config(*current) == ESP_OK) {
+    size_t cur_len = sizeof(DeviceConfig);
+    if (nvs_get_blob(handle_, "device_cfg", current.get(), &cur_len) == ESP_OK && cur_len == sizeof(DeviceConfig)) {
         nvs_set_blob(handle_, "device_cfg_bak", current.get(), sizeof(DeviceConfig));
     }
 
@@ -211,7 +224,7 @@ esp_err_t ConfigStore::save_config(const DeviceConfig& config) {
     return nvs_commit(handle_);
 }
 
-bool ConfigStore::migrate_v1_to_v2(const DeviceConfigV1& v1, DeviceConfig& v2) {
+bool ConfigStore::migrate_v1_to_v2(const DeviceConfigV1& v1, DeviceConfig& v2, uint32_t* out_warning_count) {
     auto def = std::make_unique<DeviceConfig>();
     v2 = *def;
     v2.schema_version = 2;
@@ -266,14 +279,40 @@ bool ConfigStore::migrate_v1_to_v2(const DeviceConfigV1& v1, DeviceConfig& v2) {
         v2.fixtures[f].gamma_correction = v1.fixtures[f].gamma_correction;
         v2.fixtures[f].max_milliwatts = v1.fixtures[f].max_milliwatts;
 
-        // Map fixture_mask from zones into fixture.zone_id
-        v2.fixtures[f].zone_id = 0;
+        // Count matching zones from legacy v1 fixture_mask (Batch 3 Item 11)
+        uint8_t match_count = 0;
+        uint8_t first_zone = 0;
         for (uint8_t z = 0; z < 8; ++z) {
             if (v1.zones[z].fixture_mask & (1U << f)) {
-                v2.fixtures[f].zone_id = z;
-                break;
+                if (match_count == 0) {
+                    first_zone = z;
+                }
+                match_count++;
             }
         }
+
+        if (match_count == 0) {
+            v2.fixtures[f].zone_id = 0;
+            ESP_LOGW(TAG, "Migration: Fixture %u has 0 zone memberships in legacy config, assigning to zone 0", (unsigned)f);
+            if (out_warning_count) (*out_warning_count)++;
+        } else if (match_count == 1) {
+            v2.fixtures[f].zone_id = first_zone;
+        } else {
+            v2.fixtures[f].zone_id = first_zone;
+            ESP_LOGW(TAG, "Migration: Fixture %u belonged to %u legacy zones (collapsed to first matching zone %u)",
+                     (unsigned)f, (unsigned)match_count, (unsigned)first_zone);
+            if (out_warning_count) (*out_warning_count)++;
+        }
+
+        // Validate fixture pixel limits (Batch 3 Item 10)
+        bool is_addressable = (v2.fixtures[f].profile == FixtureProfile::WS2812 || v2.fixtures[f].profile == FixtureProfile::SK6812);
+        if (is_addressable && v2.fixtures[f].num_pixels > MAX_PIXELS) {
+            ESP_LOGE(TAG, "Migration Error: Fixture %u num_pixels (%u) exceeds MAX_PIXELS (%u). Marking invalid.",
+                     (unsigned)f, (unsigned)v2.fixtures[f].num_pixels, (unsigned)MAX_PIXELS);
+            v2.fixtures[f].num_pixels = 0;
+            if (out_warning_count) (*out_warning_count)++;
+        }
+
         v2.fixtures[f].dmx_universe = 0;
         v2.fixtures[f].dmx_start_channel = 0;
         v2.fixtures[f].dmx_mode = 0;
@@ -401,9 +440,35 @@ esp_err_t ConfigStore::load_config(DeviceConfig& config) {
             needs_persist = true;
         }
 
+        // Validate loaded fixtures (Batch 3 Item 10)
+        for (uint8_t f = 0; f < 16; ++f) {
+            bool is_addressable = (config.fixtures[f].profile == FixtureProfile::WS2812 ||
+                                   config.fixtures[f].profile == FixtureProfile::SK6812);
+            if (is_addressable && config.fixtures[f].num_pixels > MAX_PIXELS) {
+                ESP_LOGE(TAG, "Config load validation: Fixture %u num_pixels (%u) exceeds MAX_PIXELS (%u). Marking invalid.",
+                         (unsigned)f, (unsigned)config.fixtures[f].num_pixels, (unsigned)MAX_PIXELS);
+                config.fixtures[f].num_pixels = 0;
+                needs_persist = true;
+            }
+        }
+
         if (needs_persist) {
             ESP_LOGI(TAG, "Persisting migrated/updated DeviceConfig to NVS");
-            save_config(config);
+            esp_err_t s_err = save_config(config);
+            if (s_err != ESP_OK) {
+                ESP_LOGE(TAG, "Failed to persist migrated DeviceConfig to NVS: %s", esp_err_to_name(s_err));
+                return s_err;
+            }
+
+            // Verify persisted data by reloading it before reporting migration success (Batch 3 Item 11)
+            auto verify_cfg = std::make_unique<DeviceConfig>();
+            size_t verify_len = sizeof(DeviceConfig);
+            esp_err_t v_err = nvs_get_blob(handle_, "device_cfg", verify_cfg.get(), &verify_len);
+            if (v_err != ESP_OK || verify_len != sizeof(DeviceConfig) || verify_cfg->checksum != calc_device_crc(*verify_cfg)) {
+                ESP_LOGE(TAG, "Verification of persisted migrated config failed!");
+                return ESP_ERR_NVS_INVALID_STATE;
+            }
+            ESP_LOGI(TAG, "Migrated config successfully persisted and verified from NVS");
         }
     }
     return err;
