@@ -28,8 +28,14 @@ public:
     void activate_scene(uint8_t index);
     void activate_scene_direct(const SceneConfig& scene, bool immediate = false);
 
-    /// Atomically submit a full live DMX frame from DmxRouter
-    void submit_live_frame(const LiveDmxFrame& frame);
+    /// Atomically submit a full live DMX frame from DmxRouter (returns false if rejected or unavailable)
+    bool submit_live_frame(const LiveDmxFrame& frame);
+
+    /// Authoritative clear of complete live frame state and ownership
+    void clear_live_frame();
+
+    /// Safe ordered runtime task shutdown
+    void stop();
 
     void inject_live_data(uint8_t zone_idx, uint8_t layer_idx, const BrandColor& color, uint8_t opacity);
     void inject_live_fixture(uint8_t fixture_idx, const LightValue* pixels, uint16_t count, const uint16_t* pwm_duties, uint8_t opacity);
@@ -60,7 +66,7 @@ public:
     }
     const OutputController& controller() const { return controller_; }
 
-    // Hardware output fault tracking
+    // Hardware output fault tracking (Two-stage recovery, Batch 5 Items 1 & 2)
     void report_output_fault(esp_err_t err);
     esp_err_t clear_output_fault();
     bool is_output_fault() const {
@@ -73,7 +79,6 @@ public:
         return output_fault_count_.load(std::memory_order_relaxed);
     }
     uint8_t active_live_objects() const;
-    uint8_t active_dmx_sources() const { return active_live_objects(); } // Deprecated alias
 
     DeviceConfig get_config_snapshot() const;
 
@@ -110,11 +115,12 @@ private:
     std::atomic<EstopState> estop_state_{EstopState::Inactive};
     std::atomic<bool> output_fault_{false};
     std::atomic<uint32_t> output_fault_count_{0};
-    uint32_t consecutive_successful_commits_{0};
+    std::atomic<bool> output_armed_for_next_frame_{false};
+    std::atomic<bool> shutting_down_{false};
 
     DeviceConfig device_cfg_{};
 
-    // Double buffering for LiveDmxFrame (Item 5)
+    // Double buffering for LiveDmxFrame
     LiveDmxFrame live_pending_{};
     LiveDmxFrame live_active_{};
     bool live_pending_dirty_{false};
@@ -138,6 +144,7 @@ private:
     PreviewCallback preview_cb_;
 
     static constexpr uint32_t kFramePeriodMs = 25; // 40 FPS
+    static constexpr uint32_t kLiveFrameFailsafeTimeoutMs = 5000; // Defensive rendering fail-safe
 };
 
 } // namespace lg

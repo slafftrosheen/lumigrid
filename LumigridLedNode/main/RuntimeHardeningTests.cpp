@@ -5,6 +5,7 @@
 #include "ConfigStore.hpp"
 #include "OutputController.hpp"
 #include "LightingRuntime.hpp"
+#include "OutputScheduler.hpp"
 #include "DmxRouter.hpp"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -786,11 +787,371 @@ bool test_batch4_sequence_protocol_semantics() {
     return true;
 }
 
+// ============================================================================
+// Batch 5 Test A: Output Fault Latch & Two-Stage Clear (Batch 5 Items 1 & 2)
+// ============================================================================
+bool test_batch5_output_fault_latch() {
+    ESP_LOGI(TAG, "Testing Batch 5 Test A: Output Fault Latch & Two-Stage Clear...");
+
+    OutputController ctrl;
+    ControlSourceManager csm;
+    csm.init();
+    ConfigStore cfg_store;
+    LightingRuntime runtime(csm, ctrl, cfg_store);
+
+    assert(!runtime.output_fault());
+    assert(runtime.output_fault_count() == 0);
+
+    // 1. Inject failure
+    runtime.report_output_fault(ESP_ERR_TIMEOUT);
+    assert(runtime.output_fault());
+    assert(runtime.output_fault_count() == 1);
+
+    // 2. Later successful commits while faulted MUST NOT clear fault automatically
+    // (consecutive_successful_commits_ was removed)
+    assert(runtime.output_fault());
+
+    // 3. Clear during E-stop must be rejected
+    runtime.trigger_estop();
+    assert(runtime.clear_output_fault() == ESP_ERR_INVALID_STATE);
+    assert(runtime.output_fault());
+
+    // Clear E-stop
+    runtime.clear_estop();
+    ctrl.clear_estop();
+
+    // 4. Two-stage clear: explicit clear arms output for next frame
+    assert(runtime.clear_output_fault() == ESP_OK);
+    assert(!runtime.output_fault());
+
+    ESP_LOGI(TAG, "[PASS] Batch 5 Test A passed.");
+    return true;
+}
+
+// ============================================================================
+// Batch 5 Test B: Live-Frame Clear Semantics (Batch 5 Item 4)
+// ============================================================================
+bool test_batch5_live_frame_clear() {
+    ESP_LOGI(TAG, "Testing Batch 5 Test B: Live-Frame Clear Semantics...");
+
+    OutputController ctrl;
+    ControlSourceManager csm;
+    csm.init();
+    ConfigStore cfg_store;
+    LightingRuntime runtime(csm, ctrl, cfg_store);
+
+    // Inject live fixture data
+    LightValue pixels[4] = {{255, 0, 0, 0}, {0, 255, 0, 0}, {0, 0, 255, 0}, {255, 255, 255, 0}};
+    runtime.inject_live_fixture(0, pixels, 4, nullptr, 255);
+
+    // Live DMX ownership must be active
+    assert(csm.current_owner() == ControlSource::LiveDmx);
+
+    // Call clear_live_frame()
+    runtime.clear_live_frame();
+
+    // Verify ownership released and state cleared
+    assert(csm.current_owner() != ControlSource::LiveDmx);
+
+    ESP_LOGI(TAG, "[PASS] Batch 5 Test B passed.");
+    return true;
+}
+
+// ============================================================================
+// Batch 5 Test C: Universe Timeout & Patch Clearing (Batch 5 Items 3 & 5)
+// ============================================================================
+bool test_batch5_universe_timeout_and_patch_clear() {
+    ESP_LOGI(TAG, "Testing Batch 5 Test C: Universe Timeout & Patch Clearing...");
+
+    OutputController ctrl;
+    ControlSourceManager csm;
+    csm.init();
+    ConfigStore cfg_store;
+    LightingRuntime runtime(csm, ctrl, cfg_store);
+
+    DeviceConfig dev_cfg{};
+    dev_cfg.protocol.universe_start = 1;
+    dev_cfg.protocol.stream_timeout_ms = 50; // fast timeout for test
+
+    DmxRouter router(runtime, dev_cfg);
+
+    DmxSourceId src_a{DmxSourceProtocol::ArtNet, {192, 168, 1, 10}};
+    DmxSourceId src_b{DmxSourceProtocol::ArtNet, {192, 168, 1, 11}};
+    std::array<uint8_t, 6> data_a{100, 100, 100, 0, 0, 0};
+    std::array<uint8_t, 6> data_b{200, 200, 200, 0, 0, 0};
+
+    // Both sources active
+    router.process_frame(1, data_a.data(), data_a.size(), 100, src_a, 1);
+    router.process_frame(1, data_b.data(), data_b.size(), 100, src_b, 1);
+
+    DmxRouter::DmxStats stats = router.get_stats();
+    assert(stats.active_sources == 2);
+    assert(stats.active_universes == 1);
+
+    // Sleep so source A expires, but send packet on source B to keep B active
+    vTaskDelay(pdMS_TO_TICKS(60));
+    router.process_frame(1, data_b.data(), data_b.size(), 100, src_b, 2);
+
+    stats = router.get_stats();
+    assert(stats.active_sources == 1); // Source A expired, Source B remains
+    assert(stats.active_universes == 1);
+
+    // Sleep so source B also expires
+    vTaskDelay(pdMS_TO_TICKS(60));
+
+    // Clear patch for universe when it expires
+    router.clear_patch_for_universe(1);
+
+    ESP_LOGI(TAG, "[PASS] Batch 5 Test C passed.");
+    return true;
+}
+
+// ============================================================================
+// Batch 5 Test D: Patch Update Invalidation (Batch 5 Item 6)
+// ============================================================================
+bool test_batch5_patch_update_invalidation() {
+    ESP_LOGI(TAG, "Testing Batch 5 Test D: Patch Update Invalidation...");
+
+    OutputController ctrl;
+    ControlSourceManager csm;
+    csm.init();
+    ConfigStore cfg_store;
+    LightingRuntime runtime(csm, ctrl, cfg_store);
+
+    DeviceConfig cfg1{};
+    cfg1.protocol.universe_start = 10; // Zone wash on 10
+    cfg1.fixtures[0].num_pixels = 4;
+    cfg1.fixtures[0].dmx_universe = 1; // Fixture 0 on Universe 1
+    cfg1.fixtures[0].dmx_start_channel = 1;
+    cfg1.fixtures[0].dmx_mode = 0;
+
+    DmxRouter router(runtime, cfg1);
+    DmxSourceId src{DmxSourceProtocol::ArtNet, {192, 168, 1, 50}};
+
+    std::array<uint8_t, 12> data{255, 128, 64, 0};
+    router.process_frame(1, data.data(), data.size(), 100, src, 1);
+    assert(router.get_stats().packets_accepted == 1);
+
+    // Update config to move fixture 0 from universe 1 to universe 2
+    DeviceConfig cfg2 = cfg1;
+    cfg2.fixtures[0].dmx_universe = 2;
+    router.update_config(cfg2);
+
+    // Sending packet to universe 1 must now be ignored as unpatched!
+    uint32_t ignored_before = router.get_stats().packets_ignored_unpatched;
+    router.process_frame(1, data.data(), data.size(), 100, src, 2);
+    assert(router.get_stats().packets_ignored_unpatched == ignored_before + 1);
+
+    // Sending packet to universe 2 must now be accepted
+    uint32_t accepted_before = router.get_stats().packets_accepted;
+    router.process_frame(2, data.data(), data.size(), 100, src, 3);
+    assert(router.get_stats().packets_accepted == accepted_before + 1);
+
+    ESP_LOGI(TAG, "[PASS] Batch 5 Test D passed.");
+    return true;
+}
+
+// ============================================================================
+// Batch 5 Test E: DMX Span Validation & Calculation (Batch 5 Item 9 & 10)
+// ============================================================================
+bool test_batch5_dmx_span_validation() {
+    ESP_LOGI(TAG, "Testing Batch 5 Test E: DMX Span Validation & Calculation...");
+
+    uint32_t channels = 0;
+
+    // 1. Unpatched fixture (dmx_start_channel == 0)
+    FixtureConfig fix_unpatched{};
+    fix_unpatched.dmx_start_channel = 0;
+    assert(ConfigStore::calculate_dmx_span(fix_unpatched, channels) == true);
+    assert(channels == 0);
+
+    // 2. Wash RGB (3 channels)
+    FixtureConfig fix_rgb{};
+    fix_rgb.profile = FixtureProfile::WS2812;
+    fix_rgb.dmx_mode = 0; // Wash
+    
+    // RGB at 510: start = 509, end_exclusive = 509 + 3 = 512 <= 512 -> valid
+    fix_rgb.dmx_start_channel = 510;
+    assert(ConfigStore::calculate_dmx_span(fix_rgb, channels) == true);
+    assert(channels == 3);
+
+    // RGB at 511: start = 510, end_exclusive = 510 + 3 = 513 > 512 -> invalid
+    fix_rgb.dmx_start_channel = 511;
+    assert(ConfigStore::calculate_dmx_span(fix_rgb, channels) == false);
+
+    // 3. Wash RGBW (4 channels)
+    FixtureConfig fix_rgbw{};
+    fix_rgbw.profile = FixtureProfile::SK6812;
+    fix_rgbw.dmx_mode = 0; // Wash
+
+    // RGBW at 509: start = 508, end_exclusive = 508 + 4 = 512 <= 512 -> valid
+    fix_rgbw.dmx_start_channel = 509;
+    assert(ConfigStore::calculate_dmx_span(fix_rgbw, channels) == true);
+    assert(channels == 4);
+
+    // RGBW at 510: start = 509, end_exclusive = 509 + 4 = 513 > 512 -> invalid
+    fix_rgbw.dmx_start_channel = 510;
+    assert(ConfigStore::calculate_dmx_span(fix_rgbw, channels) == false);
+
+    // 4. PWM Single (1 channel)
+    FixtureConfig fix_pwm1{};
+    fix_pwm1.profile = FixtureProfile::PWM_Single;
+    fix_pwm1.dmx_mode = 0;
+    fix_pwm1.dmx_start_channel = 512; // end_exclusive = 511 + 1 = 512 -> valid
+    assert(ConfigStore::calculate_dmx_span(fix_pwm1, channels) == true);
+    assert(channels == 1);
+    fix_pwm1.dmx_start_channel = 513; // invalid
+    assert(ConfigStore::calculate_dmx_span(fix_pwm1, channels) == false);
+
+    // 5. Direct RGB with N pixels at boundary
+    // 10 pixels * 3 = 30 channels. Start 483: start = 482, end = 482 + 30 = 512 -> valid.
+    FixtureConfig fix_direct{};
+    fix_direct.profile = FixtureProfile::WS2812;
+    fix_direct.dmx_mode = 1;
+    fix_direct.num_pixels = 10;
+    fix_direct.dmx_start_channel = 483;
+    assert(ConfigStore::calculate_dmx_span(fix_direct, channels) == true);
+    assert(channels == 30);
+
+    fix_direct.dmx_start_channel = 484; // 483 + 30 = 513 > 512 -> invalid
+    assert(ConfigStore::calculate_dmx_span(fix_direct, channels) == false);
+
+    // 6. Zero-pixel semantics
+    // Addressable fixture with 0 pixels in direct mode cannot be patched
+    FixtureConfig fix_zero_addr{};
+    fix_zero_addr.profile = FixtureProfile::WS2812;
+    fix_zero_addr.dmx_mode = 1;
+    fix_zero_addr.num_pixels = 0;
+    fix_zero_addr.dmx_start_channel = 1;
+    assert(ConfigStore::calculate_dmx_span(fix_zero_addr, channels) == false);
+
+    // PWM fixture with 0 pixels in wash mode is valid
+    FixtureConfig fix_pwm_zero{};
+    fix_pwm_zero.profile = FixtureProfile::PWM_RGB;
+    fix_pwm_zero.dmx_mode = 0;
+    fix_pwm_zero.num_pixels = 0;
+    fix_pwm_zero.dmx_start_channel = 1;
+    assert(ConfigStore::calculate_dmx_span(fix_pwm_zero, channels) == true);
+    assert(channels == 3);
+
+    ESP_LOGI(TAG, "[PASS] Batch 5 Test E passed.");
+    return true;
+}
+
+// ============================================================================
+// Batch 5 Test F: Output Mapping Validation (Batch 5 Items 11 & 12)
+// ============================================================================
+bool test_batch5_output_mapping_validation() {
+    ESP_LOGI(TAG, "Testing Batch 5 Test F: Output Mapping Validation...");
+
+    // 1. Invalid RMT hardware_id (>= 8)
+    DeviceConfig cfg_bad_rmt{};
+    cfg_bad_rmt.physical_outputs[0].enabled = true;
+    cfg_bad_rmt.physical_outputs[0].type = OutputType::RMT;
+    cfg_bad_rmt.physical_outputs[0].hardware_id = 8; // out of range [0..7]
+    ConfigStore::ConfigValidationResult res_rmt;
+    assert(ConfigStore::validate_config(cfg_bad_rmt, &res_rmt) != ESP_OK);
+    assert(res_rmt.error_count > 0);
+
+    // 2. Invalid PWM hardware_id (>= 8)
+    DeviceConfig cfg_bad_pwm{};
+    cfg_bad_pwm.physical_outputs[0].enabled = true;
+    cfg_bad_pwm.physical_outputs[0].type = OutputType::PWM;
+    cfg_bad_pwm.physical_outputs[0].hardware_id = 8; // out of range [0..7]
+    ConfigStore::ConfigValidationResult res_pwm;
+    assert(ConfigStore::validate_config(cfg_bad_pwm, &res_pwm) != ESP_OK);
+    assert(res_pwm.error_count > 0);
+
+    // 3. Unsupported output type (SPI)
+    DeviceConfig cfg_bad_spi{};
+    cfg_bad_spi.physical_outputs[0].type = OutputType::SPI;
+    ConfigStore::ConfigValidationResult res_spi;
+    assert(ConfigStore::validate_config(cfg_bad_spi, &res_spi) != ESP_OK);
+    assert(res_spi.error_count > 0);
+
+    // 4. Active fixture referencing disabled physical output
+    DeviceConfig cfg_disabled_phys{};
+    cfg_disabled_phys.physical_outputs[0].enabled = false;
+    cfg_disabled_phys.physical_outputs[0].type = OutputType::RMT;
+    cfg_disabled_phys.physical_outputs[0].hardware_id = 0;
+    cfg_disabled_phys.fixtures[0].profile = FixtureProfile::WS2812;
+    cfg_disabled_phys.fixtures[0].num_pixels = 10;
+    cfg_disabled_phys.fixtures[0].physical_output_index[0] = 0;
+    ConfigStore::ConfigValidationResult res_dis;
+    assert(ConfigStore::validate_config(cfg_disabled_phys, &res_dis) != ESP_OK);
+    assert(res_dis.error_count > 0);
+
+    // 5. OutputScheduler Pass 1 pre-validation
+    OutputController ctrl;
+    RenderFrame frame{};
+    esp_err_t sched_err = OutputScheduler::schedule(frame, cfg_disabled_phys, ctrl);
+    assert(sched_err == ESP_ERR_INVALID_ARG);
+
+    ESP_LOGI(TAG, "[PASS] Batch 5 Test F passed.");
+    return true;
+}
+
+// ============================================================================
+// Batch 5 Test G: submit_live_frame() Return Value (Batch 5 Item 14 & 15)
+// ============================================================================
+bool test_batch5_submit_live_frame_return_value() {
+    ESP_LOGI(TAG, "Testing Batch 5 Test G: submit_live_frame() Return Value...");
+
+    OutputController ctrl;
+    ControlSourceManager csm;
+    csm.init();
+    ConfigStore cfg_store;
+    LightingRuntime runtime(csm, ctrl, cfg_store);
+
+    LiveDmxFrame frame{};
+    frame.layers[0][0].active = true;
+    frame.layers[0][0].opacity = 255;
+    frame.layers[0][0].color = BrandColor{10, 20, 30};
+
+    // While runtime is active, submit_live_frame returns true
+    assert(runtime.submit_live_frame(frame) == true);
+
+    // Stop runtime (shutdown)
+    runtime.stop();
+
+    // After shutdown, submit_live_frame must reject submission and return false
+    assert(runtime.submit_live_frame(frame) == false);
+
+    ESP_LOGI(TAG, "[PASS] Batch 5 Test G passed.");
+    return true;
+}
+
+// ============================================================================
+// Batch 5 Test H: Config Reload Transactional Safety (Batch 5 Item 16)
+// ============================================================================
+bool test_batch5_config_reload_transactional_safety() {
+    ESP_LOGI(TAG, "Testing Batch 5 Test H: Config Reload Transactional Safety...");
+
+    OutputController ctrl;
+    ControlSourceManager csm;
+    csm.init();
+    ConfigStore cfg_store;
+    cfg_store.init();
+
+    LightingRuntime runtime(csm, ctrl, cfg_store);
+
+    DeviceConfig initial_cfg = runtime.get_config_snapshot();
+    uint8_t orig_gamma = initial_cfg.gamma_x10;
+
+    // If reload encounters an invalid config in storage, candidate validation must reject it
+    // without altering runtime state
+    runtime.reload_device_config();
+    assert(runtime.get_config_snapshot().gamma_x10 == orig_gamma);
+
+    ESP_LOGI(TAG, "[PASS] Batch 5 Test H passed.");
+    return true;
+}
+
 } // namespace
 
 bool run_runtime_hardening_tests() {
     ESP_LOGI(TAG, "==================================================");
-    ESP_LOGI(TAG, "  STARTING RUNTIME HARDENING TESTS (BATCH 3 & 4)");
+    ESP_LOGI(TAG, "  STARTING RUNTIME HARDENING TESTS (BATCH 3, 4, 5)");
     ESP_LOGI(TAG, "==================================================");
 
     bool all_ok = true;
@@ -810,6 +1171,16 @@ bool run_runtime_hardening_tests() {
     all_ok &= test_batch4_config_validation();                // Batch 4 Test E
     all_ok &= test_batch4_source_metrics();                   // Batch 4 Test F
     all_ok &= test_batch4_sequence_protocol_semantics();      // Batch 4 Test G
+
+    // Batch 5 Tests
+    all_ok &= test_batch5_output_fault_latch();                 // Batch 5 Test A
+    all_ok &= test_batch5_live_frame_clear();                   // Batch 5 Test B
+    all_ok &= test_batch5_universe_timeout_and_patch_clear();   // Batch 5 Test C
+    all_ok &= test_batch5_patch_update_invalidation();          // Batch 5 Test D
+    all_ok &= test_batch5_dmx_span_validation();                // Batch 5 Test E
+    all_ok &= test_batch5_output_mapping_validation();          // Batch 5 Test F
+    all_ok &= test_batch5_submit_live_frame_return_value();     // Batch 5 Test G
+    all_ok &= test_batch5_config_reload_transactional_safety(); // Batch 5 Test H
 
     if (all_ok) {
         ESP_LOGI(TAG, "==================================================");

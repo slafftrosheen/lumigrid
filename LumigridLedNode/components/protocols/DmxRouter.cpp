@@ -24,10 +24,51 @@ DmxRouter::DmxRouter(LightingRuntime& lighting, const DeviceConfig& config)
 }
 
 void DmxRouter::update_config(const DeviceConfig& config) {
-    std::lock_guard<std::mutex> lock(frame_mutex_);
-    protocol_cfg_ = config.protocol;
-    for (uint8_t f = 0; f < 16; ++f) {
-        fixtures_[f] = config.fixtures[f];
+    bool patch_changed = false;
+    {
+        std::lock_guard<std::mutex> lock(frame_mutex_);
+        if (protocol_cfg_.universe_start != config.protocol.universe_start ||
+            protocol_cfg_.zone_start_channel != config.protocol.zone_start_channel ||
+            protocol_cfg_.live_stream_layer != config.protocol.live_stream_layer) {
+            patch_changed = true;
+        }
+        if (!patch_changed) {
+            for (uint8_t f = 0; f < 16; ++f) {
+                const auto& cur = fixtures_[f];
+                const auto& nxt = config.fixtures[f];
+                if (cur.dmx_universe != nxt.dmx_universe ||
+                    cur.dmx_start_channel != nxt.dmx_start_channel ||
+                    cur.dmx_mode != nxt.dmx_mode ||
+                    cur.num_pixels != nxt.num_pixels ||
+                    cur.profile != nxt.profile) {
+                    patch_changed = true;
+                    break;
+                }
+            }
+        }
+
+        protocol_cfg_ = config.protocol;
+        for (uint8_t f = 0; f < 16; ++f) {
+            fixtures_[f] = config.fixtures[f];
+        }
+
+        if (patch_changed) {
+            for (auto& u : tracked_universes_) {
+                u.active = false;
+                u.merged_data.fill(0);
+                u.merged_length = 0;
+                for (auto& s : u.sources) {
+                    s.active = false;
+                    s.sequence_valid = false;
+                }
+            }
+            assembled_frame_ = {};
+            submission_frame_ = {};
+        }
+    }
+
+    if (patch_changed) {
+        lighting_.clear_live_frame();
     }
 }
 
@@ -87,29 +128,26 @@ uint32_t DmxRouter::stream_timeout_ms() const {
     return stream_timeout_ms_locked();
 }
 
-uint32_t DmxRouter::active_source_count() const {
+DmxRouter::DmxStats DmxRouter::get_stats() const {
     std::lock_guard<std::mutex> lock(frame_mutex_);
+    DmxStats s;
     const uint32_t now = now_ms();
     const uint32_t timeout = stream_timeout_ms_locked();
-    uint32_t count = 0;
     for (const auto& u : tracked_universes_) {
         if (!u.active) continue;
-        for (const auto& s : u.sources) {
-            if (s.active && (now - s.last_packet_ms <= timeout)) {
-                count++;
+        s.active_universes++;
+        for (const auto& src : u.sources) {
+            if (src.active && (now - src.last_packet_ms <= timeout)) {
+                s.active_sources++;
             }
         }
     }
-    return count;
-}
-
-uint32_t DmxRouter::dmx_universes_active() const {
-    std::lock_guard<std::mutex> lock(frame_mutex_);
-    uint32_t count = 0;
-    for (const auto& u : tracked_universes_) {
-        if (u.active) count++;
-    }
-    return count;
+    s.sources_dropped = dropped_sources_count_.load(std::memory_order_relaxed);
+    s.packets_accepted = packets_accepted_.load(std::memory_order_relaxed);
+    s.packets_rejected_sequence = packets_rejected_sequence_.load(std::memory_order_relaxed);
+    s.packets_ignored_unpatched = packets_ignored_unpatched_.load(std::memory_order_relaxed);
+    s.submission_failures = submission_failures_count_.load(std::memory_order_relaxed);
+    return s;
 }
 
 void DmxRouter::clear_patch_for_universe(uint16_t universe) {
@@ -264,17 +302,24 @@ void DmxRouter::process_frame(uint16_t universe, const uint8_t* data, uint16_t l
         return;
     }
 
-    LiveDmxFrame submission;
     bool should_submit = false;
+    bool should_clear_live = false;
 
     {
         std::lock_guard<std::mutex> lock(frame_mutex_);
 
         const uint32_t current_ms = now_ms();
+        const uint32_t timeout = stream_timeout_ms_locked();
+
+        // Prune any tracked universes that have timed out
+        for (auto& u : tracked_universes_) {
+            if (u.active) {
+                recompute_merge(u, current_ms);
+            }
+        }
+
         UniverseState* state = get_or_create_universe(universe);
         if (!state) return;
-
-        const uint32_t timeout = stream_timeout_ms_locked();
 
         // 1. Locate existing active source or allocate a free/timed-out slot
         SourceStream* target_src = nullptr;
@@ -330,12 +375,28 @@ void DmxRouter::process_frame(uint16_t universe, const uint8_t* data, uint16_t l
 
         packets_accepted_++;
 
-        submission = assembled_frame_;
-        should_submit = true;
+        bool any_active = false;
+        for (const auto& u : tracked_universes_) {
+            if (u.active) {
+                any_active = true;
+                break;
+            }
+        }
+
+        if (!any_active) {
+            should_clear_live = true;
+        } else {
+            submission_frame_ = assembled_frame_;
+            should_submit = true;
+        }
     }
 
-    if (should_submit) {
-        lighting_.submit_live_frame(submission);
+    if (should_clear_live) {
+        lighting_.clear_live_frame();
+    } else if (should_submit) {
+        if (!lighting_.submit_live_frame(submission_frame_)) {
+            submission_failures_count_++;
+        }
     }
 }
 

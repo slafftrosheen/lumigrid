@@ -196,6 +196,60 @@ uint8_t ConfigStore::scene_count() {
 
 // ── Device config ───────────────────────────────────────────────────
 
+bool ConfigStore::calculate_dmx_span(const FixtureConfig& fixture, uint32_t& required_channels) {
+    if (fixture.dmx_start_channel == 0) {
+        required_channels = 0;
+        return true;
+    }
+
+    if (fixture.dmx_mode == 0) {
+        // Wash mode
+        switch (fixture.profile) {
+            case FixtureProfile::PWM_Single:
+                required_channels = 1;
+                break;
+            case FixtureProfile::PWM_RGB:
+            case FixtureProfile::WS2812:
+                required_channels = 3;
+                break;
+            case FixtureProfile::PWM_RGBW:
+            case FixtureProfile::SK6812:
+                required_channels = 4;
+                break;
+            default:
+                required_channels = 0;
+                return false;
+        }
+    } else if (fixture.dmx_mode == 1) {
+        // Direct pixel map mode
+        bool is_addressable = (fixture.profile == FixtureProfile::WS2812 || fixture.profile == FixtureProfile::SK6812);
+        if (is_addressable && fixture.num_pixels == 0) {
+            // Addressable fixture with 0 pixels is disabled/unconfigured
+            required_channels = 0;
+            return false;
+        }
+        uint32_t ch_per_pixel = (fixture.profile == FixtureProfile::SK6812 || fixture.profile == FixtureProfile::PWM_RGBW) ? 4 : 3;
+        required_channels = static_cast<uint32_t>(fixture.num_pixels) * ch_per_pixel;
+    } else {
+        // Reject unknown dmx_mode values
+        required_channels = 0;
+        return false;
+    }
+
+    // Check using:
+    // start = dmx_start_channel - 1
+    // end_exclusive = start + required_channels
+    // valid iff: dmx_start_channel >= 1 && end_exclusive <= 512
+    uint32_t start = static_cast<uint32_t>(fixture.dmx_start_channel) - 1;
+    uint32_t end_exclusive = start + required_channels;
+
+    if (fixture.dmx_start_channel < 1 || end_exclusive > 512) {
+        return false;
+    }
+
+    return true;
+}
+
 esp_err_t ConfigStore::validate_config(const DeviceConfig& config, ConfigValidationResult* out_result) {
     ConfigValidationResult res;
     auto add_error = [&](const char* fmt, ...) {
@@ -229,7 +283,23 @@ esp_err_t ConfigStore::validate_config(const DeviceConfig& config, ConfigValidat
                   (unsigned)config.protocol.zone_start_channel);
     }
 
-    // 3. Fixture configuration
+    // 3. Physical Outputs validation (Batch 5 Item 11)
+    for (uint8_t p = 0; p < 16; ++p) {
+        const auto& phys = config.physical_outputs[p];
+        if (phys.type == OutputType::RMT) {
+            if (phys.hardware_id >= 8) {
+                add_error("physical_output[%u] RMT hardware_id (%u) >= 8", p, (unsigned)phys.hardware_id);
+            }
+        } else if (phys.type == OutputType::PWM) {
+            if (phys.hardware_id >= 8) {
+                add_error("physical_output[%u] PWM hardware_id (%u) >= 8", p, (unsigned)phys.hardware_id);
+            }
+        } else {
+            add_error("physical_output[%u] unsupported output type (%u)", p, (unsigned)phys.type);
+        }
+    }
+
+    // 4. Fixture configuration
     for (uint8_t f = 0; f < 16; ++f) {
         const auto& fix = config.fixtures[f];
         if (fix.zone_id >= 8) {
@@ -242,43 +312,62 @@ esp_err_t ConfigStore::validate_config(const DeviceConfig& config, ConfigValidat
             }
         }
         bool is_addressable = (fix.profile == FixtureProfile::WS2812 || fix.profile == FixtureProfile::SK6812);
+        bool is_pwm = (fix.profile == FixtureProfile::PWM_Single ||
+                       fix.profile == FixtureProfile::PWM_RGB ||
+                       fix.profile == FixtureProfile::PWM_RGBW);
+
         if (is_addressable) {
             if (fix.num_pixels > MAX_PIXELS) {
                 add_error("fixture[%u].num_pixels (%u) exceeds MAX_PIXELS (%u)",
                           (unsigned)f, (unsigned)fix.num_pixels, (unsigned)MAX_PIXELS);
             }
+            // Addressable fixture with num_pixels == 0 is disabled/unconfigured.
+            // When num_pixels > 0, it is active and its referenced physical output must be valid & enabled.
+            if (fix.num_pixels > 0) {
+                uint8_t p_idx = fix.physical_output_index[0];
+                if (p_idx < 16) {
+                    const auto& phys = config.physical_outputs[p_idx];
+                    if (!phys.enabled) {
+                        add_error("fixture[%u] references disabled physical_output[%u]", (unsigned)f, (unsigned)p_idx);
+                    }
+                    if (phys.type != OutputType::RMT) {
+                        add_error("fixture[%u] addressable profile requires RMT physical output, got %u",
+                                  (unsigned)f, (unsigned)phys.type);
+                    }
+                }
+            }
+        } else if (is_pwm) {
+            // PWM fixture may still have num_pixels == 0 without being invalid.
+            // When configured, verify referenced physical outputs are enabled and of PWM type.
+            uint8_t channels_used = (fix.profile == FixtureProfile::PWM_Single) ? 1 :
+                                    (fix.profile == FixtureProfile::PWM_RGB ? 3 : 4);
+            for (uint8_t ch = 0; ch < channels_used; ++ch) {
+                uint8_t p_idx = fix.physical_output_index[ch];
+                if (p_idx < 16) {
+                    const auto& phys = config.physical_outputs[p_idx];
+                    if (!phys.enabled) {
+                        add_error("fixture[%u] references disabled physical_output[%u]", (unsigned)f, (unsigned)p_idx);
+                    }
+                    if (phys.type != OutputType::PWM) {
+                        add_error("fixture[%u] PWM profile requires PWM physical output, got %u",
+                                  (unsigned)f, (unsigned)phys.type);
+                    }
+                }
+            }
+        } else {
+            add_error("fixture[%u] unknown profile (%u)", (unsigned)f, (unsigned)fix.profile);
         }
 
-        // DMX patching checks
+        // DMX patching checks via single authoritative helper (Batch 5 Item 9)
         if (fix.dmx_start_channel > 0) {
-            if (fix.dmx_start_channel > 512) {
-                add_error("fixture[%u].dmx_start_channel (%u) must be in 1..512",
-                          (unsigned)f, (unsigned)fix.dmx_start_channel);
+            uint32_t req_channels = 0;
+            if (!calculate_dmx_span(fix, req_channels)) {
+                add_error("fixture[%u] DMX patch invalid (start=%u, mode=%u)",
+                          (unsigned)f, (unsigned)fix.dmx_start_channel, (unsigned)fix.dmx_mode);
             }
             if (fix.dmx_universe > 63999) {
                 add_error("fixture[%u].dmx_universe (%u) exceeds valid range 63999",
                           (unsigned)f, (unsigned)fix.dmx_universe);
-            }
-
-            if (fix.dmx_mode == 0) {
-                // Wash mode
-                uint16_t req_channels = 0;
-                if (fix.profile == FixtureProfile::PWM_Single) req_channels = 1;
-                else if (fix.profile == FixtureProfile::PWM_RGB || fix.profile == FixtureProfile::WS2812) req_channels = 3;
-                else if (fix.profile == FixtureProfile::PWM_RGBW || fix.profile == FixtureProfile::SK6812) req_channels = 4;
-
-                if (req_channels > 0 && (fix.dmx_start_channel + req_channels - 1 > 512)) {
-                    add_error("fixture[%u] wash patch (%u + %u ch) exceeds universe boundary 512",
-                              (unsigned)f, (unsigned)fix.dmx_start_channel, (unsigned)req_channels);
-                }
-            } else if (fix.dmx_mode == 1) {
-                // Direct Pixel Map mode
-                uint16_t ch_per_pixel = (fix.profile == FixtureProfile::SK6812 || fix.profile == FixtureProfile::PWM_RGBW) ? 4 : 3;
-                uint32_t total_channels = static_cast<uint32_t>(fix.num_pixels) * ch_per_pixel;
-                if (fix.dmx_start_channel + total_channels - 1 > 512) {
-                    add_error("fixture[%u] direct pixel map (%u + %u ch) exceeds universe boundary 512",
-                              (unsigned)f, (unsigned)fix.dmx_start_channel, (unsigned)total_channels);
-                }
             }
         }
     }

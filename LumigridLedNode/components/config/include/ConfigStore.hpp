@@ -95,7 +95,10 @@ public:
         char first_error[128] = "";
     };
 
-    /// Pure configuration validator (Batch 4 Items 10 & 11)
+    /// Calculates required DMX channel span for a fixture (Batch 5 Item 9)
+    static bool calculate_dmx_span(const FixtureConfig& fixture, uint32_t& required_channels);
+
+    /// Pure configuration validator (Batch 4 & 5)
     static esp_err_t validate_config(const DeviceConfig& config, ConfigValidationResult* out_result = nullptr);
 
     // Explicit Schema v1 -> v2 Migration (Item 16, Batch 3 Item 11)

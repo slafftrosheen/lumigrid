@@ -467,12 +467,7 @@ esp_err_t get_health(httpd_req_t* request) {
     uint16_t active_preset = 0;
     bool watchdog_fallback = false;
 
-    uint32_t dmx_sources_active = 0;
-    uint32_t dmx_universes_active = 0;
-    uint32_t dmx_sources_dropped = 0;
-    uint32_t dmx_packets_accepted = 0;
-    uint32_t dmx_packets_rejected_sequence = 0;
-    uint32_t dmx_packets_ignored_unpatched = 0;
+    DmxRouter::DmxStats dmx_stats{};
 
     if (api_ptr->signage()) {
         output_fault = api_ptr->signage()->output_fault();
@@ -491,12 +486,7 @@ esp_err_t get_health(httpd_req_t* request) {
     }
 
     if (api_ptr->dmx_router()) {
-        dmx_sources_active = api_ptr->dmx_router()->active_source_count();
-        dmx_universes_active = api_ptr->dmx_router()->dmx_universes_active();
-        dmx_sources_dropped = api_ptr->dmx_router()->dmx_sources_dropped();
-        dmx_packets_accepted = api_ptr->dmx_router()->dmx_packets_accepted();
-        dmx_packets_rejected_sequence = api_ptr->dmx_router()->dmx_packets_rejected_sequence();
-        dmx_packets_ignored_unpatched = api_ptr->dmx_router()->dmx_packets_ignored_unpatched();
+        dmx_stats = api_ptr->dmx_router()->get_stats();
     }
 
     cJSON_AddBoolToObject(root, "output_fault", output_fault);
@@ -505,13 +495,12 @@ esp_err_t get_health(httpd_req_t* request) {
     cJSON_AddBoolToObject(root, "runtime_estop", runtime_estop);
     cJSON_AddNumberToObject(root, "dominant_control_source", dominant_control_source);
     cJSON_AddNumberToObject(root, "active_live_objects", active_live_objects);
-    cJSON_AddNumberToObject(root, "active_dmx_sources", dmx_sources_active);
-    cJSON_AddNumberToObject(root, "dmx_sources_active", dmx_sources_active);
-    cJSON_AddNumberToObject(root, "dmx_universes_active", dmx_universes_active);
-    cJSON_AddNumberToObject(root, "dmx_sources_dropped", dmx_sources_dropped);
-    cJSON_AddNumberToObject(root, "dmx_packets_accepted", dmx_packets_accepted);
-    cJSON_AddNumberToObject(root, "dmx_packets_rejected_sequence", dmx_packets_rejected_sequence);
-    cJSON_AddNumberToObject(root, "dmx_packets_ignored_unpatched", dmx_packets_ignored_unpatched);
+    cJSON_AddNumberToObject(root, "source_count", dmx_stats.active_sources);
+    cJSON_AddNumberToObject(root, "universe_count", dmx_stats.active_universes);
+    cJSON_AddNumberToObject(root, "dropped_sources", dmx_stats.sources_dropped);
+    cJSON_AddNumberToObject(root, "packets_accepted", dmx_stats.packets_accepted);
+    cJSON_AddNumberToObject(root, "packets_rejected_sequence", dmx_stats.packets_rejected_sequence);
+    cJSON_AddNumberToObject(root, "packets_ignored_unpatched", dmx_stats.packets_ignored_unpatched);
     cJSON_AddNumberToObject(root, "current_power_mw", current_power_mw);
     cJSON_AddNumberToObject(root, "throttling_events", throttling_events);
     cJSON_AddNumberToObject(root, "fps", fps);

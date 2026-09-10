@@ -86,14 +86,28 @@ public:
     /// Thread-safe stream timeout helper (acquires frame_mutex_)
     uint32_t stream_timeout_ms() const;
 
+    struct DmxStats {
+        uint32_t active_sources = 0;
+        uint32_t active_universes = 0;
+        uint32_t sources_dropped = 0;
+        uint32_t packets_accepted = 0;
+        uint32_t packets_rejected_sequence = 0;
+        uint32_t packets_ignored_unpatched = 0;
+        uint32_t submission_failures = 0;
+    };
+
+    /// Thread-safe synchronized stats snapshot (acquires frame_mutex_ once)
+    DmxStats get_stats() const;
+
     /// Observable diagnostic counters
-    uint32_t active_source_count() const;
-    uint32_t dmx_universes_active() const;
+    uint32_t active_source_count() const { return get_stats().active_sources; }
+    uint32_t dmx_universes_active() const { return get_stats().active_universes; }
     uint32_t dropped_sources_count() const { return dropped_sources_count_.load(std::memory_order_relaxed); }
     uint32_t dmx_sources_dropped() const { return dropped_sources_count_.load(std::memory_order_relaxed); }
     uint32_t dmx_packets_accepted() const { return packets_accepted_.load(std::memory_order_relaxed); }
     uint32_t dmx_packets_rejected_sequence() const { return packets_rejected_sequence_.load(std::memory_order_relaxed); }
     uint32_t dmx_packets_ignored_unpatched() const { return packets_ignored_unpatched_.load(std::memory_order_relaxed); }
+    uint32_t submission_failures() const { return submission_failures_count_.load(std::memory_order_relaxed); }
 
     /// Static protocol sequence validation helper
     static bool sequence_check_required(DmxSourceProtocol protocol, uint8_t sequence) {
@@ -117,6 +131,7 @@ private:
     std::atomic<uint32_t> packets_accepted_{0};
     std::atomic<uint32_t> packets_rejected_sequence_{0};
     std::atomic<uint32_t> packets_ignored_unpatched_{0};
+    std::atomic<uint32_t> submission_failures_count_{0};
 
     // Tracking state per active stream contributor within a universe
     struct SourceStream {
@@ -143,8 +158,9 @@ private:
     static constexpr size_t kMaxTrackedUniverses = 4;
     std::array<UniverseState, kMaxTrackedUniverses> tracked_universes_{};
 
-    // Pre-allocated live frame buffer to eliminate stack/heap allocation in streaming path
+    // Pre-allocated live frame buffers to eliminate stack/heap allocation in streaming path (Batch 5 Item 13)
     LiveDmxFrame assembled_frame_{};
+    LiveDmxFrame submission_frame_{};
 
     UniverseState* get_or_create_universe(uint16_t universe);
     void recompute_merge(UniverseState& state, uint32_t current_ms);
