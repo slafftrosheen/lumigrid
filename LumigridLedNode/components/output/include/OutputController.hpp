@@ -34,7 +34,9 @@ public:
 
     /// Unified physical output safety gate
     esp_err_t try_commit();
-    esp_err_t commit() { return try_commit(); }
+
+    /// Commit while caller already holds lock()
+    esp_err_t try_commit_locked();
 
     void set_output_enabled(bool enabled);
     bool output_enabled() const { return output_enabled_.load(std::memory_order_acquire); }
@@ -42,7 +44,8 @@ public:
     void latch_estop();
     void clear_estop();
     bool is_estop_latched() const { return estop_latched_.load(std::memory_order_acquire); }
-    uint32_t commit_fault_count() const { return commit_fault_count_.load(std::memory_order_relaxed); }
+    uint32_t failed_commit_count() const { return failed_commit_count_.load(std::memory_order_relaxed); }
+    uint32_t commit_fault_count() const { return failed_commit_count(); }
     esp_err_t last_commit_error() const { return last_commit_error_.load(std::memory_order_acquire); }
     uint32_t last_commit_time_ms() const { return last_commit_time_ms_.load(std::memory_order_acquire); }
 
@@ -67,7 +70,7 @@ private:
 
     std::atomic<bool> output_enabled_{true};
     std::atomic<bool> estop_latched_{false};
-    std::atomic<uint32_t> commit_fault_count_{0};
+    std::atomic<uint32_t> failed_commit_count_{0};
     std::atomic<esp_err_t> last_commit_error_{ESP_OK};
     std::atomic<uint32_t> last_commit_time_ms_{0};
 };

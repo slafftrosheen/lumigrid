@@ -96,6 +96,40 @@ esp_err_t LumigridRuntime::init() {
     DeviceConfig dev_cfg;
     if (config_.load_config(dev_cfg) == ESP_OK) {
         api::update_tokens(dev_cfg.admin_token, dev_cfg.installer_token, dev_cfg.operator_token);
+
+        // Required startup sequence (Batch 7 Item 6):
+        // ConfigStore::load_config() -> ConfigStore::validate_config() -> OutputController::reconfigure() -> protocol config -> runtime start
+        ConfigStore::ConfigValidationResult val_res;
+        esp_err_t val_err = config_.validate_config(dev_cfg, &val_res);
+        if (val_err != ESP_OK) {
+            safe_mode_ = true;
+            configuration_valid_ = false;
+            configuration_error_count_ = val_res.error_count;
+            std::strncpy(configuration_first_error_, val_res.first_error, sizeof(configuration_first_error_));
+            output_.blackout();
+            ESP_LOGE("lumigrid", "STARTUP CONFIG VALIDATION FAILED (%u errors): %s. Entering SAFE/RECOVERY MODE!",
+                     (unsigned)val_res.error_count, val_res.first_error);
+        } else {
+            configuration_valid_ = true;
+            configuration_error_count_ = 0;
+            configuration_first_error_[0] = '\0';
+            esp_err_t reconf_err = output_.reconfigure(dev_cfg);
+            if (reconf_err != ESP_OK) {
+                safe_mode_ = true;
+                configuration_valid_ = false;
+                configuration_error_count_ = 1;
+                snprintf(configuration_first_error_, sizeof(configuration_first_error_), "output.reconfigure failed: %s", esp_err_to_name(reconf_err));
+                output_.blackout();
+                ESP_LOGE("lumigrid", "Output reconfigure failed: %s. Entering SAFE MODE!", esp_err_to_name(reconf_err));
+            }
+        }
+    } else {
+        safe_mode_ = true;
+        configuration_valid_ = false;
+        configuration_error_count_ = 1;
+        std::strncpy(configuration_first_error_, "Failed to load device config from NVS", sizeof(configuration_first_error_));
+        output_.blackout();
+        ESP_LOGE("lumigrid", "Failed to load device config! Entering SAFE MODE!");
     }
 
     // Run Stage 2 Runtime Hardening Verification (Items 2, 16, 21, 22)
@@ -106,7 +140,8 @@ esp_err_t LumigridRuntime::init() {
         err = lighting_.start();
         if (err != ESP_OK) ESP_LOGE("lumigrid", "lighting.start() FAILED: %s", esp_err_to_name(err));
     } else {
-        ESP_LOGW("lumigrid", "SAFE MODE ACTIVE: Skipping signage processing");
+        output_.blackout();
+        ESP_LOGW("lumigrid", "SAFE MODE ACTIVE: Keeping outputs blacked out, skipping lighting runtime start");
     }
 
     ESP_LOGI("lumigrid", "Step 4: factory_runner.start()...");
@@ -180,7 +215,9 @@ esp_err_t LumigridRuntime::start() {
                 ESP_ERROR_CHECK(artnet_.start(
                     node,
                     [this](const ArtnetDmxPacket& packet) {
-                        dmx_router_.handle_artnet_dmx(packet);
+                        if (!safe_mode_) {
+                            dmx_router_.handle_artnet_dmx(packet);
+                        }
                     }
                 ));
                 artnet_.set_output_universes(active_unis, port_count);
@@ -188,7 +225,9 @@ esp_err_t LumigridRuntime::start() {
                 ESP_LOGI("lumigrid", "Step 8.5: sacn.start()...");
                 ESP_ERROR_CHECK(sacn_.start(
                     [this](const SacnDmxPacket& packet) {
-                        dmx_router_.handle_sacn_dmx(packet);
+                        if (!safe_mode_) {
+                            dmx_router_.handle_sacn_dmx(packet);
+                        }
                     }
                 ));
                 sacn_.set_subscribed_universes(active_unis, u_count);

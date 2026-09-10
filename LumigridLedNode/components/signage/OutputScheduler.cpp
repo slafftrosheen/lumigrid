@@ -66,7 +66,8 @@ esp_err_t OutputScheduler::schedule(
         }
     }
 
-    // ── Pass 2: Driver state mutation & staging ──
+    // ── Pass 2: Driver state mutation & staging (Batch 7 Item 10: lock held across staging transaction) ──
+    controller.lock();
     controller.pixels().clear_buffer();
     controller.pwm().set_all(0);
 
@@ -100,7 +101,9 @@ esp_err_t OutputScheduler::schedule(
         }
     }
 
-    return controller.try_commit();
+    esp_err_t commit_err = controller.try_commit_locked();
+    controller.unlock();
+    return commit_err;
 }
 
 } // namespace lg

@@ -455,8 +455,34 @@ esp_err_t get_health(httpd_req_t* request) {
     cJSON_AddNumberToObject(root, "nvs_used", static_cast<int>(nvs_stats.used_entries));
     cJSON_AddNumberToObject(root, "nvs_free", static_cast<int>(nvs_stats.free_entries));
 
+    bool config_valid = true;
+    uint32_t config_error_count = 0;
+    char config_first_error[128] = "";
+
+    if (api_ptr->config()) {
+        DeviceConfig cfg;
+        if (api_ptr->config()->load_config(cfg) == ESP_OK) {
+            ConfigStore::ConfigValidationResult val_res;
+            if (ConfigStore::validate_config(cfg, &val_res) != ESP_OK) {
+                config_valid = false;
+                config_error_count = val_res.error_count;
+                strncpy(config_first_error, val_res.first_error, sizeof(config_first_error));
+            }
+        } else {
+            config_valid = false;
+            config_error_count = 1;
+            strncpy(config_first_error, "Failed to load device config", sizeof(config_first_error));
+        }
+    }
+
+    cJSON_AddBoolToObject(root, "configuration_valid", config_valid);
+    cJSON_AddNumberToObject(root, "configuration_error_count", config_error_count);
+    cJSON_AddStringToObject(root, "configuration_first_error", config_first_error);
+
+    const char* output_state_str = "Healthy";
     bool output_fault = false;
-    uint32_t output_fault_count = 0;
+    uint32_t output_fault_events = 0;
+    uint32_t output_failed_commits = 0;
     int output_last_error = 0;
     bool output_controller_estop_latched = false;
     bool runtime_estop = false;
@@ -471,8 +497,15 @@ esp_err_t get_health(httpd_req_t* request) {
     DmxRouter::DmxStats dmx_stats{};
 
     if (api_ptr->signage()) {
+        LightingRuntime::OutputState st = api_ptr->signage()->output_state();
+        switch (st) {
+            case LightingRuntime::OutputState::Healthy: output_state_str = "Healthy"; break;
+            case LightingRuntime::OutputState::Faulted: output_state_str = "Faulted"; break;
+            case LightingRuntime::OutputState::Armed:   output_state_str = "Armed";   break;
+        }
         output_fault = api_ptr->signage()->output_fault();
-        output_fault_count = api_ptr->signage()->output_fault_count();
+        output_fault_events = api_ptr->signage()->fault_event_count();
+        output_failed_commits = api_ptr->signage()->controller().failed_commit_count();
         output_last_error = static_cast<int>(api_ptr->signage()->controller().last_commit_error());
         output_controller_estop_latched = api_ptr->signage()->is_output_controller_estop_latched();
         runtime_estop = api_ptr->signage()->is_estop_active();
@@ -484,6 +517,8 @@ esp_err_t get_health(httpd_req_t* request) {
         active_preset = api_ptr->signage()->active_scene_index();
         watchdog_fallback = api_ptr->signage()->is_fallback_active();
     } else {
+        output_state_str = "Faulted";
+        output_fault = true;
         dominant_control_source = static_cast<int>(api_ptr->runner().control_sources().current_owner());
     }
 
@@ -491,20 +526,24 @@ esp_err_t get_health(httpd_req_t* request) {
         dmx_stats = api_ptr->dmx_router()->get_stats();
     }
 
+    cJSON_AddStringToObject(root, "output_state", output_state_str);
     cJSON_AddBoolToObject(root, "output_fault", output_fault);
-    cJSON_AddNumberToObject(root, "output_fault_count", output_fault_count);
+    cJSON_AddNumberToObject(root, "output_fault_events", output_fault_events);
+    cJSON_AddNumberToObject(root, "output_failed_commits", output_failed_commits);
     cJSON_AddNumberToObject(root, "output_last_error", output_last_error);
     cJSON_AddBoolToObject(root, "output_controller_estop_latched", output_controller_estop_latched);
     cJSON_AddBoolToObject(root, "runtime_estop", runtime_estop);
     cJSON_AddNumberToObject(root, "dominant_control_source", dominant_control_source);
     cJSON_AddNumberToObject(root, "active_live_objects", active_live_objects);
-    cJSON_AddNumberToObject(root, "source_count", dmx_stats.active_sources);
-    cJSON_AddNumberToObject(root, "universe_count", dmx_stats.active_universes);
-    cJSON_AddNumberToObject(root, "dropped_sources", dmx_stats.sources_dropped);
-    cJSON_AddNumberToObject(root, "packets_accepted", dmx_stats.packets_accepted);
-    cJSON_AddNumberToObject(root, "packets_rejected_sequence", dmx_stats.packets_rejected_sequence);
-    cJSON_AddNumberToObject(root, "packets_ignored_unpatched", dmx_stats.packets_ignored_unpatched);
-    cJSON_AddNumberToObject(root, "submission_failures", dmx_stats.submission_failures);
+
+    cJSON_AddNumberToObject(root, "dmx_sources_active", dmx_stats.active_sources);
+    cJSON_AddNumberToObject(root, "dmx_universes_active", dmx_stats.active_universes);
+    cJSON_AddNumberToObject(root, "dmx_sources_dropped", dmx_stats.sources_dropped);
+    cJSON_AddNumberToObject(root, "dmx_packets_accepted", dmx_stats.packets_accepted);
+    cJSON_AddNumberToObject(root, "dmx_packets_rejected_sequence", dmx_stats.packets_rejected_sequence);
+    cJSON_AddNumberToObject(root, "dmx_packets_ignored_unpatched", dmx_stats.packets_ignored_unpatched);
+    cJSON_AddNumberToObject(root, "dmx_submission_failures", dmx_stats.submission_failures);
+
     cJSON_AddNumberToObject(root, "current_power_mw", current_power_mw);
     cJSON_AddNumberToObject(root, "throttling_events", throttling_events);
     cJSON_AddNumberToObject(root, "fps", fps);

@@ -179,6 +179,8 @@ void DmxRouter::clear_patch_for_universe(uint16_t universe) {
             layer.opacity = 0;
             layer.color = BrandColor{0, 0, 0};
         }
+        assembled_frame_.dmx_telemetry.fill(0);
+        assembled_frame_.dmx_telemetry_len = 0;
     }
 
     // 2. Direct Fixtures
@@ -191,6 +193,31 @@ void DmxRouter::clear_patch_for_universe(uint16_t universe) {
             for (auto& px : lf.pixels) px = {0, 0, 0, 0};
             lf.pwm.fill(0);
         }
+    }
+
+    // 3. Telemetry and active status cleanup if all patches now inactive
+    bool any_active = false;
+    for (uint8_t zone = 0; zone < 8; ++zone) {
+        for (uint8_t l = 0; l < 3; ++l) {
+            if (assembled_frame_.layers[zone][l].active) {
+                any_active = true;
+                break;
+            }
+        }
+        if (any_active) break;
+    }
+    if (!any_active) {
+        for (uint8_t f = 0; f < 16; ++f) {
+            if (assembled_frame_.fixtures[f].active) {
+                any_active = true;
+                break;
+            }
+        }
+    }
+    if (!any_active) {
+        assembled_frame_.active = false;
+        assembled_frame_.dmx_telemetry.fill(0);
+        assembled_frame_.dmx_telemetry_len = 0;
     }
 }
 

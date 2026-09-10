@@ -26,6 +26,11 @@ public:
     esp_err_t init();
     esp_err_t start();
 
+    bool is_safe_mode() const { return safe_mode_; }
+    bool is_configuration_valid() const { return configuration_valid_; }
+    uint32_t configuration_error_count() const { return configuration_error_count_; }
+    const char* configuration_first_error() const { return configuration_first_error_; }
+
 private:
     static void recovery_task(void* arg);
 
@@ -46,6 +51,9 @@ private:
     MqttService mqtt_;
 
     bool safe_mode_ = false;
+    bool configuration_valid_ = true;
+    uint32_t configuration_error_count_ = 0;
+    char configuration_first_error_[128] = {0};
 };
 
 } // namespace lg

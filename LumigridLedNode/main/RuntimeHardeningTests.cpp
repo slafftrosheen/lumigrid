@@ -1491,11 +1491,271 @@ bool test_batch6_config_migration() {
     return true;
 }
 
+// ============================================================================
+// Batch 7 Test A: Option A Physical Output Topology and Anti-Aliasing Validation
+// ============================================================================
+bool test_batch7_topology_validation() {
+    ESP_LOGI(TAG, "Testing Batch 7 Test A: Option A Topology & Anti-Aliasing...");
+    auto cfg = std::make_unique<DeviceConfig>();
+    cfg->gamma_x10 = 22;
+    cfg->max_power_mw = 25000;
+    cfg->protocol.universe_start = 1;
+    cfg->protocol.zone_start_channel = 1;
+    cfg->protocol.live_stream_layer = 2;
+
+    for (int p = 0; p < 16; ++p) {
+        cfg->physical_outputs[p].enabled = false;
+        cfg->physical_outputs[p].type = OutputType::RMT;
+        cfg->physical_outputs[p].hardware_id = 255;
+    }
+    for (int f = 0; f < 16; ++f) {
+        cfg->fixtures[f].num_pixels = 0;
+        cfg->fixtures[f].dmx_start_channel = 0;
+    }
+
+    // A. Unused physical output: disabled + garbage hardware_id -> valid
+    cfg->physical_outputs[15].enabled = false;
+    cfg->physical_outputs[15].hardware_id = 99;
+    ConfigStore::ConfigValidationResult res;
+    assert(ConfigStore::validate_config(*cfg, &res) == ESP_OK);
+
+    // B. Used physical output: enabled + invalid hardware_id -> invalid
+    cfg->physical_outputs[0].enabled = true;
+    cfg->physical_outputs[0].type = OutputType::RMT;
+    cfg->physical_outputs[0].hardware_id = MAX_RMT_LANES + 1;
+    assert(ConfigStore::validate_config(*cfg, &res) != ESP_OK);
+    cfg->physical_outputs[0].hardware_id = 0; // Fix
+
+    // C. Addressable fixture uses ONLY physical_output_index[0] (Option A)
+    // Extra indices [1..3] with garbage do not fail validation
+    cfg->fixtures[0].profile = FixtureProfile::WS2812;
+    cfg->fixtures[0].num_pixels = 60;
+    cfg->fixtures[0].zone_id = 0;
+    cfg->fixtures[0].physical_output_index[0] = 0;
+    cfg->fixtures[0].physical_output_index[1] = 255; // Unused under Option A
+    cfg->fixtures[0].physical_output_index[2] = 255;
+    cfg->fixtures[0].physical_output_index[3] = 255;
+    assert(ConfigStore::validate_config(*cfg, &res) == ESP_OK);
+
+    // D. Two addressable fixtures -> same RMT lane -> reject aliasing!
+    cfg->physical_outputs[1].enabled = true;
+    cfg->physical_outputs[1].type = OutputType::RMT;
+    cfg->physical_outputs[1].hardware_id = 0; // Same RMT hardware lane 0!
+    cfg->fixtures[1].profile = FixtureProfile::WS2812;
+    cfg->fixtures[1].num_pixels = 30;
+    cfg->fixtures[1].zone_id = 0;
+    cfg->fixtures[1].physical_output_index[0] = 1;
+    assert(ConfigStore::validate_config(*cfg, &res) != ESP_OK);
+    cfg->physical_outputs[1].hardware_id = 1; // Distinct RMT lane 1 -> valid!
+    assert(ConfigStore::validate_config(*cfg, &res) == ESP_OK);
+
+    // E. PWM RGB requires indices 0..2 (Option A)
+    cfg->physical_outputs[2].enabled = true;
+    cfg->physical_outputs[2].type = OutputType::PWM;
+    cfg->physical_outputs[2].hardware_id = 0;
+    cfg->physical_outputs[3].enabled = true;
+    cfg->physical_outputs[3].type = OutputType::PWM;
+    cfg->physical_outputs[3].hardware_id = 1;
+    cfg->physical_outputs[4].enabled = true;
+    cfg->physical_outputs[4].type = OutputType::PWM;
+    cfg->physical_outputs[4].hardware_id = 2;
+
+    cfg->fixtures[2].profile = FixtureProfile::PWM_RGB;
+    cfg->fixtures[2].zone_id = 1;
+    cfg->fixtures[2].physical_output_index[0] = 2;
+    cfg->fixtures[2].physical_output_index[1] = 3;
+    cfg->fixtures[2].physical_output_index[2] = 4;
+    cfg->fixtures[2].physical_output_index[3] = 255; // Unused for RGB
+    assert(ConfigStore::validate_config(*cfg, &res) == ESP_OK);
+
+    // F. Two PWM fixtures -> same PWM channel -> reject aliasing!
+    cfg->physical_outputs[5].enabled = true;
+    cfg->physical_outputs[5].type = OutputType::PWM;
+    cfg->physical_outputs[5].hardware_id = 0; // Aliased PWM channel 0!
+    cfg->fixtures[3].profile = FixtureProfile::PWM_Single;
+    cfg->fixtures[3].zone_id = 2;
+    cfg->fixtures[3].physical_output_index[0] = 5;
+    assert(ConfigStore::validate_config(*cfg, &res) != ESP_OK);
+    cfg->physical_outputs[5].hardware_id = 3; // Distinct PWM channel 3 -> valid!
+    assert(ConfigStore::validate_config(*cfg, &res) == ESP_OK);
+
+    // G. PWM RGBW requires all 0..3 physical outputs
+    cfg->physical_outputs[6].enabled = true;
+    cfg->physical_outputs[6].type = OutputType::PWM;
+    cfg->physical_outputs[6].hardware_id = 4;
+    cfg->physical_outputs[7].enabled = true;
+    cfg->physical_outputs[7].type = OutputType::PWM;
+    cfg->physical_outputs[7].hardware_id = 5;
+    cfg->physical_outputs[8].enabled = true;
+    cfg->physical_outputs[8].type = OutputType::PWM;
+    cfg->physical_outputs[8].hardware_id = 6;
+    cfg->physical_outputs[9].enabled = false; // Disabled 4th channel!
+    cfg->physical_outputs[9].type = OutputType::PWM;
+    cfg->physical_outputs[9].hardware_id = 7;
+
+    cfg->fixtures[4].profile = FixtureProfile::PWM_RGBW;
+    cfg->fixtures[4].zone_id = 3;
+    cfg->fixtures[4].physical_output_index[0] = 6;
+    cfg->fixtures[4].physical_output_index[1] = 7;
+    cfg->fixtures[4].physical_output_index[2] = 8;
+    cfg->fixtures[4].physical_output_index[3] = 9;
+    assert(ConfigStore::validate_config(*cfg, &res) != ESP_OK); // Fails because slot 9 is disabled!
+    cfg->physical_outputs[9].enabled = true;
+    assert(ConfigStore::validate_config(*cfg, &res) == ESP_OK);
+
+    // H. Unsupported output type on enabled slot -> invalid
+    cfg->physical_outputs[10].enabled = true;
+    cfg->physical_outputs[10].type = static_cast<OutputType>(99);
+    assert(ConfigStore::validate_config(*cfg, &res) != ESP_OK);
+
+    ESP_LOGI(TAG, "[PASS] Batch 7 Test A passed.");
+    return true;
+}
+
+// ============================================================================
+// Batch 7 Test B: Output Fault State Machine (Healthy -> Faulted -> Armed -> Healthy)
+// ============================================================================
+bool test_batch7_output_fault_state_machine() {
+    ESP_LOGI(TAG, "Testing Batch 7 Test B: Output fault explicit state machine...");
+    ControlSourceManager sm;
+    sm.init();
+    OutputController ctrl;
+    ctrl.init();
+    ConfigStore cfg_store;
+
+    LightingRuntime runtime(sm, ctrl, cfg_store);
+    assert(runtime.output_state() == LightingRuntime::OutputState::Healthy);
+    assert(runtime.fault_event_count() == 0);
+
+    // 1. Hardware error transitions Healthy -> Faulted
+    runtime.report_output_fault(ESP_FAIL);
+    assert(runtime.output_state() == LightingRuntime::OutputState::Faulted);
+    assert(runtime.fault_event_count() == 1);
+
+    // 2. 100 consecutive frames/reports while Faulted do NOT increment fault_event_count
+    for (int i = 0; i < 100; ++i) {
+        runtime.report_output_fault(ESP_FAIL);
+    }
+    assert(runtime.output_state() == LightingRuntime::OutputState::Faulted);
+    assert(runtime.fault_event_count() == 1);
+
+    // 3. Explicit operator recovery transitions Faulted -> Armed
+    assert(runtime.clear_output_fault() == ESP_OK);
+    assert(runtime.output_state() == LightingRuntime::OutputState::Armed);
+    assert(runtime.fault_event_count() == 1); // event count does not reset or increment
+
+    // 4. While Armed, an output failure transitions Armed -> Faulted and increments event count!
+    runtime.report_output_fault(ESP_FAIL);
+    assert(runtime.output_state() == LightingRuntime::OutputState::Faulted);
+    assert(runtime.fault_event_count() == 2);
+
+    // 5. Clear again to Armed
+    assert(runtime.clear_output_fault() == ESP_OK);
+    assert(runtime.output_state() == LightingRuntime::OutputState::Armed);
+
+    ESP_LOGI(TAG, "[PASS] Batch 7 Test B passed.");
+    return true;
+}
+
+// ============================================================================
+// Batch 7 Test C: Real DmxRouter -> LightingRuntime Live Frame Integration
+// ============================================================================
+bool test_batch7_router_to_runtime_integration() {
+    ESP_LOGI(TAG, "Testing Batch 7 Test C: DmxRouter to LightingRuntime integration...");
+    ControlSourceManager sm;
+    sm.init();
+    OutputController ctrl;
+    ctrl.init();
+    ConfigStore cfg_store;
+
+    LightingRuntime runtime(sm, ctrl, cfg_store);
+
+    auto cfg = std::make_unique<DeviceConfig>();
+    cfg->protocol.universe_start = 1;
+    cfg->protocol.zone_start_channel = 1;
+    cfg->protocol.live_stream_layer = 2;
+    cfg->protocol.artnet_enabled = true;
+    cfg->protocol.stream_timeout_ms = 500;
+
+    cfg->fixtures[0].profile = FixtureProfile::WS2812;
+    cfg->fixtures[0].num_pixels = 10;
+    cfg->fixtures[0].dmx_universe = 1;
+    cfg->fixtures[0].dmx_start_channel = 25; // Channels 25..54
+    cfg->fixtures[0].dmx_mode = 0; // Wash mode
+
+    DmxRouter router(runtime, *cfg);
+
+    // Initial state: no live DMX active
+    assert(runtime.current_control_source() == ControlSource::Idle);
+
+    // Send valid Art-Net DMX packet
+    ArtnetDmxPacket pkt{};
+    pkt.universe = 1;
+    pkt.source_ip = 0x0A000001;
+    pkt.sequence = 1;
+    pkt.length = 64;
+    pkt.data[0] = 255; // Zone 0 R
+    pkt.data[1] = 128; // Zone 0 G
+    pkt.data[24] = 200; // Fixture 0 R (channel 25)
+    router.handle_artnet_dmx(pkt);
+
+    // Live DMX ownership claimed
+    assert(runtime.current_control_source() == ControlSource::LiveDmx);
+    assert(router.get_stats().packets_accepted == 1);
+
+    // Stale sequence packet must be rejected
+    ArtnetDmxPacket stale_pkt = pkt;
+    stale_pkt.sequence = 1; // Duplicate/older sequence
+    router.handle_artnet_dmx(stale_pkt);
+    assert(router.get_stats().packets_rejected_sequence == 1);
+
+    // Total universe patch expiry
+    router.clear_patch_for_universe(1);
+    runtime.clear_live_frame();
+    assert(runtime.current_control_source() == ControlSource::Idle);
+
+    ESP_LOGI(TAG, "[PASS] Batch 7 Test C passed.");
+    return true;
+}
+
+// ============================================================================
+// Batch 7 Test D: Shutdown and Restart Clean Initial State
+// ============================================================================
+bool test_batch7_shutdown_restart() {
+    ESP_LOGI(TAG, "Testing Batch 7 Test D: Shutdown and restart...");
+    ControlSourceManager sm;
+    sm.init();
+    OutputController ctrl;
+    ctrl.init();
+    ConfigStore cfg_store;
+
+    {
+        LightingRuntime runtime(sm, ctrl, cfg_store);
+        runtime.start();
+        runtime.inject_live_data(0, 2, BrandColor{255, 0, 0}, 255);
+        assert(runtime.current_control_source() == ControlSource::LiveDmx);
+
+        runtime.stop();
+        assert(ctrl.output_enabled() == true); // Stop leaves hardware in safe blackout
+    }
+
+    // Clean restart
+    {
+        LightingRuntime runtime2(sm, ctrl, cfg_store);
+        assert(runtime2.output_state() == LightingRuntime::OutputState::Healthy);
+        assert(runtime2.active_live_objects() == 0);
+        assert(runtime2.current_control_source() == ControlSource::Idle);
+    }
+
+    ESP_LOGI(TAG, "[PASS] Batch 7 Test D passed.");
+    return true;
+}
+
 } // namespace
 
 bool run_runtime_hardening_tests() {
     ESP_LOGI(TAG, "==================================================");
-    ESP_LOGI(TAG, "  STARTING RUNTIME HARDENING TESTS (BATCH 3, 4, 5, 6)");
+    ESP_LOGI(TAG, "  STARTING RUNTIME HARDENING TESTS (BATCH 3..7)");
     ESP_LOGI(TAG, "==================================================");
 
     bool all_ok = true;
@@ -1538,6 +1798,12 @@ bool run_runtime_hardening_tests() {
     all_ok &= test_batch6_htp_payload_lengths();          // Batch 6 Test I
     all_ok &= test_batch6_ltp_newest_expires();           // Batch 6 Test J
     all_ok &= test_batch6_config_migration();             // Batch 6 Test K
+
+    // Batch 7 Tests
+    all_ok &= test_batch7_topology_validation();          // Batch 7 Test A
+    all_ok &= test_batch7_output_fault_state_machine();   // Batch 7 Test B
+    all_ok &= test_batch7_router_to_runtime_integration();// Batch 7 Test C
+    all_ok &= test_batch7_shutdown_restart();             // Batch 7 Test D
 
     if (all_ok) {
         ESP_LOGI(TAG, "==================================================");

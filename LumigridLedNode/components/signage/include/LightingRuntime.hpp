@@ -84,8 +84,11 @@ public:
     bool output_fault() const {
         return is_output_fault();
     }
-    uint32_t output_fault_count() const {
+    uint32_t fault_event_count() const {
         return output_fault_count_.load(std::memory_order_relaxed);
+    }
+    uint32_t output_fault_count() const {
+        return fault_event_count();
     }
     uint32_t output_fault_frame_count() const {
         return output_fault_frame_count_.load(std::memory_order_relaxed);

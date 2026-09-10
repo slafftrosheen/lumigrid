@@ -279,6 +279,7 @@ void FactoryRunner::task() {
 
             const uint8_t b = local_stream_brightness;
 
+            controller_.lock();
             for (uint8_t lane = 0; lane < 8; ++lane) {
                 controller_.pixels().fill(
                     lane,
@@ -297,7 +298,10 @@ void FactoryRunner::task() {
                 controller_.pwm().set(lane, duty);
             }
 
-            if (controller_.try_commit() != ESP_OK) {
+            esp_err_t commit_err = controller_.try_commit_locked();
+            controller_.unlock();
+
+            if (commit_err != ESP_OK) {
                 blackout();
                 vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(kFramePeriodMs));
                 continue;
@@ -320,6 +324,7 @@ void FactoryRunner::task() {
         if (direct_test_active_) {
             const uint32_t elapsed = current_ms - current.effect_started_ms;
 
+            controller_.lock();
             controller_.pixels().clear();
             controller_.pwm().set_all(0);
 
@@ -341,7 +346,10 @@ void FactoryRunner::task() {
                 );
             }
 
-            if (controller_.try_commit() != ESP_OK) {
+            esp_err_t commit_err = controller_.try_commit_locked();
+            controller_.unlock();
+
+            if (commit_err != ESP_OK) {
                 blackout();
                 vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(kFramePeriodMs));
                 continue;
@@ -397,6 +405,7 @@ void FactoryRunner::task() {
         if (current.test_active) {
             const uint32_t elapsed = current_ms - current.effect_started_ms;
 
+            controller_.lock();
             render_effect(
                 current.active_effect,
                 controller_,
@@ -404,7 +413,10 @@ void FactoryRunner::task() {
                 current.brightness
             );
 
-            if (controller_.try_commit() != ESP_OK) {
+            esp_err_t commit_err = controller_.try_commit_locked();
+            controller_.unlock();
+
+            if (commit_err != ESP_OK) {
                 blackout();
                 vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(kFramePeriodMs));
                 continue;

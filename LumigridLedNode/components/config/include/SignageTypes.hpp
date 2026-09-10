@@ -2,6 +2,7 @@
 #pragma once
 #include <cstdint>
 #include <cstring>
+#include "OutputCapabilities.hpp"
 
 namespace lg {
 
@@ -16,8 +17,8 @@ struct BrandColor {
 // ──────────────────────────── Constants ────────────────────────────
 constexpr uint16_t MAX_FIXTURE_PIXELS = 256;
 constexpr uint16_t MAX_PIXELS = MAX_FIXTURE_PIXELS;
-constexpr uint8_t MAX_RMT_LANES = 8;
-constexpr uint8_t MAX_PWM_CHANNELS = 8;
+constexpr uint8_t MAX_RMT_LANES = OutputCapabilities::kRmtLanes;
+constexpr uint8_t MAX_PWM_CHANNELS = OutputCapabilities::kPca9685Channels;
 
 // ──────────────────────────── New Product Schema ─────────────────────────
 
@@ -25,7 +26,7 @@ enum class OutputType : uint8_t { RMT = 0, PWM = 1, SPI = 2 };
 
 struct PhysicalOutput {
     OutputType type = OutputType::RMT;
-    uint8_t hardware_id = 0; // RMT channel 0-7, PWM channel 0-15
+    uint8_t hardware_id = 0; // RMT channel 0-7, PWM channel 0-7
     uint8_t gpio_pin = 0;
     bool enabled = false;
 };
@@ -34,10 +35,17 @@ enum class FixtureProfile : uint8_t { WS2812 = 0, SK6812 = 1, PWM_Single = 2, PW
 
 enum class PixelOrder : uint8_t { RGB = 0, GRB = 1, RGBW = 2, GRBW = 3 };
 
+/// Physical Output Topology Model (Batch 7 Item 1 - Option A):
+/// - Addressable fixtures (WS2812, SK6812): Exactly 1 physical RMT output mapped via
+///   physical_output_index[0]. Indices 1..3 are ignored.
+/// - PWM fixtures: 1..4 physical PWM outputs mapped according to profile:
+///     PWM_Single -> physical_output_index[0] (1 channel)
+///     PWM_RGB    -> physical_output_index[0..2] (3 channels)
+///     PWM_RGBW   -> physical_output_index[0..3] (4 channels)
 struct FixtureConfig {
     FixtureProfile profile = FixtureProfile::WS2812;
     PixelOrder pixel_order = PixelOrder::GRB;
-    uint8_t physical_output_index[4] = {}; // Indices into PhysicalOutputs array
+    uint8_t physical_output_index[4] = {}; // Indices into physical_outputs array
     uint8_t zone_id = 0; // Which zone this fixture belongs to (0-7)
     uint16_t num_pixels = 0;
     uint8_t max_brightness = 255;

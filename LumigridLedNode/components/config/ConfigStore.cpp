@@ -333,7 +333,10 @@ esp_err_t ConfigStore::validate_config(const DeviceConfig& config, ConfigValidat
         }
     }
 
-    // 4. Fixture configuration (Batch 6 Items 10 & 11: Configured vs Unused semantics)
+    // 4. Fixture configuration and Anti-Aliasing Topology Validation (Batch 7 Items 1, 2, 3)
+    uint16_t rmt_lanes_claimed = 0;
+    uint16_t pwm_channels_claimed = 0;
+
     for (uint8_t f = 0; f < 16; ++f) {
         const auto& fix = config.fixtures[f];
 
@@ -345,12 +348,7 @@ esp_err_t ConfigStore::validate_config(const DeviceConfig& config, ConfigValidat
         if (fix.zone_id >= 8) {
             add_error("fixture[%u].zone_id (%u) must be < 8", (unsigned)f, (unsigned)fix.zone_id);
         }
-        for (int p = 0; p < 4; ++p) {
-            if (fix.physical_output_index[p] >= 16) {
-                add_error("fixture[%u].physical_output_index[%d] (%u) must be < 16",
-                          (unsigned)f, p, (unsigned)fix.physical_output_index[p]);
-            }
-        }
+
         bool is_addressable = (fix.profile == FixtureProfile::WS2812 || fix.profile == FixtureProfile::SK6812);
         bool is_pwm = (fix.profile == FixtureProfile::PWM_Single ||
                        fix.profile == FixtureProfile::PWM_RGB ||
@@ -362,7 +360,9 @@ esp_err_t ConfigStore::validate_config(const DeviceConfig& config, ConfigValidat
                           (unsigned)f, (unsigned)fix.num_pixels, (unsigned)MAX_PIXELS);
             }
             uint8_t p_idx = fix.physical_output_index[0];
-            if (p_idx < 16) {
+            if (p_idx >= 16) {
+                add_error("fixture[%u].physical_output_index[0] (%u) must be < 16", (unsigned)f, (unsigned)p_idx);
+            } else {
                 const auto& phys = config.physical_outputs[p_idx];
                 if (!phys.enabled) {
                     add_error("fixture[%u] references disabled physical_output[%u]", (unsigned)f, (unsigned)p_idx);
@@ -370,6 +370,14 @@ esp_err_t ConfigStore::validate_config(const DeviceConfig& config, ConfigValidat
                 if (phys.type != OutputType::RMT) {
                     add_error("fixture[%u] addressable profile requires RMT physical output, got %u",
                               (unsigned)f, (unsigned)phys.type);
+                } else if (phys.hardware_id >= MAX_RMT_LANES) {
+                    add_error("fixture[%u] RMT hardware_id (%u) >= %u", (unsigned)f, (unsigned)phys.hardware_id, (unsigned)MAX_RMT_LANES);
+                } else {
+                    if (rmt_lanes_claimed & (1U << phys.hardware_id)) {
+                        add_error("fixture[%u] RMT lane %u already claimed by another fixture",
+                                  (unsigned)f, (unsigned)phys.hardware_id);
+                    }
+                    rmt_lanes_claimed |= (1U << phys.hardware_id);
                 }
             }
         } else if (is_pwm) {
@@ -377,7 +385,9 @@ esp_err_t ConfigStore::validate_config(const DeviceConfig& config, ConfigValidat
                                     (fix.profile == FixtureProfile::PWM_RGB ? 3 : 4);
             for (uint8_t ch = 0; ch < channels_used; ++ch) {
                 uint8_t p_idx = fix.physical_output_index[ch];
-                if (p_idx < 16) {
+                if (p_idx >= 16) {
+                    add_error("fixture[%u].physical_output_index[%u] (%u) must be < 16", (unsigned)f, (unsigned)ch, (unsigned)p_idx);
+                } else {
                     const auto& phys = config.physical_outputs[p_idx];
                     if (!phys.enabled) {
                         add_error("fixture[%u] references disabled physical_output[%u]", (unsigned)f, (unsigned)p_idx);
@@ -385,9 +395,19 @@ esp_err_t ConfigStore::validate_config(const DeviceConfig& config, ConfigValidat
                     if (phys.type != OutputType::PWM) {
                         add_error("fixture[%u] PWM profile requires PWM physical output, got %u",
                                   (unsigned)f, (unsigned)phys.type);
+                    } else if (phys.hardware_id >= MAX_PWM_CHANNELS) {
+                        add_error("fixture[%u] PWM hardware_id (%u) >= %u", (unsigned)f, (unsigned)phys.hardware_id, (unsigned)MAX_PWM_CHANNELS);
+                    } else {
+                        if (pwm_channels_claimed & (1U << phys.hardware_id)) {
+                            add_error("fixture[%u] PWM channel %u already claimed by another fixture",
+                                      (unsigned)f, (unsigned)phys.hardware_id);
+                        }
+                        pwm_channels_claimed |= (1U << phys.hardware_id);
                     }
                 }
             }
+        } else {
+            add_error("fixture[%u] unsupported profile (%u)", (unsigned)f, (unsigned)fix.profile);
         }
 
         // DMX patching checks for configured fixture (Batch 5 Item 9 & Batch 6 Item 11)
@@ -446,9 +466,17 @@ esp_err_t ConfigStore::save_config(const DeviceConfig& config) {
         return ESP_ERR_NVS_INVALID_STATE;
     }
 
-    // 3. Primary confirmed valid -> update backup slot
-    nvs_set_blob(handle_, "device_cfg_bak", to_save.get(), sizeof(DeviceConfig));
-    nvs_commit(handle_);
+    // 3. Primary confirmed valid -> update backup slot (Batch 7 Item 15)
+    err = nvs_set_blob(handle_, "device_cfg_bak", to_save.get(), sizeof(DeviceConfig));
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Primary device_cfg committed, but writing backup slot failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    err = nvs_commit(handle_);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Primary device_cfg committed, but committing backup slot failed: %s", esp_err_to_name(err));
+        return err;
+    }
 
     return ESP_OK;
 }
@@ -673,18 +701,6 @@ esp_err_t ConfigStore::load_config(DeviceConfig& config) {
             ESP_LOGW(TAG, "  PERSISTING TO NVS. STORE THESE SECURELY.");
             ESP_LOGW(TAG, "==================================================");
             needs_persist = true;
-        }
-
-        // Validate loaded fixtures (Batch 3 Item 10)
-        for (uint8_t f = 0; f < 16; ++f) {
-            bool is_addressable = (config.fixtures[f].profile == FixtureProfile::WS2812 ||
-                                   config.fixtures[f].profile == FixtureProfile::SK6812);
-            if (is_addressable && config.fixtures[f].num_pixels > MAX_PIXELS) {
-                ESP_LOGE(TAG, "Config load validation: Fixture %u num_pixels (%u) exceeds MAX_PIXELS (%u). Marking invalid.",
-                         (unsigned)f, (unsigned)config.fixtures[f].num_pixels, (unsigned)MAX_PIXELS);
-                config.fixtures[f].num_pixels = 0;
-                needs_persist = true;
-            }
         }
 
         if (needs_persist) {
