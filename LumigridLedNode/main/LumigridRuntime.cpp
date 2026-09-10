@@ -28,8 +28,12 @@ LumigridRuntime::LumigridRuntime()
         dmx_router_.update_config(cfg);
         uint16_t active_unis[16];
         size_t u_count = dmx_router_.get_active_universes(active_unis, 16);
+        uint8_t port_count = (u_count > 0 && u_count <= 4) ? static_cast<uint8_t>(u_count) : (u_count > 4 ? 4 : 0);
         sacn_.set_subscribed_universes(active_unis, u_count);
-        artnet_.set_output_universes(active_unis, static_cast<uint8_t>(u_count));
+        artnet_.set_output_universes(active_unis, port_count);
+    });
+    lighting_.set_maintenance_callback([this](uint32_t now_ms) {
+        dmx_router_.tick(now_ms);
     });
 }
 
@@ -73,6 +77,10 @@ esp_err_t LumigridRuntime::init() {
     s_boot_count++;
     
     safe_mode_ = (s_boot_count >= 3);
+    startup_state_ = safe_mode_ ? StartupState::SafeMode : StartupState::Booting;
+    startup_stage_ = StartupStage::None;
+    failing_stage_ = StartupStage::None;
+    failing_error_ = ESP_OK;
 
     xTaskCreate(recovery_task, "recovery", 4096, NULL, 5, NULL);
 
@@ -81,75 +89,147 @@ esp_err_t LumigridRuntime::init() {
 
     ESP_LOGI("lumigrid", "Step 1: Hardware output init...");
     esp_err_t err = output_.init();
-    if (err != ESP_OK) ESP_LOGE("lumigrid", "output_.init() FAILED: %s", esp_err_to_name(err));
+    if (err != ESP_OK) {
+        startup_state_ = StartupState::Faulted;
+        failing_stage_ = StartupStage::OutputInitialized;
+        failing_error_ = err;
+        safe_mode_ = true;
+        output_.blackout();
+        output_.set_output_enabled(false);
+        ESP_LOGE("lumigrid", "HARD FAILURE: output_.init() failed: %s. Outputs blacked out and runtime faulted!", esp_err_to_name(err));
+        return err;
+    }
+    startup_stage_ = StartupStage::OutputInitialized;
 
     ESP_LOGI("lumigrid", "Step 1.1: source_manager.init()...");
     err = source_manager_.init();
-    if (err != ESP_OK) ESP_LOGE("lumigrid", "source_manager_.init() FAILED: %s", esp_err_to_name(err));
+    if (err != ESP_OK) {
+        startup_state_ = StartupState::Faulted;
+        failing_stage_ = StartupStage::SourceManagerInitialized;
+        failing_error_ = err;
+        safe_mode_ = true;
+        output_.blackout();
+        output_.set_output_enabled(false);
+        ESP_LOGE("lumigrid", "source_manager_.init() FAILED: %s", esp_err_to_name(err));
+        return err;
+    }
+    startup_stage_ = StartupStage::SourceManagerInitialized;
     vTaskDelay(pdMS_TO_TICKS(100));
 
     ESP_LOGI("lumigrid", "Step 2: config.init()...");
     err = config_.init();
-    if (err != ESP_OK) ESP_LOGE("lumigrid", "config_.init() FAILED: %s", esp_err_to_name(err));
+    if (err != ESP_OK) {
+        startup_state_ = StartupState::Faulted;
+        failing_stage_ = StartupStage::ConfigStoreInitialized;
+        failing_error_ = err;
+        safe_mode_ = true;
+        output_.blackout();
+        output_.set_output_enabled(false);
+        ESP_LOGE("lumigrid", "config_.init() FAILED: %s", esp_err_to_name(err));
+        return err;
+    }
+    startup_stage_ = StartupStage::ConfigStoreInitialized;
     vTaskDelay(pdMS_TO_TICKS(500));
 
     DeviceConfig dev_cfg;
     if (config_.load_config(dev_cfg) == ESP_OK) {
+        startup_stage_ = StartupStage::ConfigLoaded;
         api::update_tokens(dev_cfg.admin_token, dev_cfg.installer_token, dev_cfg.operator_token);
 
-        // Required startup sequence (Batch 7 Item 6):
-        // ConfigStore::load_config() -> ConfigStore::validate_config() -> OutputController::reconfigure() -> protocol config -> runtime start
         ConfigStore::ConfigValidationResult val_res;
         esp_err_t val_err = config_.validate_config(dev_cfg, &val_res);
         if (val_err != ESP_OK) {
             safe_mode_ = true;
+            startup_state_ = StartupState::SafeMode;
+            failing_stage_ = StartupStage::ConfigValidated;
+            failing_error_ = val_err;
             configuration_valid_ = false;
             configuration_error_count_ = val_res.error_count;
             std::strncpy(configuration_first_error_, val_res.first_error, sizeof(configuration_first_error_));
             output_.blackout();
+            output_.set_output_enabled(false);
             ESP_LOGE("lumigrid", "STARTUP CONFIG VALIDATION FAILED (%u errors): %s. Entering SAFE/RECOVERY MODE!",
                      (unsigned)val_res.error_count, val_res.first_error);
         } else {
+            startup_stage_ = StartupStage::ConfigValidated;
             configuration_valid_ = true;
             configuration_error_count_ = 0;
             configuration_first_error_[0] = '\0';
             esp_err_t reconf_err = output_.reconfigure(dev_cfg);
             if (reconf_err != ESP_OK) {
                 safe_mode_ = true;
+                startup_state_ = StartupState::Faulted;
+                failing_stage_ = StartupStage::OutputsConfigured;
+                failing_error_ = reconf_err;
                 configuration_valid_ = false;
                 configuration_error_count_ = 1;
                 snprintf(configuration_first_error_, sizeof(configuration_first_error_), "output.reconfigure failed: %s", esp_err_to_name(reconf_err));
                 output_.blackout();
+                output_.set_output_enabled(false);
                 ESP_LOGE("lumigrid", "Output reconfigure failed: %s. Entering SAFE MODE!", esp_err_to_name(reconf_err));
+            } else {
+                startup_stage_ = StartupStage::OutputsConfigured;
             }
         }
     } else {
         safe_mode_ = true;
+        startup_state_ = StartupState::SafeMode;
+        failing_stage_ = StartupStage::ConfigLoaded;
+        failing_error_ = ESP_FAIL;
         configuration_valid_ = false;
         configuration_error_count_ = 1;
         std::strncpy(configuration_first_error_, "Failed to load device config from NVS", sizeof(configuration_first_error_));
         output_.blackout();
+        output_.set_output_enabled(false);
         ESP_LOGE("lumigrid", "Failed to load device config! Entering SAFE MODE!");
     }
 
-    // Run Stage 2 Runtime Hardening Verification (Items 2, 16, 21, 22)
+#if defined(CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS) && CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS
+    ESP_LOGW("lumigrid", "==================================================");
+    ESP_LOGW("lumigrid", "  RUNTIME HARDENING TESTS: ENABLED (TEST BUILD)   ");
+    ESP_LOGW("lumigrid", "==================================================");
     run_runtime_hardening_tests();
+#else
+    ESP_LOGI("lumigrid", "Runtime hardening tests: DISABLED (PRODUCTION IMAGE)");
+#endif
 
     if (!safe_mode_) {
         ESP_LOGI("lumigrid", "Step 3: lighting.start()...");
         err = lighting_.start();
-        if (err != ESP_OK) ESP_LOGE("lumigrid", "lighting.start() FAILED: %s", esp_err_to_name(err));
+        if (err != ESP_OK) {
+            startup_state_ = StartupState::Faulted;
+            failing_stage_ = StartupStage::LightingStarted;
+            failing_error_ = err;
+            safe_mode_ = true;
+            output_.blackout();
+            output_.set_output_enabled(false);
+            ESP_LOGE("lumigrid", "lighting.start() FAILED: %s", esp_err_to_name(err));
+        } else {
+            startup_stage_ = StartupStage::LightingStarted;
+        }
     } else {
         output_.blackout();
+        output_.set_output_enabled(false);
         ESP_LOGW("lumigrid", "SAFE MODE ACTIVE: Keeping outputs blacked out, skipping lighting runtime start");
     }
 
     ESP_LOGI("lumigrid", "Step 4: factory_runner.start()...");
     err = factory_runner_.start();
-    if (err != ESP_OK) ESP_LOGE("lumigrid", "factory_runner.start() FAILED: %s", esp_err_to_name(err));
+    if (err != ESP_OK) {
+        startup_state_ = StartupState::Faulted;
+        failing_stage_ = StartupStage::FactoryStarted;
+        failing_error_ = err;
+        ESP_LOGE("lumigrid", "factory_runner.start() FAILED: %s", esp_err_to_name(err));
+    } else {
+        startup_stage_ = StartupStage::FactoryStarted;
+    }
     vTaskDelay(pdMS_TO_TICKS(500));
 
-    return ESP_OK;
+    if (!safe_mode_ && startup_state_ == StartupState::Booting) {
+        startup_state_ = StartupState::Ready;
+    }
+
+    return (startup_state_ == StartupState::Faulted) ? failing_error_ : ESP_OK;
 }
 
 esp_err_t LumigridRuntime::start() {
@@ -173,6 +253,7 @@ esp_err_t LumigridRuntime::start() {
                 static bool services_started = false;
                 if (services_started) return;
                 services_started = true;
+                startup_stage_ = StartupStage::NetworkConfigured;
 
                 esp_netif_t* ap_netif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
                 if (ap_netif) {
@@ -193,7 +274,7 @@ esp_err_t LumigridRuntime::start() {
 
                 uint16_t active_unis[16];
                 size_t u_count = dmx_router_.get_active_universes(active_unis, 16);
-                uint8_t port_count = (u_count > 0 && u_count <= 4) ? static_cast<uint8_t>(u_count) : 1;
+                uint8_t port_count = (u_count > 0 && u_count <= 4) ? static_cast<uint8_t>(u_count) : (u_count > 4 ? 4 : 0);
 
                 ArtnetNodeInfo node{};
                 node.short_name = "LumiGrid Factory";
@@ -231,6 +312,7 @@ esp_err_t LumigridRuntime::start() {
                     }
                 ));
                 sacn_.set_subscribed_universes(active_unis, u_count);
+                startup_stage_ = StartupStage::ProtocolsStarted;
 
                 if (!safe_mode_) {
                     ESP_LOGI("lumigrid", "Step 9: scheduler.start()...");
@@ -261,6 +343,10 @@ esp_err_t LumigridRuntime::start() {
                             ESP_LOGI("lumigrid", "Received MQTT command: %.*s", (int)len, payload);
                         });
                     }
+                }
+                startup_stage_ = StartupStage::RuntimeStarted;
+                if (!safe_mode_) {
+                    startup_state_ = StartupState::Ready;
                 }
             }
         }

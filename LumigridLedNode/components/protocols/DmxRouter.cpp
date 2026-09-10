@@ -93,13 +93,27 @@ size_t DmxRouter::get_active_universes(uint16_t* out_universes, size_t max_count
         }
     };
 
-    add_universe(protocol_cfg_.universe_start);
-
+    // Include protocol_cfg_.universe_start only when zone/live-layer patch is actually enabled:
+    // Zone wash is active if zone_start_channel > 0 AND at least one configured fixture with num_pixels > 0 && dmx_start_channel == 0 consumes zone wash
+    bool has_zone_consumer = false;
     for (const auto& fix : fixtures_) {
-        if (fix.dmx_start_channel > 0) {
+        if (fix.num_pixels > 0 && fix.dmx_start_channel == 0) {
+            has_zone_consumer = true;
+            break;
+        }
+    }
+    if (protocol_cfg_.zone_start_channel > 0 && has_zone_consumer) {
+        add_universe(protocol_cfg_.universe_start);
+    }
+
+    // Include fixture universes only for configured fixtures with dmx_start_channel > 0
+    for (const auto& fix : fixtures_) {
+        if (fix.num_pixels > 0 && fix.dmx_start_channel > 0) {
             add_universe(fix.dmx_universe);
         }
     }
+
+    std::sort(out_universes, out_universes + count);
     return count;
 }
 
@@ -168,8 +182,24 @@ DmxRouter::DmxStats DmxRouter::get_stats() const {
     return s;
 }
 
-void DmxRouter::clear_patch_for_universe(uint16_t universe) {
+DmxRouter::ClearResult DmxRouter::clear_universe_state_locked(uint16_t universe, uint32_t current_ms) {
     const uint8_t live_layer = protocol_cfg_.live_stream_layer < 3 ? protocol_cfg_.live_stream_layer : 2;
+
+    for (auto& u : tracked_universes_) {
+        if (u.universe == universe) {
+            u.active = false;
+            u.last_packet_ms = 0;
+            u.merged_data.fill(0);
+            u.merged_length = 0;
+            for (auto& src : u.sources) {
+                src.active = false;
+                src.sequence_valid = false;
+                src.data.fill(0);
+                src.length = 0;
+                src.last_packet_ms = 0;
+            }
+        }
+    }
 
     // 1. Zone Wash
     if (universe == protocol_cfg_.universe_start) {
@@ -195,29 +225,94 @@ void DmxRouter::clear_patch_for_universe(uint16_t universe) {
         }
     }
 
-    // 3. Telemetry and active status cleanup if all patches now inactive
-    bool any_active = false;
-    for (uint8_t zone = 0; zone < 8; ++zone) {
-        for (uint8_t l = 0; l < 3; ++l) {
-            if (assembled_frame_.layers[zone][l].active) {
-                any_active = true;
-                break;
-            }
-        }
-        if (any_active) break;
-    }
-    if (!any_active) {
-        for (uint8_t f = 0; f < 16; ++f) {
-            if (assembled_frame_.fixtures[f].active) {
-                any_active = true;
-                break;
-            }
+    // 3. Recompute live status across all tracked universes
+    bool any_live = false;
+    for (const auto& u : tracked_universes_) {
+        if (is_universe_live(u, current_ms)) {
+            any_live = true;
+            break;
         }
     }
-    if (!any_active) {
+
+    if (!any_live) {
         assembled_frame_.active = false;
         assembled_frame_.dmx_telemetry.fill(0);
         assembled_frame_.dmx_telemetry_len = 0;
+        return ClearResult::ClearLive;
+    } else {
+        submission_frame_ = assembled_frame_;
+        return ClearResult::SubmitFrame;
+    }
+}
+
+void DmxRouter::clear_universe_state(uint16_t universe) {
+    ClearResult res = ClearResult::None;
+    {
+        std::lock_guard<std::mutex> lock(frame_mutex_);
+        res = clear_universe_state_locked(universe, now_ms());
+    }
+    if (res == ClearResult::ClearLive) {
+        lighting_.clear_live_frame();
+    } else if (res == ClearResult::SubmitFrame) {
+        if (!lighting_.submit_live_frame(submission_frame_)) {
+            submission_failures_count_++;
+        }
+    }
+}
+
+void DmxRouter::tick(uint32_t now_ms) {
+    bool should_clear_live = false;
+    bool should_submit = false;
+
+    {
+        std::lock_guard<std::mutex> lock(frame_mutex_);
+        const uint32_t timeout = stream_timeout_ms_locked();
+        bool any_changed = false;
+
+        for (auto& u : tracked_universes_) {
+            if (!u.active) continue;
+
+            bool any_src_live = false;
+            for (auto& s : u.sources) {
+                if (s.active) {
+                    if (now_ms - s.last_packet_ms > timeout) {
+                        s.active = false;
+                        s.sequence_valid = false;
+                        any_changed = true;
+                    } else {
+                        any_src_live = true;
+                    }
+                }
+            }
+
+            if (!any_src_live) {
+                u.active = false;
+                u.last_packet_ms = 0;
+                u.merged_data.fill(0);
+                u.merged_length = 0;
+                ClearResult cr = clear_universe_state_locked(u.universe, now_ms);
+                if (cr == ClearResult::ClearLive) {
+                    should_clear_live = true;
+                    should_submit = false;
+                } else if (cr == ClearResult::SubmitFrame && !should_clear_live) {
+                    should_submit = true;
+                }
+                any_changed = true;
+            } else if (any_changed) {
+                recompute_merge(u, now_ms);
+                dispatch_patch(u.universe, u.merged_data.data(), u.merged_length);
+                submission_frame_ = assembled_frame_;
+                should_submit = true;
+            }
+        }
+    }
+
+    if (should_clear_live) {
+        lighting_.clear_live_frame();
+    } else if (should_submit) {
+        if (!lighting_.submit_live_frame(submission_frame_)) {
+            submission_failures_count_++;
+        }
     }
 }
 

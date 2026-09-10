@@ -74,6 +74,23 @@ struct DeviceConfigV1 {
     uint32_t checksum                      = 0;
 };
 
+enum class ConfigPersistenceState : uint8_t {
+    Synchronized,       // Primary valid + backup synchronized
+    PrimaryOnly,        // Primary valid, backup stale/failed
+    SaveFailed,         // Primary save/validation failed
+    RecoveryRequired    // Both slots invalid
+};
+
+inline const char* persistence_state_to_name(ConfigPersistenceState st) {
+    switch (st) {
+        case ConfigPersistenceState::Synchronized:     return "Synchronized";
+        case ConfigPersistenceState::PrimaryOnly:      return "PrimaryOnly";
+        case ConfigPersistenceState::SaveFailed:       return "SaveFailed";
+        case ConfigPersistenceState::RecoveryRequired: return "RecoveryRequired";
+        default:                                       return "Unknown";
+    }
+}
+
 /// NVS-backed persistent storage for presets, device config, and schedules.
 class ConfigStore {
 public:
@@ -94,6 +111,12 @@ public:
         uint32_t error_count = 0;
         char first_error[128] = "";
     };
+
+    ConfigPersistenceState persistence_state() const { return persistence_state_; }
+    const char* persistence_state_str() const { return persistence_state_to_name(persistence_state_); }
+    const ConfigValidationResult& cached_validation_result() const { return cached_val_res_; }
+    bool is_primary_valid() const { return primary_valid_; }
+    bool is_backup_valid() const { return backup_valid_; }
 
     /// Calculates required DMX channel span for a fixture (Batch 5 Item 9)
     static bool calculate_dmx_span(const FixtureConfig& fixture, uint32_t& required_channels);
@@ -121,6 +144,11 @@ public:
 
 private:
     nvs_handle_t handle_ = 0;
+
+    ConfigPersistenceState persistence_state_ = ConfigPersistenceState::RecoveryRequired;
+    ConfigValidationResult cached_val_res_{};
+    bool primary_valid_ = false;
+    bool backup_valid_ = false;
 
     /// Creates a default "Warm White" preset if no presets exist.
     void ensure_defaults();

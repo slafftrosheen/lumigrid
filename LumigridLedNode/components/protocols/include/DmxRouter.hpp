@@ -118,10 +118,22 @@ public:
         return lg::sequence_check_required(protocol, sequence);
     }
 
+    /// Periodic maintenance tick to prune timed-out sources and clear live frame (Batch 8 Item 4)
+    void tick(uint32_t now_ms);
+
+    /// Authoritative universe state clear (Batch 8 Item 5)
+    void clear_universe_state(uint16_t universe);
+
     /// Dedicated universe patch clearing when universe sources expire
-    void clear_patch_for_universe(uint16_t universe);
+    void clear_patch_for_universe(uint16_t universe) { clear_universe_state(universe); }
 
 private:
+    enum class ClearResult {
+        None,
+        SubmitFrame,
+        ClearLive
+    };
+    ClearResult clear_universe_state_locked(uint16_t universe, uint32_t current_ms);
     uint32_t stream_timeout_ms_locked() const {
         return protocol_cfg_.stream_timeout_ms > 0 ? protocol_cfg_.stream_timeout_ms : 2000;
     }

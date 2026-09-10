@@ -109,7 +109,12 @@ esp_err_t OutputController::reconfigure(const DeviceConfig& cfg) {
 
         esp_err_t err = pixels_.configure_lane(phys.hardware_id, gpio, fix.profile, fix.pixel_order, fix.num_pixels);
         if (err != ESP_OK) {
-            ESP_LOGE("output", "Failed to configure lane %u: %s. Entering safe blackout!", phys.hardware_id, esp_err_to_name(err));
+            ESP_LOGE("output", "Failed to configure lane %u: %s. Rolling back all lanes and entering safe blackout!", phys.hardware_id, esp_err_to_name(err));
+            for (uint8_t l = 0; l < OutputCapabilities::kRmtLanes; ++l) {
+                pixels_.clear_lane(l);
+            }
+            output_enabled_.store(false, std::memory_order_release);
+            last_commit_error_.store(err, std::memory_order_release);
             blackout_locked();
             unlock();
             return err;

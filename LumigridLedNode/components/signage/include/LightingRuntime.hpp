@@ -105,6 +105,9 @@ public:
     using ConfigReloadCallback = std::function<void(const DeviceConfig& cfg)>;
     void set_config_reload_callback(ConfigReloadCallback cb) { config_reload_cb_ = std::move(cb); }
 
+    using MaintenanceCallback = std::function<void(uint32_t now_ms)>;
+    void set_maintenance_callback(MaintenanceCallback cb) { maintenance_cb_ = std::move(cb); }
+
 private:
     /// State machine for deterministic E-stop reset:
     /// Tripped -> PendingReset -> ReArmedBlackout -> Inactive
@@ -157,6 +160,7 @@ private:
     float current_fps_ = 0.0f;
 
     PreviewCallback preview_cb_;
+    MaintenanceCallback maintenance_cb_;
 
     static constexpr uint32_t kFramePeriodMs = 25; // 40 FPS
     /// DmxRouter decides protocol source lifetime.

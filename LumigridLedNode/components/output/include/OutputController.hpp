@@ -45,16 +45,11 @@ public:
     void clear_estop();
     bool is_estop_latched() const { return estop_latched_.load(std::memory_order_acquire); }
     uint32_t failed_commit_count() const { return failed_commit_count_.load(std::memory_order_relaxed); }
-    uint32_t commit_fault_count() const { return failed_commit_count(); }
     esp_err_t last_commit_error() const { return last_commit_error_.load(std::memory_order_acquire); }
     uint32_t last_commit_time_ms() const { return last_commit_time_ms_.load(std::memory_order_acquire); }
 
     AddressableDriver& pixels() { return pixels_; }
     Pca9685Driver& pwm() { return pwm_; }
-
-    void enable() { set_output_enabled(true); }
-    void disable() { set_output_enabled(false); }
-    bool enabled() const { return output_enabled(); }
 
     /// Acquire the output mutex. Use when performing multi-step
     /// pixel/pwm operations that must be atomic.

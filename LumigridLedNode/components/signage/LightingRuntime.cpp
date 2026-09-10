@@ -134,6 +134,9 @@ void LightingRuntime::task() {
 
     while (true) {
         uint32_t current_ms = now_ms();
+        if (maintenance_cb_) {
+            maintenance_cb_(current_ms);
+        }
         render_frame(current_ms);
 
         // Calculate and report actual frame rate

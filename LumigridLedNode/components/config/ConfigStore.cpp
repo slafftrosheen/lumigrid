@@ -303,8 +303,8 @@ esp_err_t ConfigStore::validate_config(const DeviceConfig& config, ConfigValidat
     if (config.protocol.live_stream_layer >= 3) {
         add_error("protocol.live_stream_layer (%u) must be < 3", (unsigned)config.protocol.live_stream_layer);
     }
-    if (config.protocol.zone_start_channel < 1 || config.protocol.zone_start_channel > 512) {
-        add_error("protocol.zone_start_channel (%u) must be in 1..512", (unsigned)config.protocol.zone_start_channel);
+    if (config.protocol.zone_start_channel > 512) {
+        add_error("protocol.zone_start_channel (%u) must be in 0..512 (0=unpatched)", (unsigned)config.protocol.zone_start_channel);
     }
     if (config.protocol.zone_start_channel > 0 && (config.protocol.zone_start_channel + 24 - 1 > 512)) {
         add_error("protocol.zone_start_channel (%u) + 24 channels exceeds universe boundary 512",
@@ -434,7 +434,9 @@ esp_err_t ConfigStore::validate_config(const DeviceConfig& config, ConfigValidat
 esp_err_t ConfigStore::save_config(const DeviceConfig& config) {
     ConfigValidationResult result;
     esp_err_t val_err = validate_config(config, &result);
+    cached_val_res_ = result;
     if (val_err != ESP_OK) {
+        persistence_state_ = ConfigPersistenceState::SaveFailed;
         ESP_LOGE(TAG, "Config save rejected due to validation failure (%u error(s)): %s",
                  (unsigned)result.error_count, result.first_error);
         return val_err;
@@ -446,11 +448,15 @@ esp_err_t ConfigStore::save_config(const DeviceConfig& config) {
     // 1. Transactional primary write & commit (Batch 6 Item 18)
     esp_err_t err = nvs_set_blob(handle_, "device_cfg", to_save.get(), sizeof(DeviceConfig));
     if (err != ESP_OK) {
+        persistence_state_ = ConfigPersistenceState::SaveFailed;
+        primary_valid_ = false;
         ESP_LOGE(TAG, "Failed to write primary device_cfg: %s", esp_err_to_name(err));
         return err;
     }
     err = nvs_commit(handle_);
     if (err != ESP_OK) {
+        persistence_state_ = ConfigPersistenceState::SaveFailed;
+        primary_valid_ = false;
         ESP_LOGE(TAG, "Failed to commit primary device_cfg: %s", esp_err_to_name(err));
         return err;
     }
@@ -462,22 +468,32 @@ esp_err_t ConfigStore::save_config(const DeviceConfig& config) {
     if (err != ESP_OK || verify_len != sizeof(DeviceConfig) ||
         verify_buf->checksum != to_save->checksum ||
         calc_device_crc(*verify_buf) != to_save->checksum) {
+        persistence_state_ = ConfigPersistenceState::SaveFailed;
+        primary_valid_ = false;
         ESP_LOGE(TAG, "Primary device_cfg read-back verification failed! Preserving backup intact.");
         return ESP_ERR_NVS_INVALID_STATE;
     }
 
-    // 3. Primary confirmed valid -> update backup slot (Batch 7 Item 15)
+    primary_valid_ = true;
+
+    // 3. Primary confirmed valid -> update backup slot (Batch 7 Item 15, Batch 8 Item 13)
     err = nvs_set_blob(handle_, "device_cfg_bak", to_save.get(), sizeof(DeviceConfig));
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Primary device_cfg committed, but writing backup slot failed: %s", esp_err_to_name(err));
+        persistence_state_ = ConfigPersistenceState::PrimaryOnly;
+        backup_valid_ = false;
+        ESP_LOGW(TAG, "Primary device_cfg committed, but writing backup slot failed: %s (State: PrimaryOnly)", esp_err_to_name(err));
         return err;
     }
     err = nvs_commit(handle_);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Primary device_cfg committed, but committing backup slot failed: %s", esp_err_to_name(err));
+        persistence_state_ = ConfigPersistenceState::PrimaryOnly;
+        backup_valid_ = false;
+        ESP_LOGW(TAG, "Primary device_cfg committed, but committing backup slot failed: %s (State: PrimaryOnly)", esp_err_to_name(err));
         return err;
     }
 
+    backup_valid_ = true;
+    persistence_state_ = ConfigPersistenceState::Synchronized;
     return ESP_OK;
 }
 
@@ -640,13 +656,33 @@ esp_err_t ConfigStore::load_config(DeviceConfig& config) {
     };
 
     esp_err_t err = load_from_key("device_cfg", config);
-    
-    if (err == ESP_ERR_NVS_INVALID_STATE || err == ESP_ERR_NVS_INVALID_LENGTH) {
+    if (err == ESP_OK) {
+        primary_valid_ = true;
+        DeviceConfig bak_cfg;
+        esp_err_t bak_err = load_from_key("device_cfg_bak", bak_cfg);
+        if (bak_err == ESP_OK && bak_cfg.checksum == config.checksum) {
+            backup_valid_ = true;
+            persistence_state_ = ConfigPersistenceState::Synchronized;
+        } else {
+            backup_valid_ = false;
+            persistence_state_ = ConfigPersistenceState::PrimaryOnly;
+        }
+    } else if (err == ESP_ERR_NVS_INVALID_STATE || err == ESP_ERR_NVS_INVALID_LENGTH || err == ESP_ERR_NVS_NOT_FOUND) {
+        primary_valid_ = false;
         ESP_LOGW(TAG, "Restoring DeviceConfig from backup slot");
         err = load_from_key("device_cfg_bak", config);
         if (err == ESP_OK) {
+            backup_valid_ = true;
+            persistence_state_ = ConfigPersistenceState::PrimaryOnly;
             needs_persist = true;
+        } else {
+            backup_valid_ = false;
+            persistence_state_ = ConfigPersistenceState::RecoveryRequired;
         }
+    } else {
+        primary_valid_ = false;
+        backup_valid_ = false;
+        persistence_state_ = ConfigPersistenceState::RecoveryRequired;
     }
 
     auto generate_token = [](char* out, size_t max_len) {
@@ -721,6 +757,13 @@ esp_err_t ConfigStore::load_config(DeviceConfig& config) {
             }
             ESP_LOGI(TAG, "Migrated config successfully persisted and verified from NVS");
         }
+    }
+    if (err == ESP_OK) {
+        validate_config(config, &cached_val_res_);
+    } else {
+        cached_val_res_.valid = false;
+        cached_val_res_.error_count = 1;
+        std::strncpy(cached_val_res_.first_error, "Failed to load device config from NVS", sizeof(cached_val_res_.first_error));
     }
     return err;
 }
