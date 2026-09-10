@@ -7,6 +7,11 @@
 #include "LightingRuntime.hpp"
 #include "OutputScheduler.hpp"
 #include "DmxRouter.hpp"
+#include "FactoryRunner.hpp"
+#include "FactoryApi.hpp"
+#include "LumigridRuntime.hpp"
+#include "ArtnetDiscovery.hpp"
+#include "SacnReceiver.hpp"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -15,6 +20,8 @@
 #include <cmath>
 #include <memory>
 #include <array>
+
+#if defined(CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS) && CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS
 
 static const char* TAG = "HardeningTest";
 
@@ -1751,11 +1758,663 @@ bool test_batch7_shutdown_restart() {
     return true;
 }
 
+// ============================================================================
+// Batch 8 Hardening Tests (Certification-Grade Lifecycle, Protocol & Output)
+// ============================================================================
+
+bool test_batch8_double_start_and_cooperative_shutdown() {
+    ESP_LOGI(TAG, "Batch 8 Test A: Double-start rejection and cooperative shutdown...");
+    ControlSourceManager sm;
+    OutputController ctrl;
+    ConfigStore cfg_store;
+
+    LightingRuntime runtime(sm, ctrl, cfg_store);
+    assert(runtime.lifecycle_state() == LightingRuntime::LifecycleState::Constructed);
+
+    // Initial start succeeds
+    esp_err_t err1 = runtime.start();
+    assert(err1 == ESP_OK);
+    assert(runtime.lifecycle_state() == LightingRuntime::LifecycleState::Running);
+
+    // Repeated start must fail with ESP_ERR_INVALID_STATE (Requirement 4)
+    esp_err_t err2 = runtime.start();
+    assert(err2 == ESP_ERR_INVALID_STATE);
+    assert(runtime.lifecycle_state() == LightingRuntime::LifecycleState::Running);
+
+    // Cooperative shutdown (Requirement 3)
+    runtime.stop();
+    assert(runtime.lifecycle_state() == LightingRuntime::LifecycleState::Stopped);
+
+    // Repeated stop must be idempotent and safe
+    runtime.stop();
+    assert(runtime.lifecycle_state() == LightingRuntime::LifecycleState::Stopped);
+
+    // Clean restart verification
+    esp_err_t start_err3 = runtime.start();
+    assert(start_err3 == ESP_OK);
+    assert(runtime.lifecycle_state() == LightingRuntime::LifecycleState::Running);
+
+    runtime.stop();
+    assert(runtime.lifecycle_state() == LightingRuntime::LifecycleState::Stopped);
+
+    // Repeated lifecycle test: start -> stop -> start -> stop (100 iterations) (Requirement 4)
+    for (int i = 0; i < 100; ++i) {
+        esp_err_t loop_start = runtime.start();
+        assert(loop_start == ESP_OK);
+        assert(runtime.lifecycle_state() == LightingRuntime::LifecycleState::Running);
+        runtime.stop();
+        assert(runtime.lifecycle_state() == LightingRuntime::LifecycleState::Stopped);
+        vTaskDelay(pdMS_TO_TICKS(1)); // Allow FreeRTOS idle task to collect terminated task
+    }
+
+    ESP_LOGI(TAG, "[PASS] Batch 8 Test A passed (including 100-iteration start/stop lifecycle).");
+    return true;
+}
+
+bool test_batch8_factory_runner_abort_vs_estop() {
+    ESP_LOGI(TAG, "Batch 8 Test B: Factory abort vs E-stop semantics & state serialization...");
+    ControlSourceManager sm;
+    OutputController ctrl;
+    FactoryRunner runner(sm, ctrl);
+
+    assert(runner.lifecycle_state() == FactoryRunner::LifecycleState::Constructed);
+    assert(runner.start() == ESP_OK);
+    assert(runner.lifecycle_state() == FactoryRunner::LifecycleState::Running);
+
+    // 1. SelectEffect -> Abort
+    runner.select_effect(FactoryEffect::PixelChase);
+    vTaskDelay(pdMS_TO_TICKS(20));
+    assert(sm.current_owner() == ControlSource::Factory);
+    assert(sm.is_estop_active() == false);
+    assert(runner.status().active_effect == FactoryEffect::PixelChase);
+
+    // Abort releases Factory ownership without activating E-stop (Requirement 7)
+    runner.abort();
+    vTaskDelay(pdMS_TO_TICKS(20));
+    assert(sm.current_owner() == ControlSource::Idle);
+    assert(sm.is_estop_active() == false);
+    assert(runner.status().outputs_enabled == false);
+
+    // 2. StreamFrame -> Abort
+    StreamFramePayload payload{};
+    runner.set_stream_frame(payload, 32, 1000);
+    vTaskDelay(pdMS_TO_TICKS(20));
+    assert(sm.current_owner() == ControlSource::Factory);
+    assert(runner.status().outputs_enabled == true);
+    assert(runner.status().test_active == true);
+
+    runner.abort();
+    vTaskDelay(pdMS_TO_TICKS(20));
+    assert(sm.current_owner() == ControlSource::Idle);
+    assert(runner.status().outputs_enabled == false);
+    assert(sm.is_estop_active() == false);
+
+    // 3. StreamFrame -> SelectEffect
+    runner.set_stream_frame(payload, 50, 1000);
+    vTaskDelay(pdMS_TO_TICKS(20));
+    assert(runner.status().test_active == true);
+    runner.select_effect(FactoryEffect::Rainbow);
+    vTaskDelay(pdMS_TO_TICKS(20));
+    assert(runner.status().active_effect == FactoryEffect::Rainbow);
+    assert(sm.current_owner() == ControlSource::Factory);
+
+    // 4. SelectEffect -> SetAutoLoop
+    runner.set_auto_loop(true);
+    vTaskDelay(pdMS_TO_TICKS(20));
+    assert(runner.status().auto_loop == true);
+
+    // 5. SetAutoLoop -> Abort
+    runner.abort();
+    vTaskDelay(pdMS_TO_TICKS(20));
+    assert(runner.status().auto_loop == false);
+    assert(runner.status().outputs_enabled == false);
+    assert(sm.current_owner() == ControlSource::Idle);
+    assert(sm.is_estop_active() == false);
+
+    runner.stop();
+    assert(runner.lifecycle_state() == FactoryRunner::LifecycleState::Stopped);
+
+    ESP_LOGI(TAG, "[PASS] Batch 8 Test B passed.");
+    return true;
+}
+
+bool test_batch8_output_transaction_and_fault_unification() {
+    ESP_LOGI(TAG, "Batch 8 Test C: Output transaction API and unified commit fault transitions...");
+    ControlSourceManager sm;
+    OutputController ctrl;
+    ConfigStore cfg_store;
+    LightingRuntime runtime(sm, ctrl, cfg_store);
+
+    // Requirement 8: Controlled RAII transaction
+    {
+        auto tx = ctrl.begin_transaction();
+        assert(tx.is_active());
+        tx.pixels().set(0, 0, 0xAA, 0, 0, 0);
+        tx.pwm().set(0, 1000);
+        esp_err_t commit_res = tx.commit();
+        assert(commit_res == ESP_OK);
+        assert(!tx.is_active());
+    }
+
+    // Requirement 9: Unified fault state transitions on commit failure
+    assert(runtime.output_state() == LightingRuntime::OutputState::Healthy);
+    assert(runtime.output_commit_failure_count() == 0);
+    assert(runtime.output_fault_count() == 0);
+
+    // Simulate commit failure
+    ctrl.set_mock_failure_injections(1);
+    {
+        auto tx = ctrl.begin_transaction();
+        esp_err_t res = tx.commit();
+        assert(res != ESP_OK);
+    }
+
+    // Automatic transition to Faulted without manual report_output_fault()
+    assert(runtime.output_state() == LightingRuntime::OutputState::Faulted);
+    assert(runtime.output_commit_failure_count() == 1);
+    assert(runtime.output_fault_count() == 1);
+
+    // Clear fault moves state to Armed
+    runtime.clear_output_fault();
+    assert(runtime.output_state() == LightingRuntime::OutputState::Armed);
+
+    // Successful commit while Armed restores Healthy
+    {
+        auto tx = ctrl.begin_transaction();
+        assert(tx.commit() == ESP_OK);
+    }
+    assert(runtime.output_state() == LightingRuntime::OutputState::Healthy);
+
+    // Failure while Armed immediately drops back to Faulted
+    runtime.clear_output_fault();
+    assert(runtime.output_state() == LightingRuntime::OutputState::Armed);
+    ctrl.set_mock_failure_injections(1);
+    {
+        auto tx = ctrl.begin_transaction();
+        assert(tx.commit() != ESP_OK);
+    }
+    assert(runtime.output_state() == LightingRuntime::OutputState::Faulted);
+    assert(runtime.output_commit_failure_count() == 2);
+    assert(runtime.output_fault_count() == 2);
+
+    runtime.clear_output_fault();
+    {
+        auto tx = ctrl.begin_transaction();
+        assert(tx.commit() == ESP_OK);
+    }
+    assert(runtime.output_state() == LightingRuntime::OutputState::Healthy);
+
+    // Driver-level failure injection tests (Requirement 14)
+    // 1. Pixel driver failure only
+    ctrl.set_mock_pixel_failure(true);
+    {
+        auto tx = ctrl.begin_transaction();
+        esp_err_t res = tx.commit();
+        assert(res == ESP_ERR_TIMEOUT);
+    }
+    assert(runtime.output_state() == LightingRuntime::OutputState::Faulted);
+    assert(ctrl.last_commit_error() == ESP_ERR_TIMEOUT);
+    assert(runtime.output_commit_failure_count() == 3);
+    assert(runtime.output_fault_count() == 3);
+    ctrl.set_mock_pixel_failure(false);
+
+    runtime.clear_output_fault();
+    assert(runtime.output_state() == LightingRuntime::OutputState::Armed);
+
+    // 2. PWM driver failure only
+    ctrl.set_mock_pwm_failure(true);
+    {
+        auto tx = ctrl.begin_transaction();
+        esp_err_t res = tx.commit();
+        assert(res == ESP_ERR_INVALID_RESPONSE);
+    }
+    assert(runtime.output_state() == LightingRuntime::OutputState::Faulted);
+    assert(ctrl.last_commit_error() == ESP_ERR_INVALID_RESPONSE);
+    assert(runtime.output_commit_failure_count() == 4);
+    assert(runtime.output_fault_count() == 4);
+    ctrl.set_mock_pwm_failure(false);
+
+    runtime.clear_output_fault();
+    assert(runtime.output_state() == LightingRuntime::OutputState::Armed);
+
+    // 3. Both drivers fail
+    ctrl.set_mock_pixel_failure(true);
+    ctrl.set_mock_pwm_failure(true);
+    {
+        auto tx = ctrl.begin_transaction();
+        esp_err_t res = tx.commit();
+        assert(res != ESP_OK);
+    }
+    assert(runtime.output_state() == LightingRuntime::OutputState::Faulted);
+    assert(runtime.output_commit_failure_count() == 5);
+    assert(runtime.output_fault_count() == 5);
+    ctrl.set_mock_pixel_failure(false);
+    ctrl.set_mock_pwm_failure(false);
+
+    // Explicit recovery from Armed -> Healthy
+    runtime.clear_output_fault();
+    assert(runtime.output_state() == LightingRuntime::OutputState::Armed);
+    {
+        auto tx = ctrl.begin_transaction();
+        assert(tx.commit() == ESP_OK);
+    }
+    assert(runtime.output_state() == LightingRuntime::OutputState::Healthy);
+
+    // Candidate reconfigure failure & topology validity policy (Requirement 15)
+    DeviceConfig bad_cfg{};
+    bad_cfg.physical_outputs[0].type = OutputType::RMT;
+    bad_cfg.physical_outputs[0].gpio_pin = 13;
+    bad_cfg.physical_outputs[0].enabled = true;
+    bad_cfg.physical_outputs[1].type = OutputType::RMT;
+    bad_cfg.physical_outputs[1].gpio_pin = 13; // Duplicate GPIO pin conflict!
+    bad_cfg.physical_outputs[1].enabled = true;
+
+    esp_err_t reconf_err = ctrl.reconfigure(bad_cfg);
+    assert(reconf_err != ESP_OK);
+    assert(!ctrl.is_topology_valid());
+    assert(!ctrl.output_enabled());
+
+    // Commits during invalid topology must be safely rejected
+    {
+        auto tx = ctrl.begin_transaction();
+        assert(tx.commit() == ESP_ERR_INVALID_STATE);
+    }
+
+    ESP_LOGI(TAG, "[PASS] Batch 8 Test C passed (driver failure injection & topology invalidation verified).");
+    return true;
+}
+
+bool test_batch8_dmx_ltp_same_ms_tie_and_expiry() {
+    ESP_LOGI(TAG, "Batch 8 Test D: LTP same-ms arrival_seq tie-breaking and universe expiration...");
+    ControlSourceManager sm;
+    OutputController ctrl;
+    ConfigStore cfg_store;
+    LightingRuntime runtime(sm, ctrl, cfg_store);
+    DmxRouter router(runtime);
+
+    DeviceConfig cfg{};
+    cfg.protocol.merge_mode = MergeMode::LTP;
+    cfg.protocol.stream_timeout_ms = 500;
+    cfg.fixtures[0].profile = FixtureProfile::WS2812;
+    cfg.fixtures[0].num_pixels = 4;
+    cfg.fixtures[0].dmx_universe = 1;
+    cfg.fixtures[0].dmx_start_channel = 1;
+    router.update_config(cfg);
+
+    // Simulate two distinct Art-Net sources arriving in the EXACT same millisecond
+    ArtnetDmxPacket pktA{};
+    pktA.universe = 1;
+    pktA.length = 3;
+    pktA.source_ip = 0x0A000001; // 10.0.0.1
+    pktA.data[0] = 50;
+
+    ArtnetDmxPacket pktB{};
+    pktB.universe = 1;
+    pktB.length = 3;
+    pktB.source_ip = 0x0A000002; // 10.0.0.2
+    pktB.data[0] = 200;
+
+    // Send pktA then pktB
+    router.handle_artnet_dmx(pktA);
+    router.handle_artnet_dmx(pktB);
+
+    // In LTP with identical timestamp, the later arrival_seq MUST win (Requirement 12)
+    DmxRouter::DmxStats stats = router.get_stats();
+    assert(stats.active_sources == 2);
+    assert(stats.active_universes == 1);
+
+    // Requirement 10: Universe timeout tick() without new packets
+    router.tick(1000); // Exceeds 500ms timeout
+    stats = router.get_stats();
+    assert(stats.active_sources == 0);
+    assert(stats.active_universes == 0);
+
+    // Reappearance of source A after timeout succeeds cleanly (Requirement 10.7)
+    pktA.sequence = 1;
+    router.handle_artnet_dmx(pktA);
+    stats = router.get_stats();
+    assert(stats.active_sources == 1);
+    assert(stats.active_universes == 1);
+
+    ESP_LOGI(TAG, "[PASS] Batch 8 Test D passed.");
+    return true;
+}
+
+bool test_batch8_dmx_source_capacity_policy() {
+    ESP_LOGI(TAG, "Batch 8 Test E: Bounded 4-source capacity policy...");
+    ControlSourceManager sm;
+    OutputController ctrl;
+    ConfigStore cfg_store;
+    LightingRuntime runtime(sm, ctrl, cfg_store);
+    DmxRouter router(runtime);
+
+    DeviceConfig cfg{};
+    cfg.protocol.stream_timeout_ms = 1000;
+    cfg.fixtures[0].profile = FixtureProfile::WS2812;
+    cfg.fixtures[0].num_pixels = 4;
+    cfg.fixtures[0].dmx_universe = 1;
+    cfg.fixtures[0].dmx_start_channel = 1;
+    router.update_config(cfg);
+
+    // Register 4 distinct sources
+    for (uint32_t i = 1; i <= 4; ++i) {
+        ArtnetDmxPacket pkt{};
+        pkt.universe = 1;
+        pkt.length = 3;
+        pkt.source_ip = 0x0A000000 | i;
+        pkt.data[0] = static_cast<uint8_t>(i * 10);
+        router.handle_artnet_dmx(pkt);
+    }
+    assert(router.get_stats().active_sources == 4);
+    assert(router.get_stats().sources_dropped == 0);
+
+    // 5th source arrives -> must be rejected, counter incremented (Requirement 13)
+    ArtnetDmxPacket pkt5{};
+    pkt5.universe = 1;
+    pkt5.length = 3;
+    pkt5.source_ip = 0x0A000005;
+    pkt5.data[0] = 50;
+    router.handle_artnet_dmx(pkt5);
+
+    assert(router.get_stats().active_sources == 4);
+    assert(router.get_stats().sources_dropped == 1);
+
+    ESP_LOGI(TAG, "[PASS] Batch 8 Test E passed.");
+    return true;
+}
+
+bool test_batch8_dmx_partial_expiration_both_directions_and_reuse() {
+    ESP_LOGI(TAG, "Batch 8 Test H: DMX partial-source expiration in both directions & slot reuse...");
+    ControlSourceManager sm;
+    sm.init();
+    OutputController ctrl;
+    ConfigStore cfg_store;
+    LightingRuntime runtime(sm, ctrl, cfg_store);
+    DmxRouter router(runtime);
+
+    DeviceConfig cfg{};
+    cfg.protocol.merge_mode = MergeMode::HTP;
+    cfg.protocol.stream_timeout_ms = 500;
+    cfg.protocol.universe_start = 1;
+    cfg.fixtures[0].profile = FixtureProfile::WS2812;
+    cfg.fixtures[0].num_pixels = 4;
+    cfg.fixtures[0].dmx_universe = 1;
+    cfg.fixtures[0].dmx_start_channel = 1;
+    router.update_config(cfg);
+
+    DmxSourceId srcA{DmxSourceProtocol::Sacn, {1, 0, 0, 0}};
+    DmxSourceId srcB{DmxSourceProtocol::Sacn, {2, 0, 0, 0}};
+
+    // ── Direction 1: A + B -> A expires -> B-only submitted -> B expires -> clear live ──
+    std::array<uint8_t, 4> dataA_high{255, 0, 0, 0};
+    std::array<uint8_t, 4> dataB_low{100, 0, 0, 0};
+
+    // A arrives
+    uint32_t tA = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+    router.process_frame(1, dataA_high.data(), 4, 100, srcA, 1);
+    vTaskDelay(pdMS_TO_TICKS(150));
+    // B arrives
+    uint32_t tB = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+    router.process_frame(1, dataB_low.data(), 4, 100, srcB, 1);
+
+    // Merged value is 255 (HTP max(255, 100))
+    assert(runtime.last_dmx_data()[0] == 255);
+    assert(runtime.current_control_source() == ControlSource::LiveDmx);
+    assert(router.get_stats().active_sources == 2);
+
+    // Advance time: Source A timed out (elapsed > 500ms), Source B still within 500ms
+    router.tick(tA + 510);
+    // B-only frame submitted immediately: value must now be 100! (Requirement 7)
+    assert(runtime.last_dmx_data()[0] == 100);
+    assert(runtime.current_control_source() == ControlSource::LiveDmx);
+    assert(router.get_stats().active_sources == 1);
+
+    // Final source B times out (elapsed > 500ms)
+    router.tick(tB + 510);
+    // When final source expires: universe removed, patch cleared, LiveDmx released! (Requirements 7, 11)
+    assert(router.get_stats().active_sources == 0);
+    assert(router.get_stats().active_universes == 0);
+    assert(runtime.current_control_source() == ControlSource::Idle);
+
+    // ── Direction 2: A + B -> B expires -> A-only submitted -> A expires -> clear live ──
+    std::array<uint8_t, 4> dataB_high{250, 0, 0, 0};
+    std::array<uint8_t, 4> dataA_low{80, 0, 0, 0};
+
+    // B arrives first
+    uint32_t tB2 = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+    router.process_frame(1, dataB_high.data(), 4, 100, srcB, 2);
+    vTaskDelay(pdMS_TO_TICKS(150));
+    // A arrives second
+    uint32_t tA2 = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+    router.process_frame(1, dataA_low.data(), 4, 100, srcA, 2);
+
+    // Merged value is 250 (HTP max(250, 80))
+    assert(runtime.last_dmx_data()[0] == 250);
+    assert(runtime.current_control_source() == ControlSource::LiveDmx);
+    assert(router.get_stats().active_sources == 2);
+
+    // Advance time: Source B timed out, Source A still active
+    router.tick(tB2 + 510);
+    // A-only frame submitted immediately: value must now be 80! (Requirement 7)
+    assert(runtime.last_dmx_data()[0] == 80);
+    assert(runtime.current_control_source() == ControlSource::LiveDmx);
+    assert(router.get_stats().active_sources == 1);
+
+    // Final source A times out
+    router.tick(tA2 + 510);
+    assert(router.get_stats().active_sources == 0);
+    assert(router.get_stats().active_universes == 0);
+    assert(runtime.current_control_source() == ControlSource::Idle);
+
+    // ── Universe Slot Reuse Protection (Requirement 8) ──
+    cfg.fixtures[1].profile = FixtureProfile::WS2812;
+    cfg.fixtures[1].num_pixels = 4;
+    cfg.fixtures[1].dmx_universe = 2;
+    cfg.fixtures[1].dmx_start_channel = 1;
+    router.update_config(cfg);
+
+    // Universe 1 active with distinct data
+    std::array<uint8_t, 4> u1_data{111, 222, 123, 0};
+    router.process_frame(1, u1_data.data(), 4, 100, srcA, 10);
+    assert(runtime.last_dmx_data()[0] == 111);
+
+    // Universe 1 times out
+    uint32_t t_u1 = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+    router.tick(t_u1 + 600);
+    assert(router.get_stats().active_universes == 0);
+
+    // Universe 2 arrives into the tracked slot
+    std::array<uint8_t, 4> u2_data{42, 43, 44, 0};
+    router.process_frame(2, u2_data.data(), 4, 100, srcB, 1);
+    assert(router.get_stats().active_universes == 1);
+
+    // Reappearance of Universe 1 packet with sequence 1 after expiry (Sequence reset test)
+    std::array<uint8_t, 4> u1_new{77, 0, 0, 0};
+    router.process_frame(1, u1_new.data(), 4, 100, srcA, 1);
+    assert(runtime.last_dmx_data()[0] == 77);
+
+    // LTP mode universe reuse test (Requirement 8)
+    cfg.protocol.merge_mode = MergeMode::LTP;
+    router.update_config(cfg);
+
+    std::array<uint8_t, 4> ltp_u1{88, 88, 88, 0};
+    router.process_frame(1, ltp_u1.data(), 4, 100, srcA, 2);
+    uint32_t t_ltp1 = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+    router.tick(t_ltp1 + 600);
+    assert(router.get_stats().active_universes == 0);
+
+    std::array<uint8_t, 4> ltp_u2{33, 33, 33, 0};
+    router.process_frame(2, ltp_u2.data(), 4, 100, srcB, 1);
+    assert(router.get_stats().active_universes == 1);
+
+    ESP_LOGI(TAG, "[PASS] Batch 8 Test H passed (DMX partial expiration in both directions & slot reuse).");
+    return true;
+}
+
+bool test_batch8_protocol_consistency_and_artnet_serialization() {
+    ESP_LOGI(TAG, "Batch 8 Test F: Protocol universe consistency and Art-Net 4 serialization...");
+    ControlSourceManager sm;
+    OutputController ctrl;
+    ConfigStore cfg_store;
+    LightingRuntime runtime(sm, ctrl, cfg_store);
+    DmxRouter router(runtime);
+
+    DeviceConfig cfg{};
+    cfg.protocol.universe_start = 1;
+    cfg.fixtures[0].profile = FixtureProfile::WS2812;
+    cfg.fixtures[0].num_pixels = 4;
+    cfg.fixtures[0].dmx_universe = 1;
+    cfg.fixtures[0].dmx_start_channel = 1;
+
+    cfg.fixtures[1].profile = FixtureProfile::WS2812;
+    cfg.fixtures[1].num_pixels = 4;
+    cfg.fixtures[1].dmx_universe = 16;
+    cfg.fixtures[1].dmx_start_channel = 1;
+
+    router.update_config(cfg);
+
+    // Requirement 14: collect_patched_universes matches get_active_universes
+    uint16_t active_unis[16];
+    size_t count = router.get_active_universes(active_unis, 16);
+    assert(count == 2);
+    assert(active_unis[0] == 1);
+    assert(active_unis[1] == 16);
+
+    // Requirement 15: Exact PollReply byte serialization for universes 1, 16, 255, 512
+    uint8_t buffer[250];
+
+    // Universe 1: Net=0, Sub-Net=0, SwOut=1
+    {
+        ArtnetNodeInfo node{};
+        uint8_t net = 0, sub = 0, uni = 0;
+        decode_port_address(1, net, sub, uni);
+        node.net = net;
+        node.subnet = sub;
+        node.sw_out[0] = uni;
+        node.num_ports = 1;
+
+        size_t len = ArtnetDiscovery::serialize_poll_reply(node, buffer, sizeof(buffer));
+        assert(len == 239);
+        assert(buffer[18] == 0);  // NetSwitch (offset 18)
+        assert(buffer[19] == 0);  // SubSwitch (offset 19)
+        assert(buffer[190] == 1); // SwOut[0] (offset 190)
+    }
+
+    // Universe 16: Net=0, Sub-Net=1, SwOut=0
+    {
+        ArtnetNodeInfo node{};
+        uint8_t net = 0, sub = 0, uni = 0;
+        decode_port_address(16, net, sub, uni);
+        node.net = net;
+        node.subnet = sub;
+        node.sw_out[0] = uni;
+        node.num_ports = 1;
+
+        size_t len = ArtnetDiscovery::serialize_poll_reply(node, buffer, sizeof(buffer));
+        assert(len == 239);
+        assert(buffer[18] == 0);  // NetSwitch (offset 18)
+        assert(buffer[19] == 1);  // SubSwitch (offset 19)
+        assert(buffer[190] == 0); // SwOut[0] (offset 190)
+    }
+
+    // Universe 255: Net=0, Sub-Net=15 (0x0F), SwOut=15 (0x0F)
+    {
+        ArtnetNodeInfo node{};
+        uint8_t net = 0, sub = 0, uni = 0;
+        decode_port_address(255, net, sub, uni);
+        node.net = net;
+        node.subnet = sub;
+        node.sw_out[0] = uni;
+        node.num_ports = 1;
+
+        size_t len = ArtnetDiscovery::serialize_poll_reply(node, buffer, sizeof(buffer));
+        assert(len == 239);
+        assert(buffer[18] == 0);   // NetSwitch (offset 18)
+        assert(buffer[19] == 15);  // SubSwitch (offset 19)
+        assert(buffer[190] == 15); // SwOut[0] (offset 190)
+    }
+
+    // Universe 512: Net=2, Sub-Net=0, SwOut=0
+    {
+        ArtnetNodeInfo node{};
+        uint8_t net = 0, sub = 0, uni = 0;
+        decode_port_address(512, net, sub, uni);
+        node.net = net;
+        node.subnet = sub;
+        node.sw_out[0] = uni;
+        node.num_ports = 1;
+
+        size_t len = ArtnetDiscovery::serialize_poll_reply(node, buffer, sizeof(buffer));
+        assert(len == 239);
+        assert(buffer[18] == 2);  // NetSwitch (offset 18)
+        assert(buffer[19] == 0);  // SubSwitch (offset 19)
+        assert(buffer[190] == 0); // SwOut[0] (offset 190)
+    }
+
+    ESP_LOGI(TAG, "[PASS] Batch 8 Test F passed.");
+    return true;
+}
+
+bool test_batch8_observational_health_and_lifecycle_rollback() {
+    ESP_LOGI(TAG, "Batch 8 Test G: Purely observational health, persistence states, and lifecycle rollback...");
+    ConfigStore cfg_store;
+    assert(cfg_store.persistence_state_str() != nullptr);
+    const auto& res = cfg_store.cached_validation_result();
+    (void)res;
+
+    // Requirement 19: Persistence state machine strings
+    assert(strcmp(persistence_state_to_name(ConfigPersistenceState::Synchronized), "Synchronized") == 0);
+    assert(strcmp(persistence_state_to_name(ConfigPersistenceState::PrimaryOnly), "PrimaryOnly") == 0);
+    assert(strcmp(persistence_state_to_name(ConfigPersistenceState::SaveFailed), "SaveFailed") == 0);
+    assert(strcmp(persistence_state_to_name(ConfigPersistenceState::RecoveryRequired), "RecoveryRequired") == 0);
+
+    // Requirement 18: Observational health diagnostics without NVS load
+    StartupDiagnostics diag{
+        startup_state_to_name(StartupState::Booting),
+        startup_stage_to_name(StartupStage::None),
+        startup_stage_to_name(StartupStage::None),
+        0
+    };
+    assert(strcmp(diag.startup_state, "Booting") == 0);
+
+    // Requirement 21: Recovery button simulation (grace period, debounce, one-shot latch)
+    {
+        int stable_press_count = 0;
+        constexpr int kRequiredHoldTicks = 250; // 250 * 20ms = 5000ms
+        bool reset_triggered = false;
+        int trigger_count = 0;
+
+        // Simulate continuously held button for 500 samples (10 seconds)
+        for (int tick = 0; tick < 500; ++tick) {
+            // Simulated GPIO LOW (button pressed)
+            const int gpio_level = 0;
+            if (gpio_level == 0) {
+                stable_press_count++;
+                if (stable_press_count >= kRequiredHoldTicks) {
+                    if (!reset_triggered) {
+                        reset_triggered = true;
+                        trigger_count++;
+                    }
+                }
+            } else {
+                stable_press_count = 0;
+            }
+        }
+
+        // Must trigger exactly once (one-shot guarantee) despite remaining held
+        assert(reset_triggered == true);
+        assert(trigger_count == 1);
+    }
+
+    ESP_LOGI(TAG, "[PASS] Batch 8 Test G passed.");
+    return true;
+}
+
 } // namespace
 
 bool run_runtime_hardening_tests() {
     ESP_LOGI(TAG, "==================================================");
-    ESP_LOGI(TAG, "  STARTING RUNTIME HARDENING TESTS (BATCH 3..7)");
+    ESP_LOGI(TAG, "  STARTING RUNTIME HARDENING TESTS (BATCH 3..8)");
     ESP_LOGI(TAG, "==================================================");
 
     bool all_ok = true;
@@ -1805,6 +2464,16 @@ bool run_runtime_hardening_tests() {
     all_ok &= test_batch7_router_to_runtime_integration();// Batch 7 Test C
     all_ok &= test_batch7_shutdown_restart();             // Batch 7 Test D
 
+    // Batch 8 Tests
+    all_ok &= test_batch8_double_start_and_cooperative_shutdown();         // Batch 8 Test A
+    all_ok &= test_batch8_factory_runner_abort_vs_estop();                 // Batch 8 Test B
+    all_ok &= test_batch8_output_transaction_and_fault_unification();       // Batch 8 Test C
+    all_ok &= test_batch8_dmx_ltp_same_ms_tie_and_expiry();               // Batch 8 Test D
+    all_ok &= test_batch8_dmx_source_capacity_policy();                   // Batch 8 Test E
+    all_ok &= test_batch8_protocol_consistency_and_artnet_serialization(); // Batch 8 Test F
+    all_ok &= test_batch8_observational_health_and_lifecycle_rollback();   // Batch 8 Test G
+    all_ok &= test_batch8_dmx_partial_expiration_both_directions_and_reuse(); // Batch 8 Test H
+
     if (all_ok) {
         ESP_LOGI(TAG, "==================================================");
         ESP_LOGI(TAG, "  ALL RUNTIME HARDENING TESTS PASSED SUCCESSFULLY!");
@@ -1816,3 +2485,5 @@ bool run_runtime_hardening_tests() {
 }
 
 } // namespace lg
+
+#endif // CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS

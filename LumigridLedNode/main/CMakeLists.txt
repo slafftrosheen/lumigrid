@@ -1,11 +1,8 @@
 set(MAIN_SRCS
     "main.cpp"
     "LumigridRuntime.cpp"
+    "RuntimeHardeningTests.cpp"
 )
-
-if(CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS)
-    list(APPEND MAIN_SRCS "RuntimeHardeningTests.cpp")
-endif()
 
 idf_component_register(
     SRCS

@@ -1,0 +1,96 @@
+# LumiGrid Runtime Certification Status
+
+> **Target Base Commit**: `90e7644bd943dfe285d9e8ff69effc9f843f51a1`
+> **Date**: September 2026
+> **Scope**: Certification Hardening, Lifecycle Integrity, Concurrency Safety, and Verification Status.
+> **Certification Stage**: Pre-Hardware Verification (Architecture & Simulation Complete). Full certification is **NOT** claimed until physical hardware milestones are completed.
+
+---
+
+## 1. Runtime Invariant Verification Matrix
+
+| Category | Invariant Description | Status | Verification Level |
+| :--- | :--- | :---: | :--- |
+| **Lifecycle** | Transactional `start()`: Synchronous initialization with sequential rollback on failure | `[PASS]` | Compile Verified, Integration |
+| **Lifecycle** | Zero `ESP_ERROR_CHECK()` in runtime startup and infrastructure paths | `[PASS]` | Compile Verified, Static CI |
+| **Lifecycle** | Cooperative `stop()`: Task observes shutdown signal and completes before state destruction | `[PASS]` | Compile Verified, Integration |
+| **Lifecycle** | Double-start rejection with `ESP_ERR_INVALID_STATE` and deterministic repeated stops | `[PASS]` | Compile Verified, Unit Test |
+| **Lifecycle** | Instance-scoped `services_started_` (zero process-global static state) | `[PASS]` | Compile Verified, Unit Test |
+| **Factory** | Transactional startup: queue, mutex, and task allocations rollback on partial failure | `[PASS]` | Compile Verified, Unit Test |
+| **Factory** | Serialized command transition pipeline (`validate -> state -> ownership -> output`) | `[PASS]` | Compile Verified, Integration |
+| **Factory** | Strict decoupling: Factory Abort releases ownership and blacks out WITHOUT activating E-Stop | `[PASS]` | Compile Verified, Unit Test |
+| **Output** | Scoped Output Transaction API (`begin_transaction` / `commit`) with RAII auto-unlock | `[PASS]` | Compile Verified, Unit Test |
+| **Output** | Unified commit fault owner: physical commit failure drives `Healthy -> Faulted -> Armed -> Healthy` | `[PASS]` | Compile Verified, Integration |
+| **Protocols** | Deterministic LTP tie-breaking on same-millisecond arrivals via monotonic `arrival_seq` | `[PASS]` | Compile Verified, Unit Test |
+| **Protocols** | Safe timestamp wraparound comparison using bounded `elapsed_ms(now, then)` | `[PASS]` | Compile Verified, Simulated |
+| **Protocols** | Strict 4-source bounded capacity policy (5th rejected, live sources never overwritten) | `[PASS]` | Compile Verified, Unit Test |
+| **Protocols** | DMX universe timeout without packets via `DmxRouter::tick()` maintenance loop | `[PASS]` | Compile Verified, Integration |
+| **Protocols** | Single authoritative universe patch collector: `Art-Net == sACN == DmxRouter` | `[PASS]` | Compile Verified, Unit Test |
+| **Protocols** | Art-Net 4 15-bit Port-Address serialization (NetSwitch @ 18, SubSwitch @ 19, SwOut @ 190..193) | `[PASS]` | Compile Verified, Unit Test |
+| **Observability** | Purely observational `/api/v1/health`: zero NVS reads/writes, zero hardware operations | `[PASS]` | Compile Verified, Unit Test |
+| **Observability** | Real-time diagnostic startup state (`startup_state`, `startup_stage`, `failing_stage`, `failing_error`) | `[PASS]` | Compile Verified, Integration |
+| **Security** | Production credentials policy: non-universal AP recovery credential (no static `"lumigrid123"`) | `[PASS]` | Compile Verified, Static CI |
+| **Hardware** | Factory recovery button: 3s grace period, 20ms debounce, stuck pin protection, safe blackout | `[PASS]` | Compile Verified, Simulated |
+
+---
+
+## 2. Invariant Detail & Verification Results
+
+### 2.1 Lifecycle & Shutdown Safety
+- **Synchronous Lifecycle**: `LumigridRuntime::start()` executes synchronous network wait, API startup, mDNS discovery, protocol listeners (Art-Net/sACN), and background services sequentially. Any failure halts progression, executes reverse-order teardown via `rollback_services()`, blackouts outputs, enters `Faulted` state, and returns the error code without crashing the MCU.
+- **Cooperative Shutdown**: `LightingRuntime::stop()` sets `shutting_down_ = true`, aborts blocking delays, waits for the task to complete via `shutdown_sem_`, and only then safely deletes runtime-owned synchronization primitives.
+- **No Double-Start**: Both `LumigridRuntime` and `LightingRuntime` reject repeated `start()` invocations with `ESP_ERR_INVALID_STATE`. Multiple calls to `stop()` are idempotent.
+
+### 2.2 Protocol Correctness & Serialization
+- **Art-Net 4 Spec Adherence**: ArtPollReply serialization strictly formats 15-bit Port-Addresses:
+  - Universe 1: `Net=0, SubNet=0, SwOut[0]=1`
+  - Universe 16: `Net=0, SubNet=1, SwOut[0]=0`
+  - Universe 255: `Net=0, SubNet=15, SwOut[0]=15`
+  - Universe 512: `Net=2, SubNet=0, SwOut[0]=0`
+- **Deterministic LTP**: Packet arrival sequencing assigns a monotonic 64-bit `arrival_seq` to every incoming packet, breaking timestamp ties deterministically when packets arrive within the same millisecond.
+- **Bounded Capacity**: Bounded at 4 concurrent active sources per universe. A 5th source is rejected and increments `sources_dropped` without evicting active transmitters.
+
+### 2.3 Output & Safety Architecture
+- **Output Transaction RAII**: All frame staging occurs inside `OutputTransaction` objects acquiring the hardware lock once. Staging methods (`pixels()`, `pwm()`) are scoped to the transaction, and `commit()` invokes the physical driver commit pipeline.
+- **Unified Fault State Transition**: Physical commit failures immediately trigger the `CommitObserver`, advancing `LightingRuntime` output state to `Faulted` and recording distinct metrics for failed commits and fault events.
+
+---
+
+## 3. Remaining Hardware Verification Milestones
+
+The software architecture and simulation boundaries are fully hardened. The runtime now strictly requires physical hardware validation on reference test fixtures before claiming full certification.
+
+- [ ] **Actual RMT Output Verification**:
+  - Verify WS2812 / SK6812 signal integrity on an oscilloscope (timing parameters: $T0H = 350\text{ns} \pm 150\text{ns}$, $T1H = 900\text{ns} \pm 150\text{ns}$).
+  - Verify 8 parallel RMT channels under maximum pixel load (8 x 300 pixels @ 40 FPS).
+- [ ] **Actual PCA9685 Output Verification**:
+  - Verify I2C bus clock stretching, waveform shape, and fast-mode (400 kHz) stability.
+  - Verify output enable (OE) physical pull-down and PWM duty accuracy from 0 to 4095.
+- [ ] **Physical Art-Net Source Validation**:
+  - Test real Art-Net controller broadcast and unicast streaming at 44 Hz continuous.
+  - Verify ArtPoll / ArtPollReply round-trip and node discovery in QLC+ and Madrix.
+- [ ] **Physical sACN Source Validation**:
+  - Verify IGMPv2/v3 multicast group membership joining and leaving on physical managed switch.
+  - Test multi-console priority preemption (Priority 100 vs Priority 150).
+- [ ] **Hardware Emergency Stop**:
+  - Verify physical GPIO interruption line latching.
+  - Assert zero PWM / LED output within $< 5\text{ms}$ of E-Stop pin trip.
+- [ ] **Factory Hardware Test Output**:
+  - Execute factory direct RGBW pattern and verify physical color balance and gamma response.
+- [ ] **Thermal and Power Budget Verification**:
+  - Validate dynamic power limiter on calibrated DC power supply (assert total draw does not exceed configured `max_power_mw`).
+- [ ] **24h / 72h Continuous Burn-in Run**:
+  - Continuous 72-hour test at 40 FPS under maximum load with 4 concurrent DMX streams.
+  - Assert 0 memory leaks, 0 dropped frames, and zero unexpected watchdog restarts.
+
+---
+
+## 4. Stop Condition Notice
+
+With the completion of Batch 8:
+- **No new effects** will be introduced.
+- **No new fixture profiles** will be added.
+- **No new network protocols** will be implemented.
+- **No UI expansion** will be performed.
+
+Development focus is frozen on physical hardware bench validation and certification testing.

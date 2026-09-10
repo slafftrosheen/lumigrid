@@ -31,13 +31,45 @@ jobs:
           python -m pip install --upgrade pip
           pip install platformio esptool
 
+      - name: Static Architecture & Lifecycle Sanity Checks
+        run: |
+          echo "=== Checking runtime lifecycle and architectural invariants ==="
+          # 1. No ESP_ERROR_CHECK in runtime lifecycle code
+          if grep -rn "ESP_ERROR_CHECK(" LumigridLedNode/main/LumigridRuntime.cpp LumigridLedNode/components/signage/LightingRuntime.cpp LumigridLedNode/components/factory/FactoryRunner.cpp; then
+            echo "ERROR: Found forbidden ESP_ERROR_CHECK in runtime lifecycle code!"
+            exit 1
+          fi
+          # 2. No uncontrolled vTaskDelete(task_handle_)
+          if grep -rn "vTaskDelete(task_handle_" LumigridLedNode/components/signage/LightingRuntime.cpp LumigridLedNode/components/factory/FactoryRunner.cpp; then
+            echo "ERROR: Found uncontrolled external vTaskDelete targeting runtime tasks!"
+            exit 1
+          fi
+          # 3. No static bool services_started
+          if grep -rn "static bool services_started" LumigridLedNode/; then
+            echo "ERROR: Found process-global static bool services_started!"
+            exit 1
+          fi
+          # 4. No hardcoded development password in network component definitions
+          if grep -rn "lumigrid123" LumigridLedNode/components/network/; then
+            echo "ERROR: Found hardcoded development password in network component definitions!"
+            exit 1
+          fi
+          # 5. Dedicated invariant checker
+          python LumigridLedNode/scripts/check_invariants.py
+          # 6. Runtime mathematical and protocol simulation tests
+          python LumigridLedNode/scripts/verify_runtime_math.py
+          echo "=== Static Architecture & Lifecycle Sanity Checks PASSED ==="
+
       # The project uses PlatformIO with the official ESP-IDF framework (espressif32 @ 6.7.0, ESP-IDF 5.2.1)
       # and pre_build.py to generate production dashboard headers from dashboard.html.
-      - name: Build Firmware
+      - name: Build Firmware (Factory and Test environments)
         id: pio_build
         run: |
           cd LumigridLedNode
+          echo "=== Building Factory Environment ==="
           pio run -e factory
+          echo "=== Building Test Environment ==="
+          pio run -e test
 
       - name: Firmware Build Success Status
         if: success()

@@ -17,6 +17,9 @@ Scheduler::Scheduler(
 ) : config_(config), engine_(engine), clock_(clock) {}
 
 esp_err_t Scheduler::start(const char* timezone) {
+    if (running_) {
+        return ESP_ERR_INVALID_STATE;
+    }
     setenv("TZ", timezone, 1);
     tzset();
     ESP_LOGI(TAG, "Timezone set to: %s", timezone);
@@ -28,11 +31,24 @@ esp_err_t Scheduler::start(const char* timezone) {
 
     ESP_LOGI(TAG, "SNTP initialized, waiting for sync...");
 
+    running_ = true;
     const BaseType_t created = xTaskCreatePinnedToCore(
         task_entry, "scheduler", 4096, this, 2, &task_handle_, 0
     );
 
-    return (created == pdPASS) ? ESP_OK : ESP_ERR_NO_MEM;
+    if (created != pdPASS) {
+        running_ = false;
+        task_handle_ = nullptr;
+        esp_sntp_stop();
+        return ESP_ERR_NO_MEM;
+    }
+    return ESP_OK;
+}
+
+esp_err_t Scheduler::stop() {
+    running_ = false;
+    esp_sntp_stop();
+    return ESP_OK;
 }
 
 void Scheduler::task_entry(void* arg) {
@@ -66,7 +82,7 @@ void Scheduler::task() {
     }
 
     TickType_t xLastWakeTime = xTaskGetTickCount();
-    for (;;) {
+    while (running_) {
         vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(50)); // Evaluate 20x a second
 
         if (!time_synced_) {

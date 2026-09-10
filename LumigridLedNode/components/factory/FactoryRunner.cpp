@@ -51,18 +51,41 @@ uint32_t clamp_duration(uint32_t duration_ms) {
 FactoryRunner::FactoryRunner(ControlSourceManager& source_manager, OutputController& controller)
     : source_manager_(source_manager), controller_(controller) {}
 
-esp_err_t FactoryRunner::start() {
-    queue_ = xQueueCreate(kQueueDepth, sizeof(FactoryCommand));
-    if (queue_ == nullptr) return ESP_ERR_NO_MEM;
+FactoryRunner::~FactoryRunner() {
+    stop();
+}
 
+esp_err_t FactoryRunner::start() {
+    if (lifecycle_state_ == LifecycleState::Running || lifecycle_state_ == LifecycleState::Starting) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    lifecycle_state_ = LifecycleState::Starting;
+
+    // Stage 1: Queue allocation (Batch 8 Item 5)
+    queue_ = xQueueCreate(kQueueDepth, sizeof(FactoryCommand));
+    if (queue_ == nullptr) {
+        lifecycle_state_ = LifecycleState::Faulted;
+        source_manager_.release(ControlSource::Factory);
+        return ESP_ERR_NO_MEM;
+    }
+
+    // Stage 2: Status mutex allocation
     status_mutex_ = xSemaphoreCreateMutex();
-    if (status_mutex_ == nullptr) return ESP_ERR_NO_MEM;
+    if (status_mutex_ == nullptr) {
+        vQueueDelete(queue_);
+        queue_ = nullptr;
+        lifecycle_state_ = LifecycleState::Faulted;
+        source_manager_.release(ControlSource::Factory);
+        return ESP_ERR_NO_MEM;
+    }
 
     status_.active_effect = FactoryEffect::SafeBlackout;
     status_.brightness = LG_FACTORY_DEFAULT_BRIGHTNESS;
     status_.auto_loop = false; // Disabled by default to prevent flicker with LightingRuntime
     status_.outputs_enabled = false;
+    status_.test_active = false;
 
+    // Stage 3: Task creation
     const BaseType_t created = xTaskCreatePinnedToCore(
         task_entry,
         "lg_factory",
@@ -73,7 +96,41 @@ esp_err_t FactoryRunner::start() {
         1
     );
 
-    return created == pdPASS ? ESP_OK : ESP_FAIL;
+    if (created != pdPASS) {
+        vSemaphoreDelete(status_mutex_);
+        status_mutex_ = nullptr;
+        vQueueDelete(queue_);
+        queue_ = nullptr;
+        task_handle_ = nullptr;
+        source_manager_.release(ControlSource::Factory);
+        lifecycle_state_ = LifecycleState::Faulted;
+        return ESP_FAIL;
+    }
+
+    lifecycle_state_ = LifecycleState::Running;
+    return ESP_OK;
+}
+
+void FactoryRunner::stop() {
+    if (lifecycle_state_ == LifecycleState::Stopping || lifecycle_state_ == LifecycleState::Stopped) {
+        return;
+    }
+    lifecycle_state_ = LifecycleState::Stopping;
+    if (task_handle_) {
+        TaskHandle_t th = task_handle_;
+        task_handle_ = nullptr;
+        vTaskDelete(th);
+    }
+    blackout();
+    if (status_mutex_) {
+        vSemaphoreDelete(status_mutex_);
+        status_mutex_ = nullptr;
+    }
+    if (queue_) {
+        vQueueDelete(queue_);
+        queue_ = nullptr;
+    }
+    lifecycle_state_ = LifecycleState::Stopped;
 }
 
 bool FactoryRunner::enqueue(const FactoryCommand& command) {
@@ -144,6 +201,8 @@ void FactoryRunner::set_stream_frame(const StreamFramePayload& payload,
                                      uint8_t brightness,
                                      uint32_t duration_ms) {
     const uint32_t current_ms = now_ms();
+    // Establish ownership before marking outputs_enabled (Batch 8 Item 6)
+    source_manager_.acquire(ControlSource::Factory);
 
     xSemaphoreTake(status_mutex_, portMAX_DELAY);
     stream_frame_.stream = payload;
@@ -171,19 +230,33 @@ void FactoryRunner::apply_command(const FactoryCommand& command,
             direct_test_active_ = false;
             xSemaphoreTake(status_mutex_, portMAX_DELAY);
             stream_active_ = false;
+            status_.auto_loop = false;
             xSemaphoreGive(status_mutex_);
             blackout();
             return;
 
         case FactoryCommandType::SetAutoLoop:
-            source_manager_.release(ControlSource::Factory);
-
-            xSemaphoreTake(status_mutex_, portMAX_DELAY);
-            status_.auto_loop = command.enabled;
-            status_.effect_started_ms = current_ms;
-            status_.effect_duration_ms = kLoopEffectDurationMs;
-            xSemaphoreGive(status_mutex_);
-
+            direct_test_active_ = false;
+            if (command.enabled) {
+                source_manager_.acquire(ControlSource::Factory);
+                xSemaphoreTake(status_mutex_, portMAX_DELAY);
+                stream_active_ = false;
+                status_.auto_loop = true;
+                status_.effect_started_ms = current_ms;
+                status_.effect_duration_ms = kLoopEffectDurationMs;
+                xSemaphoreGive(status_mutex_);
+                start_effect(
+                    kLoopEffects[0],
+                    kLoopEffectDurationMs,
+                    LG_FACTORY_DEFAULT_BRIGHTNESS,
+                    current_ms
+                );
+            } else {
+                xSemaphoreTake(status_mutex_, portMAX_DELAY);
+                status_.auto_loop = false;
+                xSemaphoreGive(status_mutex_);
+                blackout();
+            }
             if (status_callback_) status_callback_();
             return;
 
@@ -191,6 +264,7 @@ void FactoryRunner::apply_command(const FactoryCommand& command,
             direct_test_active_ = false;
 
             xSemaphoreTake(status_mutex_, portMAX_DELAY);
+            stream_active_ = false;
             status_.auto_loop = false;
             xSemaphoreGive(status_mutex_);
 
@@ -212,6 +286,7 @@ void FactoryRunner::apply_command(const FactoryCommand& command,
             direct_test_active_ = true;
 
             xSemaphoreTake(status_mutex_, portMAX_DELAY);
+            stream_active_ = false;
             status_.auto_loop = false;
             status_.active_effect = FactoryEffect::SafeBlackout;
             status_.effect_started_ms = current_ms;

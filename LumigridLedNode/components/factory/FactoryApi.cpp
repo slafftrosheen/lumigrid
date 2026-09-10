@@ -374,10 +374,6 @@ esp_err_t post_abort(httpd_req_t* request) {
         return send_error(request, "409 Conflict", "command_queue_full");
     }
 
-    if (api_ptr->signage()) {
-        api_ptr->signage()->acquire_control(ControlSource::EStop, 0);
-    }
-
     return send_json(request, R"({"accepted":true,"action":"blackout"})");
 }
 
@@ -457,27 +453,36 @@ esp_err_t get_health(httpd_req_t* request) {
 
     bool config_valid = true;
     uint32_t config_error_count = 0;
-    char config_first_error[128] = "";
+    const char* config_first_error = "";
+    const char* persistence_state = "Unknown";
+    bool primary_config_valid = false;
+    bool backup_config_valid = false;
 
     if (api_ptr->config()) {
-        DeviceConfig cfg;
-        if (api_ptr->config()->load_config(cfg) == ESP_OK) {
-            ConfigStore::ConfigValidationResult val_res;
-            if (ConfigStore::validate_config(cfg, &val_res) != ESP_OK) {
-                config_valid = false;
-                config_error_count = val_res.error_count;
-                strncpy(config_first_error, val_res.first_error, sizeof(config_first_error));
-            }
-        } else {
-            config_valid = false;
-            config_error_count = 1;
-            strncpy(config_first_error, "Failed to load device config", sizeof(config_first_error));
-        }
+        const auto& val_res = api_ptr->config()->cached_validation_result();
+        config_valid = val_res.valid;
+        config_error_count = val_res.error_count;
+        config_first_error = val_res.first_error;
+        persistence_state = api_ptr->config()->persistence_state_str();
+        primary_config_valid = api_ptr->config()->is_primary_valid();
+        backup_config_valid = api_ptr->config()->is_backup_valid();
     }
 
     cJSON_AddBoolToObject(root, "configuration_valid", config_valid);
     cJSON_AddNumberToObject(root, "configuration_error_count", config_error_count);
     cJSON_AddStringToObject(root, "configuration_first_error", config_first_error);
+    cJSON_AddStringToObject(root, "persistence_state", persistence_state);
+    cJSON_AddBoolToObject(root, "primary_config_valid", primary_config_valid);
+    cJSON_AddBoolToObject(root, "backup_config_valid", backup_config_valid);
+
+    StartupDiagnostics diag{};
+    if (api_ptr->diagnostics_provider()) {
+        diag = api_ptr->diagnostics_provider()();
+    }
+    cJSON_AddStringToObject(root, "startup_state", diag.startup_state);
+    cJSON_AddStringToObject(root, "startup_stage", diag.startup_stage);
+    cJSON_AddStringToObject(root, "failing_stage", diag.failing_stage);
+    cJSON_AddNumberToObject(root, "failing_error", diag.failing_error);
 
     const char* output_state_str = "Healthy";
     bool output_fault = false;
@@ -551,23 +556,11 @@ esp_err_t get_health(httpd_req_t* request) {
     cJSON_AddBoolToObject(root, "watchdog_fallback", watchdog_fallback);
 
     cJSON* univ_arr = cJSON_CreateArray();
-    if (api_ptr->config()) {
-        DeviceConfig cfg;
-        if (api_ptr->config()->load_config(cfg) == ESP_OK) {
-            std::vector<uint16_t> univs;
-            univs.push_back(cfg.protocol.universe_start);
-            for (const auto& fix : cfg.fixtures) {
-                if (fix.dmx_start_channel > 0) {
-                    bool exists = false;
-                    for (uint16_t u : univs) {
-                        if (u == fix.dmx_universe) { exists = true; break; }
-                    }
-                    if (!exists) univs.push_back(fix.dmx_universe);
-                }
-            }
-            for (uint16_t u : univs) {
-                cJSON_AddItemToArray(univ_arr, cJSON_CreateNumber(u));
-            }
+    if (api_ptr->dmx_router()) {
+        uint16_t active_unis[16];
+        size_t u_count = api_ptr->dmx_router()->get_active_universes(active_unis, 16);
+        for (size_t i = 0; i < u_count; ++i) {
+            cJSON_AddItemToArray(univ_arr, cJSON_CreateNumber(active_unis[i]));
         }
     }
     cJSON_AddItemToObject(root, "configured_universes", univ_arr);

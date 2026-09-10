@@ -66,10 +66,10 @@ esp_err_t OutputScheduler::schedule(
         }
     }
 
-    // ── Pass 2: Driver state mutation & staging (Batch 7 Item 10: lock held across staging transaction) ──
-    controller.lock();
-    controller.pixels().clear_buffer();
-    controller.pwm().set_all(0);
+    // ── Pass 2: Driver state mutation & staging via RAII OutputTransaction (Batch 8 Item 8) ──
+    OutputTransaction tx = controller.begin_transaction();
+    tx.pixels().clear_buffer();
+    tx.pwm().set_all(0);
 
     for (uint8_t f = 0; f < 16; ++f) {
         const FixtureConfig& fixture = device_cfg.fixtures[f];
@@ -88,7 +88,7 @@ esp_err_t OutputScheduler::schedule(
             const PhysicalOutput& phys = device_cfg.physical_outputs[p_idx];
             for (uint16_t px = 0; px < fixture.num_pixels; ++px) {
                 const LightValue& lv = fx_frame.pixels[px];
-                controller.pixels().set(phys.hardware_id, px, lv.r, lv.g, lv.b, lv.w);
+                tx.pixels().set(phys.hardware_id, px, lv.r, lv.g, lv.b, lv.w);
             }
         } else {
             uint8_t pwm_chans = (fixture.profile == FixtureProfile::PWM_Single) ? 1 :
@@ -96,14 +96,12 @@ esp_err_t OutputScheduler::schedule(
             for (uint8_t ch = 0; ch < pwm_chans; ++ch) {
                 uint8_t p_idx = fixture.physical_output_index[ch];
                 const PhysicalOutput& phys = device_cfg.physical_outputs[p_idx];
-                controller.pwm().set(phys.hardware_id, fx_frame.pwm[ch]);
+                tx.pwm().set(phys.hardware_id, fx_frame.pwm[ch]);
             }
         }
     }
 
-    esp_err_t commit_err = controller.try_commit_locked();
-    controller.unlock();
-    return commit_err;
+    return tx.commit();
 }
 
 } // namespace lg

@@ -127,6 +127,14 @@ public:
     /// Dedicated universe patch clearing when universe sources expire
     void clear_patch_for_universe(uint16_t universe) { clear_universe_state(universe); }
 
+    /// Authoritative calculation of all active patched universes for the device config (Batch 8 Item 14)
+    static size_t collect_patched_universes(const DeviceConfig& config, uint16_t* out_universes, size_t max_count);
+
+    /// Safe timestamp elapsed helper (Batch 8 Item 11)
+    static inline uint32_t elapsed_ms(uint32_t now, uint32_t then) {
+        return now - then;
+    }
+
 private:
     enum class ClearResult {
         None,
@@ -135,25 +143,16 @@ private:
     };
     ClearResult clear_universe_state_locked(uint16_t universe, uint32_t current_ms);
     uint32_t stream_timeout_ms_locked() const {
-        return protocol_cfg_.stream_timeout_ms > 0 ? protocol_cfg_.stream_timeout_ms : 2000;
+        uint32_t t = protocol_cfg_.stream_timeout_ms > 0 ? protocol_cfg_.stream_timeout_ms : 2000;
+        return (t < 0x7FFFFFFFUL) ? t : 0x7FFFFFFEUL;
     }
-
-    LightingRuntime& lighting_;
-    mutable std::mutex frame_mutex_;
-    ProtocolConfig protocol_cfg_{};
-    std::array<FixtureConfig, 16> fixtures_{};
-
-    std::atomic<uint32_t> dropped_sources_count_{0};
-    std::atomic<uint32_t> packets_accepted_{0};
-    std::atomic<uint32_t> packets_rejected_sequence_{0};
-    std::atomic<uint32_t> packets_ignored_unpatched_{0};
-    std::atomic<uint32_t> submission_failures_count_{0};
 
     // Tracking state per active stream contributor within a universe
     struct SourceStream {
         DmxSourceId source_id{};
         uint8_t  priority = 100;
         uint32_t last_packet_ms = 0;
+        uint64_t arrival_seq = 0; // Monotonic packet arrival sequence for same-ms LTP tie-breaking
         uint16_t length = 0;
         uint8_t  last_sequence = 0;
         bool     sequence_valid = false;
@@ -173,6 +172,27 @@ private:
 
     static constexpr size_t kMaxTrackedUniverses = 4;
     std::array<UniverseState, kMaxTrackedUniverses> tracked_universes_{};
+
+    // Canonical universe lifecycle pipeline (Batch 8 Items 6, 10)
+    void prune_source_locked(SourceStream& s);
+    bool expire_sources_locked(uint32_t current_ms);
+    void recompute_universe_locked(UniverseState& state, uint32_t current_ms);
+    void update_assembled_patch_locked(uint16_t universe, const uint8_t* data, uint16_t length);
+    void clear_assembled_patch_locked(uint16_t universe);
+    bool build_submission_locked(uint32_t current_ms);
+
+    LightingRuntime& lighting_;
+    mutable std::mutex frame_mutex_;
+    ProtocolConfig protocol_cfg_{};
+    std::array<FixtureConfig, 16> fixtures_{};
+
+    std::atomic<uint32_t> dropped_sources_count_{0};
+    std::atomic<uint32_t> packets_accepted_{0};
+    std::atomic<uint32_t> packets_rejected_sequence_{0};
+    std::atomic<uint32_t> packets_ignored_unpatched_{0};
+    std::atomic<uint32_t> submission_failures_count_{0};
+
+    uint64_t arrival_counter_{0}; // Monotonic arrival counter for LTP tie-breaking (Batch 8 Item 12)
 
     // Pre-allocated live frame buffers to eliminate stack/heap allocation in streaming path (Batch 5 Item 13)
     LiveDmxFrame assembled_frame_{};

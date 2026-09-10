@@ -21,6 +21,7 @@ public:
 
     /// Initialize SNTP and start the background evaluation task.
     esp_err_t start(const char* timezone);
+    esp_err_t stop();
 
     /// Returns true once SNTP or a trusted sync leader has supplied an epoch.
     bool has_time() const { return clock_.has_epoch(); }
@@ -49,6 +50,7 @@ private:
     uint64_t calendar_sequence_started_ms_ = 0;
 
     TaskHandle_t task_handle_ = nullptr;
+    bool running_ = false;
 };
 
 } // namespace lg

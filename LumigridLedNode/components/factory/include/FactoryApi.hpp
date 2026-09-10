@@ -16,6 +16,13 @@ class DmxRouter;
 
 namespace lg {
 
+struct StartupDiagnostics {
+    const char* startup_state = "Booting";
+    const char* startup_stage = "None";
+    const char* failing_stage = "None";
+    int failing_error = 0;
+};
+
 class FactoryApi {
 public:
     explicit FactoryApi(FactoryRunner& runner);
@@ -29,6 +36,13 @@ public:
                     NodeSync* node_sync = nullptr,
                     DmxRouter* dmx_router = nullptr);
     void stop();
+
+    void set_diagnostics_provider(std::function<StartupDiagnostics()> provider) {
+        diagnostics_provider_ = std::move(provider);
+    }
+    const std::function<StartupDiagnostics()>& diagnostics_provider() const {
+        return diagnostics_provider_;
+    }
 
     FactoryRunner& runner() { return runner_; }
     ConfigStore* config() { return config_; }
@@ -49,6 +63,7 @@ public:
     Scheduler* scheduler_ = nullptr;
     NodeSync* node_sync_ = nullptr;
     DmxRouter* dmx_router_ = nullptr;
+    std::function<StartupDiagnostics()> diagnostics_provider_{};
     httpd_handle_t signage_server_ = nullptr;
     httpd_handle_t factory_server_ = nullptr;
     size_t max_open_sockets_ = 0;

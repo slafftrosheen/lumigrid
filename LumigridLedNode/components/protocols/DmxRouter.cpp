@@ -79,12 +79,12 @@ void DmxRouter::update_config(const DeviceConfig& config) {
     }
 }
 
-size_t DmxRouter::get_active_universes(uint16_t* out_universes, size_t max_count) const {
+size_t DmxRouter::collect_patched_universes(const DeviceConfig& config, uint16_t* out_universes, size_t max_count) {
     if (!out_universes || max_count == 0) return 0;
 
-    std::lock_guard<std::mutex> lock(frame_mutex_);
     size_t count = 0;
     auto add_universe = [&](uint16_t u) {
+        if (u == 0 || u > 63999) return;
         for (size_t i = 0; i < count; ++i) {
             if (out_universes[i] == u) return;
         }
@@ -93,21 +93,20 @@ size_t DmxRouter::get_active_universes(uint16_t* out_universes, size_t max_count
         }
     };
 
-    // Include protocol_cfg_.universe_start only when zone/live-layer patch is actually enabled:
-    // Zone wash is active if zone_start_channel > 0 AND at least one configured fixture with num_pixels > 0 && dmx_start_channel == 0 consumes zone wash
+    // Include universe_start only when zone wash is configured and at least one fixture consumes it
     bool has_zone_consumer = false;
-    for (const auto& fix : fixtures_) {
+    for (const auto& fix : config.fixtures) {
         if (fix.num_pixels > 0 && fix.dmx_start_channel == 0) {
             has_zone_consumer = true;
             break;
         }
     }
-    if (protocol_cfg_.zone_start_channel > 0 && has_zone_consumer) {
-        add_universe(protocol_cfg_.universe_start);
+    if (config.protocol.zone_start_channel > 0 && has_zone_consumer) {
+        add_universe(config.protocol.universe_start);
     }
 
     // Include fixture universes only for configured fixtures with dmx_start_channel > 0
-    for (const auto& fix : fixtures_) {
+    for (const auto& fix : config.fixtures) {
         if (fix.num_pixels > 0 && fix.dmx_start_channel > 0) {
             add_universe(fix.dmx_universe);
         }
@@ -115,6 +114,18 @@ size_t DmxRouter::get_active_universes(uint16_t* out_universes, size_t max_count
 
     std::sort(out_universes, out_universes + count);
     return count;
+}
+
+size_t DmxRouter::get_active_universes(uint16_t* out_universes, size_t max_count) const {
+    if (!out_universes || max_count == 0) return 0;
+
+    std::lock_guard<std::mutex> lock(frame_mutex_);
+    DeviceConfig cfg{};
+    cfg.protocol = protocol_cfg_;
+    for (size_t i = 0; i < fixtures_.size(); ++i) {
+        cfg.fixtures[i] = fixtures_[i];
+    }
+    return collect_patched_universes(cfg, out_universes, max_count);
 }
 
 void DmxRouter::handle_artnet_dmx(const ArtnetDmxPacket& packet) {
@@ -153,7 +164,7 @@ bool DmxRouter::is_universe_live(const UniverseState& u, uint32_t now) const {
     if (!u.active) return false;
     const uint32_t timeout = stream_timeout_ms_locked();
     for (const auto& src : u.sources) {
-        if (src.active && (now - src.last_packet_ms <= timeout)) {
+        if (src.active && (elapsed_ms(now, src.last_packet_ms) <= timeout)) {
             return true;
         }
     }
@@ -169,7 +180,7 @@ DmxRouter::DmxStats DmxRouter::get_stats() const {
         if (!is_universe_live(u, now)) continue;
         s.active_universes++;
         for (const auto& src : u.sources) {
-            if (src.active && (now - src.last_packet_ms <= timeout)) {
+            if (src.active && (elapsed_ms(now, src.last_packet_ms) <= timeout)) {
                 s.active_sources++;
             }
         }
@@ -182,24 +193,8 @@ DmxRouter::DmxStats DmxRouter::get_stats() const {
     return s;
 }
 
-DmxRouter::ClearResult DmxRouter::clear_universe_state_locked(uint16_t universe, uint32_t current_ms) {
+void DmxRouter::clear_assembled_patch_locked(uint16_t universe) {
     const uint8_t live_layer = protocol_cfg_.live_stream_layer < 3 ? protocol_cfg_.live_stream_layer : 2;
-
-    for (auto& u : tracked_universes_) {
-        if (u.universe == universe) {
-            u.active = false;
-            u.last_packet_ms = 0;
-            u.merged_data.fill(0);
-            u.merged_length = 0;
-            for (auto& src : u.sources) {
-                src.active = false;
-                src.sequence_valid = false;
-                src.data.fill(0);
-                src.length = 0;
-                src.last_packet_ms = 0;
-            }
-        }
-    }
 
     // 1. Zone Wash
     if (universe == protocol_cfg_.universe_start) {
@@ -224,8 +219,13 @@ DmxRouter::ClearResult DmxRouter::clear_universe_state_locked(uint16_t universe,
             lf.pwm.fill(0);
         }
     }
+}
 
-    // 3. Recompute live status across all tracked universes
+void DmxRouter::update_assembled_patch_locked(uint16_t universe, const uint8_t* data, uint16_t length) {
+    dispatch_patch(universe, data, length);
+}
+
+bool DmxRouter::build_submission_locked(uint32_t current_ms) {
     bool any_live = false;
     for (const auto& u : tracked_universes_) {
         if (is_universe_live(u, current_ms)) {
@@ -238,10 +238,131 @@ DmxRouter::ClearResult DmxRouter::clear_universe_state_locked(uint16_t universe,
         assembled_frame_.active = false;
         assembled_frame_.dmx_telemetry.fill(0);
         assembled_frame_.dmx_telemetry_len = 0;
-        return ClearResult::ClearLive;
+        return false;
+    }
+
+    submission_frame_ = assembled_frame_;
+    return true;
+}
+
+void DmxRouter::prune_source_locked(SourceStream& s) {
+    s.active = false;
+    s.sequence_valid = false;
+    s.last_sequence = 0;
+    s.data.fill(0);
+    s.length = 0;
+    s.last_packet_ms = 0;
+    s.arrival_seq = 0;
+    s.priority = 100;
+}
+
+bool DmxRouter::expire_sources_locked(uint32_t current_ms) {
+    const uint32_t timeout = stream_timeout_ms_locked();
+    bool any_changed = false;
+    for (auto& u : tracked_universes_) {
+        if (!u.active) continue;
+        for (auto& s : u.sources) {
+            if (s.active && elapsed_ms(current_ms, s.last_packet_ms) > timeout) {
+                prune_source_locked(s);
+                any_changed = true;
+            }
+        }
+    }
+    return any_changed;
+}
+
+void DmxRouter::recompute_universe_locked(UniverseState& state, uint32_t current_ms) {
+    const uint32_t timeout = stream_timeout_ms_locked();
+
+    // 1. Prune timed-out sources in this universe (Batch 8 Items 6, 11: prune_source_locked + elapsed_ms)
+    for (auto& src : state.sources) {
+        if (src.active && elapsed_ms(current_ms, src.last_packet_ms) > timeout) {
+            prune_source_locked(src);
+        }
+    }
+
+    // 2. Check if any source in universe is still live
+    if (!is_universe_live(state, current_ms)) {
+        state.active = false;
+        state.last_packet_ms = 0;
+        state.merged_data.fill(0);
+        state.merged_length = 0;
+        clear_assembled_patch_locked(state.universe);
+        return;
+    }
+
+    // 3. Find highest priority among active sources
+    uint8_t highest_priority = 0;
+    for (const auto& src : state.sources) {
+        if (src.active && elapsed_ms(current_ms, src.last_packet_ms) <= timeout) {
+            if (src.priority > highest_priority) {
+                highest_priority = src.priority;
+            }
+        }
+    }
+
+    state.merged_data.fill(0);
+    uint16_t max_len = 0;
+
+    if (protocol_cfg_.merge_mode == MergeMode::HTP) {
+        // True HTP: maximum across all active sources sharing the highest priority
+        for (const auto& src : state.sources) {
+            if (src.active && src.priority == highest_priority) {
+                max_len = std::max(max_len, src.length);
+                for (uint16_t ch = 0; ch < src.length; ++ch) {
+                    state.merged_data[ch] = std::max(state.merged_data[ch], src.data[ch]);
+                }
+            }
+        }
     } else {
-        submission_frame_ = assembled_frame_;
+        // True LTP with deterministic tie-breaking (Batch 8 Item 12):
+        // 1. highest priority
+        // 2. newest last_packet_ms
+        // 3. newest arrival_seq
+        const SourceStream* latest_src = nullptr;
+        for (const auto& src : state.sources) {
+            if (src.active && src.priority == highest_priority) {
+                if (!latest_src ||
+                    src.last_packet_ms > latest_src->last_packet_ms ||
+                    (src.last_packet_ms == latest_src->last_packet_ms && src.arrival_seq > latest_src->arrival_seq)) {
+                    latest_src = &src;
+                }
+            }
+        }
+
+        if (latest_src) {
+            max_len = latest_src->length;
+            std::memcpy(state.merged_data.data(), latest_src->data.data(), max_len);
+        }
+    }
+
+    state.merged_length = max_len;
+    update_assembled_patch_locked(state.universe, state.merged_data.data(), state.merged_length);
+}
+
+void DmxRouter::recompute_merge(UniverseState& state, uint32_t current_ms) {
+    recompute_universe_locked(state, current_ms);
+}
+
+DmxRouter::ClearResult DmxRouter::clear_universe_state_locked(uint16_t universe, uint32_t current_ms) {
+    for (auto& u : tracked_universes_) {
+        if (u.universe == universe) {
+            u.active = false;
+            u.last_packet_ms = 0;
+            u.merged_data.fill(0);
+            u.merged_length = 0;
+            for (auto& src : u.sources) {
+                prune_source_locked(src);
+            }
+        }
+    }
+
+    clear_assembled_patch_locked(universe);
+
+    if (build_submission_locked(current_ms)) {
         return ClearResult::SubmitFrame;
+    } else {
+        return ClearResult::ClearLive;
     }
 }
 
@@ -266,43 +387,28 @@ void DmxRouter::tick(uint32_t now_ms) {
 
     {
         std::lock_guard<std::mutex> lock(frame_mutex_);
-        const uint32_t timeout = stream_timeout_ms_locked();
-        bool any_changed = false;
+        bool changed = expire_sources_locked(now_ms);
 
         for (auto& u : tracked_universes_) {
             if (!u.active) continue;
 
-            bool any_src_live = false;
-            for (auto& s : u.sources) {
-                if (s.active) {
-                    if (now_ms - s.last_packet_ms > timeout) {
-                        s.active = false;
-                        s.sequence_valid = false;
-                        any_changed = true;
-                    } else {
-                        any_src_live = true;
-                    }
-                }
-            }
-
-            if (!any_src_live) {
+            if (!is_universe_live(u, now_ms)) {
                 u.active = false;
                 u.last_packet_ms = 0;
                 u.merged_data.fill(0);
                 u.merged_length = 0;
-                ClearResult cr = clear_universe_state_locked(u.universe, now_ms);
-                if (cr == ClearResult::ClearLive) {
-                    should_clear_live = true;
-                    should_submit = false;
-                } else if (cr == ClearResult::SubmitFrame && !should_clear_live) {
-                    should_submit = true;
-                }
-                any_changed = true;
-            } else if (any_changed) {
-                recompute_merge(u, now_ms);
-                dispatch_patch(u.universe, u.merged_data.data(), u.merged_length);
-                submission_frame_ = assembled_frame_;
+                clear_assembled_patch_locked(u.universe);
+                changed = true;
+            } else if (changed) {
+                recompute_universe_locked(u, now_ms);
+            }
+        }
+
+        if (changed) {
+            if (build_submission_locked(now_ms)) {
                 should_submit = true;
+            } else {
+                should_clear_live = true;
             }
         }
     }
@@ -327,7 +433,7 @@ DmxRouter::UniverseState* DmxRouter::get_or_create_universe(uint16_t universe) {
         if (slot.active && slot.universe == universe) {
             return &slot;
         }
-        if (!slot.active || (current_ms - slot.last_packet_ms > stream_timeout)) {
+        if (!slot.active || (elapsed_ms(current_ms, slot.last_packet_ms) > stream_timeout)) {
             if (!oldest_slot || (slot.last_packet_ms < oldest_age)) {
                 oldest_slot = &slot;
                 oldest_age = slot.last_packet_ms;
@@ -336,87 +442,23 @@ DmxRouter::UniverseState* DmxRouter::get_or_create_universe(uint16_t universe) {
     }
 
     if (oldest_slot) {
+        // If reusing slot previously occupied by another universe, clear old patch contribution (Item 8)
+        if (oldest_slot->universe != 0 && oldest_slot->universe != universe) {
+            clear_assembled_patch_locked(oldest_slot->universe);
+        }
         oldest_slot->universe = universe;
         oldest_slot->last_packet_ms = current_ms;
         oldest_slot->merged_data.fill(0);
         oldest_slot->merged_length = 0;
         for (auto& src : oldest_slot->sources) {
-            src.active = false;
-            src.sequence_valid = false;
+            src.source_id = {};
+            prune_source_locked(src);
         }
         oldest_slot->active = true;
         return oldest_slot;
     }
 
     return nullptr;
-}
-
-void DmxRouter::recompute_merge(UniverseState& state, uint32_t current_ms) {
-    const uint32_t stream_timeout = stream_timeout_ms_locked();
-
-    // Prune timed-out sources
-    for (auto& src : state.sources) {
-        if (src.active) {
-            if (current_ms - src.last_packet_ms > stream_timeout) {
-                src.active = false;
-                src.sequence_valid = false;
-            }
-        }
-    }
-
-    if (!is_universe_live(state, current_ms)) {
-        state.merged_data.fill(0);
-        state.merged_length = 0;
-        if (state.active) {
-            state.active = false;
-            clear_patch_for_universe(state.universe);
-        }
-        return;
-    }
-
-    uint8_t highest_priority = 0;
-    for (const auto& src : state.sources) {
-        if (src.active && (current_ms - src.last_packet_ms <= stream_timeout)) {
-            if (src.priority > highest_priority) {
-                highest_priority = src.priority;
-            }
-        }
-    }
-
-    state.merged_data.fill(0);
-    uint16_t max_len = 0;
-
-    if (protocol_cfg_.merge_mode == MergeMode::HTP) {
-        // True HTP: maximum across all active sources sharing the highest priority
-        for (const auto& src : state.sources) {
-            if (src.active && src.priority == highest_priority) {
-                max_len = std::max(max_len, src.length);
-                for (uint16_t ch = 0; ch < src.length; ++ch) {
-                    state.merged_data[ch] = std::max(state.merged_data[ch], src.data[ch]);
-                }
-            }
-        }
-    } else {
-        // True LTP: newest packet timestamp among active sources sharing highest priority
-        const SourceStream* latest_src = nullptr;
-        uint32_t latest_ts = 0;
-
-        for (const auto& src : state.sources) {
-            if (src.active && src.priority == highest_priority) {
-                if (!latest_src || src.last_packet_ms >= latest_ts) {
-                    latest_src = &src;
-                    latest_ts = src.last_packet_ms;
-                }
-            }
-        }
-
-        if (latest_src) {
-            max_len = latest_src->length;
-            std::memcpy(state.merged_data.data(), latest_src->data.data(), max_len);
-        }
-    }
-
-    state.merged_length = max_len;
 }
 
 void DmxRouter::process_frame(uint16_t universe, const uint8_t* data, uint16_t length,
@@ -455,14 +497,14 @@ void DmxRouter::process_frame(uint16_t universe, const uint8_t* data, uint16_t l
         // Prune any tracked universes that have timed out
         for (auto& u : tracked_universes_) {
             if (u.active) {
-                recompute_merge(u, current_ms);
+                recompute_universe_locked(u, current_ms);
             }
         }
 
         UniverseState* state = get_or_create_universe(universe);
         if (!state) return;
 
-        // 1. Locate existing active source or allocate a free/timed-out slot
+        // 1. Locate existing active source or allocate a free/timed-out slot (Batch 8 Item 13)
         SourceStream* target_src = nullptr;
 
         for (auto& src : state->sources) {
@@ -474,7 +516,7 @@ void DmxRouter::process_frame(uint16_t universe, const uint8_t* data, uint16_t l
 
         if (!target_src) {
             for (auto& src : state->sources) {
-                if (!src.active || (current_ms - src.last_packet_ms > timeout)) {
+                if (!src.active || (elapsed_ms(current_ms, src.last_packet_ms) > timeout)) {
                     target_src = &src;
                     target_src->active = false;
                     target_src->sequence_valid = false;
@@ -483,7 +525,7 @@ void DmxRouter::process_frame(uint16_t universe, const uint8_t* data, uint16_t l
             }
         }
 
-        // If bounded capacity exceeded, drop newest source and increment counter; never overwrite active source
+        // If bounded capacity exceeded (4 active sources), reject 5th source; NEVER overwrite active source
         if (!target_src) {
             dropped_sources_count_++;
             return;
@@ -504,31 +546,20 @@ void DmxRouter::process_frame(uint16_t universe, const uint8_t* data, uint16_t l
         target_src->source_id = source_id;
         target_src->priority = priority;
         target_src->last_packet_ms = current_ms;
+        target_src->arrival_seq = ++arrival_counter_; // Monotonic counter for deterministic LTP tie-breaking (Batch 8 Item 12)
         target_src->length = length;
         std::memcpy(target_src->data.data(), data, length);
         target_src->active = true;
 
         state->last_packet_ms = current_ms;
-        recompute_merge(*state, current_ms);
-
-        // Dispatch patched output into assembled_frame_
-        dispatch_patch(universe, state->merged_data.data(), state->merged_length);
+        recompute_universe_locked(*state, current_ms);
 
         packets_accepted_++;
 
-        bool any_active = false;
-        for (const auto& u : tracked_universes_) {
-            if (is_universe_live(u, current_ms)) {
-                any_active = true;
-                break;
-            }
-        }
-
-        if (!any_active) {
-            should_clear_live = true;
-        } else {
-            submission_frame_ = assembled_frame_;
+        if (build_submission_locked(current_ms)) {
             should_submit = true;
+        } else {
+            should_clear_live = true;
         }
     }
 

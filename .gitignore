@@ -17,6 +17,8 @@ static/
 compile_commands.json
 /build_output/
 /logs/
+sdkconfig.*
+!sdkconfig.defaults
 
 # Environment variables
 .env

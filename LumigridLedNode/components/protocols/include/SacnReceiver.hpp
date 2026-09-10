@@ -5,6 +5,8 @@
 #include <array>
 #include <mutex>
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "esp_err.h"
 
 namespace lg {
@@ -24,6 +26,7 @@ using SacnDmxCallback = std::function<void(const SacnDmxPacket&)>;
 class SacnReceiver {
 public:
     esp_err_t start(SacnDmxCallback callback);
+    esp_err_t stop();
 
     /// Configure active universes for multicast group membership (IGMP join/leave).
     void set_subscribed_universes(const uint16_t* universes, size_t count);
@@ -40,6 +43,8 @@ private:
     std::mutex mtx_;
     std::array<uint16_t, 16> subscribed_universes_{};
     size_t subscribed_count_ = 0;
+    TaskHandle_t task_handle_ = nullptr;
+    bool running_ = false;
 };
 
 } // namespace lg

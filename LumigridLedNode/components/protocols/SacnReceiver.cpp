@@ -32,17 +32,46 @@ uint32_t fnv1a_32(const uint8_t* data, size_t len) {
 } // namespace
 
 esp_err_t SacnReceiver::start(SacnDmxCallback callback) {
+    std::lock_guard<std::mutex> lock(mtx_);
+    if (running_) {
+        return ESP_ERR_INVALID_STATE;
+    }
     callback_ = std::move(callback);
+    running_ = true;
 
-    return xTaskCreatePinnedToCore(
+    BaseType_t res = xTaskCreatePinnedToCore(
         task_entry,
         "lg_sacn",
         4096,
         this,
         4,
-        nullptr,
+        &task_handle_,
         0
-    ) == pdPASS ? ESP_OK : ESP_FAIL;
+    );
+    if (res != pdPASS) {
+        running_ = false;
+        task_handle_ = nullptr;
+        return ESP_FAIL;
+    }
+    return ESP_OK;
+}
+
+esp_err_t SacnReceiver::stop() {
+    int sock_to_close = -1;
+    {
+        std::lock_guard<std::mutex> lock(mtx_);
+        if (!running_) return ESP_OK;
+        running_ = false;
+        if (sock_ >= 0) {
+            leave_multicast_groups(sock_);
+            sock_to_close = sock_;
+            sock_ = -1;
+        }
+    }
+    if (sock_to_close >= 0) {
+        ::close(sock_to_close);
+    }
+    return ESP_OK;
 }
 
 void SacnReceiver::set_subscribed_universes(const uint16_t* universes, size_t count) {
@@ -190,7 +219,7 @@ void SacnReceiver::task() {
 
     uint8_t buffer[1024];
 
-    for (;;) {
+    while (running_) {
         sockaddr_in source = {};
         socklen_t source_len = sizeof(source);
 
@@ -203,10 +232,21 @@ void SacnReceiver::task() {
             &source_len
         );
 
-        if (received <= 0) continue;
+        if (received <= 0) {
+            if (!running_) break;
+            continue;
+        }
 
         handle_packet(buffer, received);
     }
+
+    ::close(sock);
+    {
+        std::lock_guard<std::mutex> lock(mtx_);
+        if (sock_ == sock) sock_ = -1;
+        task_handle_ = nullptr;
+    }
+    vTaskDelete(nullptr);
 }
 
 bool SacnReceiver::handle_packet(const uint8_t* packet, size_t length) {

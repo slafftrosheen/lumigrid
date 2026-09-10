@@ -107,6 +107,10 @@ public:
     // Returns the control state snapshot for a source (thread-safe by value, Item 9).
     ControlState state(ControlSource source) const;
 
+    bool is_estop_active() const {
+        return state(ControlSource::EStop).active;
+    }
+
 private:
     SemaphoreHandle_t mutex_ = nullptr;
     ControlState states_[8]; // 8 ControlSource enum values

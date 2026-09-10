@@ -56,9 +56,13 @@ using ArtnetDmxCallback = std::function<void(const ArtnetDmxPacket&)>;
 class ArtnetDiscovery {
 public:
     esp_err_t start(const ArtnetNodeInfo& info, ArtnetDmxCallback dmx_callback);
+    esp_err_t stop();
 
     /// Update reported output universes for ArtPoll replies using full 15-bit Port-Address decoding
     void set_output_universes(const uint16_t* universes, uint8_t count);
+
+    /// Serializes an ArtPollReply packet according to the Art-Net 4 specification (returns 239 on success)
+    static size_t serialize_poll_reply(const ArtnetNodeInfo& info, uint8_t* out_buf, size_t max_len);
 
 private:
     static void task_entry(void* arg);
@@ -70,6 +74,9 @@ private:
     ArtnetNodeInfo info_{};
     ArtnetDmxCallback dmx_callback_{};
     std::mutex mtx_;
+    TaskHandle_t task_handle_ = nullptr;
+    int sock_ = -1;
+    bool running_ = false;
 };
 
 } // namespace lg

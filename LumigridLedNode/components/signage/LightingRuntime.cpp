@@ -27,25 +27,50 @@ LightingRuntime::LightingRuntime(ControlSourceManager& source_manager, OutputCon
       config_(config),
       scene_manager_(config) {
     mutex_ = xSemaphoreCreateMutex();
+    shutdown_sem_ = xSemaphoreCreateBinary();
+
+    // Unified commit observer: physical commit result automatically drives fault state machine (Batch 8 Item 9)
+    controller_.set_commit_observer([this](esp_err_t commit_result) {
+        if (commit_result != ESP_OK) {
+            report_output_fault(commit_result);
+        } else {
+            OutputState current = output_state_.load(std::memory_order_acquire);
+            if (current == OutputState::Armed) {
+                output_state_.store(OutputState::Healthy, std::memory_order_release);
+                ESP_LOGI(TAG, "Armed commit succeeded: output state restored to HEALTHY");
+            }
+        }
+    });
 }
 
 LightingRuntime::~LightingRuntime() {
     stop();
+    if (shutdown_sem_) {
+        vSemaphoreDelete(shutdown_sem_);
+        shutdown_sem_ = nullptr;
+    }
 }
 
 void LightingRuntime::stop() {
-    if (shutting_down_.exchange(true)) {
+    LifecycleState prev = lifecycle_state_.exchange(LifecycleState::Stopping, std::memory_order_acq_rel);
+    if (prev == LifecycleState::Stopping || prev == LifecycleState::Stopped) {
         return;
     }
-    // 1. Stop task
+    shutting_down_.store(true, std::memory_order_release);
+
+    // 1. Cooperative task termination wait (Batch 8 Item 3: no vTaskDelete from outside)
     if (task_handle_) {
-        TaskHandle_t th = task_handle_;
+        xTaskAbortDelay(task_handle_);
+        if (shutdown_sem_) {
+            xSemaphoreTake(shutdown_sem_, pdMS_TO_TICKS(1000));
+        }
         task_handle_ = nullptr;
-        vTaskDelete(th);
     }
+
     // 2. Force blackout
     controller_.blackout();
-    // 3. Clear live state and release controls
+
+    // 3. Clear live state and release controls (guaranteed safe since task is stopped)
     if (mutex_) {
         xSemaphoreTake(mutex_, portMAX_DELAY);
         live_pending_ = {};
@@ -60,9 +85,20 @@ void LightingRuntime::stop() {
         vSemaphoreDelete(mutex_);
         mutex_ = nullptr;
     }
+
+    lifecycle_state_.store(LifecycleState::Stopped, std::memory_order_release);
 }
 
 esp_err_t LightingRuntime::start() {
+    // Prevent double start (Batch 8 Item 4)
+    LifecycleState current = lifecycle_state_.load(std::memory_order_acquire);
+    if (current == LifecycleState::Running || current == LifecycleState::Starting) {
+        ESP_LOGW(TAG, "LightingRuntime start() rejected: already running or starting");
+        return ESP_ERR_INVALID_STATE;
+    }
+    lifecycle_state_.store(LifecycleState::Starting, std::memory_order_release);
+    shutting_down_.store(false, std::memory_order_release);
+
     config_.load_config(device_cfg_);
     power_budget_.set_limit_mw(device_cfg_.max_power_mw);
     power_budget_.set_soft_start(device_cfg_.soft_start_enabled, device_cfg_.soft_start_ms);
@@ -72,8 +108,12 @@ esp_err_t LightingRuntime::start() {
         mutex_ = xSemaphoreCreateMutex();
         if (!mutex_) {
             ESP_LOGE(TAG, "Failed to create mutex");
+            lifecycle_state_.store(LifecycleState::Faulted, std::memory_order_release);
             return ESP_ERR_NO_MEM;
         }
+    }
+    if (!shutdown_sem_) {
+        shutdown_sem_ = xSemaphoreCreateBinary();
     }
 
     scene_manager_.init();
@@ -90,9 +130,11 @@ esp_err_t LightingRuntime::start() {
 
     if (ret != pdPASS) {
         ESP_LOGE(TAG, "Failed to create task");
+        lifecycle_state_.store(LifecycleState::Faulted, std::memory_order_release);
         return ESP_FAIL;
     }
 
+    lifecycle_state_.store(LifecycleState::Running, std::memory_order_release);
     ESP_LOGI(TAG, "LightingRuntime started (gamma=%.1f, max_mw=%u)", device_cfg_.gamma_x10 / 10.0f, device_cfg_.max_power_mw);
     return ESP_OK;
 }
@@ -132,7 +174,7 @@ void LightingRuntime::task() {
     enable_ms_ = now_ms();
     power_budget_.on_enable();
 
-    while (true) {
+    while (!shutting_down_.load(std::memory_order_acquire)) {
         uint32_t current_ms = now_ms();
         if (maintenance_cb_) {
             maintenance_cb_(current_ms);
@@ -149,6 +191,12 @@ void LightingRuntime::task() {
 
         vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(kFramePeriodMs));
     }
+
+    // Cooperative task exit completion signal (Batch 8 Item 3)
+    if (shutdown_sem_) {
+        xSemaphoreGive(shutdown_sem_);
+    }
+    vTaskDelete(NULL);
 }
 
 void LightingRuntime::render_frame(uint32_t current_ms) {
@@ -334,6 +382,10 @@ bool LightingRuntime::submit_live_frame(const LiveDmxFrame& frame) {
     live_pending_.timestamp_ms = now;
     live_pending_dirty_ = true;
     last_live_stream_ms_ = now;
+    if (!task_handle_) {
+        live_active_ = live_pending_;
+        live_pending_dirty_ = false;
+    }
 
     // Aggregate ownership calculation
     uint8_t live_zone_mask = 0;
@@ -357,7 +409,8 @@ bool LightingRuntime::submit_live_frame(const LiveDmxFrame& frame) {
     if (live_zone_mask == 0 && live_fixture_mask == 0) {
         source_manager_.release(ControlSource::LiveDmx);
     } else {
-        source_manager_.acquire(ControlSource::LiveDmx, kLiveFrameFailsafeTimeoutMs, live_zone_mask, live_layer_mask, live_fixture_mask);
+        // DMX router owns source lifetime; lease is indefinite (0) until explicitly released/cleared
+        source_manager_.acquire(ControlSource::LiveDmx, 0, live_zone_mask, live_layer_mask, live_fixture_mask);
     }
     xSemaphoreGive(mutex_);
     return true;
@@ -540,6 +593,7 @@ ControlSource LightingRuntime::current_control_source() const {
 }
 
 void LightingRuntime::report_output_fault(esp_err_t err) {
+    output_commit_failure_count_.fetch_add(1, std::memory_order_relaxed);
     OutputState prev = output_state_.exchange(OutputState::Faulted, std::memory_order_acq_rel);
     if (prev != OutputState::Faulted) {
         output_fault_count_.fetch_add(1, std::memory_order_relaxed);

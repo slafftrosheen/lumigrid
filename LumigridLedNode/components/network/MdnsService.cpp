@@ -23,4 +23,9 @@ esp_err_t MdnsService::start(const std::string& hostname,
     );
 }
 
+esp_err_t MdnsService::stop() {
+    mdns_free();
+    return ESP_OK;
+}
+
 } // namespace lg

@@ -160,4 +160,11 @@ bool WifiService::has_ip() const {
     return has_ip_;
 }
 
+esp_err_t WifiService::stop() {
+    esp_err_t err = esp_wifi_stop();
+    state_ = WifiState::Idle;
+    has_ip_ = false;
+    return err;
+}
+
 } // namespace lg

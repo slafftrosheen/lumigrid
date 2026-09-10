@@ -22,10 +22,42 @@ namespace lg {
 /// FactoryRunner can NEVER physically output while the controller is estop-latched or output-disabled.
 class FactoryRunner {
 public:
+    enum class LifecycleState : uint8_t {
+        Constructed = 0,
+        Starting = 1,
+        Running = 2,
+        Stopping = 3,
+        Stopped = 4,
+        Faulted = 5
+    };
+
     FactoryRunner(ControlSourceManager& source_manager, OutputController& controller);
+    ~FactoryRunner();
 
     esp_err_t start();
+    void stop();
+    LifecycleState lifecycle_state() const { return lifecycle_state_; }
+
     bool enqueue(const FactoryCommand& command);
+    bool abort() {
+        FactoryCommand cmd;
+        cmd.type = FactoryCommandType::Abort;
+        return enqueue(cmd);
+    }
+    bool select_effect(FactoryEffect effect, uint8_t brightness = 32, uint32_t duration_ms = 10000) {
+        FactoryCommand cmd;
+        cmd.type = FactoryCommandType::SelectEffect;
+        cmd.effect = effect;
+        cmd.brightness = brightness;
+        cmd.duration_ms = duration_ms;
+        return enqueue(cmd);
+    }
+    bool set_auto_loop(bool enabled) {
+        FactoryCommand cmd;
+        cmd.type = FactoryCommandType::SetAutoLoop;
+        cmd.enabled = enabled;
+        return enqueue(cmd);
+    }
     void set_stream_frame(const StreamFramePayload& payload, uint8_t brightness, uint32_t duration_ms);
     FactoryStatus status() const;
 
@@ -65,6 +97,7 @@ private:
     uint32_t stream_last_ms_ = 0;
 
     StatusCallback status_callback_{};
+    LifecycleState lifecycle_state_{LifecycleState::Constructed};
 };
 
 } // namespace lg

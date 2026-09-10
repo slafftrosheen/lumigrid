@@ -57,6 +57,26 @@ public:
 
     // Absolute E-Stop safety state with latched recovery semantics
     void trigger_estop();
+    enum class LifecycleState : uint8_t {
+        Constructed = 0,
+        Starting = 1,
+        Running = 2,
+        Stopping = 3,
+        Stopped = 4,
+        Faulted = 5
+    };
+
+    LifecycleState lifecycle_state() const {
+        return lifecycle_state_.load(std::memory_order_acquire);
+    }
+
+    uint32_t commit_failure_count() const {
+        return output_commit_failure_count_.load(std::memory_order_relaxed);
+    }
+    uint32_t output_commit_failure_count() const {
+        return output_commit_failure_count_.load(std::memory_order_relaxed);
+    }
+
     void clear_estop();
     bool is_estop_active() const {
         return estop_state_.load(std::memory_order_relaxed) != EstopState::Inactive;
@@ -130,11 +150,14 @@ private:
     PowerBudget power_budget_;
     SceneManager scene_manager_;
 
+    std::atomic<LifecycleState> lifecycle_state_{LifecycleState::Constructed};
     std::atomic<EstopState> estop_state_{EstopState::Inactive};
     std::atomic<OutputState> output_state_{OutputState::Healthy};
     std::atomic<uint32_t> output_fault_count_{0};
+    std::atomic<uint32_t> output_commit_failure_count_{0};
     std::atomic<uint32_t> output_fault_frame_count_{0};
     std::atomic<bool> shutting_down_{false};
+    SemaphoreHandle_t shutdown_sem_ = nullptr;
 
     DeviceConfig device_cfg_{};
 

@@ -21,7 +21,7 @@ struct WifiConfig {
     std::string sta_ssid;
     std::string sta_password;
     std::string ap_ssid = "LumiGrid-Factory";
-    std::string ap_password = "lumigrid123";
+    std::string ap_password; // Configured at runtime, non-universal
     uint8_t max_retry = 10;
 };
 
@@ -38,6 +38,7 @@ using WifiStateCallback = std::function<void(WifiState)>;
 class WifiService {
 public:
     esp_err_t start(const WifiConfig& config, WifiStateCallback callback);
+    esp_err_t stop();
     WifiState state() const;
     bool has_ip() const;
 

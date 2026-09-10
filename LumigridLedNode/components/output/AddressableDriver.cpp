@@ -78,6 +78,18 @@ void AddressableDriver::clear() {
     }
 }
 
+void AddressableDriver::clear_lane(uint8_t lane) {
+    if (lane < kLanes && strips_[lane] != nullptr) {
+        led_strip_del(strips_[lane]);
+        strips_[lane] = nullptr;
+        has_white_[lane] = false;
+        num_pixels_[lane] = 0;
+        for (uint16_t p = 0; p < kPixels; ++p) {
+            buffer_[lane][p] = {0, 0, 0};
+        }
+    }
+}
+
 void AddressableDriver::clear_buffer() {
     for (uint8_t lane = 0; lane < kLanes; ++lane) {
         for (uint16_t p = 0; p < kPixels; ++p) {
