@@ -44,6 +44,9 @@ const initial: NodeLiveState = {
 };
 
 const state = writable<NodeLiveState>(initial);
+let latestState = initial;
+state.subscribe(value => { latestState = value; });
+
 let socket: WebSocket | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let reconnectAttempt = 0;
@@ -110,7 +113,7 @@ export function connect(nodeIp = readString(NODE_IP_KEY)): void {
     if (event.data instanceof ArrayBuffer) {
       const arr = new Uint8Array(event.data);
       if (arr.length > 1 && (arr[0] === 1 || arr[0] === 76)) {
-        const pixels = currentPixels();
+        const pixels = latestState.pixels;
         const raw = arr.subarray(1);
         const len = Math.min(raw.length, BUF_SIZE);
         pixels.fill(0);
@@ -141,12 +144,6 @@ export function connect(nodeIp = readString(NODE_IP_KEY)): void {
   };
 }
 
-let pixelCache = initial.pixels;
-state.subscribe(value => { pixelCache = value.pixels; });
-function currentPixels(): Uint8Array {
-  return pixelCache;
-}
-
 export function disconnect(): void {
   manualClose = true;
   if (reconnectTimer) {
@@ -168,4 +165,8 @@ export function reconnect(): void {
 
 export function getNodeLiveState() {
   return state;
+}
+
+export function getNodeLiveSnapshot(): NodeLiveState {
+  return latestState;
 }
