@@ -21,11 +21,11 @@ export function readString(key: string, fallback = ''): string {
 }
 
 export function writeString(key: string, value: string): void {
-  try { storage()?.setItem(key, value); } catch {}
+  storage()?.setItem(key, value);
 }
 
 export function removeValue(key: string): void {
-  try { storage()?.removeItem(key); } catch {}
+  storage()?.removeItem(key);
 }
 
 export function readStringList(key: string): string[] {
