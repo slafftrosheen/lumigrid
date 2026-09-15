@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { getCalendarSchedule, saveCalendarSchedule, getPresets } from '$lib/api/node';
   import type { CalendarEntry, CalendarSchedule, ScenePreset } from '$lib/api/node';
+  import { NODE_IP_KEY, readString } from '$lib/auth/storage';
 
   let nodeIp = $state('');
   let loading = $state(true);
@@ -98,7 +99,7 @@
   }
 
   onMount(() => {
-    nodeIp = localStorage.getItem('lg_node_ip') ?? '';
+    nodeIp = readString(NODE_IP_KEY);
     if (nodeIp) load();
     else loading = false;
   });
@@ -120,7 +121,6 @@
       </button>
     </header>
 
-    <!-- Weekly grid overview -->
     <div class="week-grid">
       <div class="week-header-row">
         <span class="week-time-col">Time</span>
@@ -157,7 +157,6 @@
       {/each}
     </div>
 
-    <!-- Entry editor -->
     {#if editEntry}
       <section class="entry-editor">
         <div class="editor-top">
@@ -256,7 +255,6 @@
   .btn-save:hover:not(:disabled) { background: #ff3b30; }
   .btn-save:disabled { opacity: .5; cursor: default; }
 
-  /* Weekly grid */
   .week-grid {
     background: rgba(29,29,31,.88);
     border: 1px solid rgba(255,255,255,.08);
@@ -321,7 +319,6 @@
   .action-badge.preset { background: rgba(255,149,0,.12); color: #ff9500; }
   .action-badge.seq { background: rgba(0,212,255,.12); color: #00d4ff; }
 
-  /* Entry editor */
   .entry-editor {
     background: rgba(29,29,31,.88);
     border: 1px solid rgba(255,255,255,.08);
@@ -415,7 +412,6 @@
   }
   .quick-btn:hover { background: rgba(255,255,255,.08); color: #f5f5f7; }
 
-  /* Toast / error */
   .toast {
     position: fixed; bottom: 1.5rem; right: 1.5rem;
     background: rgba(48,209,88,.92); color: #fff;
