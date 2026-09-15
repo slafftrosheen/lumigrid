@@ -497,50 +497,8 @@
         </header>
 
         <!-- Navigation Rail -->
-        <nav class="nav-rail" aria-label="Main Navigation" style="justify-content: flex-start; gap: 0.5rem;">
-            <div style="display:flex; gap:0.25rem; flex-wrap:wrap; align-items:center;">
-                <span class="eyebrow" style="padding: 0 0.5rem; color: var(--accent);">Operate</span>
-                <button class="active" data-page="dashboard" onclick="lg.nav('dashboard', this)">
-                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="2" width="5" height="5" rx="1"/><rect x="9" y="2" width="5" height="5" rx="1"/><rect x="2" y="9" width="5" height="5" rx="1"/><rect x="9" y="9" width="5" height="5" rx="1"/></svg>
-                    Overview
-                </button>
-                <button data-page="scenes" onclick="lg.nav('scenes', this)">
-                    <svg viewBox="0 0 16 16" fill="currentColor"><rect x="1" y="1" width="6" height="6" rx="1.5"/><rect x="9" y="1" width="6" height="6" rx="1.5" opacity=".45"/><rect x="1" y="9" width="6" height="6" rx="1.5" opacity=".45"/><rect x="9" y="9" width="6" height="6" rx="1.5"/></svg>
-                    Scenes
-                </button>
-                <button data-page="timeline" onclick="lg.nav('timeline', this)">
-                    <svg viewBox="0 0 16 16" fill="currentColor"><rect x="1" y="9" width="3" height="6" rx="1"/><rect x="5.5" y="5" width="3" height="10" rx="1" opacity=".7"/><rect x="10" y="2" width="3" height="13" rx="1"/></svg>
-                    Timeline
-                </button>
-                <button data-page="schedules" onclick="lg.nav('schedules', this)">
-                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><path d="M8 4v4l3 3"/></svg>
-                    Schedules
-                </button>
-                <button data-page="zones" onclick="lg.nav('zones', this)">
-                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="12" width="12" height="12" rx="2"/><line x1="6" y1="2" x2="6" y2="14"/><line x1="10" y1="2" x2="10" y2="14"/></svg>
-                    Zones
-                </button>
-            </div>
-            <div style="width: 1px; background: var(--border); margin: 0 0.5rem;"></div>
-            <div style="display:flex; gap:0.25rem; flex-wrap:wrap; align-items:center;">
-                <span class="eyebrow" style="padding: 0 0.5rem; color: var(--danger);">Service</span>
-                <button data-page="visualizer" onclick="lg.nav('visualizer', this)">
-                    <svg viewBox="0 0 16 16" fill="currentColor"><path d="M1 8a7 7 0 1 1 14 0A7 7 0 0 1 1 8zm1.5 0a5.5 5.5 0 1 0 11 0A5.5 5.5 0 0 0 2.5 8z"/><circle cx="8" cy="8" r="3"/></svg>
-                    Live Visualizer
-                </button>
-                <button data-page="patcher" onclick="lg.nav('patcher', this)">
-                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1" y="5" width="14" height="6" rx="1"/><path d="M4 8h8"/></svg>
-                    Hardware Patch
-                </button>
-                <button data-page="dmx" onclick="lg.nav('dmx', this)">
-                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 13V3a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v10M6 8h4M6 11h4M6 5h4"/></svg>
-                    Live DMX Monitor
-                </button>
-                <button data-page="diagnostics" onclick="lg.nav('diagnostics', this)">
-                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="2.5"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4"/></svg>
-                    Diagnostics & System
-                </button>
-            </div>
+        <nav id="nav-rail" class="nav-rail" aria-label="Main Navigation" style="justify-content: flex-start; gap: 0.5rem;">
+            <!-- Generated dynamically by initNavRail() -->
         </nav>
 
         <!-- ══════════════════════════════════════════════════════

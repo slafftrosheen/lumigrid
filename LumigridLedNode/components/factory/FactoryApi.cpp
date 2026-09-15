@@ -20,6 +20,7 @@
 #include <inttypes.h>
 
 #include "cJSON.h"
+#include "cjson_helpers.hpp"
 #include "esp_http_server.h"
 
 #include <algorithm>
@@ -432,6 +433,8 @@ esp_err_t ws_handler(httpd_req_t* request) {
     }
     return ESP_OK;
 }
+
+} // namespace
 
 void RuntimeHealthSnapshot::collect(FactoryApi* api) {
     system.uptime_s = static_cast<uint32_t>(esp_timer_get_time() / 1000000ULL);
@@ -1594,7 +1597,7 @@ esp_err_t get_sync_status(httpd_req_t* request) {
     return result;
 }
 
-} // namespace
+
 
 esp_err_t get_audit_log(httpd_req_t* request) {
     if (!api::authorize(request, api::ApiRole::Admin)) return ESP_OK;
@@ -1845,29 +1848,28 @@ esp_err_t post_restore(httpd_req_t* request) {
         DeviceConfig cfg;
         api_ptr->config()->load_config(cfg);
         
-        cJSON* item;
-        item = cJSON_GetObjectItem(cfg_json, "deviceName"); if (item && item->valuestring) safe_strncpy(cfg.device_name, item->valuestring, sizeof(cfg.device_name));
-        item = cJSON_GetObjectItem(cfg_json, "maxPowerMw"); if (item) cfg.max_power_mw = item->valueint;
-        item = cJSON_GetObjectItem(cfg_json, "gammaX10"); if (item) cfg.gamma_x10 = item->valueint;
-        item = cJSON_GetObjectItem(cfg_json, "mqttEnabled"); if (item) cfg.mqtt_enabled = item->valueint;
-        item = cJSON_GetObjectItem(cfg_json, "mqttBroker"); if (item && item->valuestring) safe_strncpy(cfg.mqtt_broker, item->valuestring, sizeof(cfg.mqtt_broker));
-        item = cJSON_GetObjectItem(cfg_json, "mqttPort"); if (item) cfg.mqtt_port = item->valueint;
-        item = cJSON_GetObjectItem(cfg_json, "syncEnabled"); if (item) cfg.sync_enabled = item->valueint;
-        item = cJSON_GetObjectItem(cfg_json, "syncRole"); if (item) cfg.sync_role = item->valueint;
+        lg::json::get_string(cfg_json, "deviceName", cfg.device_name, sizeof(cfg.device_name));
+        lg::json::get_number(cfg_json, "maxPowerMw", cfg.max_power_mw);
+        lg::json::get_number(cfg_json, "gammaX10", cfg.gamma_x10);
+        lg::json::get_number(cfg_json, "mqttEnabled", cfg.mqtt_enabled);
+        lg::json::get_string(cfg_json, "mqttBroker", cfg.mqtt_broker, sizeof(cfg.mqtt_broker));
+        lg::json::get_number(cfg_json, "mqttPort", cfg.mqtt_port);
+        lg::json::get_number(cfg_json, "syncEnabled", cfg.sync_enabled);
+        lg::json::get_number(cfg_json, "syncRole", cfg.sync_role);
 
         cJSON* prot = cJSON_GetObjectItem(cfg_json, "protocol");
         if (prot) {
-            item = cJSON_GetObjectItem(prot, "artnetEnabled"); if (item) cfg.protocol.artnet_enabled = cJSON_IsTrue(item);
-            item = cJSON_GetObjectItem(prot, "sacnEnabled"); if (item) cfg.protocol.sacn_enabled = cJSON_IsTrue(item);
-            item = cJSON_GetObjectItem(prot, "universeStart"); if (item) cfg.protocol.universe_start = item->valueint;
-            item = cJSON_GetObjectItem(prot, "liveStreamLayer"); if (item) cfg.protocol.live_stream_layer = item->valueint;
+            lg::json::get_bool(prot, "artnetEnabled", cfg.protocol.artnet_enabled);
+            lg::json::get_bool(prot, "sacnEnabled", cfg.protocol.sacn_enabled);
+            lg::json::get_number(prot, "universeStart", cfg.protocol.universe_start);
+            lg::json::get_number(prot, "liveStreamLayer", cfg.protocol.live_stream_layer);
         }
 
         cJSON* auth = cJSON_GetObjectItem(cfg_json, "auth");
         if (auth) {
-            item = cJSON_GetObjectItem(auth, "adminToken"); if (item && item->valuestring) safe_strncpy(cfg.admin_token, item->valuestring, sizeof(cfg.admin_token));
-            item = cJSON_GetObjectItem(auth, "installerToken"); if (item && item->valuestring) safe_strncpy(cfg.installer_token, item->valuestring, sizeof(cfg.installer_token));
-            item = cJSON_GetObjectItem(auth, "operatorToken"); if (item && item->valuestring) safe_strncpy(cfg.operator_token, item->valuestring, sizeof(cfg.operator_token));
+            lg::json::get_string(auth, "adminToken", cfg.admin_token, sizeof(cfg.admin_token));
+            lg::json::get_string(auth, "installerToken", cfg.installer_token, sizeof(cfg.installer_token));
+            lg::json::get_string(auth, "operatorToken", cfg.operator_token, sizeof(cfg.operator_token));
         }
 
         cJSON* z_arr = cJSON_GetObjectItem(cfg_json, "zones");
@@ -1876,8 +1878,11 @@ esp_err_t post_restore(httpd_req_t* request) {
             cJSON* zj;
             cJSON_ArrayForEach(zj, z_arr) {
                 if (z_idx >= 8) break;
-                item = cJSON_GetObjectItem(zj, "name"); if (item && item->valuestring) safe_strncpy(cfg.zones[z_idx].name, item->valuestring, sizeof(cfg.zones[z_idx].name));
-                item = cJSON_GetObjectItem(zj, "role"); if (item && item->valuestring) parse_zone_role(item->valuestring, cfg.zones[z_idx].role);
+                char role_buf[32] = "";
+                lg::json::get_string(zj, "name", cfg.zones[z_idx].name, sizeof(cfg.zones[z_idx].name));
+                if (lg::json::get_string(zj, "role", role_buf, sizeof(role_buf))) {
+                    parse_zone_role(role_buf, cfg.zones[z_idx].role);
+                }
                 z_idx++;
             }
         }
@@ -1894,10 +1899,9 @@ esp_err_t post_restore(httpd_req_t* request) {
             cJSON* idx = cJSON_GetObjectItem(p, "index");
             if (idx && idx->valueint >= 0 && idx->valueint < lg::kMaxPresets) {
                 SceneConfig sc;
-                cJSON* item;
-                item = cJSON_GetObjectItem(p, "name"); if (item && item->valuestring) safe_strncpy(sc.name, item->valuestring, sizeof(sc.name));
-                item = cJSON_GetObjectItem(p, "globalBrightness"); if (item) sc.global_brightness = item->valueint;
-                item = cJSON_GetObjectItem(p, "transitionMs"); if (item) sc.transition_ms = item->valueint;
+                lg::json::get_string(p, "name", sc.name, sizeof(sc.name));
+                lg::json::get_number(p, "globalBrightness", sc.global_brightness);
+                lg::json::get_number(p, "transitionMs", sc.transition_ms);
 
                 cJSON* z_arr = cJSON_GetObjectItem(p, "zones");
                 if (z_arr && cJSON_IsArray(z_arr)) {
@@ -1912,24 +1916,28 @@ esp_err_t post_restore(httpd_req_t* request) {
                             cJSON_ArrayForEach(lj, l_arr) {
                                 if (l_idx >= 3) break;
                                 auto& layer = sc.zones[z_idx].layers[l_idx];
-                                item = cJSON_GetObjectItem(lj, "enabled"); if (item) layer.enabled = cJSON_IsTrue(item);
-                                item = cJSON_GetObjectItem(lj, "effect"); if (item) layer.effect = item->valueint;
-                                item = cJSON_GetObjectItem(lj, "speedMs"); if (item) layer.speed_ms = item->valueint;
-                                item = cJSON_GetObjectItem(lj, "opacity"); if (item) layer.opacity = item->valueint;
-                                item = cJSON_GetObjectItem(lj, "blendMode"); if (item) layer.blend_mode = static_cast<BlendMode>(item->valueint);
-                                item = cJSON_GetObjectItem(lj, "parameter"); if (item) layer.fx_param = item->valueint;
+                                lg::json::get_bool(lj, "enabled", layer.enabled);
+                                lg::json::get_number(lj, "effect", layer.effect);
+                                lg::json::get_number(lj, "speedMs", layer.speed_ms);
+                                lg::json::get_number(lj, "opacity", layer.opacity);
+                                
+                                int blend = 0;
+                                if (lg::json::get_number(lj, "blendMode", blend)) {
+                                    layer.blend_mode = static_cast<BlendMode>(blend);
+                                }
+                                lg::json::get_number(lj, "parameter", layer.fx_param);
 
                                 cJSON* pcol = cJSON_GetObjectItem(lj, "primaryColor");
                                 if (pcol) {
-                                    cJSON* r = cJSON_GetObjectItem(pcol, "r"); if (r) layer.primary_color.r = r->valueint;
-                                    cJSON* g = cJSON_GetObjectItem(pcol, "g"); if (g) layer.primary_color.g = g->valueint;
-                                    cJSON* b = cJSON_GetObjectItem(pcol, "b"); if (b) layer.primary_color.b = b->valueint;
+                                    lg::json::get_number(pcol, "r", layer.primary_color.r);
+                                    lg::json::get_number(pcol, "g", layer.primary_color.g);
+                                    lg::json::get_number(pcol, "b", layer.primary_color.b);
                                 }
                                 cJSON* scol = cJSON_GetObjectItem(lj, "secondaryColor");
                                 if (scol) {
-                                    cJSON* r = cJSON_GetObjectItem(scol, "r"); if (r) layer.secondary_color.r = r->valueint;
-                                    cJSON* g = cJSON_GetObjectItem(scol, "g"); if (g) layer.secondary_color.g = g->valueint;
-                                    cJSON* b = cJSON_GetObjectItem(scol, "b"); if (b) layer.secondary_color.b = b->valueint;
+                                    lg::json::get_number(scol, "r", layer.secondary_color.r);
+                                    lg::json::get_number(scol, "g", layer.secondary_color.g);
+                                    lg::json::get_number(scol, "b", layer.secondary_color.b);
                                 }
                                 l_idx++;
                             }
@@ -1938,8 +1946,8 @@ esp_err_t post_restore(httpd_req_t* request) {
                     }
                 } else {
                     // Fallback for v1 legacy backups
-                    item = cJSON_GetObjectItem(p, "effect"); if (item) sc.zones[0].layers[0].effect = item->valueint;
-                    item = cJSON_GetObjectItem(p, "speedMs"); if (item) sc.zones[0].layers[0].speed_ms = item->valueint;
+                    lg::json::get_number(p, "effect", sc.zones[0].layers[0].effect);
+                    lg::json::get_number(p, "speedMs", sc.zones[0].layers[0].speed_ms);
                 }
                 
                 api_ptr->config()->save_scene(idx->valueint, sc);
@@ -2102,9 +2110,9 @@ esp_err_t FactoryApi::start(
                         uint16_t pcount = std::min<uint16_t>(fix.num_pixels, 128);
                         for (uint16_t p = 0; p < pcount; ++p) {
                             const auto& lv = ff.pixels[p];
-                            uint8_t r = std::min(255, int(lv.r) + lv.w);
-                            uint8_t g = std::min(255, int(lv.g) + lv.w);
-                            uint8_t b = std::min(255, int(lv.b) + lv.w);
+                            uint8_t r = (std::min)(255, int(lv.r) + lv.w);
+                            uint8_t g = (std::min)(255, int(lv.g) + lv.w);
+                            uint8_t b = (std::min)(255, int(lv.b) + lv.w);
                             arg->payload.push_back(r);
                             arg->payload.push_back(g);
                             arg->payload.push_back(b);
@@ -2127,9 +2135,9 @@ esp_err_t FactoryApi::start(
                             uint8_t g = static_cast<uint8_t>((uint32_t(ff.pwm[1]) * 255) / 4095);
                             uint8_t b = static_cast<uint8_t>((uint32_t(ff.pwm[2]) * 255) / 4095);
                             uint8_t w = static_cast<uint8_t>((uint32_t(ff.pwm[3]) * 255) / 4095);
-                            arg->payload.push_back(std::min(255, int(r) + w));
-                            arg->payload.push_back(std::min(255, int(g) + w));
-                            arg->payload.push_back(std::min(255, int(b) + w));
+                            arg->payload.push_back((std::min)(255, int(r) + w));
+                            arg->payload.push_back((std::min)(255, int(g) + w));
+                            arg->payload.push_back((std::min)(255, int(b) + w));
                         }
                     }
                 }
