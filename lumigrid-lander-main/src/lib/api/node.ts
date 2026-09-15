@@ -61,19 +61,79 @@ export interface NodeStatus {
 
 // ── Core fetch helper ─────────────────────────────────────────────────────────
 
+const API_TOKEN_KEY = 'lg_api_token';
+const DEV_API_TOKEN = 'admin';
+
+/**
+ * Returns the node Bearer token used by the operator console.
+ * In development the firmware accepts the built-in `admin` credential when
+ * CONFIG_LUMIGRID_ENABLE_DEV_CREDENTIALS is enabled. A real token can be
+ * supplied through localStorage without changing the client code.
+ */
+export function getApiToken(): string {
+  if (typeof localStorage === 'undefined') return DEV_API_TOKEN;
+  return localStorage.getItem(API_TOKEN_KEY) ?? DEV_API_TOKEN;
+}
+
+export function setApiToken(token: string): void {
+  if (typeof localStorage !== 'undefined') {
+    const value = token.trim();
+    if (value) localStorage.setItem(API_TOKEN_KEY, value);
+    else localStorage.removeItem(API_TOKEN_KEY);
+  }
+}
+
+export function clearApiToken(): void {
+  if (typeof localStorage !== 'undefined') localStorage.removeItem(API_TOKEN_KEY);
+}
+
+function authHeaders(extra?: HeadersInit): Headers {
+  const headers = new Headers(extra);
+  const token = getApiToken();
+  if (token) headers.set('Authorization', `Bearer ${token}`);
+  return headers;
+}
+
 async function wfetch<T>(ip: string, path: string, opts?: RequestInit, timeout = 8000): Promise<T> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeout);
   const url = `http://${ip}${path}`;
   try {
-    const res = await fetch(url, { ...opts, signal: ctrl.signal });
-    clearTimeout(timer);
-    if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
+    const res = await fetch(url, {
+      ...opts,
+      headers: authHeaders(opts?.headers),
+      signal: ctrl.signal,
+    });
+    if (!res.ok) {
+      let detail = '';
+      try {
+        const body = await res.clone().json() as { error?: string };
+        detail = body?.error ? `: ${body.error}` : '';
+      } catch {
+        // Keep the HTTP status as the useful fallback for non-JSON responses.
+      }
+      throw new Error(`HTTP ${res.status} ${res.statusText}${detail}`);
+    }
     return (await res.json()) as T;
   } catch (e: unknown) {
-    clearTimeout(timer);
     const msg = e instanceof Error ? e.message : String(e);
     throw new Error(`[${ip}] ${path} → ${msg}`);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function rawFetch(ip: string, path: string, opts?: RequestInit, timeout = 8000): Promise<Response> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeout);
+  try {
+    return await fetch(`http://${ip}${path}`, {
+      ...opts,
+      headers: authHeaders(opts?.headers),
+      signal: ctrl.signal,
+    });
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -103,9 +163,7 @@ export async function getChannelConfig(ip: string): Promise<ChannelConfig | null
 /** Read /animations.json from LED Node Storage. Returns null if not found. */
 export async function getSchedule(ip: string): Promise<AnimationBlock[] | null> {
   try {
-    const ctrl = new AbortController();
-    setTimeout(() => ctrl.abort(), 8000);
-    const res = await fetch(`http://${ip}/animations.json`, { signal: ctrl.signal });
+    const res = await rawFetch(ip, '/animations.json');
     if (!res.ok) return null;
     const j = await res.json() as { animations?: AnimationBlock[] };
     return j.animations ?? [];
@@ -158,7 +216,7 @@ export function setPixels(ip: string, pixels: Array<[number, [number, number, nu
 export async function uploadFile(ip: string, filename: string, content: string): Promise<void> {
   const form = new FormData();
   form.append('data', new Blob([content], { type: 'application/json' }), filename);
-  const res = await fetch(`http://${ip}/edit`, { method: 'POST', body: form });
+  const res = await rawFetch(ip, '/edit', { method: 'POST', body: form });
   if (!res.ok) throw new Error(`Upload failed: HTTP ${res.status}`);
 }
 
@@ -174,7 +232,7 @@ export async function saveSchedule(ip: string, blocks: AnimationBlock[]): Promis
  * Upload firmware binary to a LumiGrid LED Node's /update endpoint.
  * Returns a promise that resolves when the upload is accepted (not when rebooted).
  */
-export async function uploadFirmware(
+export function uploadFirmware(
   ip: string,
   binary: File | Blob,
   onProgress?: (pct: number) => void
@@ -182,6 +240,7 @@ export async function uploadFirmware(
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open('POST', `http://${ip}/update`, true);
+    xhr.setRequestHeader('Authorization', `Bearer ${getApiToken()}`);
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable && onProgress) onProgress(Math.round((e.loaded / e.total) * 100));
     };
@@ -441,11 +500,10 @@ export function getHealth(ip: string): Promise<HealthSnapshot> {
 }
 
 export function getLogs(ip: string): Promise<string> {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 8000);
-  return fetch(`http://${ip}/api/v1/logs`, { signal: ctrl.signal })
-    .then(res => { clearTimeout(timer); if (!res.ok) throw new Error(`HTTP ${res.status}`); return res.text(); })
-    .catch(e => { clearTimeout(timer); throw e; });
+  return rawFetch(ip, '/api/v1/logs').then(async res => {
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return res.text();
+  });
 }
 
 export function getAuditLog(ip: string): Promise<AuditEvent[]> {
