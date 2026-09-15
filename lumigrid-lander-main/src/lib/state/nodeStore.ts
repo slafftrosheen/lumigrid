@@ -113,12 +113,16 @@ export function connect(nodeIp = readString(NODE_IP_KEY)): void {
     if (event.data instanceof ArrayBuffer) {
       const arr = new Uint8Array(event.data);
       if (arr.length > 1 && (arr[0] === 1 || arr[0] === 76)) {
-        const pixels = latestState.pixels;
         const raw = arr.subarray(1);
         const len = Math.min(raw.length, BUF_SIZE);
-        pixels.fill(0);
+        const pixels = new Uint8Array(BUF_SIZE);
         pixels.set(raw.subarray(0, len));
-        state.update(current => ({ ...current, pixels, frameCount: current.frameCount + 1, lastMessageAt: now }));
+        state.update(current => ({
+          ...current,
+          pixels,
+          frameCount: current.frameCount + 1,
+          lastMessageAt: now,
+        }));
       }
       return;
     }
@@ -129,11 +133,11 @@ export function connect(nodeIp = readString(NODE_IP_KEY)): void {
         state.update(current => ({
           ...current,
           status: {
-            effect: typeof json.effect === 'string' ? json.effect : '',
-            brightness: typeof json.brightness === 'number' ? json.brightness : 0,
-            outputsEnabled: json.outputsEnabled === true,
-            testActive: json.testActive === true,
-            autoLoop: json.autoLoop === true,
+            effect: typeof json.effect === 'string' ? json.effect : current.status.effect,
+            brightness: typeof json.brightness === 'number' ? json.brightness : current.status.brightness,
+            outputsEnabled: typeof json.outputsEnabled === 'boolean' ? json.outputsEnabled : current.status.outputsEnabled,
+            testActive: typeof json.testActive === 'boolean' ? json.testActive : current.status.testActive,
+            autoLoop: typeof json.autoLoop === 'boolean' ? json.autoLoop : current.status.autoLoop,
           },
           lastMessageAt: now,
         }));
