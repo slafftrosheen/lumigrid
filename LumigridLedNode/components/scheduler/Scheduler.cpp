@@ -187,7 +187,8 @@ void Scheduler::evaluate(const Sequence& seq, uint64_t clock_ms) {
 
     SceneConfig active_composite;
     // Just use a base preset name for reference
-    strncpy(active_composite.name, "Sequenced", sizeof(active_composite.name));
+    strncpy(active_composite.name, "Sequenced", sizeof(active_composite.name) - 1);
+    active_composite.name[sizeof(active_composite.name) - 1] = '\0';
     active_composite.global_brightness = 255;
     active_composite.transition_ms = 0;
 

@@ -48,7 +48,8 @@ void SceneManager::init() {
         if (config_.load_scene(0, scene) != ESP_OK) {
             ESP_LOGW(TAG, "No scenes available, starting with blackout");
             scene = SceneConfig{};
-            strncpy(scene.name, "Default", sizeof(scene.name));
+            strncpy(scene.name, "Default", sizeof(scene.name) - 1);
+            scene.name[sizeof(scene.name) - 1] = '\0';
         }
     }
 

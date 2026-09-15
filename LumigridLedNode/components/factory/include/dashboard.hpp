@@ -1766,7 +1766,7 @@ window.lg = (() => {
             const health = await api('/api/v1/health');
             const stats = byId('health-stats');
             if (stats) {
-                stats.textContent = `Uptime: ${health.uptime_s || 0}s\nFree Heap: ${health.free_heap || 0} bytes\nMin Free Heap: ${health.min_free_heap || 0} bytes\nFirmware Version: 2.1.0\nChip Revision: ESP32-S3`;
+                stats.textContent = `Uptime: ${(health.system && health.system.uptime_s) || 0}s\nFree Heap: ${(health.system && health.system.free_heap) || 0} bytes\nMin Free Heap: ${(health.system && health.system.min_free_heap) || 0} bytes\nFirmware Version: 2.1.0\nChip Revision: ESP32-S3`;
             }
             toast('Health metrics updated.');
         } catch (e) { toast(e.message, true); }

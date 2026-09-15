@@ -38,6 +38,12 @@ namespace {
 
 constexpr size_t kMaxBodyBytes = 8192;
 
+void safe_strncpy(char* dst, const char* src, size_t dst_size) {
+    if (dst_size == 0) return;
+    std::memcpy(dst, src, dst_size - 1);
+    dst[dst_size - 1] = '\0';
+}
+
 
 esp_err_t send_json(httpd_req_t* request,
                     const char* body,
@@ -427,150 +433,164 @@ esp_err_t ws_handler(httpd_req_t* request) {
     return ESP_OK;
 }
 
-esp_err_t get_health(httpd_req_t* request) {
-    if (!api::authorize(request, api::ApiRole::Installer)) return ESP_OK;
-    
-    FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
-
-    cJSON* root = cJSON_CreateObject();
-    cJSON_AddNumberToObject(root, "schema_version", 1);
-    cJSON_AddNumberToObject(root, "uptime_s", static_cast<uint32_t>(esp_timer_get_time() / 1000000ULL));
-    cJSON_AddNumberToObject(root, "free_heap", static_cast<uint32_t>(esp_get_free_heap_size()));
-    cJSON_AddNumberToObject(root, "min_free_heap", static_cast<uint32_t>(esp_get_minimum_free_heap_size()));
-    cJSON_AddNumberToObject(root, "reset_reason", static_cast<int>(esp_reset_reason()));
+void RuntimeHealthSnapshot::collect(FactoryApi* api) {
+    system.uptime_s = static_cast<uint32_t>(esp_timer_get_time() / 1000000ULL);
+    system.free_heap = static_cast<uint32_t>(esp_get_free_heap_size());
+    system.min_free_heap = static_cast<uint32_t>(esp_get_minimum_free_heap_size());
+    system.reset_reason = static_cast<int>(esp_reset_reason());
 
     wifi_ap_record_t ap_info;
-    int rssi = 0;
     if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) {
-        rssi = ap_info.rssi;
+        network.wifi_rssi = ap_info.rssi;
     }
-    cJSON_AddNumberToObject(root, "wifi_rssi", rssi);
 
     nvs_stats_t nvs_stats{};
     nvs_get_stats(NULL, &nvs_stats);
-    cJSON_AddNumberToObject(root, "nvs_used", static_cast<int>(nvs_stats.used_entries));
-    cJSON_AddNumberToObject(root, "nvs_free", static_cast<int>(nvs_stats.free_entries));
+    nvs.used_entries = static_cast<int>(nvs_stats.used_entries);
+    nvs.free_entries = static_cast<int>(nvs_stats.free_entries);
 
-    bool config_valid = true;
-    uint32_t config_error_count = 0;
-    const char* config_first_error = "";
-    const char* persistence_state = "Unknown";
-    bool primary_config_valid = false;
-    bool backup_config_valid = false;
-
-    if (api_ptr->config()) {
-        const auto& val_res = api_ptr->config()->cached_validation_result();
-        config_valid = val_res.valid;
-        config_error_count = val_res.error_count;
-        config_first_error = val_res.first_error;
-        persistence_state = api_ptr->config()->persistence_state_str();
-        primary_config_valid = api_ptr->config()->is_primary_valid();
-        backup_config_valid = api_ptr->config()->is_backup_valid();
+    if (api->config()) {
+        const auto& val = api->config()->cached_validation_result();
+        config.valid = val.valid;
+        config.error_count = val.error_count;
+        config.first_error = val.first_error;
+        config.persistence_state = api->config()->persistence_state_str();
+        config.primary_valid = api->config()->is_primary_valid();
+        config.backup_valid = api->config()->is_backup_valid();
     }
 
-    cJSON_AddBoolToObject(root, "configuration_valid", config_valid);
-    cJSON_AddNumberToObject(root, "configuration_error_count", config_error_count);
-    cJSON_AddStringToObject(root, "configuration_first_error", config_first_error);
-    cJSON_AddStringToObject(root, "persistence_state", persistence_state);
-    cJSON_AddBoolToObject(root, "primary_config_valid", primary_config_valid);
-    cJSON_AddBoolToObject(root, "backup_config_valid", backup_config_valid);
-
-    StartupDiagnostics diag{};
-    if (api_ptr->diagnostics_provider()) {
-        diag = api_ptr->diagnostics_provider()();
+    if (api->diagnostics_provider()) {
+        StartupDiagnostics diag = api->diagnostics_provider()();
+        startup.state = diag.startup_state;
+        startup.stage = diag.startup_stage;
+        startup.failing_stage = diag.failing_stage;
+        startup.failing_error = diag.failing_error;
     }
-    cJSON_AddStringToObject(root, "startup_state", diag.startup_state);
-    cJSON_AddStringToObject(root, "startup_stage", diag.startup_stage);
-    cJSON_AddStringToObject(root, "failing_stage", diag.failing_stage);
-    cJSON_AddNumberToObject(root, "failing_error", diag.failing_error);
 
-    const char* output_state_str = "Healthy";
-    bool output_fault = false;
-    uint32_t output_fault_events = 0;
-    uint32_t output_failed_commits = 0;
-    int output_last_error = 0;
-    bool output_controller_estop_latched = false;
-    bool runtime_estop = false;
-    int dominant_control_source = 0;
-    uint8_t active_live_objects = 0;
-    uint32_t throttling_events = 0;
-    uint32_t current_power_mw = 0;
-    float fps = 0.0f;
-    uint16_t active_preset = 0;
-    bool watchdog_fallback = false;
-
-    DmxRouter::DmxStats dmx_stats{};
-
-    if (api_ptr->signage()) {
-        LightingRuntime::OutputState st = api_ptr->signage()->output_state();
-        switch (st) {
-            case LightingRuntime::OutputState::Healthy: output_state_str = "Healthy"; break;
-            case LightingRuntime::OutputState::Faulted: output_state_str = "Faulted"; break;
-            case LightingRuntime::OutputState::Armed:   output_state_str = "Armed";   break;
+    if (api->signage()) {
+        auto* sig = api->signage();
+        switch (sig->output_state()) {
+            case LightingRuntime::OutputState::Healthy: output.state = "Healthy"; break;
+            case LightingRuntime::OutputState::Faulted: output.state = "Faulted"; break;
+            case LightingRuntime::OutputState::Armed:   output.state = "Armed";   break;
         }
-        output_fault = api_ptr->signage()->output_fault();
-        output_fault_events = api_ptr->signage()->fault_event_count();
-        output_failed_commits = api_ptr->signage()->controller().failed_commit_count();
-        output_last_error = static_cast<int>(api_ptr->signage()->controller().last_commit_error());
-        output_controller_estop_latched = api_ptr->signage()->is_output_controller_estop_latched();
-        runtime_estop = api_ptr->signage()->is_estop_active();
-        dominant_control_source = static_cast<int>(api_ptr->signage()->current_control_source());
-        active_live_objects = api_ptr->signage()->active_live_objects();
-        throttling_events = api_ptr->signage()->power_budget().throttling_events();
-        current_power_mw = api_ptr->signage()->power_budget().current_power_mw();
-        fps = api_ptr->signage()->get_fps();
-        active_preset = api_ptr->signage()->active_scene_index();
-        watchdog_fallback = api_ptr->signage()->is_fallback_active();
+        output.fault = sig->output_fault();
+        output.fault_events = sig->fault_event_count();
+        output.failed_commits = sig->controller().failed_commit_count();
+        output.last_error = static_cast<int>(sig->controller().last_commit_error());
+        output.estop_latched = sig->is_output_controller_estop_latched();
+        output.runtime_estop = sig->is_estop_active();
+        output.control_source = static_cast<int>(sig->current_control_source());
+        output.live_objects = sig->active_live_objects();
+        output.current_power_mw = sig->power_budget().current_power_mw();
+        output.throttling_events = sig->power_budget().throttling_events();
+        system.fps = sig->get_fps();
+        output.active_preset = sig->active_scene_index();
+        output.watchdog_fallback = sig->is_fallback_active();
     } else {
-        output_state_str = "Faulted";
-        output_fault = true;
-        dominant_control_source = static_cast<int>(api_ptr->runner().control_sources().current_owner());
+        output.state = "Faulted";
+        output.fault = true;
+        output.control_source = static_cast<int>(api->runner().control_sources().current_owner());
     }
 
-    if (api_ptr->dmx_router()) {
-        dmx_stats = api_ptr->dmx_router()->get_stats();
+    if (api->dmx_router()) {
+        auto stats = api->dmx_router()->get_stats();
+        dmx.sources_active = stats.active_sources;
+        dmx.universes_active = stats.active_universes;
+        dmx.sources_dropped = stats.sources_dropped;
+        dmx.packets_accepted = stats.packets_accepted;
+        dmx.packets_rejected_seq = stats.packets_rejected_sequence;
+        dmx.packets_ignored_unpatched = stats.packets_ignored_unpatched;
+        dmx.submission_failures = stats.submission_failures;
+        dmx.universe_count = api->dmx_router()->get_active_universes(
+            dmx.configured_universes, kMaxUniverses);
     }
 
-    cJSON_AddStringToObject(root, "output_state", output_state_str);
-    cJSON_AddBoolToObject(root, "output_fault", output_fault);
-    cJSON_AddNumberToObject(root, "output_fault_events", output_fault_events);
-    cJSON_AddNumberToObject(root, "output_failed_commits", output_failed_commits);
-    cJSON_AddNumberToObject(root, "output_last_error", output_last_error);
-    cJSON_AddBoolToObject(root, "output_controller_estop_latched", output_controller_estop_latched);
-    cJSON_AddBoolToObject(root, "runtime_estop", runtime_estop);
-    cJSON_AddNumberToObject(root, "dominant_control_source", dominant_control_source);
-    cJSON_AddNumberToObject(root, "active_live_objects", active_live_objects);
+    if (api->node_sync()) {
+        sync.packet_loss = api->node_sync()->status().packets_missed;
+    }
+}
 
-    cJSON_AddNumberToObject(root, "dmx_sources_active", dmx_stats.active_sources);
-    cJSON_AddNumberToObject(root, "dmx_universes_active", dmx_stats.active_universes);
-    cJSON_AddNumberToObject(root, "dmx_sources_dropped", dmx_stats.sources_dropped);
-    cJSON_AddNumberToObject(root, "dmx_packets_accepted", dmx_stats.packets_accepted);
-    cJSON_AddNumberToObject(root, "dmx_packets_rejected_sequence", dmx_stats.packets_rejected_sequence);
-    cJSON_AddNumberToObject(root, "dmx_packets_ignored_unpatched", dmx_stats.packets_ignored_unpatched);
-    cJSON_AddNumberToObject(root, "dmx_submission_failures", dmx_stats.submission_failures);
+cJSON* RuntimeHealthSnapshot::to_json() const {
+    cJSON* root = cJSON_CreateObject();
+    if (!root) return nullptr;
 
-    cJSON_AddNumberToObject(root, "current_power_mw", current_power_mw);
-    cJSON_AddNumberToObject(root, "throttling_events", throttling_events);
-    cJSON_AddNumberToObject(root, "fps", fps);
-    cJSON_AddNumberToObject(root, "active_preset", active_preset);
-    cJSON_AddBoolToObject(root, "watchdog_fallback", watchdog_fallback);
+    cJSON_AddNumberToObject(root, "schema_version", kSchemaVersion);
 
+    cJSON* sys = cJSON_AddObjectToObject(root, "system");
+    cJSON_AddNumberToObject(sys, "uptime_s", system.uptime_s);
+    cJSON_AddNumberToObject(sys, "free_heap", system.free_heap);
+    cJSON_AddNumberToObject(sys, "min_free_heap", system.min_free_heap);
+    cJSON_AddNumberToObject(sys, "reset_reason", system.reset_reason);
+    cJSON_AddNumberToObject(sys, "fps", system.fps);
+
+    cJSON* net = cJSON_AddObjectToObject(root, "network");
+    cJSON_AddNumberToObject(net, "wifi_rssi", network.wifi_rssi);
+
+    cJSON* nvs_obj = cJSON_AddObjectToObject(root, "nvs");
+    cJSON_AddNumberToObject(nvs_obj, "used", nvs.used_entries);
+    cJSON_AddNumberToObject(nvs_obj, "free", nvs.free_entries);
+
+    cJSON* cfg = cJSON_AddObjectToObject(root, "config");
+    cJSON_AddBoolToObject(cfg, "valid", config.valid);
+    cJSON_AddNumberToObject(cfg, "error_count", config.error_count);
+    cJSON_AddStringToObject(cfg, "first_error", config.first_error);
+    cJSON_AddStringToObject(cfg, "persistence_state", config.persistence_state);
+    cJSON_AddBoolToObject(cfg, "primary_valid", config.primary_valid);
+    cJSON_AddBoolToObject(cfg, "backup_valid", config.backup_valid);
+
+    cJSON* su = cJSON_AddObjectToObject(root, "startup");
+    cJSON_AddStringToObject(su, "state", startup.state);
+    cJSON_AddStringToObject(su, "stage", startup.stage);
+    cJSON_AddStringToObject(su, "failing_stage", startup.failing_stage);
+    cJSON_AddNumberToObject(su, "failing_error", startup.failing_error);
+
+    cJSON* out = cJSON_AddObjectToObject(root, "output");
+    cJSON_AddStringToObject(out, "state", output.state);
+    cJSON_AddBoolToObject(out, "fault", output.fault);
+    cJSON_AddNumberToObject(out, "fault_events", output.fault_events);
+    cJSON_AddNumberToObject(out, "failed_commits", output.failed_commits);
+    cJSON_AddNumberToObject(out, "last_error", output.last_error);
+    cJSON_AddBoolToObject(out, "estop_latched", output.estop_latched);
+    cJSON_AddBoolToObject(out, "runtime_estop", output.runtime_estop);
+    cJSON_AddNumberToObject(out, "control_source", output.control_source);
+    cJSON_AddNumberToObject(out, "live_objects", output.live_objects);
+    cJSON_AddNumberToObject(out, "current_power_mw", output.current_power_mw);
+    cJSON_AddNumberToObject(out, "throttling_events", output.throttling_events);
+    cJSON_AddNumberToObject(out, "active_preset", output.active_preset);
+    cJSON_AddBoolToObject(out, "watchdog_fallback", output.watchdog_fallback);
+
+    cJSON* dmx_obj = cJSON_AddObjectToObject(root, "dmx");
+    cJSON_AddNumberToObject(dmx_obj, "sources_active", dmx.sources_active);
+    cJSON_AddNumberToObject(dmx_obj, "universes_active", dmx.universes_active);
+    cJSON_AddNumberToObject(dmx_obj, "sources_dropped", dmx.sources_dropped);
+    cJSON_AddNumberToObject(dmx_obj, "packets_accepted", dmx.packets_accepted);
+    cJSON_AddNumberToObject(dmx_obj, "packets_rejected_seq", dmx.packets_rejected_seq);
+    cJSON_AddNumberToObject(dmx_obj, "packets_ignored_unpatched", dmx.packets_ignored_unpatched);
+    cJSON_AddNumberToObject(dmx_obj, "submission_failures", dmx.submission_failures);
     cJSON* univ_arr = cJSON_CreateArray();
-    if (api_ptr->dmx_router()) {
-        uint16_t active_unis[16];
-        size_t u_count = api_ptr->dmx_router()->get_active_universes(active_unis, 16);
-        for (size_t i = 0; i < u_count; ++i) {
-            cJSON_AddItemToArray(univ_arr, cJSON_CreateNumber(active_unis[i]));
-        }
+    for (size_t i = 0; i < dmx.universe_count; ++i) {
+        cJSON_AddItemToArray(univ_arr, cJSON_CreateNumber(dmx.configured_universes[i]));
     }
-    cJSON_AddItemToObject(root, "configured_universes", univ_arr);
+    cJSON_AddItemToObject(dmx_obj, "configured_universes", univ_arr);
 
-    uint32_t packet_loss = 0;
-    if (api_ptr->node_sync()) {
-        packet_loss = api_ptr->node_sync()->status().packets_missed;
+    cJSON* sync_obj = cJSON_AddObjectToObject(root, "sync");
+    cJSON_AddNumberToObject(sync_obj, "packet_loss", sync.packet_loss);
+
+    return root;
+}
+
+esp_err_t get_health(httpd_req_t* request) {
+    if (!api::authorize(request, api::ApiRole::Installer)) return ESP_OK;
+
+    auto* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+    RuntimeHealthSnapshot snapshot;
+    snapshot.collect(api_ptr);
+
+    cJSON* root = snapshot.to_json();
+    if (!root) {
+        return send_error(request, "500 Internal Server Error", "json_encode_failed");
     }
-    cJSON_AddNumberToObject(root, "packet_loss_count", packet_loss);
-
     char* json = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
     if (!json) {
@@ -1826,11 +1846,11 @@ esp_err_t post_restore(httpd_req_t* request) {
         api_ptr->config()->load_config(cfg);
         
         cJSON* item;
-        item = cJSON_GetObjectItem(cfg_json, "deviceName"); if (item && item->valuestring) strncpy(cfg.device_name, item->valuestring, sizeof(cfg.device_name));
+        item = cJSON_GetObjectItem(cfg_json, "deviceName"); if (item && item->valuestring) safe_strncpy(cfg.device_name, item->valuestring, sizeof(cfg.device_name));
         item = cJSON_GetObjectItem(cfg_json, "maxPowerMw"); if (item) cfg.max_power_mw = item->valueint;
         item = cJSON_GetObjectItem(cfg_json, "gammaX10"); if (item) cfg.gamma_x10 = item->valueint;
         item = cJSON_GetObjectItem(cfg_json, "mqttEnabled"); if (item) cfg.mqtt_enabled = item->valueint;
-        item = cJSON_GetObjectItem(cfg_json, "mqttBroker"); if (item && item->valuestring) strncpy(cfg.mqtt_broker, item->valuestring, sizeof(cfg.mqtt_broker));
+        item = cJSON_GetObjectItem(cfg_json, "mqttBroker"); if (item && item->valuestring) safe_strncpy(cfg.mqtt_broker, item->valuestring, sizeof(cfg.mqtt_broker));
         item = cJSON_GetObjectItem(cfg_json, "mqttPort"); if (item) cfg.mqtt_port = item->valueint;
         item = cJSON_GetObjectItem(cfg_json, "syncEnabled"); if (item) cfg.sync_enabled = item->valueint;
         item = cJSON_GetObjectItem(cfg_json, "syncRole"); if (item) cfg.sync_role = item->valueint;
@@ -1845,9 +1865,9 @@ esp_err_t post_restore(httpd_req_t* request) {
 
         cJSON* auth = cJSON_GetObjectItem(cfg_json, "auth");
         if (auth) {
-            item = cJSON_GetObjectItem(auth, "adminToken"); if (item && item->valuestring) strncpy(cfg.admin_token, item->valuestring, sizeof(cfg.admin_token));
-            item = cJSON_GetObjectItem(auth, "installerToken"); if (item && item->valuestring) strncpy(cfg.installer_token, item->valuestring, sizeof(cfg.installer_token));
-            item = cJSON_GetObjectItem(auth, "operatorToken"); if (item && item->valuestring) strncpy(cfg.operator_token, item->valuestring, sizeof(cfg.operator_token));
+            item = cJSON_GetObjectItem(auth, "adminToken"); if (item && item->valuestring) safe_strncpy(cfg.admin_token, item->valuestring, sizeof(cfg.admin_token));
+            item = cJSON_GetObjectItem(auth, "installerToken"); if (item && item->valuestring) safe_strncpy(cfg.installer_token, item->valuestring, sizeof(cfg.installer_token));
+            item = cJSON_GetObjectItem(auth, "operatorToken"); if (item && item->valuestring) safe_strncpy(cfg.operator_token, item->valuestring, sizeof(cfg.operator_token));
         }
 
         cJSON* z_arr = cJSON_GetObjectItem(cfg_json, "zones");
@@ -1856,7 +1876,7 @@ esp_err_t post_restore(httpd_req_t* request) {
             cJSON* zj;
             cJSON_ArrayForEach(zj, z_arr) {
                 if (z_idx >= 8) break;
-                item = cJSON_GetObjectItem(zj, "name"); if (item && item->valuestring) strncpy(cfg.zones[z_idx].name, item->valuestring, sizeof(cfg.zones[z_idx].name));
+                item = cJSON_GetObjectItem(zj, "name"); if (item && item->valuestring) safe_strncpy(cfg.zones[z_idx].name, item->valuestring, sizeof(cfg.zones[z_idx].name));
                 item = cJSON_GetObjectItem(zj, "role"); if (item && item->valuestring) parse_zone_role(item->valuestring, cfg.zones[z_idx].role);
                 z_idx++;
             }
@@ -1875,7 +1895,7 @@ esp_err_t post_restore(httpd_req_t* request) {
             if (idx && idx->valueint >= 0 && idx->valueint < lg::kMaxPresets) {
                 SceneConfig sc;
                 cJSON* item;
-                item = cJSON_GetObjectItem(p, "name"); if (item && item->valuestring) strncpy(sc.name, item->valuestring, sizeof(sc.name));
+                item = cJSON_GetObjectItem(p, "name"); if (item && item->valuestring) safe_strncpy(sc.name, item->valuestring, sizeof(sc.name));
                 item = cJSON_GetObjectItem(p, "globalBrightness"); if (item) sc.global_brightness = item->valueint;
                 item = cJSON_GetObjectItem(p, "transitionMs"); if (item) sc.transition_ms = item->valueint;
 

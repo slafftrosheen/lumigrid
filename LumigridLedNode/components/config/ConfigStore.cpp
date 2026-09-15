@@ -14,6 +14,12 @@ static const char* TAG = "config";
 namespace lg {
 namespace {
 
+void safe_strncpy(char* dst, const char* src, size_t dst_size) {
+    if (dst_size == 0) return;
+    std::memcpy(dst, src, dst_size - 1);
+    dst[dst_size - 1] = '\0';
+}
+
 void make_key(char* buf, size_t buflen, const char* prefix, uint8_t index) {
     snprintf(buf, buflen, "%s_%u", prefix, index);
 }
@@ -63,19 +69,25 @@ esp_err_t ConfigStore::save_scene(uint8_t index, const SceneConfig& scene) {
     char key[12];
     make_key(key, sizeof(key), "scene", index);
 
-    // Save backup of current
-    auto current = std::make_unique<SceneConfig>();
-    if (load_scene(index, *current) == ESP_OK) {
-        char bak_key[16];
-        snprintf(bak_key, sizeof(bak_key), "scene_b_%u", index);
-        nvs_set_blob(handle_, bak_key, current.get(), sizeof(SceneConfig));
-    }
-
     ESP_RETURN_ON_ERROR(
         nvs_set_blob(handle_, key, to_save.get(), sizeof(SceneConfig)),
-        TAG, "save scene"
+        TAG, "save scene primary"
     );
-    return nvs_commit(handle_);
+    ESP_RETURN_ON_ERROR(nvs_commit(handle_), TAG, "commit scene primary");
+
+    char bak_key[16];
+    snprintf(bak_key, sizeof(bak_key), "scene_b_%u", index);
+    esp_err_t bak_err = nvs_set_blob(handle_, bak_key, to_save.get(), sizeof(SceneConfig));
+    if (bak_err != ESP_OK) {
+        ESP_LOGW(TAG, "Scene %u backup write failed: %s", index, esp_err_to_name(bak_err));
+    } else {
+        bak_err = nvs_commit(handle_);
+        if (bak_err != ESP_OK) {
+            ESP_LOGW(TAG, "Scene %u backup commit failed: %s", index, esp_err_to_name(bak_err));
+        }
+    }
+
+    return ESP_OK;
 }
 
 esp_err_t ConfigStore::load_scene(uint8_t index, SceneConfig& scene) {
@@ -127,9 +139,9 @@ esp_err_t ConfigStore::load_scene(uint8_t index, SceneConfig& scene) {
                         return ESP_ERR_NVS_INVALID_STATE;
                     }
                     
-                    // Migrate
                     auto migrated = std::make_unique<SceneConfig>();
-                    strncpy(migrated->name, old->name, sizeof(migrated->name));
+                    std::memcpy(migrated->name, old->name, sizeof(migrated->name) - 1);
+                    migrated->name[sizeof(migrated->name) - 1] = '\0';
                     migrated->global_brightness = old->global_brightness;
                     migrated->transition_ms = old->transition_ms;
                     
@@ -164,9 +176,15 @@ esp_err_t ConfigStore::load_scene(uint8_t index, SceneConfig& scene) {
         ESP_LOGW(TAG, "Restoring scene %u from backup slot", index);
         err = load_from_key(bak_key, scene);
         if (err == ESP_OK) {
-            // Restore primary
-            nvs_set_blob(handle_, key, &scene, sizeof(SceneConfig));
-            nvs_commit(handle_);
+            esp_err_t restore_err = nvs_set_blob(handle_, key, &scene, sizeof(SceneConfig));
+            if (restore_err != ESP_OK) {
+                ESP_LOGW(TAG, "Scene %u primary restore write failed: %s", index, esp_err_to_name(restore_err));
+            } else {
+                restore_err = nvs_commit(handle_);
+                if (restore_err != ESP_OK) {
+                    ESP_LOGW(TAG, "Scene %u primary restore commit failed: %s", index, esp_err_to_name(restore_err));
+                }
+            }
         }
     }
     
@@ -501,7 +519,7 @@ bool ConfigStore::migrate_v1_to_v2(const DeviceConfigV1& v1, DeviceConfig& v2, u
     auto def = std::make_unique<DeviceConfig>();
     v2 = *def;
     v2.schema_version = 2;
-    std::strncpy(v2.device_name, v1.device_name, sizeof(v2.device_name));
+    safe_strncpy(v2.device_name, v1.device_name, sizeof(v2.device_name));
     v2.active_preset_index = v1.active_preset_index;
     v2.fallback_preset_index = v1.fallback_preset_index;
     v2.watchdog_timeout_s = v1.watchdog_timeout_s;
@@ -510,21 +528,21 @@ bool ConfigStore::migrate_v1_to_v2(const DeviceConfigV1& v1, DeviceConfig& v2, u
     v2.soft_start_enabled = v1.soft_start_enabled;
     v2.soft_start_ms = v1.soft_start_ms;
     v2.mqtt_enabled = v1.mqtt_enabled;
-    std::strncpy(v2.mqtt_broker, v1.mqtt_broker, sizeof(v2.mqtt_broker));
+    safe_strncpy(v2.mqtt_broker, v1.mqtt_broker, sizeof(v2.mqtt_broker));
     v2.mqtt_port = v1.mqtt_port;
-    std::strncpy(v2.timezone, v1.timezone, sizeof(v2.timezone));
+    safe_strncpy(v2.timezone, v1.timezone, sizeof(v2.timezone));
     v2.sync_enabled = v1.sync_enabled;
     v2.sync_role = v1.sync_role;
     v2.sync_token = v1.sync_token;
 
-    std::strncpy(v2.admin_token, v1.admin_token, sizeof(v2.admin_token));
-    std::strncpy(v2.installer_token, v1.installer_token, sizeof(v2.installer_token));
-    std::strncpy(v2.operator_token, v1.operator_token, sizeof(v2.operator_token));
+    safe_strncpy(v2.admin_token, v1.admin_token, sizeof(v2.admin_token));
+    safe_strncpy(v2.installer_token, v1.installer_token, sizeof(v2.installer_token));
+    safe_strncpy(v2.operator_token, v1.operator_token, sizeof(v2.operator_token));
 
-    std::strncpy(v2.serial_number, v1.serial_number, sizeof(v2.serial_number));
-    std::strncpy(v2.hardware_revision, v1.hardware_revision, sizeof(v2.hardware_revision));
-    std::strncpy(v2.site_label, v1.site_label, sizeof(v2.site_label));
-    std::strncpy(v2.group_label, v1.group_label, sizeof(v2.group_label));
+    safe_strncpy(v2.serial_number, v1.serial_number, sizeof(v2.serial_number));
+    safe_strncpy(v2.hardware_revision, v1.hardware_revision, sizeof(v2.hardware_revision));
+    safe_strncpy(v2.site_label, v1.site_label, sizeof(v2.site_label));
+    safe_strncpy(v2.group_label, v1.group_label, sizeof(v2.group_label));
 
     for (size_t i = 0; i < 16; ++i) {
         v2.physical_outputs[i].type = v1.physical_outputs[i].type;
@@ -534,7 +552,7 @@ bool ConfigStore::migrate_v1_to_v2(const DeviceConfigV1& v1, DeviceConfig& v2, u
     }
 
     for (size_t i = 0; i < 8; ++i) {
-        std::strncpy(v2.zones[i].name, v1.zones[i].name, sizeof(v2.zones[i].name));
+        safe_strncpy(v2.zones[i].name, v1.zones[i].name, sizeof(v2.zones[i].name));
         v2.zones[i].role = v1.zones[i].role;
     }
 
@@ -763,7 +781,7 @@ esp_err_t ConfigStore::load_config(DeviceConfig& config) {
     } else {
         cached_val_res_.valid = false;
         cached_val_res_.error_count = 1;
-        std::strncpy(cached_val_res_.first_error, "Failed to load device config from NVS", sizeof(cached_val_res_.first_error));
+        safe_strncpy(cached_val_res_.first_error, "Failed to load device config from NVS", sizeof(cached_val_res_.first_error));
     }
     return err;
 }
@@ -774,16 +792,23 @@ esp_err_t ConfigStore::save_sequence(const Sequence& seq) {
     auto to_save = std::make_unique<Sequence>(seq);
     to_save->checksum = calc_seq_crc(*to_save);
 
-    auto current = std::make_unique<Sequence>();
-    if (load_sequence(*current) == ESP_OK) {
-        nvs_set_blob(handle_, "seq_main_bak", current.get(), sizeof(Sequence));
-    }
-
     ESP_RETURN_ON_ERROR(
         nvs_set_blob(handle_, "seq_main", to_save.get(), sizeof(Sequence)),
-        TAG, "save seq"
+        TAG, "save seq primary"
     );
-    return nvs_commit(handle_);
+    ESP_RETURN_ON_ERROR(nvs_commit(handle_), TAG, "commit seq primary");
+
+    esp_err_t bak_err = nvs_set_blob(handle_, "seq_main_bak", to_save.get(), sizeof(Sequence));
+    if (bak_err != ESP_OK) {
+        ESP_LOGW(TAG, "Sequence backup write failed: %s", esp_err_to_name(bak_err));
+    } else {
+        bak_err = nvs_commit(handle_);
+        if (bak_err != ESP_OK) {
+            ESP_LOGW(TAG, "Sequence backup commit failed: %s", esp_err_to_name(bak_err));
+        }
+    }
+
+    return ESP_OK;
 }
 
 esp_err_t ConfigStore::load_sequence(Sequence& seq) {
@@ -813,8 +838,15 @@ esp_err_t ConfigStore::load_sequence(Sequence& seq) {
         ESP_LOGW(TAG, "Restoring Sequence from backup slot");
         err = load_from_key("seq_main_bak", seq);
         if (err == ESP_OK) {
-            nvs_set_blob(handle_, "seq_main", &seq, sizeof(Sequence));
-            nvs_commit(handle_);
+            esp_err_t restore_err = nvs_set_blob(handle_, "seq_main", &seq, sizeof(Sequence));
+            if (restore_err != ESP_OK) {
+                ESP_LOGW(TAG, "Sequence primary restore write failed: %s", esp_err_to_name(restore_err));
+            } else {
+                restore_err = nvs_commit(handle_);
+                if (restore_err != ESP_OK) {
+                    ESP_LOGW(TAG, "Sequence primary restore commit failed: %s", esp_err_to_name(restore_err));
+                }
+            }
         }
     }
 
@@ -832,16 +864,23 @@ esp_err_t ConfigStore::save_calendar_schedule(const CalendarSchedule& schedule) 
     auto to_save = std::make_unique<CalendarSchedule>(schedule);
     to_save->checksum = calc_calendar_crc(*to_save);
 
-    auto current = std::make_unique<CalendarSchedule>();
-    if (load_calendar_schedule(*current) == ESP_OK) {
-        nvs_set_blob(handle_, "calendar_bak", current.get(), sizeof(CalendarSchedule));
-    }
-
     ESP_RETURN_ON_ERROR(
         nvs_set_blob(handle_, "calendar", to_save.get(), sizeof(CalendarSchedule)),
-        TAG, "save calendar"
+        TAG, "save calendar primary"
     );
-    return nvs_commit(handle_);
+    ESP_RETURN_ON_ERROR(nvs_commit(handle_), TAG, "commit calendar primary");
+
+    esp_err_t bak_err = nvs_set_blob(handle_, "calendar_bak", to_save.get(), sizeof(CalendarSchedule));
+    if (bak_err != ESP_OK) {
+        ESP_LOGW(TAG, "Calendar backup write failed: %s", esp_err_to_name(bak_err));
+    } else {
+        bak_err = nvs_commit(handle_);
+        if (bak_err != ESP_OK) {
+            ESP_LOGW(TAG, "Calendar backup commit failed: %s", esp_err_to_name(bak_err));
+        }
+    }
+
+    return ESP_OK;
 }
 
 esp_err_t ConfigStore::load_calendar_schedule(CalendarSchedule& schedule) {
@@ -871,8 +910,15 @@ esp_err_t ConfigStore::load_calendar_schedule(CalendarSchedule& schedule) {
         ESP_LOGW(TAG, "Restoring Calendar from backup slot");
         err = load_from_key("calendar_bak", schedule);
         if (err == ESP_OK) {
-            nvs_set_blob(handle_, "calendar", &schedule, sizeof(CalendarSchedule));
-            nvs_commit(handle_);
+            esp_err_t restore_err = nvs_set_blob(handle_, "calendar", &schedule, sizeof(CalendarSchedule));
+            if (restore_err != ESP_OK) {
+                ESP_LOGW(TAG, "Calendar primary restore write failed: %s", esp_err_to_name(restore_err));
+            } else {
+                restore_err = nvs_commit(handle_);
+                if (restore_err != ESP_OK) {
+                    ESP_LOGW(TAG, "Calendar primary restore commit failed: %s", esp_err_to_name(restore_err));
+                }
+            }
         }
     }
 
@@ -913,7 +959,7 @@ void ConfigStore::ensure_defaults() {
 
     // ── Product-Grade Default Scenes ──
     auto s_open = std::make_unique<SceneConfig>();
-    strncpy(s_open->name, "Store Open", sizeof(s_open->name));
+    safe_strncpy(s_open->name, "Store Open", sizeof(s_open->name));
     s_open->global_brightness = 180;
     for (uint8_t i = 0; i < 8; ++i) {
         s_open->zones[i].layers[0].effect = static_cast<uint8_t>(SignageEffect::Solid);
@@ -921,10 +967,13 @@ void ConfigStore::ensure_defaults() {
         s_open->zones[i].layers[0].enabled = true;
         s_open->zones[i].layers[0].opacity = 255;
     }
-    save_scene(0, *s_open);
+    esp_err_t err = save_scene(0, *s_open);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to save default scene 0: %s", esp_err_to_name(err));
+    }
 
     auto s_night = std::make_unique<SceneConfig>();
-    strncpy(s_night->name, "Night Mode", sizeof(s_night->name));
+    safe_strncpy(s_night->name, "Night Mode", sizeof(s_night->name));
     s_night->global_brightness = 40;
     for (uint8_t i = 0; i < 8; ++i) {
         s_night->zones[i].layers[0].effect = static_cast<uint8_t>(SignageEffect::Breathe);
@@ -932,7 +981,10 @@ void ConfigStore::ensure_defaults() {
         s_night->zones[i].layers[0].enabled = true;
         s_night->zones[i].layers[0].opacity = 255;
     }
-    save_scene(1, *s_night);
+    err = save_scene(1, *s_night);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to save default scene 1: %s", esp_err_to_name(err));
+    }
 
     // 🔒 Security Provisioning
     auto dc = std::make_unique<DeviceConfig>();
@@ -960,7 +1012,10 @@ void ConfigStore::ensure_defaults() {
             ESP_LOGW(TAG, "  STORE THESE SECURELY. THEY WILL NOT BE SHOWN AGAIN.");
             ESP_LOGW(TAG, "==================================================");
 
-            save_config(*dc);
+            esp_err_t cfg_err = save_config(*dc);
+            if (cfg_err != ESP_OK) {
+                ESP_LOGE(TAG, "Failed to persist provisioned credentials: %s", esp_err_to_name(cfg_err));
+            }
         }
     }
 }

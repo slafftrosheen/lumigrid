@@ -82,13 +82,18 @@
   });
 
   const navLinks = [
-    { href: '/dashboard',          icon: '⬡',  label: 'Fleet' },
-    { href: '/dashboard/channels', icon: '◈',  label: 'Channels' },
-    { href: '/dashboard/thermal',  icon: '⬥',  label: 'Thermal' },
-    { href: '/dashboard/schedule', icon: '◷',  label: 'Schedule' },
-    { href: '/dashboard/uptime',   icon: '▣',  label: 'Uptime' },
-    { href: '/dashboard/preview',  icon: '◉',  label: 'Preview' },
-    { href: '/dashboard/firmware', icon: '⟳',  label: 'Firmware' },
+    { href: '/dashboard',              icon: '⬡',  label: 'Fleet' },
+    { href: '/dashboard/scenes',       icon: '◆',  label: 'Scenes' },
+    { href: '/dashboard/timeline',     icon: '▤',  label: 'Timeline' },
+    { href: '/dashboard/schedule',     icon: '◷',  label: 'Schedule' },
+    { href: '/dashboard/channels',     icon: '◈',  label: 'Channels' },
+    { href: '/dashboard/thermal',      icon: '⬥',  label: 'Thermal' },
+    { href: '/dashboard/visualizer',   icon: '▶',  label: 'Visualizer' },
+    { href: '/dashboard/uptime',       icon: '▣',  label: 'Uptime' },
+    { href: '/dashboard/diagnostics',  icon: '⚕',  label: 'Diagnostics' },
+    { href: '/dashboard/factory',      icon: '⚙',  label: 'Factory' },
+    { href: '/dashboard/preview',      icon: '◉',  label: 'Preview' },
+    { href: '/dashboard/firmware',     icon: '⟳',  label: 'Firmware' },
   ];
 
   let { children } = $props();

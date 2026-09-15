@@ -187,7 +187,8 @@ esp_err_t LumigridRuntime::init() {
             failing_error_ = val_err;
             configuration_valid_ = false;
             configuration_error_count_ = val_res.error_count;
-            std::strncpy(configuration_first_error_, val_res.first_error, sizeof(configuration_first_error_));
+            std::strncpy(configuration_first_error_, val_res.first_error, sizeof(configuration_first_error_) - 1);
+            configuration_first_error_[sizeof(configuration_first_error_) - 1] = '\0';
             output_.blackout();
             output_.set_output_enabled(false);
             ESP_LOGE("lumigrid", "STARTUP CONFIG VALIDATION FAILED (%u errors): %s. Entering SAFE/RECOVERY MODE!",
@@ -220,7 +221,8 @@ esp_err_t LumigridRuntime::init() {
         failing_error_ = ESP_FAIL;
         configuration_valid_ = false;
         configuration_error_count_ = 1;
-        std::strncpy(configuration_first_error_, "Failed to load device config from NVS", sizeof(configuration_first_error_));
+        std::strncpy(configuration_first_error_, "Failed to load device config from NVS", sizeof(configuration_first_error_) - 1);
+        configuration_first_error_[sizeof(configuration_first_error_) - 1] = '\0';
         output_.blackout();
         output_.set_output_enabled(false);
         ESP_LOGE("lumigrid", "Failed to load device config! Entering SAFE MODE!");
