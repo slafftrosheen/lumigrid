@@ -1,6 +1,18 @@
 <script lang="ts">
   import { page } from '$app/stores';
   import { onMount } from 'svelte';
+  import {
+    AUTH_ROLE_KEY,
+    AUTH_TIMESTAMP_KEY,
+    NODE_IP_KEY,
+    NODE_LIST_KEY,
+    readString,
+    readStringList,
+    removeValue,
+    writeString,
+    writeStringList,
+  } from '$lib/auth/storage';
+  import { connect, reconnect as reconnectNode } from '$lib/state/nodeStore';
 
   // ── Feature 5: PIN Gate ──────────────────────────────────────────────────────
   const OPERATOR_HASH_KEY = 'lg_op_hash';
@@ -14,9 +26,9 @@
   let pinError    = $state('');
   let showPinWall = $state(true);
 
-  // Node management — shared context for all child pages
-  let nodeIp   = $state(localStorage?.getItem('lg_node_ip') ?? '');
-  let nodeList = $state<string[]>(JSON.parse(localStorage?.getItem('lg_nodes') ?? '[]'));
+  // Node management — browser persistence is isolated in auth/storage.
+  let nodeIp   = $state('');
+  let nodeList = $state<string[]>([]);
   let addIpVal = $state('');
 
   async function sha256(s: string): Promise<string> {
@@ -25,19 +37,19 @@
   }
 
   async function initHashes() {
-    if (!localStorage.getItem(OPERATOR_HASH_KEY)) {
-      localStorage.setItem(OPERATOR_HASH_KEY, await sha256(DEFAULT_OP_PIN));
+    if (!readString(OPERATOR_HASH_KEY)) {
+      writeString(OPERATOR_HASH_KEY, await sha256(DEFAULT_OP_PIN));
     }
-    if (!localStorage.getItem(ADMIN_HASH_KEY)) {
-      localStorage.setItem(ADMIN_HASH_KEY, await sha256(DEFAULT_AD_PIN));
+    if (!readString(ADMIN_HASH_KEY)) {
+      writeString(ADMIN_HASH_KEY, await sha256(DEFAULT_AD_PIN));
     }
   }
 
   async function submitPin() {
     pinError = '';
     const h = await sha256(pinInput);
-    const opHash = localStorage.getItem(OPERATOR_HASH_KEY);
-    const adHash = localStorage.getItem(ADMIN_HASH_KEY);
+    const opHash = readString(OPERATOR_HASH_KEY);
+    const adHash = readString(ADMIN_HASH_KEY);
     if (h === adHash) { authed = true; isAdmin = true; showPinWall = false; }
     else if (h === opHash) { authed = true; isAdmin = false; showPinWall = false; }
     else { pinError = 'Incorrect PIN'; pinInput = ''; }
@@ -47,37 +59,44 @@
     const ip = addIpVal.trim();
     if (!ip || nodeList.includes(ip)) return;
     nodeList = [...nodeList, ip];
-    localStorage.setItem('lg_nodes', JSON.stringify(nodeList));
+    writeStringList(NODE_LIST_KEY, nodeList);
     if (!nodeIp) selectNode(ip);
     addIpVal = '';
   }
 
   function removeNode(ip: string) {
     nodeList = nodeList.filter(n => n !== ip);
-    localStorage.setItem('lg_nodes', JSON.stringify(nodeList));
+    writeStringList(NODE_LIST_KEY, nodeList);
     if (nodeIp === ip) selectNode(nodeList[0] ?? '');
   }
 
   function selectNode(ip: string) {
     nodeIp = ip;
-    localStorage.setItem('lg_node_ip', ip);
+    writeString(NODE_IP_KEY, ip);
+    reconnectNode();
   }
 
   onMount(() => {
+    nodeIp = readString(NODE_IP_KEY);
+    nodeList = readStringList(NODE_LIST_KEY);
     initHashes();
-    // Re-check auth on mount (session persists for 8 h via timestamp)
-    const ts = Number(localStorage.getItem('lg_auth_ts') ?? 0);
+
+    // Re-check auth on mount (session persists for 8 h via timestamp).
+    const ts = Number(readString(AUTH_TIMESTAMP_KEY, '0'));
     if (Date.now() - ts < 8 * 3600 * 1000) {
       authed = true;
-      isAdmin = localStorage.getItem('lg_auth_role') === 'admin';
+      isAdmin = readString(AUTH_ROLE_KEY) === 'admin';
       showPinWall = false;
     }
+
+    // Keep the shared live connection warm for all dashboard routes.
+    if (nodeIp) connect(nodeIp);
   });
 
   $effect(() => {
     if (authed) {
-      localStorage.setItem('lg_auth_ts', String(Date.now()));
-      localStorage.setItem('lg_auth_role', isAdmin ? 'admin' : 'operator');
+      writeString(AUTH_TIMESTAMP_KEY, String(Date.now()));
+      writeString(AUTH_ROLE_KEY, isAdmin ? 'admin' : 'operator');
     }
   });
 
@@ -100,7 +119,6 @@
 </script>
 
 {#if showPinWall}
-<!-- ── PIN wall ─────────────────────────────────────────────────────────────── -->
 <div class="pin-wall">
   <div class="pin-card">
     <div class="pin-logo">⬡</div>
@@ -124,16 +142,13 @@
 </div>
 
 {:else}
-<!-- ── Dashboard shell ─────────────────────────────────────────────────────── -->
 <div class="dash-root">
-  <!-- Sidebar -->
   <nav class="dash-nav" aria-label="Dashboard navigation">
     <a class="dash-brand" href="/dashboard">
       <span class="brand-hex">⬡</span>
       <span>LumiGrid</span>
     </a>
 
-    <!-- Node selector -->
     <div class="node-section">
       <p class="nav-label">ACTIVE NODE</p>
       <select class="node-select" value={nodeIp} onchange={(e) => selectNode((e.target as HTMLSelectElement).value)}>
@@ -159,7 +174,6 @@
       {/each}
     </div>
 
-    <!-- Navigation links -->
     <ul class="nav-links" role="list">
       {#each navLinks as { href, icon, label }}
         <li>
@@ -171,18 +185,15 @@
       {/each}
     </ul>
 
-    <!-- Role badge -->
     <div class="role-badge" class:admin={isAdmin}>
       {isAdmin ? '◈ Admin' : '◦ Operator'}
     </div>
-    <button class="logout-btn" onclick={() => { authed = false; showPinWall = true; localStorage.removeItem('lg_auth_ts'); }}>
+    <button class="logout-btn" onclick={() => { authed = false; showPinWall = true; removeValue(AUTH_TIMESTAMP_KEY); }}>
       Lock
     </button>
   </nav>
 
-  <!-- Main content -->
   <main class="dash-main">
-    <!-- Pass nodeIp + isAdmin via context trick — children read from localStorage directly -->
     {@render children()}
   </main>
 </div>
@@ -191,7 +202,6 @@
 <style>
   :global(body) { margin: 0; }
 
-  /* PIN wall */
   .pin-wall {
     min-height: 100dvh;
     display: flex;
@@ -261,7 +271,6 @@
   .pin-hint { color: #a1a1a6; font-size: .78rem; margin: 0; }
   .pin-hint code { color: #f5f5f7; background: rgba(255,255,255,.08); padding: .1em .35em; border-radius: 4px; }
 
-  /* Dashboard shell */
   .dash-root {
     display: flex;
     min-height: 100dvh;
@@ -271,8 +280,6 @@
     color: #f5f5f7;
     font-family: -apple-system, BlinkMacSystemFont, Inter, system-ui, sans-serif;
   }
-
-  /* Sidebar */
   .dash-nav {
     width: 220px;
     min-height: 100dvh;
@@ -289,7 +296,6 @@
     height: 100dvh;
     overflow-y: auto;
   }
-
   .dash-brand {
     display: flex;
     align-items: center;
@@ -308,8 +314,6 @@
     background-clip: text;
     color: transparent;
   }
-
-  /* Node section */
   .node-section { display: flex; flex-direction: column; gap: .4rem; }
   .nav-label { font-size: .65rem; font-weight: 700; letter-spacing: .08em; color: #a1a1a6; margin: 0 0 .2rem; text-transform: uppercase; }
   .node-select {
@@ -376,8 +380,6 @@
     transition: color .2s;
   }
   .node-chip-del:hover { color: #ff453a; }
-
-  /* Nav links */
   .nav-links { list-style: none; margin: .5rem 0 0; padding: 0; display: flex; flex-direction: column; gap: .15rem; }
   .nav-link {
     display: flex;
@@ -394,8 +396,6 @@
   .nav-link:hover { background: rgba(255,255,255,.06); color: #f5f5f7; }
   .nav-link.active { background: rgba(255,45,85,.18); color: #f5f5f7; border-left: 2px solid #ff2d55; }
   .nav-icon { font-size: 1rem; width: 1.2rem; text-align: center; }
-
-  /* Role badge */
   .role-badge {
     margin-top: auto;
     padding: .3rem .6rem;
@@ -407,7 +407,6 @@
     text-align: center;
   }
   .role-badge.admin { border-color: rgba(255,149,0,.3); color: #ff9500; background: rgba(255,149,0,.08); }
-
   .logout-btn {
     background: transparent;
     border: 1px solid rgba(255,255,255,.10);
@@ -419,15 +418,12 @@
     transition: border-color .2s, color .2s;
   }
   .logout-btn:hover { border-color: #ff453a; color: #ff453a; }
-
-  /* Main content area */
   .dash-main {
     flex: 1;
     padding: 2rem;
     overflow-y: auto;
     max-height: 100dvh;
   }
-
   @media (max-width: 768px) {
     .dash-nav { width: 56px; padding: 1rem .5rem; }
     .dash-brand span:last-child,
