@@ -2,8 +2,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { getNodeStatus, setBrightness, setPower, applyPreset, emergencyOff } from '$lib/api/node';
   import type { NodeStatus } from '$lib/api/node';
-
-  // ── Feature 4: Multi-Node Fleet Manager ──────────────────────────────────────
+  import { readString, readStringList, writeString, NODE_IP_KEY, NODE_LIST_KEY } from '$lib/auth/storage';
 
   let nodeList  = $state<string[]>([]);
   let statuses  = $state<Record<string, NodeStatus>>({});
@@ -13,19 +12,20 @@
   let selected  = $state<Set<string>>(new Set());
   let polling: ReturnType<typeof setInterval> | null = null;
 
-  // Track uptime events in localStorage for Feature 6
+  // Track uptime events in shared browser storage for Feature 6
   function recordUptimeEvent(ip: string, online: boolean) {
     const key = `lg_uptime_${ip}`;
-    const raw = localStorage.getItem(key);
-    const events: { ts: number; online: boolean }[] = raw ? JSON.parse(raw) : [];
+    const raw = readString(key);
+    let events: { ts: number; online: boolean }[] = [];
+    if (raw) {
+      try { events = JSON.parse(raw); } catch { events = []; }
+    }
     const now = Date.now();
-    // Only record if state changed or >5 min since last event
     const last = events[events.length - 1];
     if (!last || last.online !== online || now - last.ts > 300_000) {
       events.push({ ts: now, online });
-      // Keep last 1000 events per node
       if (events.length > 1000) events.splice(0, events.length - 1000);
-      localStorage.setItem(key, JSON.stringify(events));
+      writeString(key, JSON.stringify(events));
     }
   }
 
@@ -42,7 +42,7 @@
   }
 
   onMount(() => {
-    nodeList = JSON.parse(localStorage.getItem('lg_nodes') ?? '[]');
+    nodeList = readStringList(NODE_LIST_KEY);
     if (nodeList.length) refreshAll();
     else loading = false;
     polling = setInterval(refreshAll, 10_000);
@@ -197,7 +197,7 @@
               <button class="cta" onclick={(e) => { e.stopPropagation(); setPower(ip, !(s?.state?.on ?? true)).then(refreshAll); }}>
                 {s?.state?.on ? 'Off' : 'On'}
               </button>
-              <a href="/dashboard/channels" class="cta link" onclick={(e) => { e.stopPropagation(); localStorage.setItem('lg_node_ip', ip); }}>
+              <a href="/dashboard/channels" class="cta link" onclick={(e) => { e.stopPropagation(); writeString(NODE_IP_KEY, ip); }}>
                 Control
               </a>
             </div>
@@ -215,17 +215,11 @@
   .sub { margin: .25rem 0 0; color: #a1a1a6; font-size: .85rem; }
   .refresh-btn { background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.12); border-radius: 999px; color: #f5f5f7; padding: .5rem 1rem; cursor: pointer; font-size: .85rem; transition: background .2s; }
   .refresh-btn:hover { background: rgba(255,255,255,.14); }
-
-  /* Loading */
   .loading { display: flex; align-items: center; gap: .75rem; color: #a1a1a6; padding: 3rem; justify-content: center; }
   .spinner { width: 20px; height: 20px; border: 2px solid rgba(255,255,255,.1); border-top-color: #ff2d55; border-radius: 50%; animation: spin .8s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
-
-  /* Empty */
   .empty { text-align: center; padding: 4rem 2rem; color: #a1a1a6; }
   .empty-icon { font-size: 3rem; background: linear-gradient(135deg, #ff2d55, #00d4ff); -webkit-background-clip: text; background-clip: text; color: transparent; margin-bottom: .5rem; }
-
-  /* Bulk bar */
   .bulk-bar { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; padding: .75rem 1rem; background: rgba(29,29,31,.7); border: 1px solid rgba(255,255,255,.08); border-radius: 14px; margin-bottom: 1.25rem; }
   .bulk-sel { display: flex; align-items: center; gap: .5rem; }
   .bulk-actions { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; flex: 1; }
@@ -240,25 +234,11 @@
   .bri-range { width: 80px; accent-color: #ff2d55; }
   .bri-val { min-width: 2.5ch; color: #f5f5f7; font-size: .82rem; }
   .preset-input { width: 50px; background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.12); border-radius: 6px; color: #f5f5f7; font-size: .82rem; padding: .25rem .4rem; text-align: center; }
-
-  /* Node grid */
   .node-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 1rem; }
-  .node-card {
-    background: rgba(29,29,31,.72);
-    backdrop-filter: blur(16px);
-    border: 1px solid rgba(255,255,255,.08);
-    border-radius: 18px;
-    padding: 1rem;
-    cursor: pointer;
-    transition: border-color .2s, box-shadow .2s, transform .2s;
-    display: flex;
-    flex-direction: column;
-    gap: .6rem;
-  }
+  .node-card { background: rgba(29,29,31,.72); backdrop-filter: blur(16px); border: 1px solid rgba(255,255,255,.08); border-radius: 18px; padding: 1rem; cursor: pointer; transition: border-color .2s, box-shadow .2s, transform .2s; display: flex; flex-direction: column; gap: .6rem; }
   .node-card:hover { border-color: rgba(255,255,255,.18); transform: translateY(-1px); }
   .node-card.selected { border-color: #ff2d55; box-shadow: 0 0 0 1px rgba(255,45,85,.3); }
   .node-card.offline { opacity: .55; }
-
   .node-card-head { display: flex; align-items: center; gap: .5rem; }
   .status-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
   .status-dot.online { background: #34c759; box-shadow: 0 0 6px rgba(52,199,89,.6); }
@@ -271,10 +251,9 @@
   .stat-label { font-size: .65rem; color: #a1a1a6; text-transform: uppercase; letter-spacing: .05em; }
   .stat-val { font-size: .82rem; color: #f5f5f7; font-weight: 600; }
   .stat-val.on { color: #34c759; }
-  .node-error { font-size: .75rem; color: #ff453a; font-family: monospace; }
-  .card-actions { display: flex; gap: .5rem; margin-top: .25rem; }
-  .cta { flex: 1; background: rgba(255,45,85,.75); border: none; border-radius: 8px; color: #fff; font-size: .78rem; font-weight: 600; padding: .4rem; cursor: pointer; text-align: center; text-decoration: none; transition: background .2s; }
-  .cta:hover { background: #ff3b30; }
-  .cta.link { background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.12); color: #f5f5f7; }
-  .cta.link:hover { background: rgba(255,255,255,.14); }
+  .node-error { font-size: .75rem; color: #ff453a; min-height: 2.2rem; }
+  .card-actions { display: flex; gap: .5rem; margin-top: auto; }
+  .cta { flex: 1; text-align: center; padding: .45rem .6rem; border-radius: 9px; border: 1px solid rgba(255,255,255,.12); background: rgba(255,255,255,.07); color: #f5f5f7; font-size: .8rem; cursor: pointer; text-decoration: none; }
+  .cta:hover { background: rgba(255,255,255,.14); }
+  .cta.link { display: flex; align-items: center; justify-content: center; }
 </style>
