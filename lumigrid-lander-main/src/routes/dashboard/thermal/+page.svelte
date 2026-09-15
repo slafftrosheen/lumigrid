@@ -2,14 +2,16 @@
   import { onMount, onDestroy } from 'svelte';
   import { getInfo } from '$lib/api/node';
   import type { NodeInfo } from '$lib/api/node';
+  import { readString, writeString } from '$lib/auth/storage';
+  import { NODE_IP_KEY } from '$lib/auth/storage';
 
   // ── Feature 2: Thermal Dashboard ─────────────────────────────────────────────
 
   let nodeIp    = $state('');
   let info      = $state<NodeInfo | null>(null);
   let error     = $state('');
-  let history   = $state<number[]>([]);  // last 60 readings
-  let alertTemp = $state(Number(localStorage.getItem('lg_alert_temp') ?? 65));
+  let history   = $state<number[]>([]);
+  let alertTemp = $state(65);
   let alertSent = $state(false);
   let polling: ReturnType<typeof setInterval> | null = null;
 
@@ -26,7 +28,6 @@
       const t = getTemp(info);
       if (t !== null) {
         history = [...history.slice(-59), t];
-        // Alert
         if (t >= alertTemp && !alertSent) {
           alertSent = true;
           if ('Notification' in window && Notification.permission === 'granted') {
@@ -45,7 +46,8 @@
   }
 
   onMount(async () => {
-    nodeIp = localStorage.getItem('lg_node_ip') ?? '';
+    nodeIp = readString(NODE_IP_KEY);
+    alertTemp = Number(readString('lg_alert_temp', '65'));
     if (nodeIp) { await poll(); polling = setInterval(poll, 5000); }
   });
   onDestroy(() => { if (polling) clearInterval(polling); });
@@ -54,7 +56,6 @@
     if ('Notification' in window) Notification.requestPermission();
   }
 
-  // Temperature → colour
   function tempToColor(t: number): string {
     if (t < 40) return '#34c759';
     if (t < 55) return '#ff9500';
@@ -62,7 +63,6 @@
     return '#ff453a';
   }
 
-  // SVG arc for gauge (0 at 7 o'clock, 100% at 5 o'clock)
   function arcPath(pct: number, r = 54): string {
     const startAngle = -220 * (Math.PI / 180);
     const sweep = 260 * (Math.PI / 180);
@@ -76,7 +76,6 @@
     return `M ${x1} ${y1} A ${r} ${r} 0 ${large} 1 ${x2} ${y2}`;
   }
 
-  // Sparkline path
   function sparkPath(vals: number[]): string {
     if (!vals.length) return '';
     const W = 400, H = 64, pad = 4;
@@ -89,7 +88,7 @@
     }).join(' ');
   }
 
-  $effect(() => { localStorage.setItem('lg_alert_temp', String(alertTemp)); });
+  $effect(() => { writeString('lg_alert_temp', String(alertTemp)); });
 
   const MAX_TEMP = 85;
   let currentTemp = $derived(getTemp(info));
@@ -116,16 +115,12 @@
     <div class="err-box">{error}</div>
   {:else}
     <div class="dash-grid">
-      <!-- Gauge card -->
       <div class="card gauge-card">
         <h2>Current Temperature</h2>
         <svg viewBox="0 0 128 128" class="gauge-svg" aria-label="Temperature gauge">
-          <!-- Background track -->
           <path d={arcPath(1)} stroke="rgba(255,255,255,.08)" stroke-width="10" fill="none" stroke-linecap="round" />
-          <!-- Value arc -->
           <path d={arcPath(tempPct)} stroke={col} stroke-width="10" fill="none" stroke-linecap="round"
                 style:filter={`drop-shadow(0 0 6px ${col}88)`} />
-          <!-- Centre text -->
           <text x="64" y="68" text-anchor="middle" dominant-baseline="middle"
                 font-size="22" font-weight="700" fill={col} font-family="monospace">
             {currentTemp !== null ? currentTemp.toFixed(1) : '—'}
@@ -137,7 +132,6 @@
         </div>
       </div>
 
-      <!-- Info card -->
       <div class="card info-card">
         <h2>Node Info</h2>
         {#if info}
@@ -149,8 +143,6 @@
             <dt>MAC</dt><dd class="mono">{info.mac ?? '—'}</dd>
           </dl>
         {/if}
-
-        <!-- Alert threshold -->
         <div class="alert-section">
           <label class="alert-label" for="alert-range-input">
             Alert threshold
@@ -160,19 +152,16 @@
         </div>
       </div>
 
-      <!-- Sparkline card -->
       <div class="card spark-card">
         <h2>Temperature History ({history.length} readings)</h2>
         {#if history.length > 1}
           <svg viewBox="0 0 400 64" class="spark-svg" preserveAspectRatio="none">
-            <!-- Alert line -->
             {#if history.length}
               {@const min = Math.min(...history) - 2}
               {@const max = Math.max(...history, min + 10) + 2}
               {@const ay = 64 - 4 - ((alertTemp - min) / (max - min)) * (64 - 8)}
               <line x1="4" y1={ay} x2="396" y2={ay} stroke="rgba(255,69,58,.4)" stroke-width="1" stroke-dasharray="4 3" />
             {/if}
-            <!-- Sparkline fill -->
             <defs>
               <linearGradient id="sg" x1="0" y1="0" x2="0" y2="1">
                 <stop offset="0%" stop-color={col} stop-opacity="0.3" />
@@ -205,16 +194,11 @@
   .err-box { background: rgba(255,69,58,.12); border: 1px solid rgba(255,69,58,.3); border-radius: 12px; color: #ff453a; padding: 1rem; font-size: .85rem; font-family: monospace; }
   .dash-grid { display: grid; grid-template-columns: 180px 1fr; grid-template-rows: auto auto; gap: 1rem; }
   @media (max-width: 600px) { .dash-grid { grid-template-columns: 1fr; } }
-
   .card { background: rgba(29,29,31,.75); backdrop-filter: blur(16px); border: 1px solid rgba(255,255,255,.08); border-radius: 20px; padding: 1.25rem; }
   h2 { margin: 0 0 1rem; font-size: .95rem; font-weight: 600; color: #f5f5f7; }
-
-  /* Gauge */
   .gauge-card { grid-row: 1 / 2; display: flex; flex-direction: column; align-items: center; gap: .5rem; }
   .gauge-svg { width: 100%; max-width: 160px; }
   .temp-status { font-size: .85rem; font-weight: 700; letter-spacing: .05em; }
-
-  /* Info */
   .info-card { grid-row: 1 / 2; }
   .info-dl { display: grid; grid-template-columns: auto 1fr; gap: .25rem .75rem; margin: 0 0 1rem; }
   dt { font-size: .72rem; color: #a1a1a6; text-transform: uppercase; letter-spacing: .05em; align-self: center; }
@@ -224,8 +208,6 @@
   .alert-label { display: flex; justify-content: space-between; font-size: .82rem; color: #a1a1a6; margin-bottom: .35rem; }
   .alert-val { color: #ff9500; font-weight: 600; }
   .alert-range { width: 100%; accent-color: #ff9500; }
-
-  /* Sparkline */
   .spark-card { grid-column: 1 / 3; }
   .spark-svg { width: 100%; height: 80px; }
   .spark-labels { display: flex; justify-content: space-between; font-size: .72rem; color: #a1a1a6; margin-top: .25rem; }
