@@ -19,7 +19,7 @@ export interface NodeSegment {
   id:  number;
   start: number;
   stop: number;
-  len: number;
+  len:  number;
   on:  boolean;
   bri: number;
   col: number[][];
@@ -62,13 +62,14 @@ export interface NodeStatus {
 // ── Core fetch helper ─────────────────────────────────────────────────────────
 
 const API_TOKEN_KEY = 'lg_api_token';
-const DEV_API_TOKEN = 'admin';
+// Matches ConfigStore's development/default admin credential.
+const DEV_API_TOKEN = 'lumigrid_admin';
 
 /**
  * Returns the node Bearer token used by the operator console.
- * In development the firmware accepts the built-in `admin` credential when
- * CONFIG_LUMIGRID_ENABLE_DEV_CREDENTIALS is enabled. A real token can be
- * supplied through localStorage without changing the client code.
+ * In development the firmware's default admin credential is used. A real
+ * configured token can be supplied through localStorage without changing the
+ * client code.
  */
 export function getApiToken(): string {
   if (typeof localStorage === 'undefined') return DEV_API_TOKEN;
