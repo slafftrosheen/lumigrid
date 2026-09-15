@@ -3,6 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="description" content="LumiGrid OS Node Controller - Configure, operate, and monitor your lighting node in real-time.">
     <title>LumiGrid OS — Node Controller</title>
     <style>
         /* ═══════════════════════════════════════════════════════
@@ -354,7 +355,32 @@
             gap: 0.65rem; align-items: center; margin-top: 0.65rem;
         }
         .range-row label { font-size: 0.75rem; font-weight: 700; color: var(--text-secondary); }
-        .range-row output { color: #c7d2fe; font-variant-numeric: tabular-nums; text-align: right; font-weight: 600; font-size: 0.82rem; }
+        .range-row output { color: var(--accent); font-variant-numeric: tabular-nums; text-align: right; font-weight: 600; font-size: 0.82rem; }
+        
+        input[type="range"] {
+            -webkit-appearance: none; appearance: none; width: 100%; height: 6px;
+            background: rgba(255,255,255,0.1); border-radius: 3px; outline: none;
+            transition: background 0.3s;
+        }
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none; appearance: none;
+            width: 16px; height: 16px; border-radius: 50%;
+            background: var(--primary); cursor: pointer;
+            box-shadow: 0 0 12px rgba(99,102,241,0.6);
+            transition: transform 0.15s cubic-bezier(0.4, 0, 0.2, 1), background 0.15s;
+        }
+        input[type="range"]::-moz-range-thumb {
+            width: 16px; height: 16px; border-radius: 50%; border: none;
+            background: var(--primary); cursor: pointer;
+            box-shadow: 0 0 12px rgba(99,102,241,0.6);
+            transition: transform 0.15s cubic-bezier(0.4, 0, 0.2, 1), background 0.15s;
+        }
+        input[type="range"]:active::-webkit-slider-thumb {
+            transform: scale(1.3); background: var(--accent);
+        }
+        input[type="range"]:active::-moz-range-thumb {
+            transform: scale(1.3); background: var(--accent);
+        }
         .layer-box {
             background: rgba(0,0,0,0.25); border: 1px solid var(--border-subtle);
             border-radius: var(--radius); padding: 1rem; margin-top: 0.85rem;
@@ -471,39 +497,50 @@
         </header>
 
         <!-- Navigation Rail -->
-        <nav class="nav-rail" aria-label="Main Navigation">
-            <button class="active" data-page="dashboard" onclick="lg.nav('dashboard', this)">
-                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="2" width="5" height="5" rx="1"/><rect x="9" y="2" width="5" height="5" rx="1"/><rect x="2" y="9" width="5" height="5" rx="1"/><rect x="9" y="9" width="5" height="5" rx="1"/></svg>
-                Dashboard
-            </button>
-            <button data-page="visualizer" onclick="lg.nav('visualizer', this)">
-                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><path d="M8 2v12M2 8h12"/></svg>
-                Live Visualizer
-            </button>
-            <button data-page="scenes" onclick="lg.nav('scenes', this)">
-                <svg viewBox="0 0 16 16" fill="currentColor"><rect x="1" y="1" width="6" height="6" rx="1.5"/><rect x="9" y="1" width="6" height="6" rx="1.5" opacity=".45"/><rect x="1" y="9" width="6" height="6" rx="1.5" opacity=".45"/><rect x="9" y="9" width="6" height="6" rx="1.5"/></svg>
-                Scenes
-            </button>
-            <button data-page="zones" onclick="lg.nav('zones', this)">
-                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="12" width="12" height="12" rx="2"/><line x1="6" y1="2" x2="6" y2="14"/><line x1="10" y1="2" x2="10" y2="14"/></svg>
-                Zones
-            </button>
-            <button data-page="patcher" onclick="lg.nav('patcher', this)">
-                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="4" cy="4" r="2"/><circle cx="12" cy="12" r="2"/><path d="M5.5 5.5l5 5M12 4v2M4 12v-2"/></svg>
-                Fixture Patch
-            </button>
-            <button data-page="dmx" onclick="lg.nav('dmx', this)">
-                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 13V3a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v10M6 8h4M6 11h4M6 5h4"/></svg>
-                Live DMX
-            </button>
-            <button data-page="timeline" onclick="lg.nav('timeline', this)">
-                <svg viewBox="0 0 16 16" fill="currentColor"><rect x="1" y="9" width="3" height="6" rx="1"/><rect x="5.5" y="5" width="3" height="10" rx="1" opacity=".7"/><rect x="10" y="2" width="3" height="13" rx="1"/></svg>
-                Timeline
-            </button>
-            <button data-page="diagnostics" onclick="lg.nav('diagnostics', this)">
-                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="2.5"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4"/></svg>
-                Diagnostics
-            </button>
+        <nav class="nav-rail" aria-label="Main Navigation" style="justify-content: flex-start; gap: 0.5rem;">
+            <div style="display:flex; gap:0.25rem; flex-wrap:wrap; align-items:center;">
+                <span class="eyebrow" style="padding: 0 0.5rem; color: var(--accent);">Operate</span>
+                <button class="active" data-page="dashboard" onclick="lg.nav('dashboard', this)">
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="2" width="5" height="5" rx="1"/><rect x="9" y="2" width="5" height="5" rx="1"/><rect x="2" y="9" width="5" height="5" rx="1"/><rect x="9" y="9" width="5" height="5" rx="1"/></svg>
+                    Overview
+                </button>
+                <button data-page="scenes" onclick="lg.nav('scenes', this)">
+                    <svg viewBox="0 0 16 16" fill="currentColor"><rect x="1" y="1" width="6" height="6" rx="1.5"/><rect x="9" y="1" width="6" height="6" rx="1.5" opacity=".45"/><rect x="1" y="9" width="6" height="6" rx="1.5" opacity=".45"/><rect x="9" y="9" width="6" height="6" rx="1.5"/></svg>
+                    Scenes
+                </button>
+                <button data-page="timeline" onclick="lg.nav('timeline', this)">
+                    <svg viewBox="0 0 16 16" fill="currentColor"><rect x="1" y="9" width="3" height="6" rx="1"/><rect x="5.5" y="5" width="3" height="10" rx="1" opacity=".7"/><rect x="10" y="2" width="3" height="13" rx="1"/></svg>
+                    Timeline
+                </button>
+                <button data-page="schedules" onclick="lg.nav('schedules', this)">
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><path d="M8 4v4l3 3"/></svg>
+                    Schedules
+                </button>
+                <button data-page="zones" onclick="lg.nav('zones', this)">
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="12" width="12" height="12" rx="2"/><line x1="6" y1="2" x2="6" y2="14"/><line x1="10" y1="2" x2="10" y2="14"/></svg>
+                    Zones
+                </button>
+            </div>
+            <div style="width: 1px; background: var(--border); margin: 0 0.5rem;"></div>
+            <div style="display:flex; gap:0.25rem; flex-wrap:wrap; align-items:center;">
+                <span class="eyebrow" style="padding: 0 0.5rem; color: var(--danger);">Service</span>
+                <button data-page="visualizer" onclick="lg.nav('visualizer', this)">
+                    <svg viewBox="0 0 16 16" fill="currentColor"><path d="M1 8a7 7 0 1 1 14 0A7 7 0 0 1 1 8zm1.5 0a5.5 5.5 0 1 0 11 0A5.5 5.5 0 0 0 2.5 8z"/><circle cx="8" cy="8" r="3"/></svg>
+                    Live Visualizer
+                </button>
+                <button data-page="patcher" onclick="lg.nav('patcher', this)">
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1" y="5" width="14" height="6" rx="1"/><path d="M4 8h8"/></svg>
+                    Hardware Patch
+                </button>
+                <button data-page="dmx" onclick="lg.nav('dmx', this)">
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 13V3a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v10M6 8h4M6 11h4M6 5h4"/></svg>
+                    Live DMX Monitor
+                </button>
+                <button data-page="diagnostics" onclick="lg.nav('diagnostics', this)">
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="2.5"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4"/></svg>
+                    Diagnostics & System
+                </button>
+            </div>
         </nav>
 
         <!-- ══════════════════════════════════════════════════════
@@ -593,7 +630,10 @@
         <section id="page-scenes" class="product-page">
             <div class="page-heading">
                 <div><p class="eyebrow">Lighting Cues</p><h3>Scene Library</h3></div>
-                <button class="button-secondary" onclick="lg.refresh()">Refresh library</button>
+                <div style="display:flex; gap:0.5rem;">
+                    <button class="button-secondary" onclick="lg.refresh()">Refresh</button>
+                    <button class="button-primary" onclick="lg.createNewScene()">+ New Scene</button>
+                </div>
             </div>
             <div id="scene-library" class="scene-grid"></div>
         </section>
@@ -774,40 +814,97 @@
         </section>
 
         <!-- ══════════════════════════════════════════════════════
+             PAGE: SCHEDULES
+             ══════════════════════════════════════════════════════ -->
+        <section id="page-schedules" class="product-page">
+            <div class="page-heading">
+                <div><p class="eyebrow">Calendar Automation</p><h3>Schedule Editor</h3></div>
+                <button class="button-primary" onclick="lg.saveSchedules()">Save Schedules</button>
+            </div>
+            <div id="schedules-grid" class="settings-grid"></div>
+        </section>
+
+        <!-- ══════════════════════════════════════════════════════
              PAGE: DIAGNOSTICS & SYSTEM
              ══════════════════════════════════════════════════════ -->
         <section id="page-diagnostics" class="product-page">
             <div class="page-heading">
                 <div><p class="eyebrow">Maintenance & Hardware</p><h3>Diagnostics & System</h3></div>
             </div>
-            <div class="settings-grid">
-                <article class="product-card">
-                    <h4>Factory Output Testing</h4>
-                    <p class="help" style="margin-bottom:0.75rem;">Run hardware test routines on physical LED strips.</p>
-                    <button class="button-secondary" style="width:100%; margin-bottom:0.5rem" onclick="lg.runTestSequence('lane')">Test Strip Lanes (White Chase)</button>
-                    <button class="button-secondary" style="width:100%" onclick="lg.runTestSequence('color')">Test Color Wash (Rainbow)</button>
-                </article>
+            <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 1.25rem;">
+                <!-- Left Column: Operations -->
+                <div style="display:flex; flex-direction:column; gap:1.25rem;">
+                    <article class="product-card">
+                        <h4>Factory Output Testing</h4>
+                        <p class="help" style="margin-bottom:0.75rem;">Run hardware test routines on physical LED strips.</p>
+                        <button class="button-secondary" style="width:100%; margin-bottom:0.5rem" onclick="lg.runTestSequence('lane')">Test Strip Lanes (White Chase)</button>
+                        <button class="button-secondary" style="width:100%; margin-bottom:0.5rem" onclick="lg.runTestSequence('color')">Test Color Wash (Rainbow)</button>
+                        <button class="button-primary" style="width:100%; border: 1px solid var(--danger); color: var(--danger); background: rgba(239,68,68,0.1);" onclick="lg.runTestSequence('burn_in')">Burn-in Test (Full Power)</button>
+                    </article>
 
-                <article class="product-card">
-                    <h4>Firmware OTA Update</h4>
-                    <p class="help" style="margin-bottom:0.75rem;">Upload a compiled .bin image to update node firmware.</p>
-                    <input type="file" id="ota-file" accept=".bin" style="margin-bottom:0.75rem;">
-                    <button class="button-primary" style="width:100%" onclick="lg.uploadOta()">Flash Firmware</button>
-                    <div id="ota-status" class="help" style="margin-top:0.5rem;"></div>
-                </article>
+                    <article class="product-card">
+                        <h4>Firmware OTA Update</h4>
+                        <p class="help" style="margin-bottom:0.75rem;">Upload a compiled .bin image to update node firmware.</p>
+                        <input type="file" id="ota-file" accept=".bin" style="margin-bottom:0.75rem;">
+                        <button class="button-primary" style="width:100%" onclick="lg.uploadOta()">Flash Firmware</button>
+                        <div id="ota-status" class="help" style="margin-top:0.5rem;"></div>
+                    </article>
 
-                <article class="product-card">
-                    <h4>Backup & Recovery</h4>
-                    <p class="help" style="margin-bottom:0.75rem;">Export or restore device configurations and scenes.</p>
-                    <button class="button-secondary" style="width:100%; margin-bottom:0.75rem" onclick="lg.downloadBackup()">Export Config JSON</button>
-                    <input type="file" id="restore-file" accept=".json" style="margin-bottom:0.75rem;">
-                    <button class="button-primary" style="width:100%" onclick="lg.uploadRestore()">Restore From JSON</button>
-                </article>
+                    <article class="product-card">
+                        <h4>Backup & Recovery</h4>
+                        <p class="help" style="margin-bottom:0.75rem;">Export or restore device configurations and scenes.</p>
+                        <button class="button-secondary" style="width:100%; margin-bottom:0.75rem" onclick="lg.downloadBackup()">Export Config JSON</button>
+                        <input type="file" id="restore-file" accept=".json" style="margin-bottom:0.75rem;">
+                        <button class="button-primary" style="width:100%" onclick="lg.uploadRestore()">Restore From JSON</button>
+                    </article>
+                </div>
 
-                <article class="product-card">
-                    <h4>System Health Telemetry</h4>
-                    <pre id="health-stats" style="background:rgba(0,0,0,0.3); padding:0.75rem; border-radius:8px; font-size:0.75rem; font-family:monospace; margin-bottom:0.75rem;"></pre>
-                    <button class="button-secondary" style="width:100%" onclick="lg.loadCommissioning()">Refresh Diagnostics</button>
+                <!-- Right Column: Telemetry & Logs -->
+                <article class="product-card" style="display:flex; flex-direction:column; padding:0;">
+                    <div style="display:flex; border-bottom: 1px solid var(--border); background:rgba(0,0,0,0.2); border-radius: var(--radius) var(--radius) 0 0;">
+                        <button id="tab-health" class="button-secondary" style="border:none; border-radius:var(--radius) 0 0 0; flex:1; background:var(--surface-2);" onclick="lg.switchDiagTab('health')">Health Metrics</button>
+                        <button id="tab-logs" class="button-secondary" style="border:none; border-radius:0; border-left:1px solid var(--border); flex:1; background:transparent;" onclick="lg.switchDiagTab('logs')">System Logs</button>
+                        <button id="tab-audit" class="button-secondary" style="border:none; border-radius:0 var(--radius) 0 0; border-left:1px solid var(--border); flex:1; background:transparent;" onclick="lg.switchDiagTab('audit')">Audit Trail</button>
+                    </div>
+                    
+                    <div id="panel-health" style="padding:1.25rem; display:flex; flex-direction:column;">
+                        <div style="display:flex; justify-content:space-between; margin-bottom:1rem; align-items:center;">
+                            <h4 style="margin:0;">Live Health Telemetry</h4>
+                            <button class="button-secondary" style="font-size:0.7rem; padding:0.25rem 0.6rem;" onclick="lg.loadCommissioning()">Refresh Health</button>
+                        </div>
+                        <div id="health-metrics-grid" style="display:grid; grid-template-columns:1fr 1fr; gap:1rem;">
+                            <div class="empty-state">Loading metrics...</div>
+                        </div>
+                    </div>
+
+                    <div id="panel-logs" style="padding:1.25rem; display:none; flex-direction:column; height:100%;">
+                        <div style="display:flex; justify-content:space-between; margin-bottom:1rem; align-items:center;">
+                            <h4 style="margin:0;">Node Diagnostic Stream</h4>
+                            <button class="button-secondary" style="font-size:0.7rem; padding:0.25rem 0.6rem;" onclick="lg.loadLogs()">Stream Latest</button>
+                        </div>
+                        <pre id="sys-logs-viewer" style="background:rgba(5,6,15,0.9); padding:1rem; border-radius:8px; font-size:0.75rem; font-family:monospace; color:#a5b4fc; border:1px solid var(--border-subtle); overflow-y:auto; flex:1; min-height:300px; max-height:500px; margin:0; white-space:pre-wrap; word-wrap:break-word;"></pre>
+                    </div>
+
+                    <div id="panel-audit" style="padding:1.25rem; display:none; flex-direction:column; height:100%;">
+                        <div style="display:flex; justify-content:space-between; margin-bottom:1rem; align-items:center;">
+                            <h4 style="margin:0;">Security & Config Audit</h4>
+                            <button class="button-secondary" style="font-size:0.7rem; padding:0.25rem 0.6rem;" onclick="lg.loadAudit()">Fetch Trail</button>
+                        </div>
+                        <div class="patcher-scroll" style="flex:1;">
+                            <table class="patcher-table">
+                                <thead>
+                                    <tr>
+                                        <th>Timestamp</th>
+                                        <th>Role</th>
+                                        <th>Event Type</th>
+                                        <th>Details</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="audit-tbody">
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
                 </article>
             </div>
         </section>
@@ -865,7 +962,9 @@ window.lg = (() => {
         schedules: null,
         config: null,
         status: null,
+        health: null,
         editing: null,
+        activeTimelineStep: { track: 0, step: 0 },
         targetZones: [true, false, false, false, false, false, false, false],
         activeTab: 'dashboard',
         visualizerMode: 'lanes', // 'lanes' | 'zones'
@@ -947,11 +1046,19 @@ window.lg = (() => {
                 }
             } else if (typeof event.data === 'string') {
                 try {
-                    const status = JSON.parse(event.data);
-                    state.status = status;
-                    if (status.dmx && Array.isArray(status.dmx)) {
-                        for (let i = 0; i < Math.min(status.dmx.length, 512); ++i) {
-                            state.dmxData[i] = status.dmx[i];
+                    const payload = JSON.parse(event.data);
+                    if (payload.free_heap !== undefined || payload.uptime_s !== undefined) {
+                        state.health = { ...state.health, ...payload };
+                        const stats = byId('health-stats');
+                        if (stats) {
+                            stats.textContent = `Uptime: ${state.health.uptime_s || 0}s\nFree Heap: ${state.health.free_heap || 0} bytes\nMin Free Heap: ${state.health.min_free_heap || 0} bytes\nFirmware Version: 2.1.0\nChip Revision: ESP32-S3`;
+                        }
+                    } else {
+                        state.status = { ...state.status, ...payload };
+                    }
+                    if (payload.dmx && Array.isArray(payload.dmx)) {
+                        for (let i = 0; i < Math.min(payload.dmx.length, 512); ++i) {
+                            state.dmxData[i] = payload.dmx[i];
                         }
                     }
                     updateTelemetryUI();
@@ -1175,12 +1282,14 @@ window.lg = (() => {
 
     // ── Data Sync ──
     async function refresh() {
-        const [effects, presets, status, sequence, config] = await Promise.all([
+        const [effects, presets, status, sequence, config, health, schedules] = await Promise.all([
             api('/api/v1/effects').catch(() => fallbackEffects),
             api('/api/v1/presets'),
             api('/api/v1/status'),
             api('/api/v1/sequence'),
-            api('/api/v1/config')
+            api('/api/v1/config'),
+            api('/api/v1/health').catch(() => ({})),
+            api('/api/v1/schedules').catch(() => [])
         ]);
 
         state.effects = Array.isArray(effects) && effects.length ? effects : fallbackEffects;
@@ -1202,6 +1311,11 @@ window.lg = (() => {
         state.status = status;
         state.sequence = sequence;
         state.config = config;
+        state.health = health;
+        
+        let validScheds = Array.isArray(schedules) ? schedules : [];
+        while (validScheds.length < 8) validScheds.push({ enabled: false, hour: 0, minute: 0, daysOfWeek: 0, action: 'preset', presetIndex: 0 });
+        state.schedules = validScheds.slice(0, 8);
 
         byId('experience-node-name').textContent = (config.deviceName || 'LIGHTING NODE').toUpperCase();
         updateTelemetryUI();
@@ -1211,6 +1325,7 @@ window.lg = (() => {
         renderPatcher();
         renderDmxGrid();
         renderTimeline();
+        renderSchedules();
     }
 
     function updateTelemetryUI() {
@@ -1259,6 +1374,8 @@ window.lg = (() => {
             fitVisualizer();
         } else if (page === 'dmx') {
             renderDmxGrid();
+        } else if (page === 'diagnostics') {
+            loadCommissioning();
         }
     }
 
@@ -1310,20 +1427,86 @@ window.lg = (() => {
     function renderScenes() {
         const lib = byId('scene-library');
         if (!lib) return;
-        lib.innerHTML = state.presets.map(scene => `
-            <article class="product-card scene-card" style="--scene-color:${colorToHex(scene.zones[0]?.layers[0]?.primaryColor)}">
+        const validPresets = state.presets.filter(p => p.name && p.name.trim() !== '');
+        lib.innerHTML = validPresets.map(scene => `
+            <article class="product-card scene-card" style="--scene-color:${colorToHex(scene.zones[0]?.layers[0]?.primaryColor)}; display:flex; flex-direction:column; justify-content:space-between;">
                 <div>
-                    <span class="badge badge-wash">● ${esc(effectMeta(scene.zones[0]?.layers[0]?.effect).label)}</span>
-                    <h4 style="margin:0.4rem 0 0.2rem;">${esc(scene.name || 'Untitled scene')}</h4>
+                    <div style="display:flex; justify-content:space-between; align-items:flex-start;">
+                        <span class="badge badge-wash" style="margin-bottom:0.4rem;">● ${esc(effectMeta(scene.zones[0]?.layers[0]?.effect).label)}</span>
+                        <span class="help" style="font-size:0.65rem;">Slot ${Number(scene.index)}</span>
+                    </div>
+                    <h4 style="margin:0 0 0.2rem;">${esc(scene.name || 'Untitled scene')}</h4>
                     <p class="help">${Math.round(scene.globalBrightness * 100 / 255)}% Brightness · ${(scene.transitionMs/1000).toFixed(1)}s Transition</p>
+                    <p class="help" style="margin-top:0.5rem; font-style:italic;">${esc(effectMeta(scene.zones[0]?.layers[0]?.effect).description)}</p>
                 </div>
-                <p class="help">${esc(effectMeta(scene.zones[0]?.layers[0]?.effect).description)}</p>
-                <div class="scene-actions">
+                <div class="scene-actions" style="margin-top:1rem; display:grid; grid-template-columns:1fr 1fr; gap:0.4rem;">
                     <button class="button-primary" onclick="lg.playScene(${Number(scene.index)})">Play</button>
-                    <button class="button-secondary" onclick="lg.editScene(${Number(scene.index)})">Designer</button>
+                    <button class="button-secondary" onclick="lg.editScene(${Number(scene.index)})">Edit</button>
+                    <button class="button-secondary" style="font-size:0.7rem; padding:0.25rem;" onclick="lg.duplicateScene(${Number(scene.index)})">Duplicate</button>
+                    <button class="button-secondary" style="font-size:0.7rem; padding:0.25rem; color:var(--danger);" onclick="lg.clearScene(${Number(scene.index)})">Clear</button>
                 </div>
             </article>
-        `).join('') || '<div class="empty-state">No scenes stored.</div>';
+        `).join('') || '<div class="empty-state">No scenes stored. Create a new scene to begin.</div>';
+    }
+
+    function createNewScene() {
+        let idx = -1;
+        for(let i=0; i<32; i++) {
+            if (!state.presets.some(p => Number(p.index) === i && p.name && p.name.trim() !== '')) {
+                idx = i;
+                break;
+            }
+        }
+        if (idx === -1) return toast('All 32 scene slots are full.', true);
+        
+        state.editing = {
+            index: idx,
+            name: 'New Scene',
+            globalBrightness: 255,
+            transitionMs: 1000,
+            zones: Array.from({length:8}, (_, z) => ({
+                layers: Array.from({length:3}, (_, l) => ({
+                    effect: 'solid', blendMode: 'normal',
+                    primaryColor: {r:255,g:255,b:255}, secondaryColor: {r:0,g:0,b:0},
+                    speedMs: 2000, fxParam: 0, paletteId: 0, opacity: 255, enabled: l === 0
+                }))
+            }))
+        };
+        state.targetZones = [true, false, false, false, false, false, false, false];
+        nav('scene-editor');
+        renderSceneEditor();
+    }
+
+    async function duplicateScene(idx) {
+        const existing = state.presets.find(p => Number(p.index) === Number(idx));
+        if (!existing) return toast('Scene not found', true);
+        
+        let newIdx = -1;
+        for(let i=0; i<32; i++) {
+            if (!state.presets.some(p => Number(p.index) === i && p.name && p.name.trim() !== '')) {
+                newIdx = i;
+                break;
+            }
+        }
+        if (newIdx === -1) return toast('All 32 scene slots are full.', true);
+
+        const cloneScene = clone(existing);
+        cloneScene.index = newIdx;
+        cloneScene.name = (cloneScene.name || 'Untitled') + ' (Copy)';
+        try {
+            await api('/api/v1/presets', 'PUT', cloneScene);
+            toast('Scene duplicated successfully.');
+            await refresh();
+        } catch (e) { toast(e.message, true); }
+    }
+
+    async function clearScene(idx) {
+        if(!confirm('Are you sure you want to clear this scene?')) return;
+        try {
+            await api('/api/v1/presets', 'PUT', { index: idx, name: "" }); // Empty name clears it
+            toast('Scene cleared.');
+            await refresh();
+        } catch (e) { toast(e.message, true); }
     }
 
     function editScene(idx) {
@@ -1367,7 +1550,7 @@ window.lg = (() => {
         const zoneChips = `
             <div class="product-card" style="margin-bottom:1rem;">
                 <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.65rem;">
-                    <h5>Target Zones for Editing</h5>
+                    <h5>Target Zones</h5>
                     <div style="display:flex; gap:0.35rem;">
                         <button class="button-secondary" style="font-size:0.7rem; padding:0.25rem 0.5rem;" onclick="lg.selectAllTargetZones(true)">Select All</button>
                         <button class="button-secondary" style="font-size:0.7rem; padding:0.25rem 0.5rem;" onclick="lg.selectAllTargetZones(false)">Clear</button>
@@ -1387,13 +1570,15 @@ window.lg = (() => {
             const layer = scene.zones[firstZ].layers[l];
             const meta = effectMeta(layer.effect);
             const param = clamp(layer.fxParam || meta.parameterDefault || 0, meta.parameterMin || 0, meta.parameterMax || 255);
+            const hexPrimary = colorToHex(layer.primaryColor);
+            const hexSecondary = colorToHex(layer.secondaryColor);
 
             return `
-                <div class="layer-box">
-                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.75rem;">
+                <div class="layer-box" style="background: linear-gradient(135deg, ${hexPrimary}1a, ${hexSecondary}0d), rgba(255,255,255,0.03); border-left: 4px solid ${hexPrimary}; margin-bottom: 1rem; padding: 1.25rem; border-radius: 8px; border-top: 1px solid rgba(255,255,255,0.05); border-right: 1px solid rgba(255,255,255,0.05); border-bottom: 1px solid rgba(255,255,255,0.05); transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1), background 0.3s;" onmouseenter="this.style.transform='translateX(6px)'" onmouseleave="this.style.transform='translateX(0)'">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 0.75rem;">
                         <div style="display:flex; align-items:center; gap:0.5rem;">
-                            <span class="badge ${layer.enabled ? 'badge-pixel' : 'badge-wash'}">Layer ${l+1}</span>
-                            <strong>${layer.enabled ? esc(meta.label) : 'Disabled'}</strong>
+                            <span class="badge ${layer.enabled ? 'badge-pixel' : 'badge-wash'}" style="font-size:0.7rem;">Layer ${l+1}</span>
+                            <strong style="font-size:1.1rem; color:var(--text-primary);">${layer.enabled ? esc(meta.label) : 'Disabled'}</strong>
                         </div>
                         <label class="switch-row" style="padding:0;">
                             <span>Active</span>
@@ -1401,22 +1586,22 @@ window.lg = (() => {
                         </label>
                     </div>
 
-                    <div class="settings-grid">
+                    <div class="settings-grid" style="grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); margin-bottom: 1.5rem;">
                         <div>
-                            <label style="font-size:0.75rem; font-weight:700; color:var(--text-secondary); display:block; margin-bottom:0.3rem;">Effect Algorithm</label>
-                            <select id="l${l}-effect" onchange="lg.changeLayerEffect(${l}, this.value)">
+                            <label style="font-size:0.75rem; font-weight:700; color:var(--text-secondary); display:block; margin-bottom:0.4rem;">Effect Algorithm</label>
+                            <select id="l${l}-effect" onchange="lg.changeLayerEffect(${l}, this.value)" style="width:100%;">
                                 ${state.effects.map(e => `<option value="${esc(e.id)}" ${e.id === layer.effect ? 'selected' : ''}>${esc(e.label)}</option>`).join('')}
                             </select>
                         </div>
                         <div>
-                            <label style="font-size:0.75rem; font-weight:700; color:var(--text-secondary); display:block; margin-bottom:0.3rem;">Color Palette</label>
-                            <select id="l${l}-palette">
+                            <label style="font-size:0.75rem; font-weight:700; color:var(--text-secondary); display:block; margin-bottom:0.4rem;">Color Palette</label>
+                            <select id="l${l}-palette" style="width:100%;">
                                 ${palettes.map(p => `<option value="${p.id}" ${p.id === (layer.paletteId || 0) ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}
                             </select>
                         </div>
                         <div>
-                            <label style="font-size:0.75rem; font-weight:700; color:var(--text-secondary); display:block; margin-bottom:0.3rem;">Blend Mode</label>
-                            <select id="l${l}-blend">
+                            <label style="font-size:0.75rem; font-weight:700; color:var(--text-secondary); display:block; margin-bottom:0.4rem;">Blend Mode</label>
+                            <select id="l${l}-blend" style="width:100%;">
                                 <option value="normal" ${layer.blendMode === 'normal' ? 'selected' : ''}>Normal (Alpha Over)</option>
                                 <option value="add" ${layer.blendMode === 'add' ? 'selected' : ''}>Add (Linear Dodge)</option>
                                 <option value="multiply" ${layer.blendMode === 'multiply' ? 'selected' : ''}>Multiply</option>
@@ -1425,14 +1610,20 @@ window.lg = (() => {
                         </div>
                     </div>
 
-                    <div class="color-inputs">
-                        <div class="color-swatch-btn">
-                            <input type="color" id="l${l}-pcolor" value="${colorToHex(layer.primaryColor)}" style="width:24px; height:24px; padding:0; border:none; cursor:pointer; background:none;">
-                            <span style="font-size:0.75rem; font-weight:600;">Primary Color</span>
+                    <div class="color-inputs" style="display:flex; gap:1rem; margin-bottom:1.5rem;">
+                        <div class="color-swatch-btn" style="display:flex; align-items:center; gap:0.75rem; background:rgba(0,0,0,0.25); padding:0.6rem 0.75rem; border-radius:8px; flex:1; border: 1px solid rgba(255,255,255,0.03);">
+                            <input type="color" id="l${l}-pcolor" value="${hexPrimary}" style="width:36px; height:36px; padding:0; border:2px solid rgba(255,255,255,0.2); cursor:pointer; background:none; border-radius:50%; box-shadow: 0 0 10px ${hexPrimary}40;">
+                            <div style="display:flex; flex-direction:column; gap:0.15rem;">
+                                <span style="font-size:0.75rem; font-weight:700; color:var(--text-primary);">Primary</span>
+                                <span style="font-size:0.65rem; color:var(--text-muted); font-family:monospace;">${hexPrimary.toUpperCase()}</span>
+                            </div>
                         </div>
-                        <div class="color-swatch-btn">
-                            <input type="color" id="l${l}-scolor" value="${colorToHex(layer.secondaryColor)}" style="width:24px; height:24px; padding:0; border:none; cursor:pointer; background:none;">
-                            <span style="font-size:0.75rem; font-weight:600;">Secondary Color</span>
+                        <div class="color-swatch-btn" style="display:flex; align-items:center; gap:0.75rem; background:rgba(0,0,0,0.25); padding:0.6rem 0.75rem; border-radius:8px; flex:1; border: 1px solid rgba(255,255,255,0.03);">
+                            <input type="color" id="l${l}-scolor" value="${hexSecondary}" style="width:36px; height:36px; padding:0; border:2px solid rgba(255,255,255,0.2); cursor:pointer; background:none; border-radius:50%; box-shadow: 0 0 10px ${hexSecondary}40;">
+                            <div style="display:flex; flex-direction:column; gap:0.15rem;">
+                                <span style="font-size:0.75rem; font-weight:700; color:var(--text-primary);">Secondary</span>
+                                <span style="font-size:0.65rem; color:var(--text-muted); font-family:monospace;">${hexSecondary.toUpperCase()}</span>
+                            </div>
                         </div>
                     </div>
 
@@ -1717,27 +1908,104 @@ window.lg = (() => {
         byId('timeline-bpm-output').textContent = `${state.sequence.bpm} BPM`;
         byId('timeline-enabled').checked = state.sequence.enabled;
 
-        byId('timeline-palette').innerHTML = state.presets.map(p => `
-            <button class="button-secondary" style="font-size:0.75rem; padding:0.35rem 0.65rem;" onclick="lg.playScene(${Number(p.index)})">
-                ● ${esc(p.name || `Scene ${Number(p.index)+1}`)}
+        const activeTrk = state.activeTimelineStep.track;
+        const activeStp = state.activeTimelineStep.step;
+        const activeStepObj = state.sequence.tracks[activeTrk]?.steps[activeStp];
+
+        const validPresets = state.presets.filter(p => p.name && p.name.trim() !== '');
+        
+        let paletteHtml = `<div style="margin-bottom:0.75rem; color:var(--text-secondary); font-size:0.75rem; font-weight:600;">Assign Preset to Track ${activeTrk+1}, Step ${activeStp+1}</div>`;
+        paletteHtml += `<div style="display:flex; gap:0.5rem; overflow-x:auto; padding-bottom:0.5rem;">`;
+        paletteHtml += validPresets.map(p => `
+            <button class="button-secondary" style="font-size:0.75rem; padding:0.35rem 0.65rem;" onclick="lg.assignTimelinePreset(${Number(p.index)})">
+                ● ${esc(p.name)}
             </button>
         `).join('');
+        paletteHtml += `</div>`;
+
+        if (activeStepObj) {
+            paletteHtml += `
+            <div style="display:flex; align-items:center; gap:1rem; margin-top:0.75rem; background:rgba(0,0,0,0.2); padding:0.75rem; border-radius:8px; border:1px solid rgba(255,255,255,0.05);">
+                <div class="range-row" style="margin-top:0; flex:1; max-width:400px;">
+                    <label>Step Duration (Beats)</label>
+                    <input type="range" min="1" max="64" value="${activeStepObj.lengthBeats}" oninput="lg.updateText('timeline-len-out', this.value); lg.setTimelineStepLength(this.value);">
+                    <output id="timeline-len-out">${activeStepObj.lengthBeats}</output>
+                </div>
+            </div>`;
+        }
+        
+        byId('timeline-palette').innerHTML = paletteHtml;
 
         byId('timeline-tracks').innerHTML = state.sequence.tracks.map((track, trackIdx) => {
             const zName = state.config?.zones?.[trackIdx]?.name || `Zone ${trackIdx + 1}`;
             return `
                 <div style="display:flex; align-items:center; gap:0.75rem; background:rgba(0,0,0,0.25); padding:0.5rem; border-radius:8px; border:1px solid var(--border-subtle);">
-                    <div style="width:110px; font-weight:700; font-size:0.8rem;">${esc(zName)}</div>
-                    <div style="display:flex; gap:4px; flex:1; overflow-x:auto;">
-                        ${track.steps.map((step, stepIdx) => `
-                            <div style="width:28px; height:36px; border-radius:4px; background:${step.presetIndex > 0 ? '#6366f1' : 'rgba(255,255,255,0.06)'}; display:flex; align-items:center; justify-content:center; font-size:0.65rem; color:#fff; cursor:pointer;" title="Step ${stepIdx+1}: Preset ${step.presetIndex+1}">
-                                ${stepIdx+1}
-                            </div>
-                        `).join('')}
+                    <div style="width:110px; font-weight:700; font-size:0.8rem; color:${trackIdx === activeTrk ? 'var(--primary)' : 'inherit'};">${esc(zName)}</div>
+                    <div style="display:flex; gap:4px; flex:1; overflow-x:auto; align-items:center;">
+                        ${track.steps.map((step, stepIdx) => {
+                            const isActive = (trackIdx === activeTrk && stepIdx === activeStp);
+                            const preset = validPresets.find(p => Number(p.index) === step.presetIndex);
+                            const hexColor = preset ? colorToHex(preset.zones[0]?.layers[0]?.primaryColor) : '#444';
+                            const widthPx = Math.max(28, step.lengthBeats * 14); // 14px per beat
+                            return `
+                                <div onclick="lg.selectTimelineStep(${trackIdx}, ${stepIdx})" style="width:${widthPx}px; height:36px; border-radius:4px; background:${isActive ? hexColor : hexColor+'40'}; border: 2px solid ${isActive ? '#fff' : 'transparent'}; display:flex; align-items:center; justify-content:center; font-size:0.65rem; font-weight:700; color:#fff; cursor:pointer; transition:all 0.2s; box-shadow:${isActive ? '0 0 10px '+hexColor+'80' : 'none'}; flex-shrink:0;" title="Step ${stepIdx+1}: ${preset ? esc(preset.name) : 'Slot '+step.presetIndex} (${step.lengthBeats} beats)">
+                                    ${stepIdx+1}
+                                </div>
+                            `;
+                        }).join('')}
+                        <div style="display:flex; gap:4px; margin-left:8px;">
+                            ${track.steps.length < 16 ? `<button class="button-secondary" style="padding:0; width:28px; height:28px; border-radius:50%; font-size:1rem;" onclick="lg.addTimelineStep(${trackIdx})">+</button>` : ''}
+                            ${track.steps.length > 1 ? `<button class="button-secondary" style="padding:0; width:28px; height:28px; border-radius:50%; font-size:1rem; color:var(--danger);" onclick="lg.removeTimelineStep(${trackIdx})">−</button>` : ''}
+                        </div>
                     </div>
                 </div>
             `;
         }).join('');
+    }
+
+    function selectTimelineStep(track, step) {
+        state.activeTimelineStep = { track, step };
+        renderTimeline();
+    }
+
+    function assignTimelinePreset(presetIdx) {
+        if (!state.sequence) return;
+        const { track, step } = state.activeTimelineStep;
+        if (state.sequence.tracks[track] && state.sequence.tracks[track].steps[step]) {
+            state.sequence.tracks[track].steps[step].presetIndex = presetIdx;
+            renderTimeline();
+        }
+    }
+
+    function setTimelineStepLength(beats) {
+        if (!state.sequence) return;
+        const { track, step } = state.activeTimelineStep;
+        if (state.sequence.tracks[track] && state.sequence.tracks[track].steps[step]) {
+            state.sequence.tracks[track].steps[step].lengthBeats = clamp(beats, 1, 64);
+            renderTimeline();
+        }
+    }
+
+    function addTimelineStep(trackIdx) {
+        if (!state.sequence) return;
+        const track = state.sequence.tracks[trackIdx];
+        if (track && track.steps.length < 16) {
+            track.steps.push({ presetIndex: 0, lengthBeats: 4 });
+            state.activeTimelineStep = { track: trackIdx, step: track.steps.length - 1 };
+            renderTimeline();
+        }
+    }
+
+    function removeTimelineStep(trackIdx) {
+        if (!state.sequence) return;
+        const track = state.sequence.tracks[trackIdx];
+        if (track && track.steps.length > 1) {
+            track.steps.pop();
+            if (state.activeTimelineStep.track === trackIdx && state.activeTimelineStep.step >= track.steps.length) {
+                state.activeTimelineStep.step = track.steps.length - 1;
+            }
+            renderTimeline();
+        }
     }
 
     function setBpm(val) {
@@ -1758,16 +2026,172 @@ window.lg = (() => {
         } catch (e) { toast(e.message, true); }
     }
 
+    // ── Schedules Editor ──
+    function renderSchedules() {
+        const container = byId('schedules-grid');
+        if (!container || !state.schedules) return;
+        
+        const validPresets = state.presets.filter(p => p.name && p.name.trim() !== '');
+
+        container.innerHTML = state.schedules.map((sched, idx) => {
+            const h = String(sched.hour || 0).padStart(2, '0');
+            const m = String(sched.minute || 0).padStart(2, '0');
+            const mask = sched.daysOfWeek || 0;
+            const days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].map((d, i) => {
+                const checked = (mask & (1 << i)) ? 'checked' : '';
+                return `<label style="display:inline-flex; align-items:center; gap:0.25rem; font-size:0.7rem; color:var(--text-secondary);"><input type="checkbox" id="sched-${idx}-day-${i}" ${checked}> ${d}</label>`;
+            }).join('');
+            
+            return `
+                <article class="product-card" style="display:flex; flex-direction:column; gap:0.75rem; border-top: 3px solid ${sched.enabled ? 'var(--primary)' : 'rgba(255,255,255,0.1)'}; transition:all 0.3s;">
+                    <div style="display:flex; justify-content:space-between; align-items:center;">
+                        <h4 style="margin:0;">Schedule Slot ${idx+1}</h4>
+                        <label class="switch-row" style="padding:0;">
+                            <span>Active</span>
+                            <input type="checkbox" id="sched-${idx}-en" ${sched.enabled ? 'checked' : ''} onchange="this.closest('article').style.borderTopColor = this.checked ? 'var(--primary)' : 'rgba(255,255,255,0.1)';">
+                        </label>
+                    </div>
+                    <div style="display:flex; gap:0.5rem;">
+                        <input type="time" id="sched-${idx}-time" value="${h}:${m}" style="flex:1;">
+                    </div>
+                    <div style="display:flex; gap:0.65rem; flex-wrap:wrap; margin:0.25rem 0; background:rgba(0,0,0,0.25); padding:0.6rem; border-radius:6px; border:1px solid rgba(255,255,255,0.05);">
+                        ${days}
+                    </div>
+                    <div>
+                        <label style="font-size:0.75rem; font-weight:700; color:var(--text-secondary); display:block; margin-bottom:0.3rem;">Action Type</label>
+                        <select id="sched-${idx}-action" style="width:100%; margin-bottom:0.6rem;" onchange="document.getElementById('sched-${idx}-preset-wrap').style.display = this.value === 'preset' ? 'block' : 'none'">
+                            <option value="preset" ${sched.action === 'preset' ? 'selected' : ''}>Activate Scene (Preset)</option>
+                            <option value="sequence" ${sched.action === 'sequence' ? 'selected' : ''}>Start Timeline Sequence</option>
+                        </select>
+                        <div id="sched-${idx}-preset-wrap" style="display:${sched.action === 'sequence' ? 'none' : 'block'};">
+                            <label style="font-size:0.75rem; font-weight:700; color:var(--text-secondary); display:block; margin-bottom:0.3rem;">Target Scene</label>
+                            <select id="sched-${idx}-preset" style="width:100%;">
+                                ${validPresets.map(p => `<option value="${p.index}" ${p.index === sched.presetIndex ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}
+                            </select>
+                        </div>
+                    </div>
+                </article>
+            `;
+        }).join('');
+    }
+
+    async function saveSchedules() {
+        try {
+            const updated = clone(state.schedules);
+            for (let i = 0; i < 8; i++) {
+                if (!updated[i]) updated[i] = { enabled: false, hour: 0, minute: 0, daysOfWeek: 0, action: 'preset', presetIndex: 0 };
+                const timeStr = byId(`sched-${i}-time`)?.value || "00:00";
+                const [hh, mm] = timeStr.split(':').map(Number);
+                updated[i].enabled = byId(`sched-${i}-en`)?.checked || false;
+                updated[i].hour = hh || 0;
+                updated[i].minute = mm || 0;
+                
+                let mask = 0;
+                for (let d = 0; d < 7; d++) {
+                    if (byId(`sched-${i}-day-${d}`)?.checked) mask |= (1 << d);
+                }
+                updated[i].daysOfWeek = mask;
+                updated[i].action = byId(`sched-${i}-action`)?.value || 'preset';
+                updated[i].presetIndex = Number(byId(`sched-${i}-preset`)?.value || 0);
+            }
+            await api('/api/v1/schedules', 'PUT', updated);
+            toast('Calendar schedules saved.');
+            state.schedules = updated;
+        } catch (e) { toast(e.message, true); }
+    }
+
     // ── Diagnostics & OTA ──
     async function loadCommissioning() {
         try {
             const health = await api('/api/v1/health');
-            const stats = byId('health-stats');
-            if (stats) {
-                stats.textContent = `Uptime: ${health.uptime_s || 0}s\nFree Heap: ${health.free_heap || 0} bytes\nMin Free Heap: ${health.min_free_heap || 0} bytes\nFirmware Version: 2.1.0\nChip Revision: ESP32-S3`;
+            const grid = byId('health-metrics-grid');
+            if (grid) {
+                const h = health || {};
+                const uptime = h.uptime_s || 0;
+                const hh = Math.floor(uptime / 3600);
+                const mm = Math.floor((uptime % 3600) / 60);
+                const ss = uptime % 60;
+                const upStr = `${hh}h ${mm}m ${ss}s`;
+                
+                const free = Math.round((h.free_heap || 0) / 1024);
+                const minFree = Math.round((h.min_free_heap || 0) / 1024);
+                const rssi = h.rssi || -100;
+                
+                grid.innerHTML = `
+                    <div style="background:rgba(0,0,0,0.2); padding:0.8rem; border-radius:6px;">
+                        <div style="font-size:0.7rem; color:var(--text-secondary); margin-bottom:0.25rem;">System Uptime</div>
+                        <div style="font-size:1.1rem; font-weight:700;">${upStr}</div>
+                    </div>
+                    <div style="background:rgba(0,0,0,0.2); padding:0.8rem; border-radius:6px;">
+                        <div style="font-size:0.7rem; color:var(--text-secondary); margin-bottom:0.25rem;">Wi-Fi Signal</div>
+                        <div style="font-size:1.1rem; font-weight:700; color:${rssi > -60 ? 'var(--primary)' : rssi > -80 ? 'orange' : 'var(--danger)'};">${rssi} dBm</div>
+                    </div>
+                    <div style="background:rgba(0,0,0,0.2); padding:0.8rem; border-radius:6px;">
+                        <div style="font-size:0.7rem; color:var(--text-secondary); margin-bottom:0.25rem;">Free Heap</div>
+                        <div style="font-size:1.1rem; font-weight:700;">${free} KB</div>
+                    </div>
+                    <div style="background:rgba(0,0,0,0.2); padding:0.8rem; border-radius:6px;">
+                        <div style="font-size:0.7rem; color:var(--text-secondary); margin-bottom:0.25rem;">Min Free Heap (Lifetime)</div>
+                        <div style="font-size:1.1rem; font-weight:700;">${minFree} KB</div>
+                    </div>
+                    <div style="background:rgba(0,0,0,0.2); padding:0.8rem; border-radius:6px; grid-column:span 2;">
+                        <div style="font-size:0.7rem; color:var(--text-secondary); margin-bottom:0.25rem;">DMX Drops</div>
+                        <div style="font-size:1.1rem; font-weight:700;">${h.dmx_drops || 0}</div>
+                    </div>
+                `;
             }
-            toast('Health metrics updated.');
         } catch (e) { toast(e.message, true); }
+    }
+
+    function switchDiagTab(tab) {
+        ['health','logs','audit'].forEach(t => {
+            const panel = byId('panel-'+t);
+            const btn = byId('tab-'+t);
+            if(panel) panel.style.display = t === tab ? 'flex' : 'none';
+            if(btn) btn.style.background = t === tab ? 'var(--surface-2)' : 'transparent';
+        });
+        if (tab === 'logs') loadLogs();
+        if (tab === 'audit') loadAudit();
+    }
+
+    async function loadLogs() {
+        try {
+            const viewer = byId('sys-logs-viewer');
+            if (viewer) viewer.textContent = "Loading logs...";
+            const res = await api('/api/v1/logs');
+            if (viewer) {
+                if (Array.isArray(res)) {
+                    viewer.textContent = res.join('\n') || 'No logs available.';
+                } else if (typeof res === 'object' && res.logs) {
+                    viewer.textContent = Array.isArray(res.logs) ? res.logs.join('\n') : String(res.logs);
+                } else {
+                    viewer.textContent = String(res) || 'No logs available.';
+                }
+                viewer.scrollTop = viewer.scrollHeight;
+            }
+        } catch(e) {
+            const viewer = byId('sys-logs-viewer');
+            if (viewer) viewer.textContent = `Error fetching logs: ${e.message}`;
+        }
+    }
+
+    async function loadAudit() {
+        try {
+            const tbody = byId('audit-tbody');
+            if (tbody) tbody.innerHTML = `<tr><td colspan="4" style="text-align:center;">Loading audit trail...</td></tr>`;
+            const res = await api('/api/v1/audit');
+            if (tbody) {
+                const events = Array.isArray(res) ? res : (res.events || []);
+                tbody.innerHTML = events.map(ev => `
+                    <tr>
+                        <td style="font-family:monospace; color:var(--text-muted);">${ev.timestamp || '-'}</td>
+                        <td><span class="badge badge-wash">${esc(ev.role || 'System')}</span></td>
+                        <td>${esc(ev.type || 'Unknown')}</td>
+                        <td style="color:var(--text-secondary);">${esc(ev.message || '')}</td>
+                    </tr>
+                `).join('') || `<tr><td colspan="4" style="text-align:center;">No audit events found.</td></tr>`;
+            }
+        } catch(e) { toast(e.message, true); }
     }
 
     async function runTestSequence(type) {
@@ -1775,6 +2199,9 @@ window.lg = (() => {
             if (type === 'lane') {
                 await api('/api/v1/factory/effect', 'POST', { effect: 'pixel_chase', durationMs: 5000 });
                 toast('Running lane chase test sequence...');
+            } else if (type === 'burn_in') {
+                await api('/api/v1/factory/effect', 'POST', { effect: 'solid', durationMs: 3600000 });
+                toast('Running full power burn-in test...');
             } else {
                 await api('/api/v1/factory/effect', 'POST', { effect: 'rainbow', durationMs: 5000 });
                 toast('Running color wash test sequence...');
@@ -1838,9 +2265,12 @@ window.lg = (() => {
     return {
         connect, disconnect, refresh, nav, playScene, blackout,
         editScene, backToScenes, saveScene, testSceneLive, toggleTargetZone, selectAllTargetZones,
+        createNewScene, duplicateScene, clearScene,
         changeLayerEffect, changeLayerEnabled, speedLabel, updateText,
         saveHardwarePatch, renderPatcher, hoverDmxCell, toggleVisualizerMode, fitVisualizer, redrawVisualizer,
-        setBpm, setTimelineEnabled, saveTimeline, loadCommissioning, runTestSequence, uploadOta, downloadBackup, uploadRestore
+        setBpm, setTimelineEnabled, saveTimeline, selectTimelineStep, assignTimelinePreset, setTimelineStepLength, addTimelineStep, removeTimelineStep,
+        saveSchedules,
+        loadCommissioning, switchDiagTab, loadLogs, loadAudit, runTestSequence, uploadOta, downloadBackup, uploadRestore
     };
 })();
 </script>

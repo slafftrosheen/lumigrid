@@ -1,7 +1,18 @@
 # LumiGrid LED Node API
 
+> **Status:** **IMPLEMENTED** (Unless explicitly marked as PLANNED, PARTIALLY IMPLEMENTED, or CONCEPTUAL)
+
 The LED Node exposes an HTTP API on port 80 and serves the operator dashboard at
 `/`. All API responses are JSON and include `Cache-Control: no-store`.
+
+## API Contracts and Constraints
+
+The node strictly enforces memory budgets to ensure ESP32 stability. Clients must respect these constraints:
+- Normal API response size: `< 8 KB`
+- Large diagnostic response size: `< 16 KB`
+- Backup payload size: `< 32 KB`
+- WebSocket frame size: `< 4 KB`
+- Incoming JSON request body size: `< 8 KB`
 
 ## Authentication
 

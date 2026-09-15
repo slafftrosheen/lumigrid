@@ -1,0 +1,23 @@
+{
+  "typography": {
+    "fontFamily": {
+      "display": "-apple-system, BlinkMacSystemFont, \"SF Pro Display\", system-ui, sans-serif",
+      "body": "-apple-system, BlinkMacSystemFont, \"SF Pro Text\", Inter, system-ui, sans-serif"
+    },
+    "fontSize": {
+      "displayXl": "clamp(3rem, 8vw, 6rem)",
+      "displayLg": "clamp(2rem, 5vw, 3.5rem)",
+      "title1": "clamp(1.75rem, 4vw, 2.5rem)",
+      "title2": "clamp(1.5rem, 3vw, 2rem)",
+      "bodyLg": "clamp(1.0625rem, 2vw, 1.25rem)",
+      "body": "1rem",
+      "caption": "0.875rem"
+    },
+    "fontWeight": {
+      "regular": 400,
+      "medium": 500,
+      "semibold": 600,
+      "bold": 700
+    }
+  }
+}

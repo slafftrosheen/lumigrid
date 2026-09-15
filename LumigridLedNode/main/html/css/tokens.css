@@ -1,0 +1,55 @@
+/* 
+ * Design Tokens System
+ * Generated from /design tokens. Do not edit directly.
+ */
+:root {
+  --colors-brand-primary: #ff2d55;
+  --colors-brand-led-cyan: #00d4ff;
+  --colors-brand-led-amber: #ff9500;
+  --colors-brand-led-magenta: #ff2d55;
+  --colors-brand-led-cherry: #ff3b30;
+  --colors-neutral-bg-primary: #000000;
+  --colors-neutral-bg-secondary: #1d1d1f;
+  --colors-neutral-bg-tertiary: #2d2d2f;
+  --colors-neutral-bg-base: #050505;
+  --colors-neutral-text-primary: #f5f5f7;
+  --colors-neutral-text-secondary: #a1a1a6;
+  --colors-neutral-text-tertiary: #6e6e73;
+  --colors-glass-bg: rgba(29, 29, 31, 0.72);
+  --colors-glass-border: rgba(255, 255, 255, 0.1);
+  --spacing-xs: 0.5rem;
+  --spacing-sm: 1rem;
+  --spacing-md: 1.5rem;
+  --spacing-lg: 2rem;
+  --spacing-xl: 3rem;
+  --spacing-xxl: 4rem;
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 18px;
+  --radius-xl: 24px;
+  --radius-full: 9999px;
+  --effects-shadow-card: 0 2px 8px rgba(0, 0, 0, 0.1), 0 8px 24px rgba(0, 0, 0, 0.15);
+  --effects-shadow-card-hover: 0 4px 12px rgba(0, 0, 0, 0.15), 0 12px 32px rgba(0, 0, 0, 0.2);
+  --effects-blur-glass: 20px;
+  --effects-blur-backdrop: 10px;
+  --typography-fontFamily-display: -apple-system, BlinkMacSystemFont, "SF Pro Display", system-ui, sans-serif;
+  --typography-fontFamily-body: -apple-system, BlinkMacSystemFont, "SF Pro Text", Inter, system-ui, sans-serif;
+  --typography-fontSize-display-xl: clamp(3rem, 8vw, 6rem);
+  --typography-fontSize-display-lg: clamp(2rem, 5vw, 3.5rem);
+  --typography-fontSize-title1: clamp(1.75rem, 4vw, 2.5rem);
+  --typography-fontSize-title2: clamp(1.5rem, 3vw, 2rem);
+  --typography-fontSize-body-lg: clamp(1.0625rem, 2vw, 1.25rem);
+  --typography-fontSize-body: 1rem;
+  --typography-fontSize-caption: 0.875rem;
+  --typography-fontWeight-regular: 400;
+  --typography-fontWeight-medium: 500;
+  --typography-fontWeight-semibold: 600;
+  --typography-fontWeight-bold: 700;
+  --transitions-fast: 150ms;
+  --transitions-normal: 300ms;
+  --transitions-slow: 500ms;
+  --transitions-easing-default: cubic-bezier(0.4, 0, 0.2, 1);
+  --transitions-easing-in: cubic-bezier(0.4, 0, 1, 1);
+  --transitions-easing-out: cubic-bezier(0, 0, 0.2, 1);
+
+}
