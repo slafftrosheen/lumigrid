@@ -1,21 +1,26 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
+  import {
+    BUF_SIZE,
+    LANES,
+    PIXELS_PER_LANE,
+    connect,
+    disconnect,
+    getNodeLiveState,
+    reconnect as reconnectNode,
+  } from '$lib/state/nodeStore';
 
   type ViewMode = 'lanes' | 'zones' | 'composite' | 'dmx';
 
   let nodeIp = $state('');
-  let ws = $state<WebSocket | null>(null);
   let connected = $state(false);
   let viewMode = $state<ViewMode>('lanes');
-
-  const LANES = 8;
-  const PIXELS_PER_LANE = 144;
-  const BUF_SIZE = LANES * PIXELS_PER_LANE * 3;
 
   let pixelBuf = new Uint8Array(BUF_SIZE);
   let dirty = $state(false);
   let canvasEl: HTMLCanvasElement | null = null;
   let rafId = 0;
+  let unsubscribe: (() => void) | null = null;
 
   let statusInfo = $state({
     effect: '', brightness: 0, outputsEnabled: false,
@@ -23,45 +28,8 @@
   });
 
   let wsFps = $state(0);
-  let frameCount = 0;
+  let lastFrameCount = 0;
   let lastFpsTime = 0;
-
-  function connectWs() {
-    if (ws) { ws.close(); ws = null; }
-    if (!nodeIp) return;
-
-    const url = `ws://${nodeIp}/ws`;
-    ws = new WebSocket(url);
-    ws.binaryType = 'arraybuffer';
-
-    ws.onopen = () => { connected = true; };
-    ws.onclose = () => { connected = false; };
-    ws.onerror = () => { connected = false; };
-
-    ws.onmessage = (event) => {
-      if (event.data instanceof ArrayBuffer) {
-        const arr = new Uint8Array(event.data);
-        if (arr.length > 1 && (arr[0] === 1 || arr[0] === 76)) {
-          const raw = arr.subarray(1);
-          const len = Math.min(raw.length, BUF_SIZE);
-          pixelBuf.set(raw.subarray(0, len));
-          dirty = true;
-          frameCount++;
-        }
-      } else if (typeof event.data === 'string') {
-        try {
-          const j = JSON.parse(event.data);
-          statusInfo = {
-            effect: j.effect ?? '',
-            brightness: j.brightness ?? 0,
-            outputsEnabled: j.outputsEnabled ?? false,
-            testActive: j.testActive ?? false,
-            autoLoop: j.autoLoop ?? false,
-          };
-        } catch { /* ignore malformed */ }
-      }
-    };
-  }
 
   function render() {
     if (!canvasEl) { rafId = requestAnimationFrame(render); return; }
@@ -70,8 +38,12 @@
 
     const now = performance.now();
     if (now - lastFpsTime >= 1000) {
-      wsFps = frameCount;
-      frameCount = 0;
+      const state = getNodeLiveState();
+      let currentFrames = lastFrameCount;
+      const stop = state.subscribe(value => { currentFrames = value.frameCount; });
+      stop();
+      wsFps = Math.max(0, currentFrames - lastFrameCount);
+      lastFrameCount = currentFrames;
       lastFpsTime = now;
     }
 
@@ -178,19 +150,28 @@
   }
 
   onMount(() => {
-    nodeIp = localStorage.getItem('lg_node_ip') ?? '';
-    if (nodeIp) connectWs();
+    const liveState = getNodeLiveState();
+    unsubscribe = liveState.subscribe(value => {
+      nodeIp = value.nodeIp;
+      connected = value.connection === 'connected';
+      pixelBuf = value.pixels;
+      statusInfo = value.status;
+      dirty = true;
+    });
+
     lastFpsTime = performance.now();
     rafId = requestAnimationFrame(render);
+    connect();
   });
 
   onDestroy(() => {
     if (rafId) cancelAnimationFrame(rafId);
-    if (ws) { ws.close(); ws = null; }
+    unsubscribe?.();
+    disconnect();
   });
 
   function reconnect() {
-    connectWs();
+    reconnectNode();
   }
 
   function setView(mode: ViewMode) {
@@ -233,92 +214,22 @@
 </div>
 
 <style>
-  .viz-root {
-    display: flex;
-    flex-direction: column;
-    gap: 1rem;
-  }
-
-  .viz-toolbar {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 1rem;
-    flex-wrap: wrap;
-  }
+  .viz-root { display: flex; flex-direction: column; gap: 1rem; }
+  .viz-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
   .viz-left, .viz-right { display: flex; align-items: center; gap: .6rem; }
   .viz-left h2 { margin: 0; font-size: 1.15rem; font-weight: 600; color: #f5f5f7; }
-  .conn-badge {
-    font-size: .72rem;
-    padding: .2rem .5rem;
-    border-radius: 999px;
-    background: rgba(255,69,58,.15);
-    color: #ff453a;
-    border: 1px solid rgba(255,69,58,.25);
-  }
-  .conn-badge.connected {
-    background: rgba(48,209,88,.12);
-    color: #30d158;
-    border-color: rgba(48,209,88,.25);
-  }
-  .fps-badge {
-    font-size: .72rem;
-    padding: .2rem .5rem;
-    border-radius: 999px;
-    background: rgba(255,255,255,.06);
-    color: #a1a1a6;
-    font-family: monospace;
-  }
-
+  .conn-badge { font-size: .72rem; padding: .2rem .5rem; border-radius: 999px; background: rgba(255,69,58,.15); color: #ff453a; border: 1px solid rgba(255,69,58,.25); }
+  .conn-badge.connected { background: rgba(48,209,88,.12); color: #30d158; border-color: rgba(48,209,88,.25); }
+  .fps-badge { font-size: .72rem; padding: .2rem .5rem; border-radius: 999px; background: rgba(255,255,255,.06); color: #a1a1a6; font-family: monospace; }
   .viz-views { display: flex; gap: .25rem; }
-  .view-btn {
-    background: rgba(255,255,255,.05);
-    border: 1px solid rgba(255,255,255,.08);
-    border-radius: 8px;
-    color: #a1a1a6;
-    font-size: .78rem;
-    padding: .35rem .65rem;
-    cursor: pointer;
-    transition: background .15s, color .15s;
-  }
+  .view-btn { background: rgba(255,255,255,.05); border: 1px solid rgba(255,255,255,.08); border-radius: 8px; color: #a1a1a6; font-size: .78rem; padding: .35rem .65rem; cursor: pointer; transition: background .15s, color .15s; }
   .view-btn:hover { background: rgba(255,255,255,.08); color: #f5f5f7; }
   .view-btn.active { background: rgba(255,45,85,.18); color: #f5f5f7; border-color: rgba(255,45,85,.35); }
-
-  .btn-reconnect {
-    background: rgba(255,45,85,.8);
-    color: #fff;
-    border: none;
-    border-radius: 8px;
-    padding: .35rem .7rem;
-    font-size: .78rem;
-    font-weight: 600;
-    cursor: pointer;
-  }
+  .btn-reconnect { background: rgba(255,45,85,.8); color: #fff; border: none; border-radius: 8px; padding: .35rem .7rem; font-size: .78rem; font-weight: 600; cursor: pointer; }
   .btn-reconnect:hover { background: #ff3b30; }
-
-  .viz-canvas-wrap {
-    background: rgba(255,255,255,.03);
-    border: 1px solid rgba(255,255,255,.08);
-    border-radius: 12px;
-    overflow: hidden;
-    line-height: 0;
-  }
-  .viz-canvas-wrap canvas {
-    width: 100%;
-    height: auto;
-    display: block;
-    image-rendering: pixelated;
-  }
-
-  .viz-status {
-    display: flex;
-    gap: 1.5rem;
-    padding: .6rem 1rem;
-    background: rgba(255,255,255,.04);
-    border: 1px solid rgba(255,255,255,.08);
-    border-radius: 10px;
-    flex-wrap: wrap;
-  }
+  .viz-canvas-wrap { background: rgba(255,255,255,.03); border: 1px solid rgba(255,255,255,.08); border-radius: 12px; overflow: hidden; line-height: 0; }
+  .viz-canvas-wrap canvas { width: 100%; height: auto; display: block; image-rendering: pixelated; }
+  .viz-status { display: flex; gap: 1.5rem; padding: .6rem 1rem; background: rgba(255,255,255,.04); border: 1px solid rgba(255,255,255,.08); border-radius: 10px; flex-wrap: wrap; }
   .stat { display: flex; align-items: center; gap: .4rem; }
   .stat-label { font-size: .72rem; color: #666; text-transform: uppercase; letter-spacing: .04em; }
   .stat-val { font-size: .82rem; color: #f5f5f7; font-family: monospace; }
