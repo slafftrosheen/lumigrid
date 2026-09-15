@@ -1244,12 +1244,15 @@ esp_err_t get_signage_status(httpd_req_t* request) {
             api_ptr->signage()->is_transitioning()
         );
 
-        cJSON* dmx_array = cJSON_CreateArray();
+        // Encode DMX telemetry as a compact hex string instead of 512 individual
+        // cJSON number objects (~41 KB heap) to prevent OOM on status polls.
         const auto& dmx = api_ptr->signage()->last_dmx_data();
+        char dmx_hex[1025];
         for (int i = 0; i < 512; ++i) {
-            cJSON_AddItemToArray(dmx_array, cJSON_CreateNumber(dmx[i]));
+            snprintf(dmx_hex + i * 2, 3, "%02x", dmx[i]);
         }
-        cJSON_AddItemToObject(response, "dmx", dmx_array);
+        dmx_hex[1024] = '\0';
+        cJSON_AddStringToObject(response, "dmxHex", dmx_hex);
 
     } else {
         cJSON_AddStringToObject(response, "signage", "not_started");
@@ -1778,7 +1781,7 @@ esp_err_t get_backup(httpd_req_t* request) {
     httpd_resp_set_type(request, "application/json");
     httpd_resp_set_hdr(request, "Content-Disposition", "attachment; filename=\"lumigrid_backup.json\"");
     esp_err_t err = httpd_resp_sendstr(request, json_str);
-    free(json_str);
+    cJSON_free(json_str);
     return err;
 }
 
@@ -1790,13 +1793,22 @@ esp_err_t post_restore(httpd_req_t* request) {
         return send_error(request, "500 Internal Server Error", "ConfigStore not available");
     }
 
+    if (request->content_len <= 0 || request->content_len > 32768) {
+        return send_error(request, "400 Bad Request", "Payload too large or empty");
+    }
+
     char* buf = (char*)malloc(request->content_len + 1);
     if (!buf) return send_error(request, "500 Internal Server Error", "Out of memory");
-    
-    int received = httpd_req_recv(request, buf, request->content_len);
-    if (received <= 0) {
-        free(buf);
-        return send_error(request, "500 Internal Server Error", "Failed to receive payload");
+
+    int received = 0;
+    while (received < request->content_len) {
+        int ret = httpd_req_recv(request, buf + received, request->content_len - received);
+        if (ret == HTTPD_SOCK_ERR_TIMEOUT) continue;
+        if (ret <= 0) {
+            free(buf);
+            return send_error(request, "500 Internal Server Error", "Failed to receive payload");
+        }
+        received += ret;
     }
     buf[received] = '\0';
 
@@ -1951,7 +1963,7 @@ esp_err_t FactoryApi::start(
     dmx_router_ = dmx_router;
 
     httpd_config_t http_config = HTTPD_DEFAULT_CONFIG();
-    http_config.max_uri_handlers = 24;
+    http_config.max_uri_handlers = 36;
     http_config.server_port = signage_port;
     ESP_RETURN_ON_ERROR(httpd_start(&signage_server_, &http_config), "factory-api", "start signage");
 
@@ -2038,58 +2050,75 @@ esp_err_t FactoryApi::start(
             }
             last_preview_ms = now;
 
-            auto* arg = new WsPreviewArg{};
-            arg->api = this;
-            
-            // Format: 0x01 followed by raw RGB data from RenderFrame
-            arg->payload.reserve(1 + 8 * 128 * 3);
-            arg->payload.push_back(0x01);
-
-            for (uint8_t f = 0; f < 16; ++f) {
-                const auto& fix = cfg.fixtures[f];
-                const auto& ff = frame.fixtures[f];
-                bool is_pwm = (fix.profile == FixtureProfile::PWM_Single ||
-                               fix.profile == FixtureProfile::PWM_RGB ||
-                               fix.profile == FixtureProfile::PWM_RGBW);
-                if (fix.num_pixels == 0 && !is_pwm) continue;
-
-                if (!is_pwm) {
-                    uint16_t pcount = std::min<uint16_t>(fix.num_pixels, 128);
-                    for (uint16_t p = 0; p < pcount; ++p) {
-                        const auto& lv = ff.pixels[p];
-                        uint8_t r = std::min(255, int(lv.r) + lv.w);
-                        uint8_t g = std::min(255, int(lv.g) + lv.w);
-                        uint8_t b = std::min(255, int(lv.b) + lv.w);
-                        arg->payload.push_back(r);
-                        arg->payload.push_back(g);
-                        arg->payload.push_back(b);
-                    }
-                } else {
-                    if (fix.profile == FixtureProfile::PWM_Single) {
-                        uint8_t v = static_cast<uint8_t>((uint32_t(ff.pwm[0]) * 255) / 4095);
-                        arg->payload.push_back(v);
-                        arg->payload.push_back(v);
-                        arg->payload.push_back(v);
-                    } else if (fix.profile == FixtureProfile::PWM_RGB) {
-                        uint8_t r = static_cast<uint8_t>((uint32_t(ff.pwm[0]) * 255) / 4095);
-                        uint8_t g = static_cast<uint8_t>((uint32_t(ff.pwm[1]) * 255) / 4095);
-                        uint8_t b = static_cast<uint8_t>((uint32_t(ff.pwm[2]) * 255) / 4095);
-                        arg->payload.push_back(r);
-                        arg->payload.push_back(g);
-                        arg->payload.push_back(b);
-                    } else if (fix.profile == FixtureProfile::PWM_RGBW) {
-                        uint8_t r = static_cast<uint8_t>((uint32_t(ff.pwm[0]) * 255) / 4095);
-                        uint8_t g = static_cast<uint8_t>((uint32_t(ff.pwm[1]) * 255) / 4095);
-                        uint8_t b = static_cast<uint8_t>((uint32_t(ff.pwm[2]) * 255) / 4095);
-                        uint8_t w = static_cast<uint8_t>((uint32_t(ff.pwm[3]) * 255) / 4095);
-                        arg->payload.push_back(std::min(255, int(r) + w));
-                        arg->payload.push_back(std::min(255, int(g) + w));
-                        arg->payload.push_back(std::min(255, int(b) + w));
-                    }
-                }
+            // Only generate preview frames if there are active WebSocket clients connected
+            size_t client_count = 4;
+            int client_fds[4];
+            if (httpd_get_client_list(this->factory_server_, &client_count, client_fds) != ESP_OK || client_count == 0) {
+                this->preview_pending_ = false;
+                return;
             }
 
-            if (httpd_queue_work(this->factory_server_, ws_broadcast_preview_work, arg) != ESP_OK) {
+            auto* arg = new (std::nothrow) WsPreviewArg{};
+            if (!arg) {
+                this->preview_pending_ = false;
+                return;
+            }
+            arg->api = this;
+            
+            try {
+                // Format: 0x01 followed by raw RGB data from RenderFrame
+                arg->payload.reserve(1 + 8 * 128 * 3);
+                arg->payload.push_back(0x01);
+
+                for (uint8_t f = 0; f < 16; ++f) {
+                    const auto& fix = cfg.fixtures[f];
+                    const auto& ff = frame.fixtures[f];
+                    bool is_pwm = (fix.profile == FixtureProfile::PWM_Single ||
+                                   fix.profile == FixtureProfile::PWM_RGB ||
+                                   fix.profile == FixtureProfile::PWM_RGBW);
+                    if (fix.num_pixels == 0 && !is_pwm) continue;
+
+                    if (!is_pwm) {
+                        uint16_t pcount = std::min<uint16_t>(fix.num_pixels, 128);
+                        for (uint16_t p = 0; p < pcount; ++p) {
+                            const auto& lv = ff.pixels[p];
+                            uint8_t r = std::min(255, int(lv.r) + lv.w);
+                            uint8_t g = std::min(255, int(lv.g) + lv.w);
+                            uint8_t b = std::min(255, int(lv.b) + lv.w);
+                            arg->payload.push_back(r);
+                            arg->payload.push_back(g);
+                            arg->payload.push_back(b);
+                        }
+                    } else {
+                        if (fix.profile == FixtureProfile::PWM_Single) {
+                            uint8_t v = static_cast<uint8_t>((uint32_t(ff.pwm[0]) * 255) / 4095);
+                            arg->payload.push_back(v);
+                            arg->payload.push_back(v);
+                            arg->payload.push_back(v);
+                        } else if (fix.profile == FixtureProfile::PWM_RGB) {
+                            uint8_t r = static_cast<uint8_t>((uint32_t(ff.pwm[0]) * 255) / 4095);
+                            uint8_t g = static_cast<uint8_t>((uint32_t(ff.pwm[1]) * 255) / 4095);
+                            uint8_t b = static_cast<uint8_t>((uint32_t(ff.pwm[2]) * 255) / 4095);
+                            arg->payload.push_back(r);
+                            arg->payload.push_back(g);
+                            arg->payload.push_back(b);
+                        } else if (fix.profile == FixtureProfile::PWM_RGBW) {
+                            uint8_t r = static_cast<uint8_t>((uint32_t(ff.pwm[0]) * 255) / 4095);
+                            uint8_t g = static_cast<uint8_t>((uint32_t(ff.pwm[1]) * 255) / 4095);
+                            uint8_t b = static_cast<uint8_t>((uint32_t(ff.pwm[2]) * 255) / 4095);
+                            uint8_t w = static_cast<uint8_t>((uint32_t(ff.pwm[3]) * 255) / 4095);
+                            arg->payload.push_back(std::min(255, int(r) + w));
+                            arg->payload.push_back(std::min(255, int(g) + w));
+                            arg->payload.push_back(std::min(255, int(b) + w));
+                        }
+                    }
+                }
+
+                if (httpd_queue_work(this->factory_server_, ws_broadcast_preview_work, arg) != ESP_OK) {
+                    this->preview_pending_ = false;
+                    delete arg;
+                }
+            } catch (...) {
                 this->preview_pending_ = false;
                 delete arg;
             }

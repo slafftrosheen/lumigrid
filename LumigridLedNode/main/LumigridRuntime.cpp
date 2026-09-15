@@ -278,6 +278,7 @@ void LumigridRuntime::rollback_services(StartupStage failed_stage, esp_err_t err
 
     // Reverse-order teardown: only stop services that actually started
     if (started_subsystems_.mqtt) {
+        DiagnosticLog::instance().set_stream_callback(nullptr);
         mqtt_.stop();
         started_subsystems_.mqtt = false;
     }
@@ -387,20 +388,23 @@ esp_err_t LumigridRuntime::start() {
         .max_retry = 1
     };
 
-    if (!net_ready_sem_) {
-        net_ready_sem_ = xSemaphoreCreateBinary();
+    if (!net_ready_sem_.load(std::memory_order_acquire)) {
+        net_ready_sem_.store(xSemaphoreCreateBinary(), std::memory_order_release);
     } else {
-        xSemaphoreTake(net_ready_sem_, 0); // Drain stale token
+        xSemaphoreTake(net_ready_sem_.load(std::memory_order_acquire), 0); // Drain stale token
     }
 
     startup_state_ = StartupState::StartingNetwork;
-    ESP_LOGI("lumigrid", "Step 5: wifi.start()...");
+    ESP_LOGI("lumigrid", "Step 5: wifi.start() - AP SSID: '%s', Password: '%s'...",
+             wifi_cfg.ap_ssid.c_str(), wifi_cfg.ap_password.c_str());
     esp_err_t err = wifi_.start(
         wifi_cfg,
         [this](WifiState state) {
             if (state == WifiState::Connected || state == WifiState::ApActive) {
-                if (net_ready_sem_) {
-                    xSemaphoreGive(net_ready_sem_);
+                // Load with acquire so we see the semaphore written by the creator task
+                SemaphoreHandle_t sem = net_ready_sem_.load(std::memory_order_acquire);
+                if (sem) {
+                    xSemaphoreGive(sem);
                 }
             }
         }
@@ -413,7 +417,7 @@ esp_err_t LumigridRuntime::start() {
     started_subsystems_.wifi = true;
 
     // Wait synchronously for network readiness (10s bounded timeout)
-    if (xSemaphoreTake(net_ready_sem_, pdMS_TO_TICKS(10000)) != pdTRUE) {
+    if (xSemaphoreTake(net_ready_sem_.load(std::memory_order_acquire), pdMS_TO_TICKS(10000)) != pdTRUE) {
         ESP_LOGE("lumigrid", "Network readiness timed out after 10s");
         rollback_services(StartupStage::NetworkConfigured, ESP_ERR_TIMEOUT);
         return ESP_ERR_TIMEOUT;
@@ -427,8 +431,9 @@ esp_err_t LumigridRuntime::start() {
         esp_netif_ip_info_t ip_info;
         if (esp_netif_get_ip_info(ap_netif, &ip_info) == ESP_OK) {
             ESP_LOGI("lumigrid",
-                "=== UI READY === Connect to '%s' then open http://" IPSTR " ===",
+                "=== UI READY === Connect to '%s' (Password: '%s') then open http://" IPSTR " ===",
                 wifi_cfg.ap_ssid.c_str(),
+                wifi_cfg.ap_password.c_str(),
                 IP2STR(&ip_info.ip));
         }
     }

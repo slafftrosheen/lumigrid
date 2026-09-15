@@ -58,6 +58,7 @@ private:
     std::atomic<WifiState> state_{WifiState::Idle};
     uint8_t retries_ = 0;
     std::atomic<bool> has_ip_{false};
+    bool initialized_ = false;
 };
 
 } // namespace lg

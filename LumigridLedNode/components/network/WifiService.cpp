@@ -6,6 +6,7 @@
 #include "esp_check.h"
 #include "esp_event.h"
 #include "esp_log.h"
+#include "esp_mac.h"
 #include "esp_netif.h"
 #include "esp_wifi.h"
 #include "nvs_flash.h"
@@ -20,44 +21,52 @@ esp_err_t WifiService::start(const WifiConfig& config,
     config_ = config;
     callback_ = std::move(callback);
 
-    esp_err_t err = nvs_flash_init();
-    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_RETURN_ON_ERROR(nvs_flash_erase(), kTag, "nvs erase");
-        err = nvs_flash_init();
+    if (!initialized_) {
+        esp_err_t err = nvs_flash_init();
+        if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+            ESP_RETURN_ON_ERROR(nvs_flash_erase(), kTag, "nvs erase");
+            err = nvs_flash_init();
+        }
+        ESP_RETURN_ON_ERROR(err, kTag, "nvs init");
+        ESP_RETURN_ON_ERROR(esp_netif_init(), kTag, "netif");
+        
+        esp_err_t loop_err = esp_event_loop_create_default();
+        if (loop_err != ESP_OK && loop_err != ESP_ERR_INVALID_STATE) {
+            ESP_RETURN_ON_ERROR(loop_err, kTag, "event loop");
+        }
+
+        esp_netif_create_default_wifi_sta();
+        esp_netif_create_default_wifi_ap();
+
+        wifi_init_config_t init_cfg = WIFI_INIT_CONFIG_DEFAULT();
+        ESP_RETURN_ON_ERROR(esp_wifi_init(&init_cfg), kTag, "wifi init");
+
+        ESP_RETURN_ON_ERROR(
+            esp_event_handler_instance_register(
+                WIFI_EVENT,
+                ESP_EVENT_ANY_ID,
+                &WifiService::event_handler,
+                this,
+                nullptr
+            ),
+            kTag,
+            "wifi event"
+        );
+
+        ESP_RETURN_ON_ERROR(
+            esp_event_handler_instance_register(
+                IP_EVENT,
+                IP_EVENT_STA_GOT_IP,
+                &WifiService::event_handler,
+                this,
+                nullptr
+            ),
+            kTag,
+            "ip event"
+        );
+
+        initialized_ = true;
     }
-    ESP_RETURN_ON_ERROR(err, kTag, "nvs init");
-    ESP_RETURN_ON_ERROR(esp_netif_init(), kTag, "netif");
-    ESP_RETURN_ON_ERROR(esp_event_loop_create_default(), kTag, "event loop");
-
-    esp_netif_create_default_wifi_sta();
-    esp_netif_create_default_wifi_ap();
-
-    wifi_init_config_t init_cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_RETURN_ON_ERROR(esp_wifi_init(&init_cfg), kTag, "wifi init");
-
-    ESP_RETURN_ON_ERROR(
-        esp_event_handler_instance_register(
-            WIFI_EVENT,
-            ESP_EVENT_ANY_ID,
-            &WifiService::event_handler,
-            this,
-            nullptr
-        ),
-        kTag,
-        "wifi event"
-    );
-
-    ESP_RETURN_ON_ERROR(
-        esp_event_handler_instance_register(
-            IP_EVENT,
-            IP_EVENT_STA_GOT_IP,
-            &WifiService::event_handler,
-            this,
-            nullptr
-        ),
-        kTag,
-        "ip event"
-    );
 
     switch (config.mode) {
         case WifiMode::StaOnly:
@@ -81,11 +90,11 @@ esp_err_t WifiService::start_sta() {
 
     ESP_RETURN_ON_ERROR(esp_wifi_set_mode(WIFI_MODE_STA), kTag, "set sta mode");
     ESP_RETURN_ON_ERROR(esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg), kTag, "sta cfg");
+    // esp_wifi_start() triggers WIFI_EVENT_STA_START, which calls esp_wifi_connect().
+    // Do NOT call esp_wifi_connect() here — doing so causes a double-connect race.
     ESP_RETURN_ON_ERROR(esp_wifi_start(), kTag, "wifi start");
-    ESP_RETURN_ON_ERROR(esp_wifi_connect(), kTag, "wifi connect");
 
     state_ = WifiState::Connecting;
-    if (callback_) callback_(state_);
     return ESP_OK;
 }
 
@@ -94,23 +103,30 @@ esp_err_t WifiService::start_ap() {
     std::strncpy(reinterpret_cast<char*>(ap_cfg.ap.ssid),
                  config_.ap_ssid.c_str(),
                  sizeof(ap_cfg.ap.ssid) - 1);
-    std::strncpy(reinterpret_cast<char*>(ap_cfg.ap.password),
-                 config_.ap_password.c_str(),
-                 sizeof(ap_cfg.ap.password) - 1);
 
     ap_cfg.ap.ssid_len = config_.ap_ssid.size();
+    ap_cfg.ap.channel = 1;
     ap_cfg.ap.max_connection = 4;
-    ap_cfg.ap.authmode = config_.ap_password.empty()
-        ? WIFI_AUTH_OPEN
-        : WIFI_AUTH_WPA2_PSK;
+    ap_cfg.ap.ssid_hidden = 0;
+
+    if (config_.ap_password.empty() || config_.ap_password.length() < 8) {
+        ap_cfg.ap.authmode = WIFI_AUTH_OPEN;
+        ap_cfg.ap.password[0] = '\0';
+    } else {
+        std::strncpy(reinterpret_cast<char*>(ap_cfg.ap.password),
+                     config_.ap_password.c_str(),
+                     sizeof(ap_cfg.ap.password) - 1);
+        ap_cfg.ap.authmode = WIFI_AUTH_WPA2_PSK;
+    }
+
+    ESP_LOGI(kTag, "Configuring SoftAP: SSID='%s', channel=%u, authmode=%d",
+             ap_cfg.ap.ssid, (unsigned)ap_cfg.ap.channel, (int)ap_cfg.ap.authmode);
 
     ESP_RETURN_ON_ERROR(esp_wifi_set_mode(WIFI_MODE_AP), kTag, "set ap mode");
     ESP_RETURN_ON_ERROR(esp_wifi_set_config(WIFI_IF_AP, &ap_cfg), kTag, "ap cfg");
+    // esp_wifi_start() triggers WIFI_EVENT_AP_START, which calls callback_(ApActive).
+    // Do NOT call callback_ here — doing so is a double-give race on net_ready_sem_.
     ESP_RETURN_ON_ERROR(esp_wifi_start(), kTag, "wifi ap start");
-
-    state_ = WifiState::ApActive;
-    has_ip_ = true;
-    if (callback_) callback_(state_);
     return ESP_OK;
 }
 
@@ -120,28 +136,52 @@ void WifiService::event_handler(void* arg,
                                 void* event_data) {
     auto* self = static_cast<WifiService*>(arg);
 
-    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
-        esp_wifi_connect();
-        return;
-    }
-
-    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        self->has_ip_ = false;
-
-        if (self->retries_ < self->config_.max_retry) {
-            ++self->retries_;
+    if (event_base == WIFI_EVENT) {
+        if (event_id == WIFI_EVENT_STA_START) {
             esp_wifi_connect();
-            self->state_ = WifiState::Connecting;
-        } else if (self->config_.mode == WifiMode::StaWithApFallback) {
-            esp_wifi_stop();
-            self->start_ap();
             return;
-        } else {
-            self->state_ = WifiState::Failed;
         }
 
-        if (self->callback_) self->callback_(self->state_);
-        return;
+        if (event_id == WIFI_EVENT_AP_START) {
+            ESP_LOGI(kTag, "SoftAP started successfully and broadcasting beacon frames");
+            self->state_ = WifiState::ApActive;
+            self->has_ip_ = true;
+            if (self->callback_) self->callback_(self->state_);
+            return;
+        }
+
+        if (event_id == WIFI_EVENT_AP_STACONNECTED) {
+            auto* event = static_cast<wifi_event_ap_staconnected_t*>(event_data);
+            ESP_LOGI(kTag, "Station joined SoftAP: MAC=" MACSTR ", AID=%d",
+                     MAC2STR(event->mac), event->aid);
+            return;
+        }
+
+        if (event_id == WIFI_EVENT_AP_STADISCONNECTED) {
+            auto* event = static_cast<wifi_event_ap_stadisconnected_t*>(event_data);
+            ESP_LOGI(kTag, "Station left SoftAP: MAC=" MACSTR ", AID=%d",
+                     MAC2STR(event->mac), event->aid);
+            return;
+        }
+
+        if (event_id == WIFI_EVENT_STA_DISCONNECTED) {
+            self->has_ip_ = false;
+
+            if (self->retries_ < self->config_.max_retry) {
+                ++self->retries_;
+                esp_wifi_connect();
+                self->state_ = WifiState::Connecting;
+            } else if (self->config_.mode == WifiMode::StaWithApFallback) {
+                esp_wifi_stop();
+                self->start_ap();
+                return;
+            } else {
+                self->state_ = WifiState::Failed;
+            }
+
+            if (self->callback_) self->callback_(self->state_);
+            return;
+        }
     }
 
     if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
@@ -161,10 +201,18 @@ bool WifiService::has_ip() const {
 }
 
 esp_err_t WifiService::stop() {
-    esp_err_t err = esp_wifi_stop();
+    esp_wifi_stop();
+    if (initialized_) {
+        // Full deinit is mandatory so that the next start() re-runs
+        // esp_wifi_init() and re-registers event handlers. Without this,
+        // initialized_ stays true and the next start() skips init,
+        // causing esp_wifi_set_mode() / esp_wifi_start() to fail silently.
+        esp_wifi_deinit();
+        initialized_ = false;
+    }
     state_ = WifiState::Idle;
     has_ip_ = false;
-    return err;
+    return ESP_OK;
 }
 
 } // namespace lg

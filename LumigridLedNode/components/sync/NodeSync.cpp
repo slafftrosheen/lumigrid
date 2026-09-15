@@ -42,6 +42,16 @@ NodeSync::NodeSync(
     ClockDiscipline& clock
 ) : engine_(engine), config_(config), clock_(clock) {}
 
+void NodeSync::refresh_config_cache() {
+    const uint32_t now = now_ms();
+    if (last_config_cache_ms_ != 0 && now - last_config_cache_ms_ < kConfigCacheIntervalMs) return;
+    DeviceConfig cfg{};
+    config_.load_config(cfg);
+    cached_sync_token_ = cfg.sync_token;
+    cached_sync_enabled_ = cfg.sync_enabled;
+    last_config_cache_ms_ = now;
+}
+
 esp_err_t NodeSync::start(NodeRole role) {
     if (task_handle_ != nullptr) return ESP_ERR_INVALID_STATE;
 
@@ -214,8 +224,7 @@ NodeRole NodeSync::master_loop(int socket, bool auto_mode) {
         if (static_cast<int32_t>(now - next_heartbeat_ms) >= 0) {
             Sequence sequence_state{};
             config_.load_sequence(sequence_state);
-            DeviceConfig cfg{};
-            config_.load_config(cfg);
+            refresh_config_cache();
 
             SyncPacket packet{};
             packet.magic = kMagic;
@@ -226,10 +235,10 @@ NodeRole NodeSync::master_loop(int socket, bool auto_mode) {
             packet.sequence_enabled = sequence_state.enabled;
             const uint8_t active_preset = engine_.active_scene_index();
             packet.flags = (clock_.has_epoch() ? 0x01 : 0x00) |
-                           (cfg.sync_enabled ? (0x02 | ((active_preset & 0x1F) << 2)) : 0x00);
+                           (cached_sync_enabled_ ? (0x02 | ((active_preset & 0x1F) << 2)) : 0x00);
             packet.global_clock_ms = clock_.now_ms();
             packet.sent_monotonic_ms = now;
-            packet.token = cfg.sync_token;
+            packet.token = cached_sync_token_;
             std::memcpy(packet.sender_mac, local_mac, sizeof(local_mac));
 
             sendto(socket, &packet, sizeof(packet), 0,
@@ -254,9 +263,8 @@ NodeRole NodeSync::master_loop(int socket, bool auto_mode) {
             continue;
         }
 
-        DeviceConfig cfg{};
-        config_.load_config(cfg);
-        if (packet.token != cfg.sync_token) {
+        refresh_config_cache();
+        if (packet.token != cached_sync_token_) {
             continue;
         }
 
@@ -311,10 +319,9 @@ NodeRole NodeSync::worker_loop(int socket, bool auto_mode) {
             packet.type == PacketType::Heartbeat &&
             std::memcmp(packet.sender_mac, local_mac, sizeof(local_mac)) != 0) {
             
-            DeviceConfig cfg{};
-            config_.load_config(cfg);
-            if (packet.token == cfg.sync_token && handle_heartbeat(packet, sender)) {
-                send_ack(socket, packet, sender, cfg.sync_token);
+            refresh_config_cache();
+            if (packet.token == cached_sync_token_ && handle_heartbeat(packet, sender)) {
+                send_ack(socket, packet, sender, cached_sync_token_);
             }
         }
 

@@ -15,6 +15,7 @@
 #include "FactoryRunner.hpp"
 #include "FactoryApi.hpp"
 #include "esp_err.h"
+#include <atomic>
 
 namespace lg {
 
@@ -161,7 +162,10 @@ private:
 
     RuntimeLifecycle lifecycle_state_ = RuntimeLifecycle::Constructed;
     bool services_started_ = false;
-    SemaphoreHandle_t net_ready_sem_ = nullptr;
+    // Semaphore signalled by the WiFi callback when network is ready.
+    // Declared atomic so the event-loop task always observes the correct
+    // pointer with acquire/release ordering (no data race with creator task).
+    std::atomic<SemaphoreHandle_t> net_ready_sem_{nullptr};
 
     bool safe_mode_ = false;
     StartupState startup_state_ = StartupState::Booting;

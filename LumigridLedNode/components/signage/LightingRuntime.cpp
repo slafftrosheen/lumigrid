@@ -78,7 +78,10 @@ void LightingRuntime::stop() {
         source_manager_.release(ControlSource::LiveDmx);
         source_manager_.release(ControlSource::ScenePlayback);
         source_manager_.release(ControlSource::Factory);
-        xSemaphoreGive(mutex_);
+        // Do NOT give the mutex before deleting it. The task is confirmed dead
+        // (shutdown_sem_ was acked). Giving first would allow any concurrent waiter
+        // that slipped in to grab the semaphore and then touch the deleted object
+        // (UAF). Delete directly while holding it — FreeRTOS allows this.
         vSemaphoreDelete(mutex_);
         mutex_ = nullptr;
     }
@@ -119,7 +122,7 @@ esp_err_t LightingRuntime::start() {
     }
     if (!shutdown_sem_) shutdown_sem_ = xSemaphoreCreateBinary();
     scene_manager_.init();
-    BaseType_t ret = xTaskCreatePinnedToCore(task_entry, "lighting_rt", 8192, this, 6, &task_handle_, 1);
+    BaseType_t ret = xTaskCreatePinnedToCore(task_entry, "lighting_rt", 16384, this, 6, &task_handle_, 1);
     if (ret != pdPASS) {
         ESP_LOGE(TAG, "Failed to create task");
         controller_.set_commit_observer(nullptr);
@@ -183,27 +186,48 @@ void LightingRuntime::render_frame(uint32_t current_ms) {
     const EstopState es = estop_state_.load(std::memory_order_acquire);
     if (es == EstopState::Tripped) {
         controller_.blackout();
-        if (preview_cb_) { RenderFrame blank{}; DeviceConfig local_cfg = get_config_snapshot(); preview_cb_(blank, local_cfg); }
+        if (preview_cb_) {
+            for (auto& fix : current_render_frame_.fixtures) {
+                fix.pixels.fill(LightValue{0, 0, 0, 0});
+                fix.pwm.fill(0);
+            }
+            preview_cb_(current_render_frame_, current_local_cfg_);
+        }
         return;
     } else if (es == EstopState::PendingReset) {
         controller_.blackout();
-        if (preview_cb_) { RenderFrame blank{}; DeviceConfig local_cfg = get_config_snapshot(); preview_cb_(blank, local_cfg); }
+        if (preview_cb_) {
+            for (auto& fix : current_render_frame_.fixtures) {
+                fix.pixels.fill(LightValue{0, 0, 0, 0});
+                fix.pwm.fill(0);
+            }
+            preview_cb_(current_render_frame_, current_local_cfg_);
+        }
         estop_state_.store(EstopState::ReArmedBlackout, std::memory_order_release);
         return;
     } else if (es == EstopState::ReArmedBlackout) {
         controller_.clear_estop();
-        if (preview_cb_) { RenderFrame blank{}; DeviceConfig local_cfg = get_config_snapshot(); preview_cb_(blank, local_cfg); }
+        if (preview_cb_) {
+            for (auto& fix : current_render_frame_.fixtures) {
+                fix.pixels.fill(LightValue{0, 0, 0, 0});
+                fix.pwm.fill(0);
+            }
+            preview_cb_(current_render_frame_, current_local_cfg_);
+        }
         estop_state_.store(EstopState::Inactive, std::memory_order_release);
         ESP_LOGI(TAG, "EMERGENCY STOP RESET: Controller re-armed, resuming output on subsequent frame");
         return;
     }
-    SceneConfig render_scene;
-    DeviceConfig local_cfg;
+
     if (!mutex_ || xSemaphoreTake(mutex_, pdMS_TO_TICKS(5)) != pdTRUE) return;
     if (live_pending_dirty_) { live_active_ = live_pending_; live_pending_dirty_ = false; }
-    render_scene = scene_manager_.process_frame(current_ms);
-    local_cfg = device_cfg_;
+    current_render_scene_ = scene_manager_.process_frame(current_ms);
+    current_local_cfg_ = device_cfg_;
     xSemaphoreGive(mutex_);
+
+    const SceneConfig& render_scene = current_render_scene_;
+    const DeviceConfig& local_cfg = current_local_cfg_;
+
     ControlSnapshot ctrl_snapshot = source_manager_.get_snapshot(current_ms);
     auto live_layer_is_valid = [current_ms](const LiveDmxLayer& layer) -> bool {
         if (!layer.active || layer.opacity == 0) return false;
@@ -223,7 +247,7 @@ void LightingRuntime::render_frame(uint32_t current_ms) {
         if (target_zone >= 8) continue;
         ControlSource fx_owner = ctrl_snapshot.resolve_fixture(f, target_zone, current_ms);
         if (fx_owner == ControlSource::LiveDmx && live_fixture_is_valid(live_active_.fixtures[f])) {
-            FixtureFrame live_src;
+            FixtureFrame& live_src = current_live_src_;
             const uint16_t pcount = std::min<uint16_t>(live_active_.fixtures[f].pixel_count, fixture.num_pixels);
             for (uint16_t p = 0; p < pcount; ++p) live_src.pixels[p] = live_active_.fixtures[f].pixels[p];
             live_src.pwm = live_active_.fixtures[f].pwm;
@@ -264,7 +288,16 @@ void LightingRuntime::render_frame(uint32_t current_ms) {
             ESP_LOGI(TAG, "Armed commit succeeded: output state restored to HEALTHY");
         }
     }
-    if (preview_cb_) preview_cb_(render_frame, local_cfg);
+
+    if (preview_cb_) {
+        try {
+            preview_cb_(render_frame, local_cfg);
+        } catch (const std::exception& e) {
+            ESP_LOGW(TAG, "preview_cb exception: %s", e.what());
+        } catch (...) {
+            ESP_LOGW(TAG, "preview_cb unknown exception");
+        }
+    }
 }
 
 void LightingRuntime::activate_scene(uint8_t index) { xSemaphoreTake(mutex_, portMAX_DELAY); scene_manager_.activate_scene(index, now_ms()); xSemaphoreGive(mutex_); }
@@ -291,7 +324,16 @@ esp_err_t LightingRuntime::clear_output_fault() {
     return ESP_OK;
 }
 
-DeviceConfig LightingRuntime::get_config_snapshot() const { DeviceConfig cfg{}; if (!mutex_) return cfg; xSemaphoreTake(mutex_, portMAX_DELAY); cfg = device_cfg_; xSemaphoreGive(mutex_); return cfg; }
+DeviceConfig LightingRuntime::get_config_snapshot() const {
+    DeviceConfig cfg{};
+    if (!mutex_) {
+        return cfg;
+    }
+    xSemaphoreTake(mutex_, portMAX_DELAY);
+    cfg = device_cfg_;
+    xSemaphoreGive(mutex_);
+    return cfg;
+}
 
 void LightingRuntime::inject_live_data(uint8_t zone_idx, uint8_t layer_idx, const BrandColor& color, uint8_t opacity) {
     if (zone_idx >= 8 || layer_idx >= 3 || !mutex_) return;
@@ -308,48 +350,107 @@ void LightingRuntime::inject_live_fixture(uint8_t fixture_idx, const LightValue*
     xSemaphoreTake(mutex_, portMAX_DELAY); const uint32_t now = now_ms(); auto& lf = live_pending_.fixtures[fixture_idx];
     uint16_t pcount = std::min<uint16_t>(count, MAX_PIXELS); lf.pixel_count = pcount;
     if (pixels && pcount > 0) std::memcpy(lf.pixels.data(), pixels, pcount * sizeof(LightValue));
-    if (pwm_duties) for (uint8_t ch = 0; ch < 4; ++ch) lf.pwm[ch] = pwm_duties[ch];
+    if (pwm_duties) {
+        for (uint8_t ch = 0; ch < 4; ++ch) {
+            lf.pwm[ch] = pwm_duties[ch];
+        }
+    }
     lf.opacity = opacity; lf.timestamp_ms = now; lf.active = true; live_pending_dirty_ = true; last_live_stream_ms_ = now;
     source_manager_.acquire(ControlSource::LiveDmx, kLiveFrameFailsafeTimeoutMs, 0, 0, (1 << fixture_idx));
     xSemaphoreGive(mutex_);
 }
 
-std::array<uint8_t, 512> LightingRuntime::last_dmx_data() const { if (!mutex_) return {}; xSemaphoreTake(mutex_, portMAX_DELAY); auto dmx = live_active_.dmx_telemetry; xSemaphoreGive(mutex_); return dmx; }
+std::array<uint8_t, 512> LightingRuntime::last_dmx_data() const {
+    if (!mutex_) {
+        return {};
+    }
+    xSemaphoreTake(mutex_, portMAX_DELAY);
+    auto dmx = live_active_.dmx_telemetry;
+    xSemaphoreGive(mutex_);
+    return dmx;
+}
 
 uint8_t LightingRuntime::active_live_objects() const {
+    if (!mutex_ || xSemaphoreTake(mutex_, pdMS_TO_TICKS(5)) != pdTRUE) return 0;
     uint8_t count = 0; const uint32_t now = now_ms();
     for (uint8_t z = 0; z < 8; ++z) for (uint8_t l = 0; l < 3; ++l) { const auto& layer = live_active_.layers[z][l]; if (layer.active && layer.opacity > 0 && now - layer.timestamp_ms <= kLiveFrameFailsafeTimeoutMs) count++; }
     for (uint8_t f = 0; f < 16; ++f) { const auto& fix = live_active_.fixtures[f]; if (fix.active && fix.opacity > 0 && now - fix.timestamp_ms <= kLiveFrameFailsafeTimeoutMs) count++; }
+    xSemaphoreGive(mutex_);
     return count;
 }
 
-void LightingRuntime::feed_watchdog() { if (!mutex_) return; xSemaphoreTake(mutex_, portMAX_DELAY); scene_manager_.feed_watchdog(now_ms()); xSemaphoreGive(mutex_); }
+void LightingRuntime::feed_watchdog() {
+    if (!mutex_) {
+        return;
+    }
+    xSemaphoreTake(mutex_, portMAX_DELAY);
+    scene_manager_.feed_watchdog(now_ms());
+    xSemaphoreGive(mutex_);
+}
 uint8_t LightingRuntime::active_scene_index() const { return scene_manager_.active_scene_index(); }
 bool LightingRuntime::is_fallback_active() const { return scene_manager_.is_fallback_active(); }
 bool LightingRuntime::is_transitioning() const { return scene_manager_.is_transitioning(); }
-void LightingRuntime::set_beat_period(uint16_t period_ms) { if (!mutex_) return; xSemaphoreTake(mutex_, portMAX_DELAY); beat_period_ms_ = std::max<uint16_t>(10, std::min<uint16_t>(period_ms, 60000)); xSemaphoreGive(mutex_); }
+void LightingRuntime::set_beat_period(uint16_t period_ms) {
+    if (!mutex_) {
+        return;
+    }
+    xSemaphoreTake(mutex_, portMAX_DELAY);
+    beat_period_ms_ = std::max<uint16_t>(10, std::min<uint16_t>(period_ms, 60000));
+    xSemaphoreGive(mutex_);
+}
 
 void LightingRuntime::reload_device_config() {
-    DeviceConfig candidate{}; esp_err_t err = config_.load_config(candidate);
-    if (err != ESP_OK) { ESP_LOGE(TAG, "Config reload aborted: failed to load candidate from storage (%s)", esp_err_to_name(err)); return; }
-    ConfigStore::ConfigValidationResult val_res; err = ConfigStore::validate_config(candidate, &val_res);
-    if (err != ESP_OK) { ESP_LOGE(TAG, "Config reload aborted: candidate validation failed (%u errors): %s", (unsigned)val_res.error_count, val_res.first_error); return; }
-    if (!mutex_) return;
-    xSemaphoreTake(mutex_, portMAX_DELAY); device_cfg_ = candidate;
-    power_budget_.set_limit_mw(device_cfg_.max_power_mw); power_budget_.set_soft_start(device_cfg_.soft_start_enabled, device_cfg_.soft_start_ms);
-    ColorPipeline::set_gamma(device_cfg_.gamma_x10); scene_manager_.update_device_config(device_cfg_);
-    if (config_reload_cb_) config_reload_cb_(device_cfg_); xSemaphoreGive(mutex_);
+    DeviceConfig candidate{};
+    esp_err_t err = config_.load_config(candidate);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Config reload aborted: failed to load candidate from storage (%s)", esp_err_to_name(err));
+        return;
+    }
+    ConfigStore::ConfigValidationResult val_res;
+    err = ConfigStore::validate_config(candidate, &val_res);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Config reload aborted: candidate validation failed (%u errors): %s", (unsigned)val_res.error_count, val_res.first_error);
+        return;
+    }
+    if (!mutex_) {
+        return;
+    }
+    xSemaphoreTake(mutex_, portMAX_DELAY);
+    device_cfg_ = candidate;
+    power_budget_.set_limit_mw(device_cfg_.max_power_mw);
+    power_budget_.set_soft_start(device_cfg_.soft_start_enabled, device_cfg_.soft_start_ms);
+    ColorPipeline::set_gamma(device_cfg_.gamma_x10);
+    scene_manager_.update_device_config(device_cfg_);
+    if (config_reload_cb_) {
+        config_reload_cb_(device_cfg_);
+    }
+    xSemaphoreGive(mutex_);
     ESP_LOGI(TAG, "Device config transactional reload applied successfully");
 }
 
 bool LightingRuntime::acquire_control(ControlSource source, uint32_t lease_ms, uint8_t zone_mask, uint8_t layer_mask) {
-    if (source == ControlSource::EStop) trigger_estop();
-    if (!mutex_) return false; xSemaphoreTake(mutex_, portMAX_DELAY); bool won = source_manager_.acquire(source, lease_ms, zone_mask, layer_mask); xSemaphoreGive(mutex_); return won;
+    if (source == ControlSource::EStop) {
+        trigger_estop();
+    }
+    if (!mutex_) {
+        return false;
+    }
+    xSemaphoreTake(mutex_, portMAX_DELAY);
+    bool won = source_manager_.acquire(source, lease_ms, zone_mask, layer_mask);
+    xSemaphoreGive(mutex_);
+    return won;
 }
 
 void LightingRuntime::release_control(ControlSource source) {
-    if (source == ControlSource::EStop) clear_estop();
-    if (!mutex_) return; xSemaphoreTake(mutex_, portMAX_DELAY); source_manager_.release(source); xSemaphoreGive(mutex_);
+    if (source == ControlSource::EStop) {
+        clear_estop();
+    }
+    if (!mutex_) {
+        return;
+    }
+    xSemaphoreTake(mutex_, portMAX_DELAY);
+    source_manager_.release(source);
+    xSemaphoreGive(mutex_);
 }
 
 ControlSource LightingRuntime::current_control_source() const { return source_manager_.current_owner(); }

@@ -170,6 +170,9 @@ private:
     RenderFrame current_render_frame_;
     FixtureFrame current_composited_zone_;
     FixtureFrame current_layer_frame_;
+    FixtureFrame current_live_src_;
+    SceneConfig current_render_scene_{};
+    DeviceConfig current_local_cfg_{};
 
     uint16_t beat_period_ms_ = 500;
     uint32_t enable_ms_ = 0;

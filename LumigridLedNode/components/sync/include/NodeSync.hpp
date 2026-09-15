@@ -75,6 +75,13 @@ private:
     TaskHandle_t task_handle_ = nullptr;
     bool running_ = false;
 
+    // Cached config fields to avoid SPI flash thrashing on every packet
+    uint32_t cached_sync_token_ = 0;
+    bool cached_sync_enabled_ = false;
+    uint32_t last_config_cache_ms_ = 0;
+    static constexpr uint32_t kConfigCacheIntervalMs = 2000;
+    void refresh_config_cache();
+
     mutable portMUX_TYPE status_mutex_ = portMUX_INITIALIZER_UNLOCKED;
     uint32_t master_address_ = 0;
     uint8_t master_mac_[6] = {};

@@ -15,11 +15,19 @@ MqttService::~MqttService() {
     stop();
     if (telemetry_timer_) {
         xTimerDelete(telemetry_timer_, 0);
+        telemetry_timer_ = nullptr;
     }
 }
 
 esp_err_t MqttService::init(const char* broker_uri, const char* client_id, const char* topic_prefix, LightingRuntime* signage) {
     if (!broker_uri || strlen(broker_uri) == 0) return ESP_ERR_INVALID_ARG;
+
+    // Clean up any previous client from a prior init() call
+    if (client_) {
+        esp_mqtt_client_stop(client_);
+        esp_mqtt_client_destroy(client_);
+        client_ = nullptr;
+    }
 
     signage_ = signage;
 
@@ -58,6 +66,8 @@ esp_err_t MqttService::start() {
 void MqttService::stop() {
     if (client_) {
         esp_mqtt_client_stop(client_);
+        esp_mqtt_client_destroy(client_);
+        client_ = nullptr;
     }
     if (telemetry_timer_) {
         xTimerStop(telemetry_timer_, 0);

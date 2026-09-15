@@ -2,6 +2,7 @@
 #include "lg_board_pins.hpp"
 
 #include "driver/i2c_master.h"
+#include "driver/gpio.h"
 #include "esp_check.h"
 #include <cstring>
 #include "freertos/FreeRTOS.h"
@@ -52,7 +53,7 @@ esp_err_t init_i2c_once() {
     const i2c_device_config_t dev_cfg = {
         .dev_addr_length = I2C_ADDR_BIT_LEN_7,
         .device_address = lg::board::kPcaAddress,
-        .scl_speed_hz = 400000
+        .scl_speed_hz = 100000
     };
 
     return i2c_master_bus_add_device(s_bus, &dev_cfg, &s_dev);
@@ -85,6 +86,18 @@ esp_err_t Pca9685Driver::write_bytes(uint8_t start_reg,
 }
 
 esp_err_t Pca9685Driver::init() {
+    // Configure the /OE (Output Enable) pin: active-low.
+    // Must be driven LOW for PCA9685 PWM outputs to be enabled.
+    gpio_config_t oe_conf = {
+        .pin_bit_mask = (1ULL << lg::board::kPcaOe),
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_ENABLE,
+        .intr_type = GPIO_INTR_DISABLE
+    };
+    ESP_RETURN_ON_ERROR(gpio_config(&oe_conf), "pca", "oe gpio cfg");
+    ESP_RETURN_ON_ERROR(gpio_set_level(lg::board::kPcaOe, 0), "pca", "oe low");
+
     ESP_RETURN_ON_ERROR(init_i2c_once(), "pca", "i2c init");
 
     ESP_LOGI("pca", "Initializing PCA9685 at 0x%02X...", lg::board::kPcaAddress);
@@ -111,16 +124,16 @@ esp_err_t Pca9685Driver::init() {
     ESP_RETURN_ON_ERROR(write_register(kMode1, kMode1Ai | kMode1Restart), "pca", "restart");
 
     // Verify chip communication with a read-back.
-    uint8_t reg = kMode1;
+    uint8_t reg = kPrescale;
     uint8_t val = 0;
     xSemaphoreTake(s_i2c_mutex, portMAX_DELAY);
     err = i2c_master_transmit_receive(s_dev, &reg, 1, &val, 1, 100);
     xSemaphoreGive(s_i2c_mutex);
 
     if (err == ESP_OK) {
-        ESP_LOGD("pca", "MODE1 read-back: 0x%02X", val);
-        if (val == 0x00 || val == 0xFF) {
-            ESP_LOGE("pca", "Read 0x%02X — chip may be dead or bus stuck", val);
+        ESP_LOGD("pca", "PRESCALE read-back: %u", val);
+        if (val != 5) {
+            ESP_LOGE("pca", "Read %u instead of 5 — chip may be dead or bus stuck", val);
         }
     } else {
         ESP_LOGW("pca", "Read-back failed: %s (non-fatal)", esp_err_to_name(err));
