@@ -43,3 +43,15 @@ export function readStringList(key: string): string[] {
 export function writeStringList(key: string, values: string[]): void {
   writeString(key, JSON.stringify(values));
 }
+
+/** Return the currently selected node without exposing storage to routes. */
+export function getSelectedNodeIp(fallback = ''): string {
+  return readString(NODE_IP_KEY, fallback).trim();
+}
+
+/** Persist the selected node in one place for all dashboard surfaces. */
+export function setSelectedNodeIp(nodeIp: string): void {
+  const value = nodeIp.trim();
+  if (value) writeString(NODE_IP_KEY, value);
+  else removeValue(NODE_IP_KEY);
+}
