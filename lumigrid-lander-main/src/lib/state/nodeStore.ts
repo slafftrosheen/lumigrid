@@ -172,5 +172,9 @@ export function getNodeLiveState() {
 }
 
 export function getNodeLiveSnapshot(): NodeLiveState {
-  return latestState;
+  return {
+    ...latestState,
+    status: { ...latestState.status },
+    pixels: latestState.pixels.slice(),
+  };
 }
