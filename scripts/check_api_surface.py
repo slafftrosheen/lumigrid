@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Audit the dashboard's browser state and device API surface.
 
-Report-only during the migration. This deliberately scans the whole dashboard
-source tree so new pages cannot quietly reintroduce direct browser storage or
-legacy device endpoints outside the central API client.
+Report-only by default during the migration. Use --strict to make the audit
+fail when legacy device access or direct browser storage remains outside the
+explicit compatibility/storage boundaries.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ SESSION_STORAGE = re.compile(r"\bsessionStorage\b")
 def scan_files(pattern: re.Pattern[str]) -> list[tuple[str, int, str]]:
     matches: list[tuple[str, int, str]] = []
     for path in sorted(DASHBOARD_SRC.rglob("*.svelte")) + sorted(DASHBOARD_SRC.rglob("*.ts")):
-        if "/lib/auth/storage.ts" in path.as_posix():
+        if path.resolve() == (DASHBOARD_SRC / "lib" / "auth" / "storage.ts").resolve():
             continue
         try:
             lines = path.read_text(encoding="utf-8").splitlines()
@@ -38,6 +38,8 @@ def scan_files(pattern: re.Pattern[str]) -> list[tuple[str, int, str]]:
 
 
 def main() -> int:
+    strict = "--strict" in sys.argv[1:]
+
     if not API_FILE.exists():
         print(f"ERROR: API client not found: {API_FILE}", file=sys.stderr)
         return 2
@@ -50,6 +52,7 @@ def main() -> int:
 
     print("LumiGrid dashboard surface audit")
     print(f"source: {DASHBOARD_SRC.relative_to(ROOT)}")
+    print(f"mode: {'strict' if strict else 'report-only'}")
     print()
 
     print(f"canonical /api/v1 references in API client: {len(canonical)}")
@@ -72,11 +75,12 @@ def main() -> int:
         print(f"  ! {path}:{line}: {text}")
 
     print()
-    if legacy or browser_storage or dashboard_legacy:
+    findings = bool(legacy or browser_storage or dashboard_legacy)
+    if findings:
         print("ACTION: migrate remaining legacy/state access or explicitly isolate compatibility code.")
-    else:
-        print("OK: dashboard storage and device API access are centralized.")
+        return 1 if strict else 0
 
+    print("OK: dashboard storage and device API access are centralized.")
     return 0
 
 
