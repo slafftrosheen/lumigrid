@@ -5,7 +5,7 @@
     LANES,
     PIXELS_PER_LANE,
     connect,
-    disconnect,
+    getNodeLiveSnapshot,
     getNodeLiveState,
     reconnect as reconnectNode,
   } from '$lib/state/nodeStore';
@@ -38,10 +38,7 @@
 
     const now = performance.now();
     if (now - lastFpsTime >= 1000) {
-      const state = getNodeLiveState();
-      let currentFrames = lastFrameCount;
-      const stop = state.subscribe(value => { currentFrames = value.frameCount; });
-      stop();
+      const currentFrames = getNodeLiveSnapshot().frameCount;
       wsFps = Math.max(0, currentFrames - lastFrameCount);
       lastFrameCount = currentFrames;
       lastFpsTime = now;
@@ -159,6 +156,8 @@
       dirty = true;
     });
 
+    const snapshot = getNodeLiveSnapshot();
+    lastFrameCount = snapshot.frameCount;
     lastFpsTime = performance.now();
     rafId = requestAnimationFrame(render);
     connect();
@@ -167,7 +166,6 @@
   onDestroy(() => {
     if (rafId) cancelAnimationFrame(rafId);
     unsubscribe?.();
-    disconnect();
   });
 
   function reconnect() {
