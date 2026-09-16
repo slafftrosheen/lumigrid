@@ -2,7 +2,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { getChannelConfig, setPixels, getState, setBrightness, setPower } from '$lib/api/node';
   import type { ChannelConfig } from '$lib/api/node';
-  import { NODE_IP_KEY, readString } from '$lib/auth/storage';
+  import { getSelectedNodeIp } from '$lib/auth/storage';
 
   const CHANNEL_TYPES = ['Off', 'PWM (Dumb)', 'CCT (2ch)', 'RGB (3ch)', 'RGBW (4ch)'];
   let nodeIp = $state('');
@@ -23,7 +23,7 @@
     catch (e) { error = String(e); }
     loading = false;
   }
-  onMount(() => { nodeIp = readString(NODE_IP_KEY); if (nodeIp) loadConfig(); else loading = false; });
+  onMount(() => { nodeIp = getSelectedNodeIp(); if (nodeIp) loadConfig(); else loading = false; });
   async function sendChannels() {
     if (sending || Date.now() - lastSent < 66) return;
     sending = true; lastSent = Date.now(); dirty = false;

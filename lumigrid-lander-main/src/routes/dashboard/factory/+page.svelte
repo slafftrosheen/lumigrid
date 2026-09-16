@@ -10,6 +10,7 @@
     type FactoryStatus,
     type FactoryEffectName,
   } from '$lib/api/node';
+  import { getSelectedNodeIp } from '$lib/auth/storage';
 
   let nodeIp = $state('');
   let status = $state<FactoryStatus | null>(null);
@@ -41,7 +42,7 @@
   let pwmDuties = $state(Array.from({ length: 8 }, () => 0));
 
   onMount(async () => {
-    nodeIp = localStorage.getItem('lg_node_ip') ?? '';
+    nodeIp = getSelectedNodeIp();
     if (nodeIp) await refresh();
     loading = false;
   });

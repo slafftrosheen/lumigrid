@@ -3,11 +3,11 @@
  *
  * The node remains the source of truth. This module only owns browser-side
  * connection state and the latest live frame so pages do not open competing
- * WebSocket connections or read localStorage directly.
+ * WebSocket connections or access browser storage directly.
  */
 
 import { writable } from 'svelte/store';
-import { NODE_IP_KEY, readString } from '../auth/storage';
+import { getSelectedNodeIp } from '../auth/storage';
 
 export const LANES = 8;
 export const PIXELS_PER_LANE = 144;
@@ -57,7 +57,7 @@ function publish(patch: Partial<NodeLiveState>) {
 }
 
 function scheduleReconnect() {
-  if (manualClose || reconnectTimer || !readString(NODE_IP_KEY)) return;
+  if (manualClose || reconnectTimer || !getSelectedNodeIp()) return;
   const delay = Math.min(10000, 500 * Math.pow(2, reconnectAttempt));
   reconnectAttempt = Math.min(reconnectAttempt + 1, 5);
   reconnectTimer = setTimeout(() => {
@@ -66,7 +66,7 @@ function scheduleReconnect() {
   }, delay);
 }
 
-export function connect(nodeIp = readString(NODE_IP_KEY)): void {
+export function connect(nodeIp = getSelectedNodeIp()): void {
   if (typeof WebSocket === 'undefined') return;
   if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) return;
 

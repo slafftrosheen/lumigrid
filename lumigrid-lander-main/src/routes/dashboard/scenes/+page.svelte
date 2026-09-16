@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { getPresets, savePreset, activatePreset, getEffects } from '$lib/api/node';
   import type { ScenePreset, SceneZone, SceneLayer, EffectMeta, RgbColor } from '$lib/api/node';
+  import { getSelectedNodeIp } from '$lib/auth/storage';
 
   let nodeIp = $state('');
   let presets = $state<ScenePreset[]>([]);
@@ -131,7 +132,7 @@
   }
 
   onMount(() => {
-    nodeIp = localStorage.getItem('lg_node_ip') ?? '';
+    nodeIp = getSelectedNodeIp();
     if (nodeIp) loadData();
     else loading = false;
   });

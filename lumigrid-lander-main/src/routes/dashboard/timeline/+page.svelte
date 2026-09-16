@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { getSequence, saveSequence, getPresets } from '$lib/api/node';
   import type { Sequence, SequenceTrack, SequenceStep, ScenePreset } from '$lib/api/node';
+  import { getSelectedNodeIp } from '$lib/auth/storage';
 
   let nodeIp = $state('');
   let loading = $state(true);
@@ -92,7 +93,7 @@
   }
 
   onMount(() => {
-    nodeIp = localStorage.getItem('lg_node_ip') ?? '';
+    nodeIp = getSelectedNodeIp();
     if (nodeIp) load();
     else loading = false;
   });

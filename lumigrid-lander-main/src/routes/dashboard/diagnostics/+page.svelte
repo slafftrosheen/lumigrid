@@ -2,7 +2,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { getHealth, getLogs, getAuditLog } from '$lib/api/node';
   import type { HealthSnapshot, AuditEvent } from '$lib/api/node';
-  import { readString, NODE_IP_KEY } from '$lib/auth/storage';
+  import { getSelectedNodeIp } from '$lib/auth/storage';
 
   let nodeIp = $state('');
   let loading = $state(true);
@@ -95,7 +95,7 @@
   }
 
   onMount(() => {
-    nodeIp = readString(NODE_IP_KEY);
+    nodeIp = getSelectedNodeIp();
     if (nodeIp) load();
     else loading = false;
   });

@@ -6,6 +6,8 @@
     AUTH_TIMESTAMP_KEY,
     NODE_IP_KEY,
     NODE_LIST_KEY,
+    getSelectedNodeIp,
+    setSelectedNodeIp,
     readString,
     readStringList,
     removeValue,
@@ -72,12 +74,12 @@
 
   function selectNode(ip: string) {
     nodeIp = ip;
-    writeString(NODE_IP_KEY, ip);
+    setSelectedNodeIp(ip);
     reconnectNode();
   }
 
   onMount(() => {
-    nodeIp = readString(NODE_IP_KEY);
+    nodeIp = getSelectedNodeIp();
     nodeList = readStringList(NODE_LIST_KEY);
     initHashes();
 
