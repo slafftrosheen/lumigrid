@@ -1,7 +1,20 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { getPresets, savePreset, activatePreset, getEffects } from '$lib/api/node';
-  import type { ScenePreset, SceneZone, SceneLayer, EffectMeta, RgbColor } from '$lib/api/node';
+  import type { ScenePreset, EffectMeta } from '$lib/api/node';
+  import {
+    createDefaultPreset,
+    clonePreset,
+    isPresetDirty,
+    computeZonePreviewColor,
+    rgbToHex,
+    hexToRgb,
+    deletePreset,
+    BLEND_MODES,
+    ZONE_COUNT,
+    LAYER_COUNT,
+    MAX_PRESETS,
+  } from '$lib/api/scenes';
   import { getSelectedNodeIp } from '$lib/auth/storage';
 
   let nodeIp = $state('');
@@ -10,42 +23,30 @@
   let selectedIdx = $state<number | null>(null);
   let loading = $state(true);
   let saving = $state(false);
+  let activating = $state(false);
   let error = $state('');
   let toast = $state('');
   let activePreset = $state(-1);
-
-  const BLEND_MODES = ['normal', 'add', 'multiply', 'screen'];
-  const ZONE_COUNT = 8;
-  const LAYER_COUNT = 3;
-  const MAX_PRESETS = 32;
-
-  function defaultLayer(): SceneLayer {
-    return {
-      effect: 'solid', blendMode: 'normal',
-      primaryColor: { r: 255, g: 255, b: 255 },
-      secondaryColor: { r: 0, g: 0, b: 0 },
-      speedMs: 2000, fxParam: 0, paletteId: 0, opacity: 255, enabled: false,
-    };
-  }
-
-  function defaultZone(): SceneZone {
-    return { layers: [defaultLayer(), defaultLayer(), defaultLayer()] };
-  }
-
-  function defaultPreset(idx: number, name?: string): ScenePreset {
-    return {
-      index: idx, name: name ?? `Scene ${idx}`,
-      globalBrightness: 128, transitionMs: 1000,
-      zones: Array.from({ length: ZONE_COUNT }, () => defaultZone()),
-    };
-  }
+  let expandedZone = $state<number | null>(0);
 
   let editScene = $state<ScenePreset | null>(null);
+  let savedSnapshot = $state<ScenePreset | null>(null);
+
+  const isDirty = $derived(isPresetDirty(editScene, savedSnapshot));
+  const isActive = $derived(editScene !== null && activePreset === editScene.index);
 
   function selectPreset(idx: number) {
     const found = presets.find(p => p.index === idx);
-    editScene = found ? structuredClone(found) : defaultPreset(idx);
+    if (found) {
+      editScene = clonePreset(found);
+      savedSnapshot = clonePreset(found);
+    } else {
+      const def = createDefaultPreset(idx);
+      editScene = clonePreset(def);
+      savedSnapshot = null;
+    }
     selectedIdx = idx;
+    error = '';
   }
 
   function findFreeSlot(): number {
@@ -58,19 +59,38 @@
 
   function createScene() {
     const slot = findFreeSlot();
-    if (slot < 0) { toast = 'All 32 slots occupied'; return; }
+    if (slot < 0) {
+      toastMsg('All 32 slots are occupied');
+      return;
+    }
     selectPreset(slot);
   }
 
   function duplicateScene() {
     if (!editScene) return;
     const slot = findFreeSlot();
-    if (slot < 0) { toast = 'All 32 slots occupied'; return; }
-    const dup = structuredClone(editScene);
+    if (slot < 0) {
+      toastMsg('All 32 slots are occupied');
+      return;
+    }
+    const dup = clonePreset(editScene);
     dup.index = slot;
-    dup.name = `${editScene.name} copy`;
+    dup.name = `${editScene.name} (copy)`.slice(0, 23);
     editScene = dup;
+    savedSnapshot = null;
     selectedIdx = slot;
+    toastMsg(`Duplicated to slot ${slot}`);
+  }
+
+  function revertEdits() {
+    if (!editScene) return;
+    if (savedSnapshot) {
+      editScene = clonePreset(savedSnapshot);
+      toastMsg('Reverted edits to saved preset');
+    } else if (selectedIdx !== null) {
+      editScene = createDefaultPreset(selectedIdx);
+      toastMsg('Reset to default preset');
+    }
   }
 
   async function saveScene() {
@@ -81,41 +101,54 @@
       await savePreset(nodeIp, editScene);
       const idx = editScene.index;
       const name = editScene.name;
+      const saved = clonePreset(editScene);
+      savedSnapshot = clonePreset(editScene);
+
       const existing = presets.findIndex(p => p.index === idx);
-      const saved = structuredClone(editScene);
-      if (existing >= 0) presets[existing] = saved;
-      else presets = [...presets, saved].sort((a, b) => a.index - b.index);
-      presets = presets;
-      toast = `Saved "${name}"`;
+      if (existing >= 0) {
+        presets[existing] = saved;
+      } else {
+        presets = [...presets, saved].sort((a, b) => a.index - b.index);
+      }
+      toastMsg(`Saved "${name}" to slot ${idx}`);
     } catch (e) {
       error = String(e);
+    } finally {
+      saving = false;
     }
-    saving = false;
   }
 
   async function doActivate(idx: number) {
+    if (activating) return;
+    activating = true;
+    error = '';
     try {
       await activatePreset(nodeIp, idx);
       activePreset = idx;
-      toast = `Activated scene ${idx}`;
+      toastMsg(`Activated Scene ${idx} on node`);
+    } catch (e) {
+      error = String(e);
+    } finally {
+      activating = false;
+    }
+  }
+
+  async function removeScene(idx: number) {
+    if (!confirm(`Delete preset ${idx}? This will clear slot ${idx} on the node.`)) return;
+    try {
+      if (nodeIp) {
+        await deletePreset(nodeIp, idx);
+      }
+      presets = presets.filter(p => p.index !== idx);
+      if (selectedIdx === idx) {
+        editScene = null;
+        savedSnapshot = null;
+        selectedIdx = null;
+      }
+      toastMsg(`Cleared preset slot ${idx}`);
     } catch (e) {
       error = String(e);
     }
-  }
-
-  function deleteScene(idx: number) {
-    presets = presets.filter(p => p.index !== idx);
-    if (selectedIdx === idx) {
-      editScene = null;
-      selectedIdx = null;
-    }
-    toast = `Cleared slot ${idx}`;
-  }
-
-  function renameScene() {
-    if (!editScene) return;
-    const name = prompt('Scene name:', editScene.name);
-    if (name !== null && name.trim()) editScene.name = name.trim().slice(0, 23);
   }
 
   async function loadData() {
@@ -125,192 +158,370 @@
       const [p, e] = await Promise.all([getPresets(nodeIp), getEffects(nodeIp)]);
       presets = p;
       effects = e;
+      if (presets.length > 0 && selectedIdx === null) {
+        selectPreset(presets[0].index);
+      }
     } catch (e) {
       error = String(e);
+    } finally {
+      loading = false;
     }
-    loading = false;
   }
 
   onMount(() => {
     nodeIp = getSelectedNodeIp();
-    if (nodeIp) loadData();
-    else loading = false;
+    if (nodeIp) {
+      loadData();
+    } else {
+      loading = false;
+    }
   });
 
   function toastMsg(msg: string) {
     toast = msg;
-    setTimeout(() => { if (toast === msg) toast = ''; }, 3000);
+    setTimeout(() => {
+      if (toast === msg) toast = '';
+    }, 3000);
   }
-
-  function rgbToHex(c: RgbColor): string {
-    return `#${((1 << 24) + (c.r << 16) + (c.g << 8) + c.b).toString(16).slice(1)}`;
-  }
-
-  function hexToRgb(hex: string): RgbColor {
-    const n = parseInt(hex.replace('#', ''), 16);
-    return { r: (n >> 16) & 0xff, g: (n >> 8) & 0xff, b: n & 0xff };
-  }
-
-  function getEffectLabel(id: string): string {
-    return effects.find(e => e.id === id)?.label ?? id;
-  }
-
-  let expandedZone = $state<number | null>(0);
 </script>
 
 {#if loading}
-  <div class="scene-root"><div class="loading">Loading scenes...</div></div>
+  <div class="scene-root">
+    <div class="loading-box">
+      <div class="spinner"></div>
+      <p>Loading presets and effect metadata from node...</p>
+    </div>
+  </div>
 {:else}
-<div class="scene-root">
-  <!-- Scene Library -->
-  <aside class="library">
-    <div class="lib-header">
-      <h2>Scenes</h2>
-      <button class="btn-primary btn-sm" onclick={createScene}>+ New</button>
-    </div>
-    <div class="lib-list">
-      {#each Array(MAX_PRESETS) as _, i}
-        {@const preset = presets.find(p => p.index === i)}
-        <button
-          class="lib-item"
-          class:active={selectedIdx === i}
-          class:empty={!preset}
-          onclick={() => selectPreset(i)}
-        >
-          <span class="lib-idx">{i}</span>
-          <span class="lib-name">{preset ? preset.name : '— empty —'}</span>
-          {#if preset}
-            <span class="lib-bri">{preset.globalBrightness}</span>
-            {#if activePreset === i}
-              <span class="lib-active-dot" title="Active"></span>
-            {/if}
-          {/if}
-        </button>
-      {/each}
-    </div>
-  </aside>
-
-  <!-- Scene Editor -->
-  <section class="editor">
-    {#if editScene}
-      <div class="ed-toolbar">
-        <div class="ed-title-row">
-          <input class="ed-name" bind:value={editScene.name} maxlength={23} placeholder="Scene name" />
-          <span class="ed-slot">Slot {editScene.index}</span>
+  <div class="scene-root">
+    <!-- Scene Library Sidebar -->
+    <aside class="library">
+      <div class="lib-header">
+        <div class="lib-title-row">
+          <h2>Scene Library</h2>
+          <span class="lib-count">{presets.length}/{MAX_PRESETS}</span>
         </div>
-        <div class="ed-actions">
-          <button class="btn-primary" onclick={saveScene} disabled={saving}>
-            {saving ? 'Saving...' : 'Save'}
+        <button class="btn-primary btn-sm" onclick={createScene} title="Create new preset">+ New</button>
+      </div>
+
+      <div class="lib-list">
+        {#each Array(MAX_PRESETS) as _, i}
+          {@const preset = presets.find(p => p.index === i)}
+          <button
+            class="lib-item"
+            class:active={selectedIdx === i}
+            class:empty={!preset}
+            onclick={() => selectPreset(i)}
+            type="button"
+          >
+            <span class="lib-idx">{i.toString().padStart(2, '0')}</span>
+            <span class="lib-name">{preset ? preset.name : '— empty slot —'}</span>
+            {#if preset}
+              <span class="lib-bri" title="Global brightness">{preset.globalBrightness}</span>
+              {#if activePreset === i}
+                <span class="lib-active-dot" title="Active on hardware"></span>
+              {/if}
+            {/if}
           </button>
-          <button class="btn-secondary" onclick={() => doActivate(editScene.index)}>Activate</button>
-          <button class="btn-secondary" onclick={duplicateScene}>Duplicate</button>
-          <button class="btn-secondary" onclick={renameScene}>Rename</button>
-          {#if presets.find(p => p.index === editScene.index)}
-            <button class="btn-danger" onclick={() => deleteScene(editScene.index)}>Delete</button>
-          {/if}
-        </div>
-      </div>
-
-      <div class="ed-globals">
-        <label class="field">
-          <span>Brightness</span>
-          <input type="range" min="0" max="255" bind:value={editScene.globalBrightness} />
-          <span class="field-val">{editScene.globalBrightness}</span>
-        </label>
-        <label class="field">
-          <span>Transition (ms)</span>
-          <input type="range" min="0" max="10000" step="100" bind:value={editScene.transitionMs} />
-          <span class="field-val">{editScene.transitionMs}</span>
-        </label>
-      </div>
-
-      <div class="zones">
-        {#each editScene.zones as zone, zi}
-          <div class="zone-card">
-            <button class="zone-header" onclick={() => expandedZone = expandedZone === zi ? null : zi}>
-              <span class="zone-chevron">{expandedZone === zi ? '▾' : '▸'}</span>
-              <span>Zone {zi}</span>
-              <span class="zone-layer-count">
-                {zone.layers.filter(l => l.enabled).length}/{LAYER_COUNT} layers
-              </span>
-            </button>
-            {#if expandedZone === zi}
-              <div class="zone-body">
-                {#each zone.layers as layer, li}
-                  <div class="layer-card" class:disabled={!layer.enabled}>
-                    <div class="layer-header">
-                      <label class="toggle">
-                        <input type="checkbox" bind:checked={layer.enabled} />
-                        <span>L{li + 1}</span>
-                      </label>
-                      {#if layer.enabled}
-                        <div class="layer-controls">
-                          <label class="field-compact">
-                            <span>Effect</span>
-                            <select bind:value={layer.effect}>
-                              {#each effects as fx}
-                                <option value={fx.id}>{fx.label}</option>
-                              {/each}
-                            </select>
-                          </label>
-                          <label class="field-compact">
-                            <span>Blend</span>
-                            <select bind:value={layer.blendMode}>
-                              {#each BLEND_MODES as bm}
-                                <option value={bm}>{bm}</option>
-                              {/each}
-                            </select>
-                          </label>
-                          <label class="field-compact color-field">
-                            <span>Primary</span>
-                            <input type="color" value={rgbToHex(layer.primaryColor)}
-                              onchange={(e) => layer.primaryColor = hexToRgb((e.target as HTMLInputElement).value)} />
-                          </label>
-                          <label class="field-compact color-field">
-                            <span>Secondary</span>
-                            <input type="color" value={rgbToHex(layer.secondaryColor)}
-                              onchange={(e) => layer.secondaryColor = hexToRgb((e.target as HTMLInputElement).value)} />
-                          </label>
-                          <label class="field-compact">
-                            <span>Speed</span>
-                            <input type="number" min="10" max="60000" bind:value={layer.speedMs} />
-                          </label>
-                          <label class="field-compact">
-                            <span>Opacity</span>
-                            <input type="range" min="0" max="255" bind:value={layer.opacity} />
-                            <span class="field-val-sm">{layer.opacity}</span>
-                          </label>
-                          {#if effects.find(fx => fx.id === layer.effect)?.hasParameter}
-                            {@const fx = effects.find(fx => fx.id === layer.effect)}
-                            <label class="field-compact">
-                              <span>{fx?.parameterLabel ?? 'Param'}</span>
-                              <input type="number" min={fx?.parameterMin ?? 0} max={fx?.parameterMax ?? 255} bind:value={layer.fxParam} />
-                            </label>
-                          {/if}
-                        </div>
-                      {/if}
-                    </div>
-                  </div>
-                {/each}
-              </div>
-            {/if}
-          </div>
         {/each}
       </div>
-    {:else}
-      <div class="editor-empty">
-        <p>Select a scene slot to edit, or create a new scene.</p>
+    </aside>
+
+    <!-- Scene Editor Workspace -->
+    <section class="editor">
+      {#if editScene}
+        <!-- Top Toolbar -->
+        <div class="ed-toolbar">
+          <div class="ed-title-group">
+            <div class="ed-title-row">
+              <input
+                class="ed-name"
+                bind:value={editScene.name}
+                maxlength={23}
+                placeholder="Scene name"
+              />
+              <span class="ed-slot">Slot {editScene.index}</span>
+            </div>
+
+            <!-- State Badges: EDITED / SAVED / ACTIVE -->
+            <div class="status-badges">
+              {#if isActive}
+                <span class="badge badge-active" title="Preset is currently live on the physical node">
+                  <span class="pulse-dot"></span> ACTIVE
+                </span>
+              {/if}
+              {#if isDirty}
+                <span class="badge badge-edited" title="Unsaved modifications">
+                  EDITED
+                </span>
+              {:else if savedSnapshot}
+                <span class="badge badge-saved" title="Preset matches persisted node storage">
+                  SAVED
+                </span>
+              {:else}
+                <span class="badge badge-new" title="New preset not yet written to node">
+                  NEW
+                </span>
+              {/if}
+            </div>
+          </div>
+
+          <div class="ed-actions">
+            <button
+              class="btn-primary"
+              onclick={saveScene}
+              disabled={saving}
+              title="Save preset to hardware"
+              type="button"
+            >
+              {saving ? 'Saving...' : 'Save'}
+            </button>
+
+            <button
+              class="btn-activate"
+              class:is-active-btn={isActive}
+              onclick={() => doActivate(editScene!.index)}
+              disabled={activating}
+              title="Activate scene on hardware fixture"
+              type="button"
+            >
+              {activating ? 'Activating...' : isActive ? 'Re-Activate' : 'Activate'}
+            </button>
+
+            <button
+              class="btn-secondary"
+              onclick={revertEdits}
+              disabled={!isDirty}
+              title="Revert modifications to last saved state"
+              type="button"
+            >
+              Revert
+            </button>
+
+            <button
+              class="btn-secondary"
+              onclick={duplicateScene}
+              title="Duplicate this preset into next free slot"
+              type="button"
+            >
+              Duplicate
+            </button>
+
+            {#if presets.some(p => p.index === editScene!.index)}
+              <button
+                class="btn-danger"
+                onclick={() => removeScene(editScene!.index)}
+                title="Clear this preset slot on hardware"
+                type="button"
+              >
+                Delete
+              </button>
+            {/if}
+          </div>
+        </div>
+
+        <!-- Visual Software Preview (8 Zones Strip) -->
+        <div class="preview-panel">
+          <div class="preview-header">
+            <span class="preview-title">Software Fixture Preview</span>
+            <span class="preview-subtitle">Zone Color Synthesis (8 Zones)</span>
+          </div>
+
+          <div class="preview-strip">
+            {#each editScene.zones as zone, zi}
+              {@const preview = computeZonePreviewColor(zone, editScene.globalBrightness)}
+              {@const activeLayers = zone.layers.filter(l => l.enabled).length}
+              <button
+                class="zone-preview-box"
+                class:selected={expandedZone === zi}
+                onclick={() => (expandedZone = zi)}
+                style="background: rgb({preview.r}, {preview.g}, {preview.b});"
+                type="button"
+                title="Zone {zi} (RGB {preview.r},{preview.g},{preview.b}) - Click to edit"
+              >
+                <div class="zone-preview-overlay">
+                  <span class="zp-num">Z{zi}</span>
+                  <span class="zp-layers">{activeLayers}/3</span>
+                </div>
+              </button>
+            {/each}
+          </div>
+        </div>
+
+        <!-- Global Properties -->
+        <div class="ed-globals">
+          <label class="field">
+            <span class="field-label">Global Brightness</span>
+            <input
+              type="range"
+              min="0"
+              max="255"
+              bind:value={editScene.globalBrightness}
+            />
+            <span class="field-val">{editScene.globalBrightness}</span>
+          </label>
+
+          <label class="field">
+            <span class="field-label">Transition (ms)</span>
+            <input
+              type="range"
+              min="0"
+              max="10000"
+              step="100"
+              bind:value={editScene.transitionMs}
+            />
+            <span class="field-val">{editScene.transitionMs} ms</span>
+          </label>
+        </div>
+
+        <!-- Zones and Layers Editor -->
+        <div class="zones">
+          {#each editScene.zones as zone, zi}
+            {@const preview = computeZonePreviewColor(zone, editScene.globalBrightness)}
+            {@const enabledCount = zone.layers.filter(l => l.enabled).length}
+            <div class="zone-card" class:active-zone={expandedZone === zi}>
+              <button
+                class="zone-header"
+                onclick={() => (expandedZone = expandedZone === zi ? null : zi)}
+                type="button"
+              >
+                <div
+                  class="zone-swatch"
+                  style="background: rgb({preview.r}, {preview.g}, {preview.b});"
+                ></div>
+                <span class="zone-chevron">{expandedZone === zi ? '▾' : '▸'}</span>
+                <span class="zone-title">Zone {zi}</span>
+                <span class="zone-layer-count">
+                  {enabledCount}/{LAYER_COUNT} layers enabled
+                </span>
+              </button>
+
+              {#if expandedZone === zi}
+                <div class="zone-body">
+                  {#each zone.layers as layer, li}
+                    <div class="layer-card" class:disabled={!layer.enabled}>
+                      <div class="layer-header">
+                        <label class="toggle">
+                          <input type="checkbox" bind:checked={layer.enabled} />
+                          <span class="layer-title">Layer {li + 1}</span>
+                        </label>
+
+                        {#if layer.enabled}
+                          <div class="layer-controls">
+                            <!-- Effect dropdown -->
+                            <label class="field-compact">
+                              <span>Effect</span>
+                              <select bind:value={layer.effect}>
+                                {#if effects.length > 0}
+                                  {#each effects as fx}
+                                    <option value={fx.id}>{fx.label}</option>
+                                  {/each}
+                                {:else}
+                                  <option value="solid">Solid</option>
+                                  <option value="breathe">Breathe</option>
+                                  <option value="chase">Chase</option>
+                                  <option value="rainbow">Rainbow</option>
+                                  <option value="sparkle">Sparkle</option>
+                                  <option value="gradient">Gradient</option>
+                                {/if}
+                              </select>
+                            </label>
+
+                            <!-- Blend Mode -->
+                            <label class="field-compact">
+                              <span>Blend</span>
+                              <select bind:value={layer.blendMode}>
+                                {#each BLEND_MODES as bm}
+                                  <option value={bm}>{bm}</option>
+                                {/each}
+                              </select>
+                            </label>
+
+                            <!-- Colors -->
+                            <label class="field-compact color-field">
+                              <span>Primary</span>
+                              <input
+                                type="color"
+                                value={rgbToHex(layer.primaryColor)}
+                                onchange={e => (layer.primaryColor = hexToRgb((e.target as HTMLInputElement).value))}
+                              />
+                            </label>
+
+                            <label class="field-compact color-field">
+                              <span>Secondary</span>
+                              <input
+                                type="color"
+                                value={rgbToHex(layer.secondaryColor)}
+                                onchange={e => (layer.secondaryColor = hexToRgb((e.target as HTMLInputElement).value))}
+                              />
+                            </label>
+
+                            <!-- Speed -->
+                            <label class="field-compact">
+                              <span>Speed (ms)</span>
+                              <input
+                                type="number"
+                                min="10"
+                                max="60000"
+                                step="50"
+                                bind:value={layer.speedMs}
+                              />
+                            </label>
+
+                            <!-- Opacity -->
+                            <label class="field-compact">
+                              <span>Opacity</span>
+                              <input
+                                type="range"
+                                min="0"
+                                max="255"
+                                bind:value={layer.opacity}
+                              />
+                              <span class="field-val-sm">{layer.opacity}</span>
+                            </label>
+
+                            <!-- Param if effect supports it -->
+                            {#if effects.find(fx => fx.id === layer.effect)?.hasParameter}
+                              {@const fx = effects.find(fx => fx.id === layer.effect)}
+                              <label class="field-compact">
+                                <span>{fx?.parameterLabel ?? 'Param'}</span>
+                                <input
+                                  type="number"
+                                  min={fx?.parameterMin ?? 0}
+                                  max={fx?.parameterMax ?? 255}
+                                  bind:value={layer.fxParam}
+                                />
+                              </label>
+                            {/if}
+                          </div>
+                        {/if}
+                      </div>
+                    </div>
+                  {/each}
+                </div>
+              {/if}
+            </div>
+          {/each}
+        </div>
+      {:else}
+        <div class="editor-empty">
+          <div class="empty-icon">🎨</div>
+          <h3>Scene Studio</h3>
+          <p>Select a scene from the library or click <strong>+ New</strong> to build a preset.</p>
+        </div>
+      {/if}
+    </section>
+
+    {#if toast}
+      <div class="toast">{toast}</div>
+    {/if}
+    {#if error}
+      <div class="error-bar">
+        <span>{error}</span>
+        <button class="err-close" onclick={() => (error = '')} type="button">✕</button>
       </div>
     {/if}
-  </section>
-
-  {#if toast}
-    <div class="toast">{toast}</div>
-  {/if}
-  {#if error}
-    <div class="error-bar">{error}</div>
-  {/if}
-</div>
+  </div>
 {/if}
 
 <style>
@@ -320,204 +531,486 @@
     min-height: calc(100dvh - 4rem);
     position: relative;
   }
-  .loading { color: #a1a1a6; padding: 2rem; }
 
-  /* Library sidebar */
+  .loading-box {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 1rem;
+    width: 100%;
+    color: #a1a1a6;
+    min-height: 300px;
+  }
+  .spinner {
+    width: 32px;
+    height: 32px;
+    border: 3px solid rgba(255, 255, 255, 0.1);
+    border-top-color: #0071e3;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+
+  /* Library Sidebar */
   .library {
-    width: 260px;
+    width: 270px;
     flex-shrink: 0;
     display: flex;
     flex-direction: column;
-    gap: .5rem;
+    gap: 0.5rem;
   }
   .lib-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 0 .25rem .5rem;
-    border-bottom: 1px solid rgba(255,255,255,.08);
+    padding: 0 0.25rem 0.5rem;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
   }
-  .lib-header h2 { margin: 0; font-size: 1.1rem; font-weight: 600; color: #f5f5f7; }
+  .lib-title-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .lib-header h2 {
+    margin: 0;
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: #f5f5f7;
+  }
+  .lib-count {
+    font-size: 0.72rem;
+    color: #86868b;
+    font-family: monospace;
+  }
   .lib-list {
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: 3px;
     overflow-y: auto;
-    max-height: calc(100dvh - 8rem);
+    max-height: calc(100dvh - 8.5rem);
+    padding-right: 0.2rem;
   }
   .lib-item {
     display: flex;
     align-items: center;
-    gap: .5rem;
-    padding: .45rem .6rem;
-    background: rgba(255,255,255,.03);
-    border: 1px solid rgba(255,255,255,.06);
+    gap: 0.5rem;
+    padding: 0.5rem 0.65rem;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.06);
     border-radius: 8px;
     color: #a1a1a6;
-    font-size: .82rem;
+    font-size: 0.82rem;
     cursor: pointer;
     text-align: left;
-    transition: background .15s, border-color .15s;
+    transition: all 0.15s ease;
   }
-  .lib-item:hover { background: rgba(255,255,255,.06); color: #f5f5f7; }
-  .lib-item.active { background: rgba(255,45,85,.15); border-color: rgba(255,45,85,.35); color: #f5f5f7; }
-  .lib-item.empty { opacity: .5; }
+  .lib-item:hover {
+    background: rgba(255, 255, 255, 0.06);
+    color: #f5f5f7;
+    border-color: rgba(255, 255, 255, 0.12);
+  }
+  .lib-item.active {
+    background: rgba(0, 113, 227, 0.15);
+    border-color: rgba(0, 113, 227, 0.4);
+    color: #f5f5f7;
+  }
+  .lib-item.empty {
+    opacity: 0.45;
+  }
   .lib-idx {
     width: 22px;
     text-align: center;
-    font-size: .7rem;
+    font-size: 0.72rem;
     font-weight: 700;
+    color: #86868b;
+    font-family: monospace;
+  }
+  .lib-name {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .lib-bri {
+    font-size: 0.7rem;
     color: #666;
     font-family: monospace;
   }
-  .lib-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .lib-bri { font-size: .7rem; color: #666; font-family: monospace; }
   .lib-active-dot {
-    width: 6px; height: 6px; border-radius: 50%;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
     background: #30d158;
-    box-shadow: 0 0 6px rgba(48,209,88,.6);
+    box-shadow: 0 0 8px rgba(48, 209, 88, 0.8);
   }
 
-  /* Editor */
+  /* Editor Workspace */
   .editor {
     flex: 1;
     display: flex;
     flex-direction: column;
-    gap: 1rem;
+    gap: 1.25rem;
     min-width: 0;
   }
   .editor-empty {
     display: flex;
+    flex-direction: column;
     align-items: center;
     justify-content: center;
+    gap: 0.75rem;
     color: #a1a1a6;
-    font-size: .95rem;
-    min-height: 300px;
+    min-height: 400px;
+    background: rgba(255, 255, 255, 0.02);
+    border: 1px dashed rgba(255, 255, 255, 0.1);
+    border-radius: 12px;
   }
+  .empty-icon {
+    font-size: 2.5rem;
+  }
+
   .ed-toolbar {
     display: flex;
-    align-items: flex-start;
+    align-items: center;
     justify-content: space-between;
     gap: 1rem;
     flex-wrap: wrap;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    padding: 0.75rem 1rem;
+    border-radius: 12px;
   }
-  .ed-title-row { display: flex; align-items: center; gap: .75rem; }
+  .ed-title-group {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    flex-wrap: wrap;
+  }
+  .ed-title-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
   .ed-name {
-    background: rgba(255,255,255,.06);
-    border: 1px solid rgba(255,255,255,.12);
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.14);
     border-radius: 8px;
     color: #f5f5f7;
     font-size: 1.1rem;
     font-weight: 600;
-    padding: .4rem .7rem;
+    padding: 0.4rem 0.7rem;
     width: 220px;
   }
-  .ed-name:focus { outline: none; border-color: #ff2d55; }
-  .ed-slot { font-size: .75rem; color: #666; font-family: monospace; }
-  .ed-actions { display: flex; gap: .4rem; flex-wrap: wrap; }
+  .ed-name:focus {
+    outline: none;
+    border-color: #0071e3;
+    box-shadow: 0 0 0 2px rgba(0, 113, 227, 0.3);
+  }
+  .ed-slot {
+    font-size: 0.75rem;
+    color: #86868b;
+    font-family: monospace;
+    background: rgba(255, 255, 255, 0.04);
+    padding: 0.25rem 0.5rem;
+    border-radius: 6px;
+  }
 
+  /* Status Badges */
+  .status-badges {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    padding: 0.25rem 0.55rem;
+    border-radius: 6px;
+    text-transform: uppercase;
+  }
+  .badge-active {
+    background: rgba(48, 209, 88, 0.15);
+    border: 1px solid rgba(48, 209, 88, 0.4);
+    color: #30d158;
+  }
+  .badge-edited {
+    background: rgba(255, 159, 10, 0.15);
+    border: 1px solid rgba(255, 159, 10, 0.4);
+    color: #ff9f0a;
+  }
+  .badge-saved {
+    background: rgba(10, 132, 255, 0.15);
+    border: 1px solid rgba(10, 132, 255, 0.4);
+    color: #64d2ff;
+  }
+  .badge-new {
+    background: rgba(191, 90, 242, 0.15);
+    border: 1px solid rgba(191, 90, 242, 0.4);
+    color: #bf5af2;
+  }
+  .pulse-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #30d158;
+    animation: pulse 1.5s infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.4; transform: scale(0.8); }
+  }
+
+  .ed-actions {
+    display: flex;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+  }
+
+  /* Preview Panel */
+  .preview-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    padding: 0.75rem 1rem;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    border-radius: 12px;
+  }
+  .preview-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .preview-title {
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: #f5f5f7;
+  }
+  .preview-subtitle {
+    font-size: 0.7rem;
+    color: #86868b;
+  }
+  .preview-strip {
+    display: grid;
+    grid-template-columns: repeat(8, 1fr);
+    gap: 0.5rem;
+    min-height: 54px;
+  }
+  .zone-preview-box {
+    position: relative;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 8px;
+    cursor: pointer;
+    overflow: hidden;
+    padding: 0;
+    transition: transform 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+  }
+  .zone-preview-box:hover {
+    transform: translateY(-2px);
+    border-color: rgba(255, 255, 255, 0.4);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  }
+  .zone-preview-box.selected {
+    border: 2px solid #0071e3;
+    box-shadow: 0 0 10px rgba(0, 113, 227, 0.5);
+  }
+  .zone-preview-overlay {
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(to top, rgba(0, 0, 0, 0.75), transparent 70%);
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    padding: 0.3rem 0.4rem;
+  }
+  .zp-num {
+    font-size: 0.72rem;
+    font-weight: 700;
+    color: #fff;
+    font-family: monospace;
+  }
+  .zp-layers {
+    font-size: 0.65rem;
+    color: #ddd;
+    font-family: monospace;
+  }
+
+  /* Globals */
   .ed-globals {
     display: flex;
     gap: 1.5rem;
-    padding: .75rem 1rem;
-    background: rgba(255,255,255,.04);
-    border: 1px solid rgba(255,255,255,.08);
+    padding: 0.75rem 1rem;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.07);
     border-radius: 12px;
   }
 
   /* Zones */
-  .zones { display: flex; flex-direction: column; gap: .5rem; }
+  .zones {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
   .zone-card {
-    background: rgba(255,255,255,.03);
-    border: 1px solid rgba(255,255,255,.08);
+    background: rgba(255, 255, 255, 0.02);
+    border: 1px solid rgba(255, 255, 255, 0.06);
     border-radius: 10px;
     overflow: hidden;
+    transition: border-color 0.15s ease;
+  }
+  .zone-card.active-zone {
+    border-color: rgba(0, 113, 227, 0.35);
   }
   .zone-header {
     display: flex;
     align-items: center;
-    gap: .5rem;
+    gap: 0.6rem;
     width: 100%;
-    padding: .6rem .8rem;
+    padding: 0.65rem 0.85rem;
     background: transparent;
     border: none;
     color: #f5f5f7;
-    font-size: .9rem;
+    font-size: 0.88rem;
     font-weight: 600;
     cursor: pointer;
     text-align: left;
   }
-  .zone-header:hover { background: rgba(255,255,255,.03); }
-  .zone-chevron { color: #666; font-size: .8rem; width: 1rem; }
-  .zone-layer-count { margin-left: auto; font-size: .72rem; color: #666; font-weight: 400; }
-  .zone-body { padding: .25rem .8rem .8rem; display: flex; flex-direction: column; gap: .5rem; }
+  .zone-header:hover {
+    background: rgba(255, 255, 255, 0.03);
+  }
+  .zone-swatch {
+    width: 14px;
+    height: 14px;
+    border-radius: 4px;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+  }
+  .zone-chevron {
+    color: #86868b;
+    font-size: 0.8rem;
+    width: 1rem;
+  }
+  .zone-title {
+    flex: 1;
+  }
+  .zone-layer-count {
+    font-size: 0.72rem;
+    color: #86868b;
+    font-weight: 400;
+  }
+  .zone-body {
+    padding: 0.35rem 0.85rem 0.85rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
 
   /* Layers */
   .layer-card {
-    padding: .6rem .7rem;
-    background: rgba(255,255,255,.03);
-    border: 1px solid rgba(255,255,255,.06);
+    padding: 0.65rem 0.75rem;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.06);
     border-radius: 8px;
-    transition: opacity .2s;
+    transition: opacity 0.2s ease;
   }
-  .layer-card.disabled { opacity: .45; }
-  .layer-header { display: flex; flex-direction: column; gap: .4rem; }
+  .layer-card.disabled {
+    opacity: 0.45;
+  }
+  .layer-header {
+    display: flex;
+    flex-direction: column;
+    gap: 0.45rem;
+  }
   .toggle {
     display: flex;
     align-items: center;
-    gap: .4rem;
+    gap: 0.45rem;
     cursor: pointer;
-    font-size: .78rem;
+    font-size: 0.8rem;
     font-weight: 600;
-    color: #a1a1a6;
+    color: #f5f5f7;
   }
-  .toggle input[type="checkbox"] {
-    accent-color: #ff2d55;
-    width: 14px;
-    height: 14px;
+  .toggle input[type='checkbox'] {
+    accent-color: #0071e3;
+    width: 15px;
+    height: 15px;
+  }
+  .layer-title {
+    font-family: monospace;
   }
   .layer-controls {
     display: flex;
     flex-wrap: wrap;
-    gap: .6rem;
-    padding-top: .3rem;
+    gap: 0.65rem;
+    padding-top: 0.35rem;
   }
 
   /* Fields */
   .field {
     display: flex;
     align-items: center;
-    gap: .5rem;
-    font-size: .82rem;
+    gap: 0.6rem;
+    font-size: 0.82rem;
     color: #a1a1a6;
   }
-  .field input[type="range"] { flex: 1; min-width: 80px; accent-color: #ff2d55; }
-  .field-val { font-family: monospace; font-size: .75rem; min-width: 36px; text-align: right; color: #f5f5f7; }
+  .field-label {
+    white-space: nowrap;
+    font-size: 0.78rem;
+  }
+  .field input[type='range'] {
+    flex: 1;
+    min-width: 90px;
+    accent-color: #0071e3;
+  }
+  .field-val {
+    font-family: monospace;
+    font-size: 0.75rem;
+    min-width: 48px;
+    text-align: right;
+    color: #f5f5f7;
+  }
   .field-compact {
     display: flex;
     align-items: center;
-    gap: .3rem;
-    font-size: .75rem;
-    color: #888;
+    gap: 0.35rem;
+    font-size: 0.75rem;
+    color: #86868b;
   }
-  .field-compact span { white-space: nowrap; }
+  .field-compact span {
+    white-space: nowrap;
+  }
   .field-compact select,
-  .field-compact input[type="number"] {
-    background: rgba(255,255,255,.06);
-    border: 1px solid rgba(255,255,255,.10);
+  .field-compact input[type='number'] {
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.12);
     border-radius: 6px;
     color: #f5f5f7;
-    font-size: .78rem;
-    padding: .25rem .4rem;
-    width: 90px;
+    font-size: 0.78rem;
+    padding: 0.25rem 0.45rem;
+    width: 95px;
   }
-  .field-compact select { width: 100px; }
-  .field-compact input[type="range"] { width: 60px; accent-color: #ff2d55; }
-  .field-val-sm { font-family: monospace; font-size: .68rem; min-width: 24px; color: #ccc; }
-  .color-field input[type="color"] {
+  .field-compact select {
+    width: 105px;
+  }
+  .field-compact input[type='range'] {
+    width: 65px;
+    accent-color: #0071e3;
+  }
+  .field-val-sm {
+    font-family: monospace;
+    font-size: 0.68rem;
+    min-width: 24px;
+    color: #ccc;
+  }
+  .color-field input[type='color'] {
     width: 28px;
     height: 24px;
-    border: 1px solid rgba(255,255,255,.15);
+    border: 1px solid rgba(255, 255, 255, 0.15);
     border-radius: 4px;
     padding: 0;
     cursor: pointer;
@@ -525,78 +1018,121 @@
   }
 
   /* Buttons */
-  .btn-sm { padding: .3rem .6rem; font-size: .78rem; }
+  .btn-sm {
+    padding: 0.3rem 0.6rem;
+    font-size: 0.75rem;
+  }
   .btn-primary {
-    background: rgba(255,45,85,.85);
+    background: #0071e3;
     color: #fff;
     border: none;
     border-radius: 8px;
-    padding: .45rem .9rem;
-    font-size: .82rem;
+    padding: 0.45rem 0.95rem;
+    font-size: 0.82rem;
     font-weight: 600;
     cursor: pointer;
-    transition: background .2s;
+    transition: background 0.15s ease;
   }
-  .btn-primary:hover { background: #ff3b30; }
-  .btn-primary:disabled { opacity: .5; cursor: not-allowed; }
+  .btn-primary:hover:not(:disabled) {
+    background: #0077ed;
+  }
+  .btn-primary:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  .btn-activate {
+    background: rgba(48, 209, 88, 0.18);
+    color: #30d158;
+    border: 1px solid rgba(48, 209, 88, 0.4);
+    border-radius: 8px;
+    padding: 0.45rem 0.85rem;
+    font-size: 0.82rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+  .btn-activate:hover:not(:disabled) {
+    background: rgba(48, 209, 88, 0.28);
+  }
+  .btn-activate.is-active-btn {
+    background: #30d158;
+    color: #000;
+  }
   .btn-secondary {
-    background: rgba(255,255,255,.06);
+    background: rgba(255, 255, 255, 0.06);
     color: #a1a1a6;
-    border: 1px solid rgba(255,255,255,.10);
+    border: 1px solid rgba(255, 255, 255, 0.1);
     border-radius: 8px;
-    padding: .45rem .7rem;
-    font-size: .82rem;
+    padding: 0.45rem 0.75rem;
+    font-size: 0.82rem;
     cursor: pointer;
-    transition: background .2s, color .2s;
+    transition: all 0.15s ease;
   }
-  .btn-secondary:hover { background: rgba(255,255,255,.10); color: #f5f5f7; }
+  .btn-secondary:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.1);
+    color: #f5f5f7;
+  }
+  .btn-secondary:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+  }
   .btn-danger {
-    background: rgba(255,69,58,.15);
+    background: rgba(255, 69, 58, 0.15);
     color: #ff453a;
-    border: 1px solid rgba(255,69,58,.25);
+    border: 1px solid rgba(255, 69, 58, 0.3);
     border-radius: 8px;
-    padding: .45rem .7rem;
-    font-size: .82rem;
+    padding: 0.45rem 0.75rem;
+    font-size: 0.82rem;
     cursor: pointer;
-    transition: background .2s;
+    transition: all 0.15s ease;
   }
-  .btn-danger:hover { background: rgba(255,69,58,.25); }
+  .btn-danger:hover {
+    background: rgba(255, 69, 58, 0.25);
+  }
 
-  /* Toast / Error */
+  /* Toasts & Errors */
   .toast {
     position: fixed;
     bottom: 1.5rem;
     right: 1.5rem;
-    background: rgba(48,209,88,.9);
+    background: rgba(48, 209, 88, 0.92);
     color: #fff;
-    padding: .6rem 1.2rem;
+    padding: 0.6rem 1.2rem;
     border-radius: 10px;
-    font-size: .85rem;
+    font-size: 0.85rem;
     font-weight: 500;
-    box-shadow: 0 8px 24px rgba(0,0,0,.4);
-    animation: slideIn .25s ease-out;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+    z-index: 100;
   }
   .error-bar {
     position: fixed;
     bottom: 1.5rem;
     left: 50%;
     transform: translateX(-50%);
-    background: rgba(255,69,58,.9);
+    background: rgba(255, 69, 58, 0.95);
     color: #fff;
-    padding: .6rem 1.2rem;
+    padding: 0.6rem 1.2rem;
     border-radius: 10px;
-    font-size: .85rem;
-    box-shadow: 0 8px 24px rgba(0,0,0,.4);
+    font-size: 0.85rem;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+    z-index: 100;
   }
-  @keyframes slideIn {
-    from { opacity: 0; transform: translateY(10px); }
-    to { opacity: 1; transform: translateY(0); }
+  .err-close {
+    background: none;
+    border: none;
+    color: #fff;
+    cursor: pointer;
+    font-weight: bold;
   }
 
-  @media (max-width: 768px) {
+  @media (max-width: 900px) {
     .scene-root { flex-direction: column; }
     .library { width: 100%; }
-    .lib-list { flex-direction: row; flex-wrap: wrap; max-height: none; }
+    .lib-list { flex-direction: row; flex-wrap: wrap; max-height: 180px; }
     .lib-item { flex: 0 0 auto; }
+    .preview-strip { grid-template-columns: repeat(4, 1fr); }
   }
 </style>

@@ -21,7 +21,7 @@
 
   let nodeIp = $state('');
   let liveState = $state<NodeLiveState>(getNodeLiveSnapshot());
-  let canvasEl: HTMLCanvasElement | null = null;
+  let canvasEl = $state<HTMLCanvasElement | null>(null);
   let rafId = 0;
   let unsubscribeState: (() => void) | null = null;
   let unsubscribePixels: (() => void) | null = null;
