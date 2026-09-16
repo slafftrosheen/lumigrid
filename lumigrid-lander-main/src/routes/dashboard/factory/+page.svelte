@@ -22,17 +22,18 @@
   let durationMs = $state(10000);
   let autoRefresh = $state(false);
   let refreshTimer: ReturnType<typeof setInterval> | null = null;
+  let aborting = $state(false);
 
-  const EFFECTS: { name: FactoryEffectName; label: string; icon: string; color: string }[] = [
-    { name: 'identity',       label: 'Identity',       icon: '◻', color: '#8e8e93' },
-    { name: 'pixel_chase',    label: 'Pixel Chase',    icon: '→', color: '#00d4ff' },
-    { name: 'rainbow',        label: 'Rainbow',        icon: '◐', color: '#ff2d55' },
-    { name: 'white_walk',     label: 'White Walk',     icon: '◈', color: '#f5f5f7' },
-    { name: 'pwm_walk',       label: 'PWM Walk',       icon: '▤', color: '#ff9500' },
-    { name: 'pwm_fade',       label: 'PWM Fade',       icon: '◑', color: '#5856d6' },
-    { name: 'combined_pulse', label: 'Combined Pulse', icon: '◉', color: '#34c759' },
-    { name: 'burn_in',        label: 'Burn-In',        icon: '⬥', color: '#ff3b30' },
-    { name: 'blackout',       label: 'Blackout',       icon: '⬛', color: '#1c1c1e' },
+  const ALL_EFFECTS: { name: FactoryEffectName; label: string; desc: string; icon: string; category: 'quick' | 'burnin' | 'pwm' }[] = [
+    { name: 'identity',       label: 'Identity',       desc: 'Flashing node identification pulse', icon: '◻', category: 'quick' },
+    { name: 'pixel_chase',    label: 'Pixel Chase',    desc: 'Sequential lane walker',             icon: '→', category: 'quick' },
+    { name: 'rainbow',        label: 'Rainbow',        desc: 'Continuous spectrum sweep',         icon: '◐', category: 'quick' },
+    { name: 'white_walk',     label: 'White Walk',     desc: 'Full spectrum lumen test',          icon: '◈', category: 'quick' },
+    { name: 'combined_pulse', label: 'Combined Pulse', desc: 'Synchronized LED and PWM cycle',     icon: '◉', category: 'quick' },
+    { name: 'blackout',       label: 'Blackout',       desc: 'Immediately blank all outputs',     icon: '⬛', category: 'quick' },
+    { name: 'pwm_walk',       label: 'PWM Walk',       desc: 'Step through auxiliary channels',   icon: '▤', category: 'pwm' },
+    { name: 'pwm_fade',       label: 'PWM Fade',       desc: 'Smooth triangle modulation',        icon: '◑', category: 'pwm' },
+    { name: 'burn_in',        label: 'Burn-In Stress', desc: 'Full-system thermal stress cycle',  icon: '⬥', category: 'burnin' },
   ];
 
   const LANES = Array.from({ length: 8 }, (_, i) => i);
@@ -40,16 +41,6 @@
 
   let laneColors = $state(Array.from({ length: 8 }, () => ({ r: 255, g: 0, b: 0 })));
   let pwmDuties = $state(Array.from({ length: 8 }, () => 0));
-
-  onMount(async () => {
-    nodeIp = getSelectedNodeIp();
-    if (nodeIp) await refresh();
-    loading = false;
-  });
-
-  onDestroy(() => {
-    if (refreshTimer) clearInterval(refreshTimer);
-  });
 
   async function refresh() {
     if (!nodeIp) return;
@@ -63,7 +54,10 @@
 
   function toggleAutoRefresh() {
     autoRefresh = !autoRefresh;
-    if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
+    if (refreshTimer) {
+      clearInterval(refreshTimer);
+      refreshTimer = null;
+    }
     if (autoRefresh) {
       refreshTimer = setInterval(refresh, 2000);
     }
@@ -73,8 +67,8 @@
     if (!nodeIp) return;
     try {
       await postFactoryEffect(nodeIp, name, brightness, durationMs);
-      flash = `Sent: ${name}`;
-      setTimeout(() => flash = '', 2000);
+      flash = `Launched test effect: ${name}`;
+      setTimeout(() => (flash = ''), 2500);
       await refresh();
     } catch (e) {
       error = String(e);
@@ -82,14 +76,17 @@
   }
 
   async function sendAbort() {
-    if (!nodeIp) return;
+    if (!nodeIp || aborting) return;
+    aborting = true;
     try {
       await postFactoryAbort(nodeIp);
-      flash = 'Blackout sent';
-      setTimeout(() => flash = '', 2000);
+      flash = 'Emergency Blackout command dispatched';
+      setTimeout(() => (flash = ''), 2500);
       await refresh();
     } catch (e) {
       error = String(e);
+    } finally {
+      aborting = false;
     }
   }
 
@@ -98,6 +95,8 @@
     try {
       await postFactoryAutoLoop(nodeIp, !status.autoLoop);
       await refresh();
+      flash = `Auto-loop ${!status.autoLoop ? 'enabled' : 'disabled'}`;
+      setTimeout(() => (flash = ''), 2000);
     } catch (e) {
       error = String(e);
     }
@@ -108,8 +107,8 @@
     const c = laneColors[lane];
     try {
       await postFactoryLane(nodeIp, lane, c.r, c.g, c.b, brightness, durationMs);
-      flash = `Lane ${lane} sent`;
-      setTimeout(() => flash = '', 2000);
+      flash = `Lane ${lane} pattern sent (RGB ${c.r},${c.g},${c.b})`;
+      setTimeout(() => (flash = ''), 2000);
     } catch (e) {
       error = String(e);
     }
@@ -119,17 +118,17 @@
     if (!nodeIp) return;
     try {
       await postFactoryPwm(nodeIp, channel, pwmDuties[channel], durationMs);
-      flash = `PWM ${channel} sent`;
-      setTimeout(() => flash = '', 2000);
+      flash = `PWM channel ${channel} set to ${pwmDuties[channel]}`;
+      setTimeout(() => (flash = ''), 2000);
     } catch (e) {
       error = String(e);
     }
   }
 
   function setLaneColor(lane: number, hex: string) {
-    const r = parseInt(hex.slice(1, 3), 16);
-    const g = parseInt(hex.slice(3, 5), 16);
-    const b = parseInt(hex.slice(5, 7), 16);
+    const r = parseInt(hex.slice(1, 3), 16) || 0;
+    const g = parseInt(hex.slice(3, 5), 16) || 0;
+    const b = parseInt(hex.slice(5, 7), 16) || 0;
     laneColors[lane] = { r, g, b };
     laneColors = [...laneColors];
   }
@@ -138,206 +137,819 @@
     const c = laneColors[lane];
     return '#' + [c.r, c.g, c.b].map(v => v.toString(16).padStart(2, '0')).join('');
   }
+
+  onMount(async () => {
+    nodeIp = getSelectedNodeIp();
+    if (nodeIp) await refresh();
+    loading = false;
+  });
+
+  onDestroy(() => {
+    if (refreshTimer) clearInterval(refreshTimer);
+  });
 </script>
 
 <svelte:head>
-  <title>Factory / Burn-In — LumiGrid</title>
+  <title>Factory & Burn-In Console — LumiGrid</title>
 </svelte:head>
 
-<div class="page">
-  <header class="page-header">
+<div class="factory-root">
+  <!-- Page Header -->
+  <header class="factory-header">
     <div>
-      <h1>Factory / Burn-In</h1>
-      <p class="sub">{nodeIp || 'No node selected'}</p>
+      <h1>Factory & Burn-In Console</h1>
+      <p class="sub">Node: <span class="ip-mono">{nodeIp || 'No node selected'}</span></p>
     </div>
-    <div class="head-btns">
-      <button class="ghost-btn" onclick={toggleAutoRefresh}>
-        {autoRefresh ? '⏸ Pause' : '▶ Auto-refresh'}
+
+    <div class="header-right">
+      <button class="ghost-btn" onclick={toggleAutoRefresh} type="button">
+        {autoRefresh ? '⏸ Stop Polling' : '▶ Auto-poll (2s)'}
       </button>
-      <button class="ghost-btn" onclick={refresh}>↻ Refresh</button>
+      <button class="ghost-btn" onclick={refresh} type="button">↻ Refresh</button>
     </div>
   </header>
 
-  {#if error}<div class="err-box">{error}</div>{/if}
-  {#if flash}<div class="flash-box">{flash}</div>{/if}
+  {#if error}
+    <div class="error-banner">{error}</div>
+  {/if}
+  {#if flash}
+    <div class="flash-banner">{flash}</div>
+  {/if}
 
   {#if loading}
-    <div class="loading"><div class="spinner"></div>Loading…</div>
+    <div class="loading-panel">
+      <div class="spinner"></div>
+      <p>Querying factory burn-in telemetry...</p>
+    </div>
   {:else if !nodeIp}
-    <div class="empty">Select a node in the sidebar to begin.</div>
+    <div class="empty-panel">
+      <p>No active node selected. Connect to a node in the header to run factory diagnostics.</p>
+    </div>
   {:else}
-    <!-- Status card -->
-    <div class="status-card">
+    <!-- SECTION 1: ABORT / BLACKOUT (Top High-Priority Safety Bar) -->
+    <div class="abort-banner">
+      <div class="abort-info">
+        <span class="abort-icon">⚠️</span>
+        <div>
+          <h3 class="abort-title">Emergency Blackout Authority</h3>
+          <p class="abort-desc">Instantly suppresses all pixel and PWM outputs, aborts active tests, and disarms hardware drivers.</p>
+        </div>
+      </div>
+      <button
+        class="abort-btn"
+        onclick={sendAbort}
+        disabled={aborting}
+        type="button"
+        title="Trigger immediate hardware blackout"
+      >
+        {aborting ? 'BLACKING OUT...' : '⬛ IMMEDIATE BLACKOUT'}
+      </button>
+    </div>
+
+    <!-- SECTION 2: FACTORY STATUS -->
+    <section class="panel status-panel">
+      <div class="panel-head">
+        <h2>Factory Status</h2>
+        {#if status?.testActive}
+          <span class="status-live-pill">
+            <span class="pulse-dot"></span> TEST RUNNING
+          </span>
+        {:else}
+          <span class="status-idle-pill">IDLE / READY</span>
+        {/if}
+      </div>
+
       <div class="status-grid">
-        <div class="stat">
+        <div class="stat-card">
           <span class="stat-label">Active Effect</span>
-          <span class="stat-value" class:active-effect={status?.testActive}>
-            {status?.effect ?? '—'}
+          <span class="stat-val {status?.testActive ? 'active' : ''}">
+            {status?.effect ? status.effect : 'None (Idle)'}
           </span>
         </div>
-        <div class="stat">
-          <span class="stat-label">Brightness</span>
-          <span class="stat-value">{status?.brightness ?? 0}</span>
-        </div>
-        <div class="stat">
-          <span class="stat-label">Test Active</span>
-          <span class="stat-value" class:ok={status?.testActive} class:off={!status?.testActive}>
-            {status?.testActive ? 'Yes' : 'No'}
-          </span>
-        </div>
-        <div class="stat">
-          <span class="stat-label">Outputs</span>
-          <span class="stat-value" class:ok={status?.outputsEnabled} class:off={!status?.outputsEnabled}>
+
+        <div class="stat-card">
+          <span class="stat-label">Hardware Outputs</span>
+          <span class="stat-val {status?.outputsEnabled ? 'ok' : 'muted'}">
             {status?.outputsEnabled ? 'Enabled' : 'Disabled'}
           </span>
         </div>
-        <div class="stat">
-          <span class="stat-label">Auto Loop</span>
-          <span class="stat-value" class:ok={status?.autoLoop} class:off={!status?.autoLoop}>
-            {status?.autoLoop ? 'On' : 'Off'}
+
+        <div class="stat-card">
+          <span class="stat-label">Active Test Brightness</span>
+          <span class="stat-val mono">{status?.brightness ?? 0} / 96</span>
+        </div>
+
+        <div class="stat-card">
+          <span class="stat-label">Automated Loop</span>
+          <span class="stat-val {status?.autoLoop ? 'ok' : 'muted'}">
+            {status?.autoLoop ? 'Active (Looping)' : 'Disabled'}
           </span>
         </div>
-        <div class="stat">
-          <span class="stat-label">Rejections</span>
-          <span class="stat-value">{status?.commandRejections ?? 0}</span>
+
+        <div class="stat-card">
+          <span class="stat-label">Command Rejections</span>
+          <span class="stat-val {status?.commandRejections ? 'err' : ''}">
+            {status?.commandRejections ?? 0}
+          </span>
         </div>
+      </div>
+    </section>
+
+    <!-- Global Parameters Bar (Before Launching Tests) -->
+    <div class="params-bar">
+      <div class="param-group">
+        <label class="param-label" for="param-brightness">Test Brightness (0–96)</label>
+        <div class="param-slider-wrap">
+          <input
+            id="param-brightness"
+            type="range"
+            min="0"
+            max="96"
+            bind:value={brightness}
+          />
+          <span class="param-val">{brightness}</span>
+        </div>
+      </div>
+
+      <div class="param-group">
+        <label class="param-label" for="param-duration">Duration (Milliseconds)</label>
+        <div class="param-input-wrap">
+          <input
+            id="param-duration"
+            type="number"
+            min="100"
+            max="600000"
+            step="500"
+            bind:value={durationMs}
+          />
+          <span class="param-unit">{(durationMs / 1000).toFixed(1)}s</span>
+        </div>
+      </div>
+
+      <div class="param-actions">
+        <button
+          class="btn-autoloop"
+          class:on={status?.autoLoop}
+          onclick={toggleAutoLoop}
+          type="button"
+          title="Toggle automatic cycling through factory test sequences"
+        >
+          Auto-Loop: {status?.autoLoop ? 'ON' : 'OFF'}
+        </button>
       </div>
     </div>
 
-    <!-- Controls row -->
-    <div class="controls-row">
-      <label class="control-field">
-        <span>Brightness</span>
-        <input type="range" min="0" max="96" bind:value={brightness} />
-        <span class="control-val">{brightness}</span>
-      </label>
-      <label class="control-field">
-        <span>Duration (ms)</span>
-        <input type="number" min="1" max="600000" bind:value={durationMs} />
-      </label>
-      <button class="auto-loop-btn" class:on={status?.autoLoop} onclick={toggleAutoLoop}>
-        Auto Loop: {status?.autoLoop ? 'ON' : 'OFF'}
-      </button>
-      <button class="abort-btn" onclick={sendAbort}>⬛ BLACKOUT</button>
-    </div>
+    <!-- SECTION 3: QUICK TESTS -->
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Quick Tests</h2>
+        <span class="head-hint">Standard visual and hardware verification routines</span>
+      </div>
 
-    <!-- Effects grid -->
-    <div class="section">
-      <h2>Test Effects</h2>
       <div class="effects-grid">
-        {#each EFFECTS as fx}
+        {#each ALL_EFFECTS.filter(e => e.category === 'quick') as fx}
           <button
-            class="effect-btn"
-            class:is-active={status?.effect === fx.name}
-            style="--fx-color={fx.color}"
+            class="fx-card"
+            class:active={status?.effect === fx.name}
             onclick={() => sendEffect(fx.name)}
+            type="button"
           >
-            <span class="fx-icon">{fx.icon}</span>
-            <span class="fx-label">{fx.label}</span>
+            <div class="fx-top">
+              <span class="fx-icon">{fx.icon}</span>
+              <span class="fx-name">{fx.label}</span>
+            </div>
+            <p class="fx-desc">{fx.desc}</p>
           </button>
         {/each}
       </div>
-    </div>
+    </section>
 
-    <!-- Pixel lanes -->
-    <div class="section">
-      <h2>Pixel Lanes (0–7)</h2>
-      <div class="lanes-grid">
+    <!-- SECTION 4: PIXEL TEST (Lanes 0–7) -->
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Pixel Test (Lanes 0–7)</h2>
+        <span class="head-hint">Inspect discrete WS2812 output lanes and color channels</span>
+      </div>
+
+      <div class="lanes-list">
         {#each LANES as lane}
           <div class="lane-row">
-            <span class="lane-num">L{lane}</span>
+            <span class="lane-tag">Lane {lane}</span>
             <input
               type="color"
               value={laneHex(lane)}
-              onchange={(e) => setLaneColor(lane, e.currentTarget.value)}
+              onchange={e => setLaneColor(lane, (e.target as HTMLInputElement).value)}
+              title="Select lane color"
             />
-            <span class="lane-rgb">
-              {laneColors[lane].r}, {laneColors[lane].g}, {laneColors[lane].b}
+            <span class="lane-rgb mono">
+              RGB({laneColors[lane].r}, {laneColors[lane].g}, {laneColors[lane].b})
             </span>
-            <button class="send-btn" onclick={() => sendLane(lane)}>Send</button>
+            <button
+              class="btn-send-lane"
+              onclick={() => sendLane(lane)}
+              type="button"
+            >
+              Test Lane {lane}
+            </button>
           </div>
         {/each}
       </div>
-    </div>
+    </section>
 
-    <!-- PWM channels -->
-    <div class="section">
-      <h2>PWM Channels (0–7)</h2>
-      <div class="pwm-grid">
+    <!-- SECTION 5: PWM TEST (Channels 0–7) -->
+    <section class="panel">
+      <div class="panel-head">
+        <h2>PWM Test (Channels 0–7)</h2>
+        <div class="pwm-quick-actions">
+          <button
+            class="ghost-sm"
+            onclick={() => sendEffect('pwm_walk')}
+            type="button"
+          >
+            Run PWM Walk
+          </button>
+          <button
+            class="ghost-sm"
+            onclick={() => sendEffect('pwm_fade')}
+            type="button"
+          >
+            Run PWM Fade
+          </button>
+        </div>
+      </div>
+
+      <div class="pwm-list">
         {#each PWM_CHANNELS as ch}
           <div class="pwm-row">
-            <span class="pwm-num">CH{ch}</span>
-            <input type="range" min="0" max="4095" bind:value={pwmDuties[ch]} />
-            <span class="pwm-val">{pwmDuties[ch]}</span>
-            <button class="send-btn" onclick={() => sendPwm(ch)}>Set</button>
+            <span class="pwm-tag">CH {ch}</span>
+            <input
+              type="range"
+              min="0"
+              max="4095"
+              bind:value={pwmDuties[ch]}
+            />
+            <span class="pwm-val mono">{pwmDuties[ch]} / 4095</span>
+            <span class="pwm-pct mono">{((pwmDuties[ch] / 4095) * 100).toFixed(0)}%</span>
+            <button
+              class="btn-send-pwm"
+              onclick={() => sendPwm(ch)}
+              type="button"
+            >
+              Set CH{ch}
+            </button>
           </div>
         {/each}
       </div>
-    </div>
+    </section>
+
+    <!-- SECTION 6: AUTOMATED BURN-IN -->
+    <section class="panel burnin-panel">
+      <div class="panel-head">
+        <h2>Automated Burn-In & Stress Testing</h2>
+        <span class="caution-badge">High Output & Thermal Load</span>
+      </div>
+
+      <div class="burnin-content">
+        <p class="burnin-text">
+          Continuous endurance test exercising all 8 LED lanes and PWM channels at dynamic high load. Ensure device has proper heatsinking and ventilation during extended burn-in runs.
+        </p>
+
+        <div class="burnin-actions">
+          <button
+            class="btn-burnin"
+            class:active={status?.effect === 'burn_in'}
+            onclick={() => sendEffect('burn_in')}
+            type="button"
+          >
+            <span class="burn-icon">⬥</span>
+            <span>{status?.effect === 'burn_in' ? 'Burn-In Active' : 'Start Burn-In Test'}</span>
+          </button>
+
+          <button
+            class="btn-autoloop large"
+            class:on={status?.autoLoop}
+            onclick={toggleAutoLoop}
+            type="button"
+          >
+            Toggle Continuous Auto-Loop
+          </button>
+        </div>
+      </div>
+    </section>
   {/if}
 </div>
 
 <style>
-  .page { max-width: 960px; }
-  .page-header { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 1.5rem; gap: 1rem; flex-wrap: wrap; }
-  h1 { margin: 0; font-size: 1.6rem; font-weight: 700; color: #f5f5f7; }
-  .sub { margin: .25rem 0 0; color: #a1a1a6; font-size: .85rem; }
-  .head-btns { display: flex; gap: .6rem; }
-  .ghost-btn { background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.14); border-radius: 999px; color: #f5f5f7; padding: .55rem 1.1rem; cursor: pointer; font-size: .88rem; transition: background .2s; }
-  .ghost-btn:hover { background: rgba(255,255,255,.14); }
-  .err-box { background: rgba(255,69,58,.12); border: 1px solid rgba(255,69,58,.3); border-radius: 12px; color: #ff453a; padding: .9rem 1rem; font-size: .85rem; margin-bottom: 1rem; }
-  .flash-box { background: rgba(52,199,89,.12); border: 1px solid rgba(52,199,89,.3); border-radius: 12px; color: #34c759; padding: .9rem 1rem; font-size: .85rem; margin-bottom: 1rem; }
-  .loading { display: flex; align-items: center; gap: .75rem; color: #a1a1a6; padding: 3rem; justify-content: center; }
-  .spinner { width: 18px; height: 18px; border: 2px solid rgba(255,255,255,.1); border-top-color: #ff2d55; border-radius: 50%; animation: spin .8s linear infinite; }
+  .factory-root {
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+    color: #f5f5f7;
+    max-width: 1100px;
+  }
+
+  .factory-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 1rem;
+    flex-wrap: wrap;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 14px;
+    padding: 0.85rem 1.25rem;
+  }
+  .factory-header h1 {
+    margin: 0;
+    font-size: 1.25rem;
+    font-weight: 700;
+  }
+  .sub {
+    margin: 0.25rem 0 0;
+    font-size: 0.8rem;
+    color: #86868b;
+  }
+  .ip-mono {
+    font-family: monospace;
+    color: #64d2ff;
+  }
+  .header-right {
+    display: flex;
+    gap: 0.5rem;
+  }
+  .ghost-btn {
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 8px;
+    color: #f5f5f7;
+    padding: 0.4rem 0.85rem;
+    font-size: 0.8rem;
+    cursor: pointer;
+    transition: background 0.15s ease;
+  }
+  .ghost-btn:hover {
+    background: rgba(255, 255, 255, 0.1);
+  }
+
+  .error-banner {
+    background: rgba(255, 69, 58, 0.2);
+    border: 1px solid rgba(255, 69, 58, 0.4);
+    color: #ff453a;
+    padding: 0.6rem 1rem;
+    border-radius: 8px;
+    font-size: 0.85rem;
+  }
+  .flash-banner {
+    background: rgba(48, 209, 88, 0.18);
+    border: 1px solid rgba(48, 209, 88, 0.4);
+    color: #30d158;
+    padding: 0.6rem 1rem;
+    border-radius: 8px;
+    font-size: 0.85rem;
+  }
+
+  .loading-panel, .empty-panel {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 1rem;
+    min-height: 300px;
+    color: #86868b;
+  }
+  .spinner {
+    width: 32px;
+    height: 32px;
+    border: 3px solid rgba(255, 255, 255, 0.1);
+    border-top-color: #0071e3;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
   @keyframes spin { to { transform: rotate(360deg); } }
-  .empty { color: #a1a1a6; padding: 3rem; text-align: center; }
 
-  .status-card { background: rgba(29,29,31,.72); border: 1px solid rgba(255,255,255,.08); border-radius: 18px; padding: 1.25rem; margin-bottom: 1rem; }
-  .status-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 1rem; }
-  .stat { display: flex; flex-direction: column; gap: .2rem; }
-  .stat-label { font-size: .72rem; text-transform: uppercase; letter-spacing: .05em; color: #a1a1a6; font-weight: 600; }
-  .stat-value { font-size: 1.1rem; font-weight: 700; color: #f5f5f7; }
-  .stat-value.ok { color: #34c759; }
-  .stat-value.off { color: #a1a1a6; }
-  .active-effect { color: #ff9500; text-transform: capitalize; }
+  /* Emergency Abort Banner */
+  .abort-banner {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: rgba(255, 59, 48, 0.12);
+    border: 1px solid rgba(255, 59, 48, 0.35);
+    border-radius: 14px;
+    padding: 1rem 1.25rem;
+    gap: 1.5rem;
+    flex-wrap: wrap;
+  }
+  .abort-info {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+  }
+  .abort-icon {
+    font-size: 1.8rem;
+  }
+  .abort-title {
+    margin: 0;
+    font-size: 1rem;
+    font-weight: 700;
+    color: #ff453a;
+  }
+  .abort-desc {
+    margin: 0.2rem 0 0;
+    font-size: 0.8rem;
+    color: #ddd;
+  }
+  .abort-btn {
+    background: #ff3b30;
+    color: #fff;
+    border: none;
+    border-radius: 10px;
+    padding: 0.65rem 1.4rem;
+    font-size: 0.9rem;
+    font-weight: 700;
+    cursor: pointer;
+    box-shadow: 0 4px 16px rgba(255, 59, 48, 0.4);
+    transition: all 0.15s ease;
+    white-space: nowrap;
+  }
+  .abort-btn:hover:not(:disabled) {
+    background: #ff453a;
+    transform: scale(1.02);
+    box-shadow: 0 6px 20px rgba(255, 59, 48, 0.6);
+  }
+  .abort-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
 
-  .controls-row { display: flex; align-items: flex-end; gap: 1rem; flex-wrap: wrap; background: rgba(29,29,31,.72); border: 1px solid rgba(255,255,255,.08); border-radius: 18px; padding: 1rem 1.25rem; margin-bottom: 1rem; }
-  .control-field { display: flex; flex-direction: column; gap: .3rem; flex: 1; min-width: 120px; }
-  .control-field span { font-size: .72rem; text-transform: uppercase; letter-spacing: .05em; color: #a1a1a6; font-weight: 600; }
-  .control-field input[type="range"] { width: 100%; accent-color: #ff2d55; }
-  .control-field input[type="number"] { background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.12); border-radius: 8px; color: #f5f5f7; font-size: .9rem; padding: .45rem .6rem; }
-  .control-val { font-size: .85rem; color: #f5f5f7; font-weight: 600; text-align: center; }
+  /* Panels */
+  .panel {
+    background: rgba(255, 255, 255, 0.02);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 14px;
+    padding: 1.25rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+  }
+  .panel-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    padding-bottom: 0.6rem;
+  }
+  .panel-head h2 {
+    margin: 0;
+    font-size: 1.05rem;
+    font-weight: 600;
+  }
+  .head-hint {
+    font-size: 0.75rem;
+    color: #86868b;
+  }
 
-  .auto-loop-btn { background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.14); border-radius: 999px; color: #f5f5f7; padding: .55rem 1.1rem; cursor: pointer; font-size: .85rem; white-space: nowrap; transition: all .2s; }
-  .auto-loop-btn.on { background: rgba(52,199,89,.2); border-color: rgba(52,199,89,.4); color: #34c759; }
+  /* Status Grid */
+  .status-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 0.75rem;
+  }
+  .stat-card {
+    background: rgba(255, 255, 255, 0.02);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 10px;
+    padding: 0.75rem 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+  .stat-label {
+    font-size: 0.7rem;
+    color: #86868b;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-weight: 600;
+  }
+  .stat-val {
+    font-size: 1.05rem;
+    font-weight: 700;
+  }
+  .stat-val.active { color: #ff9f0a; text-transform: capitalize; }
+  .stat-val.ok { color: #30d158; }
+  .stat-val.muted { color: #86868b; }
+  .stat-val.err { color: #ff453a; }
+  .mono { font-family: monospace; }
 
-  .abort-btn { background: rgba(255,59,48,.85); border: none; border-radius: 999px; color: #fff; font-weight: 700; padding: .55rem 1.3rem; cursor: pointer; font-size: .9rem; box-shadow: 0 4px 14px rgba(255,59,48,.4); transition: all .2s; white-space: nowrap; }
-  .abort-btn:hover { background: #ff3b30; box-shadow: 0 6px 20px rgba(255,59,48,.55); transform: scale(1.02); }
+  .status-live-pill {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    background: rgba(255, 159, 10, 0.15);
+    border: 1px solid rgba(255, 159, 10, 0.4);
+    color: #ff9f0a;
+    padding: 0.2rem 0.6rem;
+    border-radius: 6px;
+    font-size: 0.72rem;
+    font-weight: 700;
+  }
+  .status-idle-pill {
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    color: #86868b;
+    padding: 0.2rem 0.6rem;
+    border-radius: 6px;
+    font-size: 0.72rem;
+    font-weight: 700;
+  }
+  .pulse-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #ff9f0a;
+    animation: pulse 1.2s infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.3; transform: scale(0.8); }
+  }
 
-  .section { background: rgba(29,29,31,.72); border: 1px solid rgba(255,255,255,.08); border-radius: 18px; padding: 1.25rem; margin-bottom: 1rem; }
-  h2 { margin: 0 0 1rem; font-size: .95rem; font-weight: 600; color: #f5f5f7; }
+  /* Params Bar */
+  .params-bar {
+    display: flex;
+    align-items: center;
+    gap: 1.5rem;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 12px;
+    padding: 0.85rem 1.25rem;
+    flex-wrap: wrap;
+  }
+  .param-group {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    min-width: 180px;
+  }
+  .param-label {
+    font-size: 0.72rem;
+    color: #86868b;
+    font-weight: 600;
+    text-transform: uppercase;
+  }
+  .param-slider-wrap, .param-input-wrap {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .param-slider-wrap input {
+    accent-color: #0071e3;
+    flex: 1;
+  }
+  .param-val {
+    font-family: monospace;
+    font-size: 0.85rem;
+    font-weight: 700;
+    min-width: 32px;
+  }
+  .param-input-wrap input {
+    width: 100px;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 6px;
+    color: #f5f5f7;
+    padding: 0.3rem 0.5rem;
+    font-family: monospace;
+    font-size: 0.85rem;
+  }
+  .param-unit {
+    font-size: 0.75rem;
+    color: #86868b;
+  }
+  .param-actions {
+    margin-left: auto;
+  }
+  .btn-autoloop {
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 8px;
+    color: #f5f5f7;
+    padding: 0.45rem 0.9rem;
+    font-size: 0.8rem;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+  .btn-autoloop.on {
+    background: rgba(48, 209, 88, 0.2);
+    border-color: rgba(48, 209, 88, 0.4);
+    color: #30d158;
+    font-weight: 700;
+  }
 
-  .effects-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: .75rem; }
-  .effect-btn { display: flex; flex-direction: column; align-items: center; gap: .4rem; padding: 1rem .5rem; background: rgba(255,255,255,.04); border: 2px solid rgba(255,255,255,.1); border-radius: 14px; cursor: pointer; transition: all .2s; color: #f5f5f7; }
-  .effect-btn:hover { background: rgba(255,255,255,.08); border-color: var(--fx-color); transform: translateY(-2px); }
-  .effect-btn.is-active { border-color: var(--fx-color); background: color-mix(in srgb, var(--fx-color) 15%, transparent); box-shadow: 0 0 16px color-mix(in srgb, var(--fx-color) 30%, transparent); }
-  .fx-icon { font-size: 1.5rem; }
-  .fx-label { font-size: .75rem; font-weight: 600; text-align: center; }
+  /* Quick Effects Grid */
+  .effects-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 0.75rem;
+  }
+  .fx-card {
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 10px;
+    padding: 0.85rem 1rem;
+    cursor: pointer;
+    text-align: left;
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    transition: all 0.15s ease;
+  }
+  .fx-card:hover {
+    background: rgba(255, 255, 255, 0.07);
+    border-color: rgba(0, 113, 227, 0.4);
+    transform: translateY(-2px);
+  }
+  .fx-card.active {
+    border-color: #ff9f0a;
+    background: rgba(255, 159, 10, 0.12);
+    box-shadow: 0 0 12px rgba(255, 159, 10, 0.3);
+  }
+  .fx-top {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .fx-icon {
+    font-size: 1.1rem;
+  }
+  .fx-name {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: #f5f5f7;
+  }
+  .fx-desc {
+    margin: 0;
+    font-size: 0.72rem;
+    color: #86868b;
+    line-height: 1.3;
+  }
 
-  .lanes-grid { display: flex; flex-direction: column; gap: .5rem; }
-  .lane-row { display: flex; align-items: center; gap: .75rem; padding: .5rem .75rem; background: rgba(255,255,255,.03); border-radius: 10px; }
-  .lane-num { font-size: .8rem; font-weight: 700; color: #a1a1a6; width: 28px; font-family: monospace; }
-  .lane-row input[type="color"] { width: 36px; height: 28px; border: none; border-radius: 6px; cursor: pointer; background: none; padding: 0; }
-  .lane-row input[type="color"]::-webkit-color-swatch-wrapper { padding: 0; }
-  .lane-row input[type="color"]::-webkit-color-swatch { border: 1px solid rgba(255,255,255,.2); border-radius: 5px; }
-  .lane-rgb { font-size: .78rem; color: #a1a1a6; font-family: monospace; min-width: 80px; }
+  /* Pixel Lanes */
+  .lanes-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+  }
+  .lane-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    background: rgba(255, 255, 255, 0.02);
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    border-radius: 8px;
+    padding: 0.4rem 0.75rem;
+  }
+  .lane-tag {
+    font-size: 0.8rem;
+    font-weight: 700;
+    color: #86868b;
+    min-width: 60px;
+  }
+  .lane-row input[type='color'] {
+    width: 32px;
+    height: 26px;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: 4px;
+    padding: 0;
+    cursor: pointer;
+    background: transparent;
+  }
+  .lane-rgb {
+    font-size: 0.75rem;
+    color: #a1a1a6;
+    flex: 1;
+  }
+  .btn-send-lane, .btn-send-pwm {
+    background: rgba(0, 113, 227, 0.15);
+    border: 1px solid rgba(0, 113, 227, 0.35);
+    border-radius: 6px;
+    color: #64d2ff;
+    font-size: 0.75rem;
+    font-weight: 600;
+    padding: 0.3rem 0.7rem;
+    cursor: pointer;
+    transition: background 0.12s ease;
+  }
+  .btn-send-lane:hover, .btn-send-pwm:hover {
+    background: rgba(0, 113, 227, 0.3);
+  }
 
-  .pwm-grid { display: flex; flex-direction: column; gap: .5rem; }
-  .pwm-row { display: flex; align-items: center; gap: .75rem; padding: .5rem .75rem; background: rgba(255,255,255,.03); border-radius: 10px; }
-  .pwm-num { font-size: .8rem; font-weight: 700; color: #a1a1a6; width: 36px; font-family: monospace; }
-  .pwm-row input[type="range"] { flex: 1; accent-color: #ff9500; }
-  .pwm-val { font-size: .85rem; color: #f5f5f7; font-weight: 600; font-family: monospace; min-width: 45px; text-align: right; }
+  /* PWM Channels */
+  .pwm-quick-actions {
+    display: flex;
+    gap: 0.4rem;
+  }
+  .ghost-sm {
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 6px;
+    color: #f5f5f7;
+    font-size: 0.72rem;
+    padding: 0.25rem 0.55rem;
+    cursor: pointer;
+  }
+  .pwm-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+  }
+  .pwm-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    background: rgba(255, 255, 255, 0.02);
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    border-radius: 8px;
+    padding: 0.4rem 0.75rem;
+  }
+  .pwm-tag {
+    font-size: 0.8rem;
+    font-weight: 700;
+    color: #86868b;
+    min-width: 50px;
+  }
+  .pwm-row input[type='range'] {
+    flex: 1;
+    accent-color: #ff9f0a;
+  }
+  .pwm-val {
+    font-size: 0.75rem;
+    color: #ddd;
+    min-width: 80px;
+    text-align: right;
+  }
+  .pwm-pct {
+    font-size: 0.75rem;
+    color: #ff9f0a;
+    min-width: 40px;
+    text-align: right;
+  }
 
-  .send-btn { background: rgba(255,45,85,.15); border: 1px solid rgba(255,45,85,.3); border-radius: 8px; color: #ff2d55; font-size: .78rem; font-weight: 600; padding: .3rem .75rem; cursor: pointer; transition: all .2s; }
-  .send-btn:hover { background: rgba(255,45,85,.25); }
+  /* Burn-In Panel */
+  .burnin-panel {
+    background: rgba(255, 159, 10, 0.03);
+    border-color: rgba(255, 159, 10, 0.2);
+  }
+  .caution-badge {
+    background: rgba(255, 159, 10, 0.15);
+    border: 1px solid rgba(255, 159, 10, 0.35);
+    color: #ff9f0a;
+    padding: 0.2rem 0.6rem;
+    border-radius: 6px;
+    font-size: 0.7rem;
+    font-weight: 700;
+  }
+  .burnin-content {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+  }
+  .burnin-text {
+    margin: 0;
+    font-size: 0.82rem;
+    color: #a1a1a6;
+    line-height: 1.45;
+  }
+  .burnin-actions {
+    display: flex;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+  }
+  .btn-burnin {
+    background: #ff9f0a;
+    color: #000;
+    border: none;
+    border-radius: 8px;
+    padding: 0.55rem 1.25rem;
+    font-size: 0.85rem;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    cursor: pointer;
+    box-shadow: 0 4px 14px rgba(255, 159, 10, 0.35);
+    transition: all 0.15s ease;
+  }
+  .btn-burnin:hover {
+    background: #ffaa22;
+    transform: translateY(-1px);
+  }
+  .btn-burnin.active {
+    background: #ff3b30;
+    color: #fff;
+    box-shadow: 0 0 18px rgba(255, 59, 48, 0.6);
+  }
+  .btn-autoloop.large {
+    padding: 0.55rem 1.25rem;
+    font-size: 0.85rem;
+  }
 </style>
