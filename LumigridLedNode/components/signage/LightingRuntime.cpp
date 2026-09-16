@@ -122,7 +122,7 @@ esp_err_t LightingRuntime::start() {
     }
     if (!shutdown_sem_) shutdown_sem_ = xSemaphoreCreateBinary();
     scene_manager_.init();
-    BaseType_t ret = xTaskCreatePinnedToCore(task_entry, "lighting_rt", 16384, this, 6, &task_handle_, 1);
+    BaseType_t ret = xTaskCreatePinnedToCore(task_entry, "lighting_rt", 6144, this, 6, &task_handle_, 1);
     if (ret != pdPASS) {
         ESP_LOGE(TAG, "Failed to create task");
         controller_.set_commit_observer(nullptr);

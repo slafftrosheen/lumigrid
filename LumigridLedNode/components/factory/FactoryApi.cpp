@@ -681,12 +681,17 @@ esp_err_t get_presets(httpd_req_t* request) {
     FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
     if (!api_ptr->config()) return send_error(request, "503 Service Unavailable", "config_not_ready");
 
-    cJSON* arr = cJSON_CreateArray();
+    httpd_resp_set_type(request, "application/json");
+    httpd_resp_set_status(request, "200 OK");
+    httpd_resp_send_chunk(request, "[", 1);
+
+    bool first = true;
     for (uint8_t i = 0; i < kMaxPresets; ++i) {
         SceneConfig scene;
         if (api_ptr->config()->load_scene(i, scene) != ESP_OK) continue;
 
         cJSON* obj = cJSON_CreateObject();
+        if (!obj) continue;
         cJSON_AddNumberToObject(obj, "index", i);
         cJSON_AddStringToObject(obj, "name", scene.name);
         cJSON_AddNumberToObject(obj, "globalBrightness", scene.global_brightness);
@@ -724,17 +729,22 @@ esp_err_t get_presets(httpd_req_t* request) {
             cJSON_AddItemToArray(zones, zone_obj);
         }
         cJSON_AddItemToObject(obj, "zones", zones);
-        cJSON_AddItemToArray(arr, obj);
+
+        char* json = cJSON_PrintUnformatted(obj);
+        cJSON_Delete(obj);
+        if (json) {
+            if (!first) {
+                httpd_resp_send_chunk(request, ",", 1);
+            }
+            first = false;
+            httpd_resp_send_chunk(request, json, strlen(json));
+            cJSON_free(json);
+        }
     }
 
-    char* json = cJSON_PrintUnformatted(arr);
-    cJSON_Delete(arr);
-    if (json == nullptr) {
-        return send_error(request, "500 Internal Server Error", "json_encode_failed");
-    }
-    esp_err_t ret = send_json(request, json);
-    cJSON_free(json);
-    return ret;
+    httpd_resp_send_chunk(request, "]", 1);
+    httpd_resp_send_chunk(request, nullptr, 0);
+    return ESP_OK;
 }
 
 esp_err_t put_preset(httpd_req_t* request) {
@@ -1425,36 +1435,23 @@ esp_err_t put_sequence(httpd_req_t* request) {
 esp_err_t get_effects(httpd_req_t* request) {
     if (!api::authorize(request, api::ApiRole::Operator)) return ESP_OK;
 
-    cJSON* effects = cJSON_CreateArray();
-    for (uint8_t index = static_cast<uint8_t>(SignageEffect::Solid);
-         index <= static_cast<uint8_t>(SignageEffect::StaticPulse);
-         ++index) {
-        const EffectMetadata& metadata = signage_effect_metadata(
-            static_cast<SignageEffect>(index)
-        );
-        cJSON* effect = cJSON_CreateObject();
-        cJSON_AddStringToObject(effect, "id", metadata.id);
-        cJSON_AddStringToObject(effect, "label", metadata.label);
-        cJSON_AddStringToObject(effect, "description", metadata.description);
-        cJSON_AddBoolToObject(effect, "hasParameter", metadata.has_parameter);
-        if (metadata.has_parameter) {
-            cJSON_AddStringToObject(effect, "parameterLabel", metadata.parameter_label);
-            cJSON_AddStringToObject(effect, "parameterUnit", metadata.parameter_unit);
-            cJSON_AddNumberToObject(effect, "parameterMin", metadata.parameter_min);
-            cJSON_AddNumberToObject(effect, "parameterMax", metadata.parameter_max);
-            cJSON_AddNumberToObject(effect, "parameterDefault", metadata.parameter_default);
-        }
-        cJSON_AddItemToArray(effects, effect);
-    }
+    static const char kEffectsJson[] =
+        "["
+        "{\"id\":\"solid\",\"label\":\"Steady color\",\"description\":\"A constant, even wash of color.\",\"hasParameter\":false},"
+        "{\"id\":\"breathe\",\"label\":\"Smooth pulse\",\"description\":\"Gently fades between a soft glow and full brightness.\",\"hasParameter\":true,\"parameterLabel\":\"Minimum glow\",\"parameterUnit\":\"%\",\"parameterMin\":1,\"parameterMax\":100,\"parameterDefault\":4},"
+        "{\"id\":\"chase\",\"label\":\"Moving comet\",\"description\":\"A bright comet travels along the strip.\",\"hasParameter\":true,\"parameterLabel\":\"Tail length\",\"parameterUnit\":\"pixels\",\"parameterMin\":1,\"parameterMax\":8,\"parameterDefault\":3},"
+        "{\"id\":\"sweep\",\"label\":\"Color sweep\",\"description\":\"Builds color across the strip from end to end.\",\"hasParameter\":false},"
+        "{\"id\":\"reveal\",\"label\":\"Soft reveal\",\"description\":\"Fades the lane in for a polished sign-on.\",\"hasParameter\":true,\"parameterLabel\":\"Fade length\",\"parameterUnit\":\"%\",\"parameterMin\":10,\"parameterMax\":90,\"parameterDefault\":25},"
+        "{\"id\":\"sparkle\",\"label\":\"Random twinkle\",\"description\":\"Adds crisp white twinkles over the base color.\",\"hasParameter\":true,\"parameterLabel\":\"Twinkles\",\"parameterUnit\":\"per lane\",\"parameterMin\":1,\"parameterMax\":12,\"parameterDefault\":2},"
+        "{\"id\":\"gradient\",\"label\":\"Flowing glow\",\"description\":\"Moves a soft wave of light along the strip.\",\"hasParameter\":true,\"parameterLabel\":\"Wave contrast\",\"parameterUnit\":\"%\",\"parameterMin\":0,\"parameterMax\":100,\"parameterDefault\":100},"
+        "{\"id\":\"strobe\",\"label\":\"Beat strobe\",\"description\":\"Flashes the lane with an adjustable on-time.\",\"hasParameter\":true,\"parameterLabel\":\"Flash time\",\"parameterUnit\":\"%\",\"parameterMin\":5,\"parameterMax\":95,\"parameterDefault\":50},"
+        "{\"id\":\"fire\",\"label\":\"Living flame\",\"description\":\"Creates a flickering flame texture from the selected color.\",\"hasParameter\":true,\"parameterLabel\":\"Flame height\",\"parameterUnit\":\"%\",\"parameterMin\":20,\"parameterMax\":100,\"parameterDefault\":70},"
+        "{\"id\":\"aurora\",\"label\":\"Aurora glow\",\"description\":\"Gentle shifting colors across the strip.\",\"hasParameter\":true,\"parameterLabel\":\"Hue shift\",\"parameterUnit\":\"deg\",\"parameterMin\":1,\"parameterMax\":255,\"parameterDefault\":120},"
+        "{\"id\":\"colorwave\",\"label\":\"Color wave\",\"description\":\"Smooth sine wave color interpolation.\",\"hasParameter\":true,\"parameterLabel\":\"Wave length\",\"parameterUnit\":\"px\",\"parameterMin\":10,\"parameterMax\":255,\"parameterDefault\":50},"
+        "{\"id\":\"staticpulse\",\"label\":\"Static pulse\",\"description\":\"Slow dimmer pulse for main/ambiance lights.\",\"hasParameter\":true,\"parameterLabel\":\"Min dim\",\"parameterUnit\":\"%\",\"parameterMin\":0,\"parameterMax\":100,\"parameterDefault\":20}"
+        "]";
 
-    char* json = cJSON_PrintUnformatted(effects);
-    cJSON_Delete(effects);
-    if (json == nullptr) {
-        return send_error(request, "500 Internal Server Error", "json_encode_failed");
-    }
-    const esp_err_t result = send_json(request, json);
-    cJSON_free(json);
-    return result;
+    return send_json(request, kEffectsJson);
 }
 
 esp_err_t get_calendar_schedule(httpd_req_t* request) {
@@ -1630,7 +1627,19 @@ esp_err_t get_audit_log(httpd_req_t* request) {
 
 esp_err_t FactoryApi::serve_dashboard(httpd_req_t* request) {
     httpd_resp_set_type(request, "text/html");
-    return httpd_resp_send(request, dashboard_html, strlen(dashboard_html));
+    httpd_resp_set_hdr(request, "Content-Encoding", "gzip");
+    httpd_resp_set_hdr(request, "Cache-Control", "no-cache, no-store, must-revalidate");
+
+    constexpr size_t kChunkSize = 2048;
+    for (size_t offset = 0; offset < dashboard_html_gz_len; offset += kChunkSize) {
+        size_t to_send = (dashboard_html_gz_len - offset > kChunkSize) ? kChunkSize : (dashboard_html_gz_len - offset);
+        esp_err_t err = httpd_resp_send_chunk(request, reinterpret_cast<const char*>(dashboard_html_gz + offset), to_send);
+        if (err != ESP_OK) {
+            httpd_resp_send_chunk(request, nullptr, 0);
+            return err;
+        }
+    }
+    return httpd_resp_send_chunk(request, nullptr, 0);
 }
 
 FactoryApi::FactoryApi(FactoryRunner& runner) : runner_(runner) {}
@@ -1975,6 +1984,11 @@ struct WsPreviewArg {
     std::vector<uint8_t> payload;
 };
 
+static esp_err_t get_favicon(httpd_req_t* request) {
+    httpd_resp_set_status(request, "204 No Content");
+    return httpd_resp_send(request, nullptr, 0);
+}
+
 esp_err_t FactoryApi::start(
     uint16_t signage_port,
     uint16_t factory_port,
@@ -1991,13 +2005,14 @@ esp_err_t FactoryApi::start(
     dmx_router_ = dmx_router;
 
     httpd_config_t http_config = HTTPD_DEFAULT_CONFIG();
-    http_config.max_uri_handlers = 36;
+    http_config.max_uri_handlers = 40;
+    http_config.stack_size = 8192;
+    http_config.lru_purge_enable = true;
+    http_config.recv_wait_timeout = 10;
+    http_config.send_wait_timeout = 10;
     http_config.server_port = signage_port;
-    ESP_RETURN_ON_ERROR(httpd_start(&signage_server_, &http_config), "factory-api", "start signage");
-
-    http_config.server_port = factory_port;
-    http_config.ctrl_port += 1; // Prevent EADDRINUSE for ctrl_port
-    ESP_RETURN_ON_ERROR(httpd_start(&factory_server_, &http_config), "factory-api", "start factory");
+    ESP_RETURN_ON_ERROR(httpd_start(&signage_server_, &http_config), "factory-api", "start server");
+    factory_server_ = signage_server_;
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wmissing-field-initializers"
@@ -2016,6 +2031,7 @@ esp_err_t FactoryApi::start(
         { .uri = "/ws", .method = HTTP_GET, .handler = ws_handler, .user_ctx = this,
           .is_websocket = true, .handle_ws_control_frames = false, .supported_subprotocol = nullptr },
         { .uri = "/",   .method = HTTP_GET, .handler = serve_dashboard, .user_ctx = this },
+        { .uri = "/favicon.ico", .method = HTTP_GET, .handler = get_favicon, .user_ctx = this },
         
         // ── Signage endpoints ──
         { .uri = "/api/v1/presets",           .method = HTTP_GET,  .handler = get_presets,      .user_ctx = this },
@@ -2042,7 +2058,7 @@ esp_err_t FactoryApi::start(
 
     for (const auto& endpoint : factory_routes) {
         ESP_RETURN_ON_ERROR(
-            httpd_register_uri_handler(factory_server_, &endpoint),
+            httpd_register_uri_handler(signage_server_, &endpoint),
             "api",
             "register uri"
         );
@@ -2050,12 +2066,6 @@ esp_err_t FactoryApi::start(
     for (const auto& endpoint : signage_routes) {
         ESP_RETURN_ON_ERROR(
             httpd_register_uri_handler(signage_server_, &endpoint),
-            "api",
-            "register uri"
-        );
-        // Bind signage routes to factory server too, so the dashboard can access them
-        ESP_RETURN_ON_ERROR(
-            httpd_register_uri_handler(factory_server_, &endpoint),
             "api",
             "register uri"
         );
@@ -2217,9 +2227,6 @@ void FactoryApi::stop() {
     if (signage_server_ != nullptr) {
         httpd_stop(signage_server_);
         signage_server_ = nullptr;
-    }
-    if (factory_server_ != nullptr) {
-        httpd_stop(factory_server_);
         factory_server_ = nullptr;
     }
 }

@@ -63,21 +63,21 @@ esp_err_t ConfigStore::init() {
 esp_err_t ConfigStore::save_scene(uint8_t index, const SceneConfig& scene) {
     if (index >= kMaxPresets) return ESP_ERR_INVALID_ARG;
 
-    auto to_save = std::make_unique<SceneConfig>(scene);
-    to_save->checksum = calc_scene_crc(*to_save);
+    SceneConfig to_save = scene;
+    to_save.checksum = calc_scene_crc(to_save);
 
     char key[12];
     make_key(key, sizeof(key), "scene", index);
 
     ESP_RETURN_ON_ERROR(
-        nvs_set_blob(handle_, key, to_save.get(), sizeof(SceneConfig)),
+        nvs_set_blob(handle_, key, &to_save, sizeof(SceneConfig)),
         TAG, "save scene primary"
     );
     ESP_RETURN_ON_ERROR(nvs_commit(handle_), TAG, "commit scene primary");
 
     char bak_key[16];
     snprintf(bak_key, sizeof(bak_key), "scene_b_%u", index);
-    esp_err_t bak_err = nvs_set_blob(handle_, bak_key, to_save.get(), sizeof(SceneConfig));
+    esp_err_t bak_err = nvs_set_blob(handle_, bak_key, &to_save, sizeof(SceneConfig));
     if (bak_err != ESP_OK) {
         ESP_LOGW(TAG, "Scene %u backup write failed: %s", index, esp_err_to_name(bak_err));
     } else {
@@ -101,14 +101,14 @@ esp_err_t ConfigStore::load_scene(uint8_t index, SceneConfig& scene) {
         esp_err_t err = nvs_get_blob(handle_, k, nullptr, &len);
         if (err == ESP_OK && len > 0) {
             if (len == sizeof(SceneConfig)) {
-                auto temp = std::make_unique<SceneConfig>();
-                err = nvs_get_blob(handle_, k, temp.get(), &len);
+                len = sizeof(SceneConfig);
+                err = nvs_get_blob(handle_, k, &out, &len);
                 if (err == ESP_OK) {
-                    if (temp->checksum != calc_scene_crc(*temp)) {
+                    if (out.checksum != calc_scene_crc(out)) {
                         ESP_LOGW(TAG, "Scene %s CRC mismatch", k);
                         return ESP_ERR_NVS_INVALID_STATE;
                     }
-                    out = *temp;
+                    return ESP_OK;
                 }
             } else if (len == 128) {
                 // Legacy v0 SceneConfig (128 bytes)
@@ -128,38 +128,39 @@ esp_err_t ConfigStore::load_scene(uint8_t index, SceneConfig& scene) {
                     uint32_t checksum = 0;
                 };
                 
-                auto old = std::make_unique<OldSceneConfig>();
-                err = nvs_get_blob(handle_, k, old.get(), &len);
+                OldSceneConfig old{};
+                len = sizeof(OldSceneConfig);
+                err = nvs_get_blob(handle_, k, &old, &len);
                 if (err == ESP_OK) {
                     // Check legacy CRC (using the same offset logic)
                     uint32_t expected_crc = ~0U;
-                    expected_crc = esp_rom_crc32_le(expected_crc, reinterpret_cast<const uint8_t*>(old.get()), offsetof(OldSceneConfig, checksum));
-                    if (old->checksum != expected_crc) {
+                    expected_crc = esp_rom_crc32_le(expected_crc, reinterpret_cast<const uint8_t*>(&old), offsetof(OldSceneConfig, checksum));
+                    if (old.checksum != expected_crc) {
                         ESP_LOGW(TAG, "Legacy Scene %s CRC mismatch", k);
                         return ESP_ERR_NVS_INVALID_STATE;
                     }
                     
-                    auto migrated = std::make_unique<SceneConfig>();
-                    std::memcpy(migrated->name, old->name, sizeof(migrated->name) - 1);
-                    migrated->name[sizeof(migrated->name) - 1] = '\0';
-                    migrated->global_brightness = old->global_brightness;
-                    migrated->transition_ms = old->transition_ms;
+                    out = SceneConfig{};
+                    std::memcpy(out.name, old.name, sizeof(out.name) - 1);
+                    out.name[sizeof(out.name) - 1] = '\0';
+                    out.global_brightness = old.global_brightness;
+                    out.transition_ms = old.transition_ms;
                     
                     for (int i = 0; i < 8; ++i) {
-                        migrated->zones[i].layers[0].effect = old->zones[i].effect;
-                        migrated->zones[i].layers[0].primary_color = old->zones[i].primary_color;
-                        migrated->zones[i].layers[0].secondary_color = old->zones[i].secondary_color;
-                        migrated->zones[i].layers[0].speed_ms = old->zones[i].speed_ms;
-                        migrated->zones[i].layers[0].fx_param = old->zones[i].fx_param;
-                        migrated->zones[i].layers[0].palette_id = old->zones[i].palette_id;
-                        migrated->zones[i].layers[0].opacity = 255;
-                        migrated->zones[i].layers[0].blend_mode = BlendMode::Normal;
-                        migrated->zones[i].layers[0].enabled = true;
+                        out.zones[i].layers[0].effect = old.zones[i].effect;
+                        out.zones[i].layers[0].primary_color = old.zones[i].primary_color;
+                        out.zones[i].layers[0].secondary_color = old.zones[i].secondary_color;
+                        out.zones[i].layers[0].speed_ms = old.zones[i].speed_ms;
+                        out.zones[i].layers[0].fx_param = old.zones[i].fx_param;
+                        out.zones[i].layers[0].palette_id = old.zones[i].palette_id;
+                        out.zones[i].layers[0].opacity = 255;
+                        out.zones[i].layers[0].blend_mode = BlendMode::Normal;
+                        out.zones[i].layers[0].enabled = true;
                     }
                     
-                    migrated->checksum = calc_scene_crc(*migrated);
-                    out = *migrated;
+                    out.checksum = calc_scene_crc(out);
                     ESP_LOGI(TAG, "Migrated legacy scene %s", k);
+                    return ESP_OK;
                 }
             } else {
                 err = ESP_ERR_NVS_INVALID_LENGTH;
@@ -205,9 +206,9 @@ esp_err_t ConfigStore::delete_scene(uint8_t index) {
 
 uint8_t ConfigStore::scene_count() {
     uint8_t count = 0;
-    auto tmp = std::make_unique<SceneConfig>();
+    SceneConfig tmp;
     for (uint8_t i = 0; i < kMaxPresets; ++i) {
-        if (load_scene(i, *tmp) == ESP_OK) ++count;
+        if (load_scene(i, tmp) == ESP_OK) ++count;
     }
     return count;
 }
@@ -629,20 +630,20 @@ esp_err_t ConfigStore::load_config(DeviceConfig& config) {
         esp_err_t err = nvs_get_blob(handle_, k, nullptr, &len);
         if (err == ESP_OK && len > 0) {
             if (len == sizeof(DeviceConfig)) {
-                auto temp = std::make_unique<DeviceConfig>();
-                err = nvs_get_blob(handle_, k, temp.get(), &len);
+                len = sizeof(DeviceConfig);
+                err = nvs_get_blob(handle_, k, &out, &len);
                 if (err == ESP_OK) {
-                    if (temp->checksum != calc_device_crc(*temp)) {
+                    if (out.checksum != calc_device_crc(out)) {
                         ESP_LOGW(TAG, "DeviceConfig %s CRC mismatch", k);
                         return ESP_ERR_NVS_INVALID_STATE;
                     }
-                    if (temp->schema_version < 2) {
-                        ESP_LOGI(TAG, "Migrating DeviceConfig %s from in-memory schema v%u to v2", k, temp->schema_version);
-                        temp->schema_version = 2;
-                        temp->checksum = calc_device_crc(*temp);
+                    if (out.schema_version < 2) {
+                        ESP_LOGI(TAG, "Migrating DeviceConfig %s from in-memory schema v%u to v2", k, out.schema_version);
+                        out.schema_version = 2;
+                        out.checksum = calc_device_crc(out);
                         needs_persist = true;
                     }
-                    out = *temp;
+                    return ESP_OK;
                 }
             } else if (len == sizeof(DeviceConfigV1)) {
                 // Real schema migration: decode legacy v1 structure (Item 16)
@@ -714,9 +715,11 @@ esp_err_t ConfigStore::load_config(DeviceConfig& config) {
     if (err == ESP_ERR_NVS_NOT_FOUND || err == ESP_ERR_NVS_INVALID_STATE || err == ESP_ERR_NVS_INVALID_LENGTH) {
         auto def = std::make_unique<DeviceConfig>();
         config = *def;
+#if !defined(CONFIG_LUMIGRID_ENABLE_DEV_CREDENTIALS)
         generate_token(config.admin_token, sizeof(config.admin_token));
         generate_token(config.installer_token, sizeof(config.installer_token));
         generate_token(config.operator_token, sizeof(config.operator_token));
+#endif
         
         ESP_LOGW(TAG, "==================================================");
         ESP_LOGW(TAG, "  NEW CREDENTIALS GENERATED");
@@ -733,6 +736,7 @@ esp_err_t ConfigStore::load_config(DeviceConfig& config) {
     } else if (err == ESP_OK) {
         // Rotate any known legacy default credentials still present in stored config
         bool token_rotated = false;
+#if !defined(CONFIG_LUMIGRID_ENABLE_DEV_CREDENTIALS)
         if (std::strcmp(config.admin_token, "lumigrid_admin") == 0) {
             generate_token(config.admin_token, sizeof(config.admin_token));
             token_rotated = true;
@@ -745,6 +749,7 @@ esp_err_t ConfigStore::load_config(DeviceConfig& config) {
             generate_token(config.operator_token, sizeof(config.operator_token));
             token_rotated = true;
         }
+#endif
 
         if (token_rotated) {
             ESP_LOGW(TAG, "==================================================");
@@ -817,14 +822,14 @@ esp_err_t ConfigStore::load_sequence(Sequence& seq) {
         esp_err_t err = nvs_get_blob(handle_, k, nullptr, &len);
         if (err == ESP_OK && len > 0) {
             if (len <= sizeof(Sequence)) {
-                auto temp = std::make_unique<Sequence>();
-                err = nvs_get_blob(handle_, k, temp.get(), &len);
+                len = sizeof(Sequence);
+                err = nvs_get_blob(handle_, k, &out, &len);
                 if (err == ESP_OK) {
-                    if (temp->checksum != calc_seq_crc(*temp)) {
+                    if (out.checksum != calc_seq_crc(out)) {
                         ESP_LOGW(TAG, "Sequence %s CRC mismatch", k);
                         return ESP_ERR_NVS_INVALID_STATE;
                     }
-                    out = *temp;
+                    return ESP_OK;
                 }
             } else {
                 err = ESP_ERR_NVS_INVALID_LENGTH;
@@ -889,14 +894,14 @@ esp_err_t ConfigStore::load_calendar_schedule(CalendarSchedule& schedule) {
         esp_err_t err = nvs_get_blob(handle_, k, nullptr, &len);
         if (err == ESP_OK && len > 0) {
             if (len <= sizeof(CalendarSchedule)) {
-                auto temp = std::make_unique<CalendarSchedule>();
-                err = nvs_get_blob(handle_, k, temp.get(), &len);
+                len = sizeof(CalendarSchedule);
+                err = nvs_get_blob(handle_, k, &out, &len);
                 if (err == ESP_OK) {
-                    if (temp->checksum != calc_calendar_crc(*temp)) {
+                    if (out.checksum != calc_calendar_crc(out)) {
                         ESP_LOGW(TAG, "Calendar %s CRC mismatch", k);
                         return ESP_ERR_NVS_INVALID_STATE;
                     }
-                    out = *temp;
+                    return ESP_OK;
                 }
             } else {
                 err = ESP_ERR_NVS_INVALID_LENGTH;
@@ -989,6 +994,7 @@ void ConfigStore::ensure_defaults() {
     // 🔒 Security Provisioning
     auto dc = std::make_unique<DeviceConfig>();
     if (load_config(*dc) == ESP_OK) {
+#if !defined(CONFIG_LUMIGRID_ENABLE_DEV_CREDENTIALS)
         if (strcmp(dc->admin_token, "lumigrid_admin") == 0) {
             ESP_LOGI(TAG, "Factory default credentials detected. Provisioning new tokens...");
             
@@ -1017,6 +1023,7 @@ void ConfigStore::ensure_defaults() {
                 ESP_LOGE(TAG, "Failed to persist provisioned credentials: %s", esp_err_to_name(cfg_err));
             }
         }
+#endif
     }
 }
 

@@ -121,7 +121,7 @@ esp_err_t FactoryRunner::start() {
     const BaseType_t created = xTaskCreatePinnedToCore(
         task_entry,
         "lg_factory",
-        6144,
+        4096,
         this,
         5,
         &task_handle_,

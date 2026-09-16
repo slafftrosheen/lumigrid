@@ -75,16 +75,20 @@ bool authorize(httpd_req_t* request, ApiRole minimum_role) {
 
     if (s_admin_token[0] != '\0' && std::strcmp(provided_token, s_admin_token) == 0) {
         provided_role = ApiRole::Admin;
-#if defined(CONFIG_LUMIGRID_ENABLE_DEV_CREDENTIALS)
-    } else if (std::strcmp(provided_token, "admin") == 0) {
-        provided_role = ApiRole::Admin;
-#endif
     } else if (s_installer_token[0] != '\0' && std::strcmp(provided_token, s_installer_token) == 0) {
         provided_role = ApiRole::Installer;
     } else if (s_operator_token[0] != '\0' && std::strcmp(provided_token, s_operator_token) == 0) {
         provided_role = ApiRole::Operator;
+#if defined(CONFIG_LUMIGRID_ENABLE_DEV_CREDENTIALS)
+    } else if (std::strcmp(provided_token, "admin") == 0 || std::strcmp(provided_token, "lumigrid_admin") == 0) {
+        provided_role = ApiRole::Admin;
+    } else if (std::strcmp(provided_token, "installer") == 0 || std::strcmp(provided_token, "lumigrid_install") == 0) {
+        provided_role = ApiRole::Installer;
+    } else if (std::strcmp(provided_token, "operator") == 0 || std::strcmp(provided_token, "lumigrid_op") == 0) {
+        provided_role = ApiRole::Operator;
+#endif
     } else {
-        ESP_LOGW(TAG, "Auth failed! Received invalid token.");
+        ESP_LOGW(TAG, "Auth failed! Received invalid token: '%s'", provided_token);
         httpd_resp_send_err(request, HTTPD_403_FORBIDDEN, "Invalid factory token");
         return false;
     }

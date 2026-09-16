@@ -437,6 +437,11 @@
             .app-shell { padding-bottom: calc(4.5rem + env(safe-area-inset-bottom, 0)); }
         }
     </style>
+    <script>
+        window.lg = window.lg || {
+            connect: function() { console.warn('LumiGrid scripts loading...'); }
+        };
+    </script>
 </head>
 <body>
 
@@ -454,8 +459,8 @@
             </div>
             <h1 id="login-title">Make light<br>feel alive.</h1>
             <p class="muted" style="margin-bottom: 1.25rem;">Connect securely to monitor live LED strips, patch DMX universes, and orchestrate scenes.</p>
-            <label for="experience-token" style="display:block; font-size:0.75rem; font-weight:700; color:var(--text-secondary); margin-bottom:0.4rem;">Node Access Token</label>
-            <input id="experience-token" type="password" autocomplete="current-password" placeholder="Enter operator or admin token" required>
+            <label for="experience-token" style="display:block; font-size:0.75rem; font-weight:700; color:var(--text-secondary); margin-bottom:0.4rem;">Node Access Token <span style="font-weight:400; color:var(--text-muted);">(Default: lumigrid_admin)</span></label>
+            <input id="experience-token" type="password" autocomplete="current-password" placeholder="Enter operator or admin token" value="lumigrid_admin" required>
             <button class="button-primary" type="submit" style="width: 100%; margin-top: 1.25rem; min-height: 2.5rem;">Connect to Node</button>
         </form>
     </div>
@@ -1240,18 +1245,16 @@ window.lg = (() => {
 
     // ── Data Sync ──
     async function refresh() {
-        const [effects, presets, status, sequence, config, health, schedules] = await Promise.all([
-            api('/api/v1/effects').catch(() => fallbackEffects),
-            api('/api/v1/presets'),
-            api('/api/v1/status'),
-            api('/api/v1/sequence'),
-            api('/api/v1/config'),
-            api('/api/v1/health').catch(() => ({})),
-            api('/api/v1/schedules').catch(() => [])
-        ]);
+        const effects = await api('/api/v1/effects').catch(() => fallbackEffects);
+        const presets = await api('/api/v1/presets').catch(() => []);
+        const status = await api('/api/v1/status').catch(() => ({}));
+        const sequence = await api('/api/v1/sequence').catch(() => ({}));
+        const config = await api('/api/v1/config').catch(() => ({}));
+        const health = await api('/api/v1/health').catch(() => ({}));
+        const schedules = await api('/api/v1/schedules').catch(() => []);
 
         state.effects = Array.isArray(effects) && effects.length ? effects : fallbackEffects;
-        state.presets = presets.map(p => {
+        state.presets = (Array.isArray(presets) ? presets : []).map(p => {
             const sc = {...p};
             sc.zones = Array.from({length:8}, (_, z) => ({
                 layers: Array.from({length:3}, (_, l) => ({

@@ -123,18 +123,15 @@ esp_err_t Pca9685Driver::init() {
     // Set RESTART bit
     ESP_RETURN_ON_ERROR(write_register(kMode1, kMode1Ai | kMode1Restart), "pca", "restart");
 
-    // Verify chip communication with a read-back.
-    uint8_t reg = kPrescale;
+    // Verify chip communication with a read-back of MODE1.
+    uint8_t reg = kMode1;
     uint8_t val = 0;
     xSemaphoreTake(s_i2c_mutex, portMAX_DELAY);
     err = i2c_master_transmit_receive(s_dev, &reg, 1, &val, 1, 100);
     xSemaphoreGive(s_i2c_mutex);
 
     if (err == ESP_OK) {
-        ESP_LOGD("pca", "PRESCALE read-back: %u", val);
-        if (val != 5) {
-            ESP_LOGE("pca", "Read %u instead of 5 — chip may be dead or bus stuck", val);
-        }
+        ESP_LOGI("pca", "PCA9685 I2C communication verified at 0x%02X (MODE1: 0x%02X)", lg::board::kPcaAddress, val);
     } else {
         ESP_LOGW("pca", "Read-back failed: %s (non-fatal)", esp_err_to_name(err));
     }

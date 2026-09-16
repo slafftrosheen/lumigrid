@@ -176,6 +176,15 @@ esp_err_t LumigridRuntime::init() {
     DeviceConfig dev_cfg;
     if (config_.load_config(dev_cfg) == ESP_OK) {
         startup_stage_ = StartupStage::ConfigLoaded;
+#if defined(CONFIG_LUMIGRID_ENABLE_DEV_CREDENTIALS)
+        if (std::strcmp(dev_cfg.admin_token, "lumigrid_admin") != 0) {
+            std::strncpy(dev_cfg.admin_token, "lumigrid_admin", sizeof(dev_cfg.admin_token) - 1);
+            std::strncpy(dev_cfg.installer_token, "lumigrid_install", sizeof(dev_cfg.installer_token) - 1);
+            std::strncpy(dev_cfg.operator_token, "lumigrid_op", sizeof(dev_cfg.operator_token) - 1);
+            config_.save_config(dev_cfg);
+            ESP_LOGW("lumigrid", "Dev credentials restored: admin_token=lumigrid_admin");
+        }
+#endif
         api::update_tokens(dev_cfg.admin_token, dev_cfg.installer_token, dev_cfg.operator_token);
 
         ConfigStore::ConfigValidationResult val_res;
