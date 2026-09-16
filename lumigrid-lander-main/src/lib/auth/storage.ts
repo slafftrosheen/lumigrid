@@ -55,3 +55,91 @@ export function setSelectedNodeIp(nodeIp: string): void {
   if (value) writeString(NODE_IP_KEY, value);
   else removeValue(NODE_IP_KEY);
 }
+
+// ── Fleet Node Metadata ────────────────────────────────────────────────────────
+
+export const NODE_META_KEY = 'lg_nodes_meta';
+
+export interface SavedNodeInfo {
+  ip: string;
+  name: string;
+  lastSeen?: number;
+}
+
+export function readNodeMetadataMap(): Record<string, { name?: string; lastSeen?: number }> {
+  const raw = readString(NODE_META_KEY, '{}');
+  try {
+    const parsed = JSON.parse(raw);
+    return typeof parsed === 'object' && parsed !== null ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+export function writeNodeMetadataMap(map: Record<string, { name?: string; lastSeen?: number }>): void {
+  writeString(NODE_META_KEY, JSON.stringify(map));
+}
+
+export function getSavedNodes(): SavedNodeInfo[] {
+  const ips = readStringList(NODE_LIST_KEY);
+  const metaMap = readNodeMetadataMap();
+  return ips.map(ip => ({
+    ip,
+    name: metaMap[ip]?.name || ip,
+    lastSeen: metaMap[ip]?.lastSeen,
+  }));
+}
+
+export function addSavedNode(ip: string, name?: string): void {
+  const cleanIp = ip.trim();
+  if (!cleanIp) return;
+  const ips = readStringList(NODE_LIST_KEY);
+  if (!ips.includes(cleanIp)) {
+    writeStringList(NODE_LIST_KEY, [...ips, cleanIp]);
+  }
+  const metaMap = readNodeMetadataMap();
+  metaMap[cleanIp] = {
+    ...metaMap[cleanIp],
+    name: name?.trim() || metaMap[cleanIp]?.name || cleanIp,
+    lastSeen: Date.now(),
+  };
+  writeNodeMetadataMap(metaMap);
+}
+
+export function renameSavedNode(ip: string, newName: string): void {
+  const cleanIp = ip.trim();
+  const cleanName = newName.trim();
+  if (!cleanIp || !cleanName) return;
+  const metaMap = readNodeMetadataMap();
+  metaMap[cleanIp] = {
+    ...metaMap[cleanIp],
+    name: cleanName,
+  };
+  writeNodeMetadataMap(metaMap);
+}
+
+export function removeSavedNode(ip: string): void {
+  const cleanIp = ip.trim();
+  const ips = readStringList(NODE_LIST_KEY).filter(i => i !== cleanIp);
+  writeStringList(NODE_LIST_KEY, ips);
+
+  const metaMap = readNodeMetadataMap();
+  delete metaMap[cleanIp];
+  writeNodeMetadataMap(metaMap);
+
+  if (getSelectedNodeIp() === cleanIp) {
+    setSelectedNodeIp(ips.length > 0 ? ips[0] : '');
+  }
+}
+
+export function updateNodeLastSeen(ip: string): void {
+  const cleanIp = ip.trim();
+  if (!cleanIp) return;
+  const metaMap = readNodeMetadataMap();
+  metaMap[cleanIp] = {
+    ...metaMap[cleanIp],
+    lastSeen: Date.now(),
+  };
+  writeNodeMetadataMap(metaMap);
+}
+

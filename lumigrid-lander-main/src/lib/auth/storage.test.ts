@@ -64,4 +64,37 @@ describe('selected node storage', () => {
     expect(mockStorage.getItem(NODE_IP_KEY)).toBeNull();
     expect(getSelectedNodeIp()).toBe('');
   });
+
+  it('manages saved fleet nodes, metadata, renaming, and removal', async () => {
+    const {
+      getSavedNodes,
+      addSavedNode,
+      renameSavedNode,
+      removeSavedNode,
+      updateNodeLastSeen,
+    } = await import('./storage');
+
+    expect(getSavedNodes()).toEqual([]);
+
+    addSavedNode('192.168.1.10', 'Stage Left');
+    addSavedNode('192.168.1.20', 'Stage Right');
+
+    let nodes = getSavedNodes();
+    expect(nodes).toHaveLength(2);
+    expect(nodes[0].name).toBe('Stage Left');
+    expect(nodes[1].name).toBe('Stage Right');
+
+    renameSavedNode('192.168.1.10', 'Main Truss');
+    nodes = getSavedNodes();
+    expect(nodes[0].name).toBe('Main Truss');
+
+    updateNodeLastSeen('192.168.1.20');
+    expect(getSavedNodes()[1].lastSeen).toBeGreaterThan(0);
+
+    removeSavedNode('192.168.1.10');
+    nodes = getSavedNodes();
+    expect(nodes).toHaveLength(1);
+    expect(nodes[0].ip).toBe('192.168.1.20');
+  });
 });
+
