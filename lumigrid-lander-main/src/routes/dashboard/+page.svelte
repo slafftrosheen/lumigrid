@@ -1,259 +1,701 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { getNodeStatus, setBrightness, setPower, applyPreset, emergencyOff } from '$lib/api/node';
-  import type { NodeStatus } from '$lib/api/node';
-  import { readString, readStringList, writeString, NODE_IP_KEY, NODE_LIST_KEY } from '$lib/auth/storage';
+  import { getSelectedNodeIp } from '$lib/auth/storage';
+  import {
+    getNodeLiveState,
+    getNodeLiveSnapshot,
+    nodePixelStore,
+    connect,
+    refreshHealth,
+    reconnect as reconnectNode,
+    LANES,
+    PIXELS_PER_LANE,
+    BUF_SIZE,
+    type NodeLiveState,
+  } from '$lib/state/nodeStore';
+  import {
+    postFactoryAbort,
+    postFactoryEffect,
+    postFactoryAutoLoop,
+  } from '$lib/api/node';
 
-  let nodeList  = $state<string[]>([]);
-  let statuses  = $state<Record<string, NodeStatus>>({});
-  let loading   = $state(true);
-  let bulkBri   = $state(128);
-  let bulkPreset = $state(1);
-  let selected  = $state<Set<string>>(new Set());
-  let polling: ReturnType<typeof setInterval> | null = null;
+  let nodeIp = $state('');
+  let liveState = $state<NodeLiveState>(getNodeLiveSnapshot());
+  let canvasEl: HTMLCanvasElement | null = null;
+  let rafId = 0;
+  let unsubscribeState: (() => void) | null = null;
+  let unsubscribePixels: (() => void) | null = null;
+  let actionToast = $state('');
+  let actionLoading = $state(false);
+  let localBri = $state(128);
 
-  // Track uptime events in shared browser storage for Feature 6
-  function recordUptimeEvent(ip: string, online: boolean) {
-    const key = `lg_uptime_${ip}`;
-    const raw = readString(key);
-    let events: { ts: number; online: boolean }[] = [];
-    if (raw) {
-      try { events = JSON.parse(raw); } catch { events = []; }
-    }
-    const now = Date.now();
-    const last = events[events.length - 1];
-    if (!last || last.online !== online || now - last.ts > 300_000) {
-      events.push({ ts: now, online });
-      if (events.length > 1000) events.splice(0, events.length - 1000);
-      writeString(key, JSON.stringify(events));
-    }
+  function toast(msg: string) {
+    actionToast = msg;
+    setTimeout(() => {
+      if (actionToast === msg) actionToast = '';
+    }, 3000);
   }
 
-  async function refreshAll() {
-    loading = statuses && Object.keys(statuses).length === 0;
-    const results = await Promise.all(nodeList.map(ip => getNodeStatus(ip)));
-    const next: Record<string, NodeStatus> = {};
-    for (const s of results) {
-      next[s.ip] = s;
-      recordUptimeEvent(s.ip, s.error === null);
-    }
-    statuses = next;
-    loading = false;
-  }
-
-  onMount(() => {
-    nodeList = readStringList(NODE_LIST_KEY);
-    if (nodeList.length) refreshAll();
-    else loading = false;
-    polling = setInterval(refreshAll, 10_000);
-  });
-  onDestroy(() => { if (polling) clearInterval(polling); });
-
-  function toggleSelect(ip: string) {
-    const s = new Set(selected);
-    s.has(ip) ? s.delete(ip) : s.add(ip);
-    selected = s;
-  }
-  function selectAll() { selected = new Set(nodeList); }
-  function clearSel()  { selected = new Set(); }
-
-  async function bulkAction(fn: (ip: string) => Promise<unknown>) {
-    const targets = selected.size ? [...selected] : nodeList;
-    await Promise.allSettled(targets.map(fn));
-    await refreshAll();
-  }
-
-  function formatUptime(s: number): string {
+  function formatUptime(s?: number): string {
+    if (!s) return '—';
     const d = Math.floor(s / 86400);
     const h = Math.floor((s % 86400) / 3600);
     const m = Math.floor((s % 3600) / 60);
-    if (d) return `${d}d ${h}h`;
-    if (h) return `${h}h ${m}m`;
+    if (d > 0) return `${d}d ${h}h ${m}m`;
+    if (h > 0) return `${h}h ${m}m`;
     return `${m}m`;
   }
 
-  function tempColor(t: number): string {
-    if (t < 45) return '#34c759';
-    if (t < 65) return '#ff9500';
-    return '#ff453a';
+  function formatBytes(b?: number): string {
+    if (!b) return '—';
+    if (b >= 1048576) return `${(b / 1048576).toFixed(1)} MB`;
+    if (b >= 1024) return `${(b / 1024).toFixed(0)} KB`;
+    return `${b} B`;
   }
+
+  async function handleBlackout() {
+    if (!nodeIp || actionLoading) return;
+    actionLoading = true;
+    try {
+      await postFactoryAbort(nodeIp);
+      toast('Emergency blackout applied.');
+      refreshHealth(nodeIp).catch(() => {});
+    } catch (e) {
+      toast(`Blackout failed: ${e}`);
+    }
+    actionLoading = false;
+  }
+
+  async function handleToggleAutoLoop() {
+    if (!nodeIp || actionLoading) return;
+    actionLoading = true;
+    const nextState = !(liveState.status?.autoLoop ?? false);
+    try {
+      await postFactoryAutoLoop(nodeIp, nextState);
+      toast(`Auto loop ${nextState ? 'enabled' : 'disabled'}`);
+    } catch (e) {
+      toast(`Toggle failed: ${e}`);
+    }
+    actionLoading = false;
+  }
+
+  async function handleSetBrightness(e: Event) {
+    const val = Number((e.target as HTMLInputElement).value);
+    localBri = val;
+    if (!nodeIp) return;
+    try {
+      await postFactoryEffect(nodeIp, (liveState.status?.effect || 'identity') as any, val);
+    } catch (err) {
+      // transient
+    }
+  }
+
+  // Live LED Output Canvas Rendering
+  let currentPixelBuf: Uint8Array = new Uint8Array(BUF_SIZE);
+
+  function renderLeds() {
+    if (!canvasEl) return;
+    const ctx = canvasEl.getContext('2d');
+    if (!ctx) return;
+
+    const width = canvasEl.width;
+    const height = canvasEl.height;
+    ctx.fillStyle = '#0a0a0c';
+    ctx.fillRect(0, 0, width, height);
+
+    const laneH = height / LANES;
+    const pixelW = width / PIXELS_PER_LANE;
+
+    for (let lane = 0; lane < LANES; lane++) {
+      const laneOffset = lane * PIXELS_PER_LANE * 3;
+      const y = lane * laneH;
+
+      for (let px = 0; px < PIXELS_PER_LANE; px++) {
+        const off = laneOffset + px * 3;
+        const r = currentPixelBuf[off] ?? 0;
+        const g = currentPixelBuf[off + 1] ?? 0;
+        const b = currentPixelBuf[off + 2] ?? 0;
+
+        if (r > 0 || g > 0 || b > 0) {
+          ctx.fillStyle = `rgb(${r},${g},${b})`;
+          ctx.fillRect(px * pixelW, y + 1, Math.max(1, pixelW - 0.5), laneH - 2);
+        } else {
+          ctx.fillStyle = 'rgba(255,255,255,0.02)';
+          ctx.fillRect(px * pixelW, y + 2, Math.max(1, pixelW - 0.5), laneH - 4);
+        }
+      }
+    }
+
+    rafId = requestAnimationFrame(renderLeds);
+  }
+
+  onMount(() => {
+    nodeIp = getSelectedNodeIp();
+    if (nodeIp) {
+      connect(nodeIp);
+      refreshHealth(nodeIp).catch(() => {});
+    }
+
+    unsubscribeState = getNodeLiveState().subscribe(val => {
+      liveState = val;
+      if (val.status?.brightness !== undefined && val.status.brightness > 0) {
+        localBri = val.status.brightness;
+      }
+    });
+
+    unsubscribePixels = nodePixelStore.subscribe(buf => {
+      currentPixelBuf = buf;
+    });
+
+    if (canvasEl) {
+      canvasEl.width = canvasEl.clientWidth || 864;
+      canvasEl.height = canvasEl.clientHeight || 120;
+    }
+    rafId = requestAnimationFrame(renderLeds);
+  });
+
+  onDestroy(() => {
+    if (rafId) cancelAnimationFrame(rafId);
+    unsubscribeState?.();
+    unsubscribePixels?.();
+  });
 </script>
 
 <svelte:head>
-  <title>Fleet Manager — LumiGrid</title>
+  <title>Node Overview — LumiGrid</title>
 </svelte:head>
 
-<div class="page">
-  <header class="page-header">
-    <div>
-      <h1>Fleet Manager</h1>
-      <p class="sub">{nodeList.length} node{nodeList.length !== 1 ? 's' : ''} configured · polling every 10 s</p>
-    </div>
-    <button class="refresh-btn" onclick={refreshAll}>↺ Refresh</button>
-  </header>
+<div class="overview-page">
+  {#if actionToast}
+    <div class="toast-bar">{actionToast}</div>
+  {/if}
 
-  {#if loading}
-    <div class="loading">
-      <div class="spinner"></div>
-      <span>Connecting to nodes…</span>
-    </div>
-  {:else if !nodeList.length}
-    <div class="empty">
-      <div class="empty-icon">⬡</div>
-      <p>No nodes configured yet.</p>
-      <p class="sub">Add a node IP in the sidebar to get started.</p>
+  {#if !nodeIp}
+    <div class="no-node-card">
+      <div class="card-icon">⬡</div>
+      <h2>No Active Node Selected</h2>
+      <p>Select or enter a LumiGrid LED node IP in the sidebar to start live monitoring and control.</p>
     </div>
   {:else}
-    <!-- Bulk controls -->
-    <div class="bulk-bar">
-      <div class="bulk-sel">
-        <button class="sm-btn" onclick={selectAll}>All</button>
-        <button class="sm-btn" onclick={clearSel}>None</button>
-        <span class="bulk-count">{selected.size || nodeList.length} targeted</span>
+    <!-- ── NODE HEADER ──────────────────────────────────────────────────────── -->
+    <header class="node-header">
+      <div class="header-left">
+        <div class="node-title-row">
+          <span class="node-ip-heading">{nodeIp}</span>
+          <span class="status-badge {liveState.connection}">
+            <span class="dot"></span>
+            {liveState.connection === 'connected' ? 'Connected' : liveState.connection === 'connecting' ? 'Connecting' : 'Disconnected'}
+          </span>
+          <span class="role-tag {liveState.role}">
+            {liveState.role.toUpperCase()}
+          </span>
+        </div>
+        <div class="header-sub-row">
+          <span>Uptime: <strong>{formatUptime(liveState.health?.system.uptime_s)}</strong></span>
+          <span class="sep">·</span>
+          <span>Output: <strong class:text-fault={liveState.health?.output.fault}>{liveState.health?.output.state ?? 'Ready'}</strong></span>
+          <span class="sep">·</span>
+          <span>FPS: <strong>{liveState.health?.system.fps ?? 0}</strong></span>
+        </div>
       </div>
-      <div class="bulk-actions">
-        <label class="bulk-label">Bri
-          <input type="range" min="0" max="255" bind:value={bulkBri} class="bri-range" />
-          <span class="bri-val">{bulkBri}</span>
-        </label>
-        <button class="action-btn" onclick={() => bulkAction(ip => setBrightness(ip, bulkBri))}>Set Bri</button>
-        <button class="action-btn" onclick={() => bulkAction(ip => setPower(ip, true))}>Power On</button>
-        <button class="action-btn" onclick={() => bulkAction(ip => setPower(ip, false))}>Power Off</button>
-        <label class="bulk-label">Preset #
-          <input type="number" min="1" max="250" bind:value={bulkPreset} class="preset-input" />
-        </label>
-        <button class="action-btn" onclick={() => bulkAction(ip => applyPreset(ip, bulkPreset))}>Apply</button>
-        <button class="action-btn danger" onclick={() => bulkAction(emergencyOff)}>⚠ E-Off</button>
+      <div class="header-right">
+        <button class="icon-refresh-btn" onclick={() => { connect(nodeIp); refreshHealth(nodeIp); }} title="Refresh node state">
+          ↺ Refresh
+        </button>
       </div>
-    </div>
+    </header>
 
-    <!-- Node grid -->
-    <div class="node-grid">
-      {#each nodeList as ip}
-        {@const s = statuses[ip]}
-        {@const online = s?.error === null}
-        <div
-          class="node-card"
-          class:online
-          class:offline={!online}
-          class:selected={selected.has(ip)}
-          onclick={() => toggleSelect(ip)}
-          role="checkbox"
-          aria-checked={selected.has(ip)}
-          tabindex="0"
-          onkeydown={(e) => e.key === ' ' && toggleSelect(ip)}
-        >
-          <div class="node-card-head">
-            <div class="status-dot" class:online class:offline={!online}></div>
-            <span class="node-name">{s?.info?.name ?? ip}</span>
-            <span class="latency">{s?.latency ?? '—'} ms</span>
-          </div>
-
-          <div class="node-ip">{ip}</div>
-
-          {#if online && s?.info}
-            <div class="node-stats">
-              <div class="stat">
-                <span class="stat-label">Uptime</span>
-                <span class="stat-val">{formatUptime(s.info.uptime)}</span>
-              </div>
-              <div class="stat">
-                <span class="stat-label">Version</span>
-                <span class="stat-val">{s.info.ver}</span>
-              </div>
-              <div class="stat">
-                <span class="stat-label">Heap</span>
-                <span class="stat-val">{Math.round((s.info.freeheap ?? 0) / 1024)} KB</span>
-              </div>
-              {#if s.info.u?.Lumigrid_PCA9685}
-                {@const pca = s.info.u.Lumigrid_PCA9685 as Record<string, unknown>}
-                {#if Array.isArray(pca.temp) && pca.temp.length}
-                  <div class="stat">
-                    <span class="stat-label">Temp</span>
-                    <span class="stat-val" style:color={tempColor(Number(pca.temp[0]))}>
-                      {Number(pca.temp[0]).toFixed(1)} °C
-                    </span>
-                  </div>
-                {/if}
-              {/if}
-              {#if s.state}
-                <div class="stat">
-                  <span class="stat-label">Power</span>
-                  <span class="stat-val" class:on={s.state.on}>{s.state.on ? 'ON' : 'OFF'}</span>
-                </div>
-                <div class="stat">
-                  <span class="stat-label">Bri</span>
-                  <span class="stat-val">{s.state.bri}</span>
-                </div>
-              {/if}
-            </div>
-          {:else if !online}
-            <div class="node-error">{s?.error ?? 'Connecting…'}</div>
+    <!-- ── LIVE OUTPUT ──────────────────────────────────────────────────────── -->
+    <section class="section-card live-output-card">
+      <div class="card-header">
+        <div class="header-title-group">
+          <h3>Live LED Output</h3>
+          <span class="frames-indicator">
+            {liveState.frameCount} frames received
+          </span>
+        </div>
+        <div class="status-flags">
+          <span class="flag-pill" class:active={liveState.status?.outputsEnabled}>
+            {liveState.status?.outputsEnabled ? 'Outputs Active' : 'Outputs Inactive'}
+          </span>
+          {#if liveState.status?.autoLoop}
+            <span class="flag-pill loop">Auto-Loop</span>
           {/if}
-
-          <!-- Quick per-card actions -->
-          {#if online}
-            <div class="card-actions">
-              <button class="cta" onclick={(e) => { e.stopPropagation(); setPower(ip, !(s?.state?.on ?? true)).then(refreshAll); }}>
-                {s?.state?.on ? 'Off' : 'On'}
-              </button>
-              <a href="/dashboard/channels" class="cta link" onclick={(e) => { e.stopPropagation(); writeString(NODE_IP_KEY, ip); }}>
-                Control
-              </a>
-            </div>
+          {#if liveState.status?.testActive}
+            <span class="flag-pill test">Test Mode</span>
           {/if}
         </div>
-      {/each}
-    </div>
+      </div>
+
+      <div class="canvas-wrap">
+        <canvas bind:this={canvasEl} class="live-canvas"></canvas>
+      </div>
+
+      <div class="output-controls-bar">
+        <div class="meta-item">
+          <span class="meta-label">Active Effect</span>
+          <span class="meta-value effect-name">{liveState.status?.effect || 'idle'}</span>
+        </div>
+
+        <div class="meta-item brightness-item">
+          <div class="label-val">
+            <span class="meta-label">Master Brightness</span>
+            <span class="meta-value">{Math.round((localBri / 255) * 100)}%</span>
+          </div>
+          <input
+            type="range"
+            min="0"
+            max="255"
+            value={localBri}
+            onchange={handleSetBrightness}
+            class="bri-slider"
+          />
+        </div>
+
+        <div class="meta-item">
+          <span class="meta-label">Topology</span>
+          <span class="meta-value">{LANES} Lanes × {PIXELS_PER_LANE} px</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── QUICK ACTIONS ────────────────────────────────────────────────────── -->
+    <section class="section-card quick-actions-card">
+      <h3>Quick Actions</h3>
+      <div class="actions-grid">
+        <button class="action-btn blackout-btn" onclick={handleBlackout} disabled={actionLoading}>
+          <span class="btn-icon">⬛</span>
+          <span class="btn-text">
+            <strong>BLACKOUT</strong>
+            <small>Emergency abort all outputs</small>
+          </span>
+        </button>
+
+        <button class="action-btn toggle-btn" onclick={handleToggleAutoLoop} disabled={actionLoading}>
+          <span class="btn-icon">⟳</span>
+          <span class="btn-text">
+            <strong>Auto-Loop</strong>
+            <small>{liveState.status?.autoLoop ? 'Stop rotation' : 'Enable sequence'}</small>
+          </span>
+        </button>
+
+        <a href="/dashboard/scenes" class="action-btn nav-action">
+          <span class="btn-icon">◆</span>
+          <span class="btn-text">
+            <strong>Scene Studio</strong>
+            <small>Compose 8-zone presets</small>
+          </span>
+        </a>
+
+        <a href="/dashboard/timeline" class="action-btn nav-action">
+          <span class="btn-icon">▤</span>
+          <span class="btn-text">
+            <strong>Timeline</strong>
+            <small>Beat grid sequencer</small>
+          </span>
+        </a>
+
+        <a href="/dashboard/factory" class="action-btn nav-action">
+          <span class="btn-icon">⚙</span>
+          <span class="btn-text">
+            <strong>Factory Console</strong>
+            <small>Burn-in & bench tests</small>
+          </span>
+        </a>
+
+        <a href="/dashboard/diagnostics" class="action-btn nav-action">
+          <span class="btn-icon">⚕</span>
+          <span class="btn-text">
+            <strong>Diagnostics</strong>
+            <small>Health, logs & audit</small>
+          </span>
+        </a>
+      </div>
+    </section>
+
+    <!-- ── HEALTH & TELEMETRY ───────────────────────────────────────────────── -->
+    <section class="section-card health-section">
+      <h3>System & Subsystem Health</h3>
+      <div class="health-grid">
+        <div class="health-stat-card">
+          <span class="stat-label">Free Heap</span>
+          <span class="stat-value">{formatBytes(liveState.health?.system.free_heap)}</span>
+          <span class="stat-sub">Min free: {formatBytes(liveState.health?.system.min_free_heap)}</span>
+        </div>
+
+        <div class="health-stat-card">
+          <span class="stat-label">Wi-Fi RSSI</span>
+          <span class="stat-value">{liveState.health?.network.wifi_rssi ? `${liveState.health.network.wifi_rssi} dBm` : '—'}</span>
+          <span class="stat-sub">Signal status</span>
+        </div>
+
+        <div class="health-stat-card">
+          <span class="stat-label">NVS Storage</span>
+          <span class="stat-value">{liveState.health?.nvs.used ?? 0} entries</span>
+          <span class="stat-sub">{liveState.health?.nvs.free ?? 0} available</span>
+        </div>
+
+        <div class="health-stat-card">
+          <span class="stat-label">Config State</span>
+          <span class="stat-value" class:text-ok={liveState.health?.config.valid}>
+            {liveState.health?.config.valid ? 'Valid' : 'Degraded'}
+          </span>
+          <span class="stat-sub">{liveState.health?.config.persistence_state || 'NVS'}</span>
+        </div>
+
+        <div class="health-stat-card">
+          <span class="stat-label">Output Subsystem</span>
+          <span class="stat-value" class:text-fault={liveState.health?.output.fault}>
+            {liveState.health?.output.state || 'Healthy'}
+          </span>
+          <span class="stat-sub">Power: {liveState.health?.output.current_power_mw ? `${(liveState.health.output.current_power_mw / 1000).toFixed(1)}W` : '0W'}</span>
+        </div>
+
+        <div class="health-stat-card">
+          <span class="stat-label">DMX Ingestion</span>
+          <span class="stat-value">{liveState.health?.dmx.sources_active ?? 0} active</span>
+          <span class="stat-sub">{liveState.health?.dmx.packets_accepted ?? 0} accepted</span>
+        </div>
+      </div>
+    </section>
   {/if}
 </div>
 
 <style>
-  .page { max-width: 1100px; }
-  .page-header { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 1.5rem; gap: 1rem; flex-wrap: wrap; }
-  h1 { margin: 0; font-size: 1.6rem; font-weight: 700; color: #f5f5f7; }
-  .sub { margin: .25rem 0 0; color: #a1a1a6; font-size: .85rem; }
-  .refresh-btn { background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.12); border-radius: 999px; color: #f5f5f7; padding: .5rem 1rem; cursor: pointer; font-size: .85rem; transition: background .2s; }
-  .refresh-btn:hover { background: rgba(255,255,255,.14); }
-  .loading { display: flex; align-items: center; gap: .75rem; color: #a1a1a6; padding: 3rem; justify-content: center; }
-  .spinner { width: 20px; height: 20px; border: 2px solid rgba(255,255,255,.1); border-top-color: #ff2d55; border-radius: 50%; animation: spin .8s linear infinite; }
-  @keyframes spin { to { transform: rotate(360deg); } }
-  .empty { text-align: center; padding: 4rem 2rem; color: #a1a1a6; }
-  .empty-icon { font-size: 3rem; background: linear-gradient(135deg, #ff2d55, #00d4ff); -webkit-background-clip: text; background-clip: text; color: transparent; margin-bottom: .5rem; }
-  .bulk-bar { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; padding: .75rem 1rem; background: rgba(29,29,31,.7); border: 1px solid rgba(255,255,255,.08); border-radius: 14px; margin-bottom: 1.25rem; }
-  .bulk-sel { display: flex; align-items: center; gap: .5rem; }
-  .bulk-actions { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; flex: 1; }
-  .bulk-count { font-size: .8rem; color: #a1a1a6; }
-  .bulk-label { display: flex; align-items: center; gap: .4rem; font-size: .82rem; color: #a1a1a6; }
-  .sm-btn { background: rgba(255,255,255,.07); border: 1px solid rgba(255,255,255,.10); border-radius: 6px; color: #f5f5f7; font-size: .75rem; padding: .25rem .55rem; cursor: pointer; }
-  .sm-btn:hover { background: rgba(255,255,255,.13); }
-  .action-btn { background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.12); border-radius: 8px; color: #f5f5f7; font-size: .8rem; padding: .35rem .7rem; cursor: pointer; white-space: nowrap; transition: background .2s; }
-  .action-btn:hover { background: rgba(255,45,85,.25); border-color: rgba(255,45,85,.4); }
-  .action-btn.danger { border-color: rgba(255,69,58,.4); color: #ff453a; }
-  .action-btn.danger:hover { background: rgba(255,69,58,.25); }
-  .bri-range { width: 80px; accent-color: #ff2d55; }
-  .bri-val { min-width: 2.5ch; color: #f5f5f7; font-size: .82rem; }
-  .preset-input { width: 50px; background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.12); border-radius: 6px; color: #f5f5f7; font-size: .82rem; padding: .25rem .4rem; text-align: center; }
-  .node-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 1rem; }
-  .node-card { background: rgba(29,29,31,.72); backdrop-filter: blur(16px); border: 1px solid rgba(255,255,255,.08); border-radius: 18px; padding: 1rem; cursor: pointer; transition: border-color .2s, box-shadow .2s, transform .2s; display: flex; flex-direction: column; gap: .6rem; }
-  .node-card:hover { border-color: rgba(255,255,255,.18); transform: translateY(-1px); }
-  .node-card.selected { border-color: #ff2d55; box-shadow: 0 0 0 1px rgba(255,45,85,.3); }
-  .node-card.offline { opacity: .55; }
-  .node-card-head { display: flex; align-items: center; gap: .5rem; }
-  .status-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
-  .status-dot.online { background: #34c759; box-shadow: 0 0 6px rgba(52,199,89,.6); }
-  .status-dot.offline { background: #ff453a; }
-  .node-name { flex: 1; font-weight: 600; font-size: .9rem; color: #f5f5f7; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .latency { font-size: .72rem; color: #a1a1a6; font-family: monospace; }
-  .node-ip { font-size: .75rem; color: #a1a1a6; font-family: monospace; }
-  .node-stats { display: grid; grid-template-columns: 1fr 1fr; gap: .35rem .5rem; }
-  .stat { display: flex; flex-direction: column; gap: .05rem; }
-  .stat-label { font-size: .65rem; color: #a1a1a6; text-transform: uppercase; letter-spacing: .05em; }
-  .stat-val { font-size: .82rem; color: #f5f5f7; font-weight: 600; }
-  .stat-val.on { color: #34c759; }
-  .node-error { font-size: .75rem; color: #ff453a; min-height: 2.2rem; }
-  .card-actions { display: flex; gap: .5rem; margin-top: auto; }
-  .cta { flex: 1; text-align: center; padding: .45rem .6rem; border-radius: 9px; border: 1px solid rgba(255,255,255,.12); background: rgba(255,255,255,.07); color: #f5f5f7; font-size: .8rem; cursor: pointer; text-decoration: none; }
-  .cta:hover { background: rgba(255,255,255,.14); }
-  .cta.link { display: flex; align-items: center; justify-content: center; }
+  .overview-page {
+    max-width: 1100px;
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+  }
+
+  .toast-bar {
+    position: fixed;
+    top: 1.5rem;
+    right: 2rem;
+    background: rgba(29, 29, 31, 0.95);
+    border: 1px solid rgba(255, 45, 85, 0.4);
+    color: #f5f5f7;
+    padding: 0.75rem 1.25rem;
+    border-radius: 12px;
+    font-size: 0.88rem;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.6);
+    z-index: 1000;
+  }
+
+  .no-node-card {
+    text-align: center;
+    padding: 4rem 2rem;
+    background: rgba(29, 29, 31, 0.6);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 20px;
+  }
+  .no-node-card .card-icon {
+    font-size: 3rem;
+    color: #ff2d55;
+    margin-bottom: 1rem;
+  }
+  .no-node-card h2 {
+    color: #f5f5f7;
+    margin: 0 0 0.5rem;
+  }
+  .no-node-card p {
+    color: #a1a1a6;
+    margin: 0;
+    font-size: 0.95rem;
+  }
+
+  /* Node Header */
+  .node-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 1.25rem 1.5rem;
+    background: rgba(29, 29, 31, 0.75);
+    backdrop-filter: blur(20px);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 18px;
+    flex-wrap: wrap;
+    gap: 1rem;
+  }
+  .node-title-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-bottom: 0.35rem;
+    flex-wrap: wrap;
+  }
+  .node-ip-heading {
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: #f5f5f7;
+    font-family: monospace;
+  }
+  .status-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.2rem 0.6rem;
+    border-radius: 999px;
+    font-size: 0.75rem;
+    font-weight: 600;
+  }
+  .status-badge .dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+  }
+  .status-badge.connected {
+    background: rgba(48, 209, 88, 0.12);
+    color: #30d158;
+    border: 1px solid rgba(48, 209, 88, 0.3);
+  }
+  .status-badge.connected .dot { background: #30d158; box-shadow: 0 0 6px rgba(48, 209, 88, 0.8); }
+  .status-badge.connecting {
+    background: rgba(0, 212, 255, 0.12);
+    color: #00d4ff;
+    border: 1px solid rgba(0, 212, 255, 0.3);
+  }
+  .status-badge.connecting .dot { background: #00d4ff; }
+  .status-badge.disconnected {
+    background: rgba(142, 142, 147, 0.12);
+    color: #8e8e93;
+    border: 1px solid rgba(142, 142, 147, 0.3);
+  }
+  .status-badge.disconnected .dot { background: #8e8e93; }
+  .role-tag {
+    font-size: 0.68rem;
+    font-weight: 700;
+    padding: 0.15rem 0.5rem;
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.08);
+    color: #a1a1a6;
+    letter-spacing: 0.05em;
+  }
+  .role-tag.admin {
+    background: rgba(255, 149, 0, 0.15);
+    color: #ff9500;
+    border: 1px solid rgba(255, 149, 0, 0.3);
+  }
+  .header-sub-row {
+    font-size: 0.82rem;
+    color: #8e8e93;
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+  }
+  .header-sub-row strong { color: #f5f5f7; }
+  .header-sub-row .sep { color: rgba(255, 255, 255, 0.15); }
+  .text-fault { color: #ff453a !important; }
+  .text-ok { color: #30d158 !important; }
+  .icon-refresh-btn {
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 10px;
+    color: #f5f5f7;
+    padding: 0.5rem 0.9rem;
+    font-size: 0.82rem;
+    cursor: pointer;
+    transition: background 0.2s, border-color 0.2s;
+  }
+  .icon-refresh-btn:hover {
+    background: rgba(255, 255, 255, 0.12);
+    border-color: rgba(255, 255, 255, 0.2);
+  }
+
+  /* Section Card */
+  .section-card {
+    background: rgba(29, 29, 31, 0.7);
+    backdrop-filter: blur(16px);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 18px;
+    padding: 1.5rem;
+  }
+  .section-card h3 {
+    margin: 0 0 1rem;
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: #f5f5f7;
+  }
+
+  /* Live Output */
+  .card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 1rem;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+  }
+  .card-header h3 { margin: 0; }
+  .frames-indicator {
+    font-size: 0.78rem;
+    color: #8e8e93;
+    font-family: monospace;
+    margin-left: 0.5rem;
+  }
+  .status-flags {
+    display: flex;
+    gap: 0.4rem;
+  }
+  .flag-pill {
+    font-size: 0.72rem;
+    padding: 0.2rem 0.55rem;
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.05);
+    color: #8e8e93;
+    font-weight: 600;
+  }
+  .flag-pill.active {
+    background: rgba(48, 209, 88, 0.15);
+    color: #30d158;
+    border: 1px solid rgba(48, 209, 88, 0.3);
+  }
+  .flag-pill.loop {
+    background: rgba(0, 212, 255, 0.12);
+    color: #00d4ff;
+    border: 1px solid rgba(0, 212, 255, 0.3);
+  }
+  .flag-pill.test {
+    background: rgba(255, 149, 0, 0.15);
+    color: #ff9500;
+    border: 1px solid rgba(255, 149, 0, 0.3);
+  }
+  .canvas-wrap {
+    background: #0a0a0c;
+    border-radius: 12px;
+    overflow: hidden;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    height: 120px;
+    display: flex;
+    align-items: center;
+  }
+  .live-canvas {
+    width: 100%;
+    height: 100%;
+    display: block;
+  }
+  .output-controls-bar {
+    display: grid;
+    grid-template-columns: 1fr 2fr 1fr;
+    gap: 1.5rem;
+    margin-top: 1.25rem;
+    align-items: center;
+  }
+  @media (max-width: 768px) {
+    .output-controls-bar { grid-template-columns: 1fr; }
+  }
+  .meta-item {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+  }
+  .meta-label {
+    font-size: 0.75rem;
+    color: #8e8e93;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .meta-value {
+    font-size: 1rem;
+    font-weight: 600;
+    color: #f5f5f7;
+  }
+  .effect-name {
+    color: #00d4ff;
+    font-family: monospace;
+  }
+  .brightness-item .label-val {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .bri-slider {
+    accent-color: #ff2d55;
+    width: 100%;
+    margin-top: 0.25rem;
+  }
+
+  /* Quick Actions Grid */
+  .actions-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 1rem;
+  }
+  .action-btn {
+    display: flex;
+    align-items: center;
+    gap: 0.85rem;
+    padding: 1rem 1.1rem;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 14px;
+    color: #f5f5f7;
+    text-decoration: none;
+    cursor: pointer;
+    text-align: left;
+    transition: all 0.2s;
+  }
+  .action-btn:hover {
+    background: rgba(255, 255, 255, 0.09);
+    border-color: rgba(255, 255, 255, 0.16);
+    transform: translateY(-2px);
+  }
+  .action-btn.blackout-btn {
+    background: rgba(255, 59, 48, 0.12);
+    border-color: rgba(255, 59, 48, 0.35);
+  }
+  .action-btn.blackout-btn:hover {
+    background: rgba(255, 59, 48, 0.22);
+    border-color: rgba(255, 59, 48, 0.5);
+  }
+  .action-btn .btn-icon {
+    font-size: 1.5rem;
+    line-height: 1;
+  }
+  .action-btn .btn-text {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+  }
+  .action-btn strong {
+    font-size: 0.92rem;
+    font-weight: 600;
+  }
+  .action-btn small {
+    font-size: 0.75rem;
+    color: #8e8e93;
+  }
+
+  /* Health Grid */
+  .health-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 1rem;
+  }
+  .health-stat-card {
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 12px;
+    padding: 0.9rem 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+  .stat-label {
+    font-size: 0.72rem;
+    color: #8e8e93;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .stat-value {
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: #f5f5f7;
+    font-family: monospace;
+  }
+  .stat-sub {
+    font-size: 0.72rem;
+    color: #636366;
+  }
 </style>
