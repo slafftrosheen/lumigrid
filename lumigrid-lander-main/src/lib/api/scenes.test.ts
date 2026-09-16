@@ -9,6 +9,9 @@ import {
   computeZonePreviewColor,
   rgbToHex,
   hexToRgb,
+  normalizeLayer,
+  normalizeZone,
+  normalizeScene,
   deletePreset,
 } from './scenes';
 import * as scenesApi from './scenes';
@@ -60,11 +63,63 @@ describe('scenes model & serialization', () => {
     expect(isPresetDirty(p3, p1)).toBe(true);
   });
 
-  it('handles rgb <-> hex conversions accurately', () => {
+  it('handles rgb <-> hex conversions accurately and rejects malformed values', () => {
     expect(rgbToHex({ r: 255, g: 0, b: 128 })).toBe('#ff0080');
     expect(hexToRgb('#ff0080')).toEqual({ r: 255, g: 0, b: 128 });
     expect(hexToRgb('#fff')).toEqual({ r: 255, g: 255, b: 255 });
-    expect(hexToRgb('invalid')).toEqual({ r: 255, g: 255, b: 255 });
+    expect(hexToRgb('#FF00AA')).toEqual({ r: 255, g: 0, b: 170 });
+    expect(hexToRgb('invalid')).toBeNull();
+    expect(hexToRgb('')).toBeNull();
+    expect(hexToRgb('#12345')).toBeNull();
+    expect(hexToRgb('invalid', { r: 10, g: 20, b: 30 })).toEqual({ r: 10, g: 20, b: 30 });
+  });
+
+  it('normalizes malformed or partial scenes to valid 8-zone 3-layer structure', () => {
+    const malformed = {
+      index: 999, // out of range -> clamped to MAX_PRESETS - 1 (31)
+      name: 'Overly long name that exceeds thirty-one chars allowed by spec',
+      globalBrightness: -50, // clamped to 0
+      transitionMs: 999999, // clamped to 10000
+      zones: [
+        {
+          layers: [
+            {
+              effect: '  rainbow  ',
+              blendMode: 'unknown_mode' as any,
+              primaryColor: { r: 300, g: -10, b: NaN },
+              speedMs: 1, // clamped to min 10
+              fxParam: 500, // clamped to 255
+              opacity: -20, // clamped to 0
+              enabled: true,
+            },
+          ],
+        },
+      ],
+    };
+
+    const normalized = normalizeScene(malformed as any);
+    expect(normalized.index).toBe(31);
+    expect(normalized.name.length).toBeLessThanOrEqual(31);
+    expect(normalized.globalBrightness).toBe(0);
+    expect(normalized.transitionMs).toBe(10000);
+    expect(normalized.zones).toHaveLength(8);
+    for (const z of normalized.zones) {
+      expect(z.layers).toHaveLength(3);
+    }
+
+    const layer0 = normalized.zones[0].layers[0];
+    expect(layer0.effect).toBe('rainbow');
+    expect(layer0.blendMode).toBe('normal');
+    expect(layer0.primaryColor).toEqual({ r: 255, g: 0, b: 255 });
+    expect(layer0.speedMs).toBe(10);
+    expect(layer0.fxParam).toBe(255);
+    expect(layer0.opacity).toBe(0);
+    expect(layer0.enabled).toBe(true);
+
+    // Serialization should be deterministic
+    const s1 = serializePreset(normalized);
+    const s2 = serializePreset(malformed as any);
+    expect(s1).toBe(s2);
   });
 
   it('computes zone preview colors with layer blending and global brightness', () => {

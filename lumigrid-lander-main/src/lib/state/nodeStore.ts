@@ -308,6 +308,15 @@ export function connect(nodeIp = getSelectedNodeIp()): void {
     if (typeof event.data === 'string') {
       try {
         const json = JSON.parse(event.data) as Record<string, unknown>;
+        const hasStatusFields =
+          json.type === 'status' ||
+          'effect' in json ||
+          'brightness' in json ||
+          'outputsEnabled' in json ||
+          'testActive' in json ||
+          'autoLoop' in json;
+        if (!hasStatusFields) return;
+
         state.update(current => ({
           ...current,
           status: {

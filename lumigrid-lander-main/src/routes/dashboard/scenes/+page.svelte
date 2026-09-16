@@ -468,7 +468,10 @@
                               <input
                                 type="color"
                                 value={rgbToHex(layer.primaryColor)}
-                                onchange={e => (layer.primaryColor = hexToRgb((e.target as HTMLInputElement).value))}
+                                onchange={e => {
+                                  const parsed = hexToRgb((e.target as HTMLInputElement).value);
+                                  if (parsed) layer.primaryColor = parsed;
+                                }}
                               />
                             </label>
 
@@ -477,7 +480,10 @@
                               <input
                                 type="color"
                                 value={rgbToHex(layer.secondaryColor)}
-                                onchange={e => (layer.secondaryColor = hexToRgb((e.target as HTMLInputElement).value))}
+                                onchange={e => {
+                                  const parsed = hexToRgb((e.target as HTMLInputElement).value);
+                                  if (parsed) layer.secondaryColor = parsed;
+                                }}
                               />
                             </label>
 

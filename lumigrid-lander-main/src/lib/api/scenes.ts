@@ -204,10 +204,10 @@ export function isValidHex(hex: unknown): boolean {
   return /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(hex.trim());
 }
 
-export function hexToRgb(hex: string, fallback: RgbColor = { r: 255, g: 255, b: 255 }): RgbColor {
+export function hexToRgb(hex: string, fallback?: RgbColor): RgbColor | null {
   const trimmed = typeof hex === 'string' ? hex.trim() : '';
   if (!isValidHex(trimmed)) {
-    return { ...fallback };
+    return fallback ? { ...fallback } : null;
   }
   const clean = trimmed.replace('#', '');
   const expanded = clean.length === 3

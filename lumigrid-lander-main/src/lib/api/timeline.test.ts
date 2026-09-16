@@ -7,8 +7,13 @@ import {
   serializeSequence,
   isSequenceDirty,
   stepDurationSeconds,
+  normalizeTimelineStep,
+  normalizeTimelineTrack,
+  normalizeTimelineSequence,
   TRACK_COUNT,
   STEP_COUNT,
+  MIN_BPM,
+  MAX_BPM,
 } from './timeline';
 
 describe('timeline model & serialization', () => {
@@ -72,5 +77,73 @@ describe('timeline model & serialization', () => {
     expect(stepDurationSeconds(2, 60)).toBe(2.0);
     // 8 beats at 240 BPM = 2.0 seconds
     expect(stepDurationSeconds(8, 240)).toBe(2.0);
+  });
+
+  it('normalizes malformed timeline sequence with boundary values', () => {
+    const malformed = {
+      bpm: -100, // clamped to MIN_BPM (10)
+      enabled: 1 as any,
+      tracks: [
+        {
+          channelId: 99, // clamped to 7
+          numSteps: 0, // clamped to 1
+          enabled: false,
+          steps: [
+            {
+              presetIndex: 99, // clamped to 31
+              lengthBeats: 500, // clamped to 64
+            },
+            {
+              presetIndex: -5, // clamped to 0
+              lengthBeats: -10, // clamped to 1
+            },
+          ],
+        },
+      ],
+    };
+
+    const norm = normalizeTimelineSequence(malformed as any);
+    expect(norm.bpm).toBe(MIN_BPM);
+    expect(norm.enabled).toBe(true);
+    expect(norm.tracks).toHaveLength(TRACK_COUNT);
+    expect(norm.tracks[0].channelId).toBe(7);
+    expect(norm.tracks[0].numSteps).toBe(1);
+    expect(norm.tracks[0].enabled).toBe(false);
+    expect(norm.tracks[0].steps).toHaveLength(STEP_COUNT);
+    expect(norm.tracks[0].steps[0].presetIndex).toBe(31);
+    expect(norm.tracks[0].steps[0].lengthBeats).toBe(64);
+    expect(norm.tracks[0].steps[1].presetIndex).toBe(0);
+    expect(norm.tracks[0].steps[1].lengthBeats).toBe(1);
+  });
+
+  it('preserves non-sequential channel IDs and does not confuse them with lane index', () => {
+    const seq = createDefaultSequence();
+    const nonSequential = [7, 5, 3, 1, 6, 4, 2, 0];
+    seq.tracks.forEach((t, i) => {
+      t.channelId = nonSequential[i];
+    });
+
+    const normalized = normalizeTimelineSequence(seq);
+    normalized.tracks.forEach((t, i) => {
+      expect(t.channelId).toBe(nonSequential[i]);
+    });
+  });
+
+  it('preserves all 16 allocated steps and maintains round-trip determinism', () => {
+    const seq = createDefaultSequence();
+    seq.bpm = 145;
+    seq.enabled = true;
+    seq.tracks[2].numSteps = 6;
+    // Set a step beyond numSteps to test that inactive steps are preserved in storage
+    seq.tracks[2].steps[10] = { presetIndex: 12, lengthBeats: 8 };
+
+    const serialized1 = serializeSequence(seq);
+    const parsed = JSON.parse(serialized1);
+    const normalized = normalizeTimelineSequence(parsed);
+    const serialized2 = serializeSequence(normalized);
+
+    expect(serialized1).toBe(serialized2);
+    expect(normalized.tracks[2].numSteps).toBe(6);
+    expect(normalized.tracks[2].steps[10]).toEqual({ presetIndex: 12, lengthBeats: 8 });
   });
 });
