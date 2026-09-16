@@ -2,7 +2,8 @@
   import { onMount } from 'svelte';
   import { getCalendarSchedule, saveCalendarSchedule, getPresets } from '$lib/api/node';
   import type { CalendarEntry, CalendarSchedule, ScenePreset } from '$lib/api/node';
-  import { NODE_IP_KEY, readString } from '$lib/auth/storage';
+  import { getSelectedNodeIp } from '$lib/auth/storage';
+  import { nodeStore } from '$lib/state/nodeStore';
 
   let nodeIp = $state('');
   let loading = $state(true);
@@ -28,14 +29,23 @@
 
   let editEntry = $derived(schedule?.entries[selectedIdx] ?? null);
 
-  async function load() {
+  let loadGen = 0;
+
+  async function load(targetIp = nodeIp, gen = loadGen) {
+    if (!targetIp) {
+      schedule = null;
+      presets = [];
+      loading = false;
+      return;
+    }
     loading = true;
     error = '';
     try {
       const [s, p] = await Promise.all([
-        getCalendarSchedule(nodeIp).catch(() => null),
-        getPresets(nodeIp).catch(() => [] as ScenePreset[]),
+        getCalendarSchedule(targetIp).catch(() => null),
+        getPresets(targetIp).catch(() => [] as ScenePreset[]),
       ]);
+      if (gen !== loadGen) return;
       if (s && s.entries) {
         while (s.entries.length < ENTRY_COUNT) s.entries.push(defaultEntry(s.entries.length));
         schedule = s;
@@ -44,9 +54,13 @@
       }
       presets = p;
     } catch (e) {
+      if (gen !== loadGen) return;
       error = String(e);
+    } finally {
+      if (gen === loadGen) {
+        loading = false;
+      }
     }
-    loading = false;
   }
 
   async function save() {
@@ -99,9 +113,25 @@
   }
 
   onMount(() => {
-    nodeIp = readString(NODE_IP_KEY);
-    if (nodeIp) load();
-    else loading = false;
+    const unsub = nodeStore.subscribe(state => {
+      const targetIp = state.nodeIp || getSelectedNodeIp();
+      if (targetIp !== nodeIp) {
+        nodeIp = targetIp;
+        loadGen++;
+        if (nodeIp) {
+          schedule = null;
+          presets = [];
+          loading = true;
+          load(nodeIp, loadGen);
+        } else {
+          schedule = null;
+          presets = [];
+          loading = false;
+          error = '';
+        }
+      }
+    });
+    return unsub;
   });
 </script>
 

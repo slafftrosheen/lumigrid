@@ -11,6 +11,7 @@
     type FactoryEffectName,
   } from '$lib/api/node';
   import { getSelectedNodeIp } from '$lib/auth/storage';
+  import { nodeStore, refreshHealth } from '$lib/state/nodeStore';
 
   let nodeIp = $state('');
   let status = $state<FactoryStatus | null>(null);
@@ -42,13 +43,26 @@
   let laneColors = $state(Array.from({ length: 8 }, () => ({ r: 255, g: 0, b: 0 })));
   let pwmDuties = $state(Array.from({ length: 8 }, () => 0));
 
-  async function refresh() {
-    if (!nodeIp) return;
+  let refreshGen = 0;
+
+  async function refresh(targetIp = nodeIp, gen = refreshGen) {
+    if (!targetIp) {
+      status = null;
+      loading = false;
+      return;
+    }
     try {
-      status = await getFactoryStatus(nodeIp);
+      const s = await getFactoryStatus(targetIp);
+      if (gen !== refreshGen) return;
+      status = s;
       error = '';
     } catch (e) {
+      if (gen !== refreshGen) return;
       error = String(e);
+    } finally {
+      if (gen === refreshGen) {
+        loading = false;
+      }
     }
   }
 
@@ -83,6 +97,7 @@
       flash = 'Emergency Blackout command dispatched';
       setTimeout(() => (flash = ''), 2500);
       await refresh();
+      refreshHealth(nodeIp).catch(() => {});
     } catch (e) {
       error = String(e);
     } finally {
@@ -140,10 +155,24 @@
     return '#' + [c.r, c.g, c.b].map(v => v.toString(16).padStart(2, '0')).join('');
   }
 
-  onMount(async () => {
-    nodeIp = getSelectedNodeIp();
-    if (nodeIp) await refresh();
-    loading = false;
+  onMount(() => {
+    const unsub = nodeStore.subscribe(state => {
+      const targetIp = state.nodeIp || getSelectedNodeIp();
+      if (targetIp !== nodeIp) {
+        nodeIp = targetIp;
+        refreshGen++;
+        if (nodeIp) {
+          status = null;
+          loading = true;
+          refresh(nodeIp, refreshGen);
+        } else {
+          status = null;
+          loading = false;
+          error = '';
+        }
+      }
+    });
+    return unsub;
   });
 
   onDestroy(() => {
@@ -167,7 +196,7 @@
       <button class="ghost-btn" onclick={toggleAutoRefresh} type="button">
         {autoRefresh ? '⏸ Stop Polling' : '▶ Auto-poll (2s)'}
       </button>
-      <button class="ghost-btn" onclick={refresh} type="button">↻ Refresh</button>
+      <button class="ghost-btn" onclick={() => refresh()} type="button">↻ Refresh</button>
     </div>
   </header>
 

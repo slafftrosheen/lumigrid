@@ -6,7 +6,8 @@
     PIXELS_PER_LANE,
     connect,
     getNodeLiveSnapshot,
-    getNodeLiveState,
+    nodePixelStore,
+    nodeStore,
     reconnect as reconnectNode,
   } from '$lib/state/nodeStore';
 
@@ -20,7 +21,7 @@
   let dirty = $state(false);
   let canvasEl: HTMLCanvasElement | null = null;
   let rafId = 0;
-  let unsubscribe: (() => void) | null = null;
+  let unsubs: (() => void)[] = [];
 
   let statusInfo = $state({
     effect: '', brightness: 0, outputsEnabled: false,
@@ -147,14 +148,17 @@
   }
 
   onMount(() => {
-    const liveState = getNodeLiveState();
-    unsubscribe = liveState.subscribe(value => {
-      nodeIp = value.nodeIp;
-      connected = value.connection === 'connected';
-      pixelBuf = value.pixels;
-      if (value.status) statusInfo = value.status;
-      dirty = true;
-    });
+    unsubs.push(
+      nodeStore.subscribe(value => {
+        nodeIp = value.nodeIp;
+        connected = value.connection === 'connected';
+        if (value.status) statusInfo = value.status;
+      }),
+      nodePixelStore.subscribe(buf => {
+        pixelBuf = buf;
+        dirty = true;
+      }),
+    );
 
     const snapshot = getNodeLiveSnapshot();
     lastFrameCount = snapshot.frameCount;
@@ -165,7 +169,8 @@
 
   onDestroy(() => {
     if (rafId) cancelAnimationFrame(rafId);
-    unsubscribe?.();
+    unsubs.forEach(fn => fn());
+    unsubs = [];
   });
 
   function reconnect() {

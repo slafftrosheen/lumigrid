@@ -214,6 +214,14 @@
 
     unsubscribeState = getNodeLiveState().subscribe(val => {
       liveState = val;
+      if (val.nodeIp !== nodeIp) {
+        nodeIp = val.nodeIp;
+        if (nodeIp) {
+          getInfo(nodeIp).then(info => { nodeInfo = info; }).catch(() => {});
+        } else {
+          nodeInfo = null;
+        }
+      }
       if (val.status?.brightness !== undefined) {
         localBri = val.status.brightness;
       }

@@ -14,6 +14,7 @@
     MAX_BPM,
   } from '$lib/api/timeline';
   import { getSelectedNodeIp } from '$lib/auth/storage';
+  import { nodeStore } from '$lib/state/nodeStore';
 
   let nodeIp = $state('');
   let loading = $state(true);
@@ -44,14 +45,20 @@
     selectedStep = s;
   }
 
-  async function loadData() {
+  let loadGen = 0;
+
+  async function loadData(targetIp: string, gen: number) {
     loading = true;
     error = '';
+    seq = null;
+    savedSnapshot = null;
+    presets = [];
     try {
       const [s, p] = await Promise.all([
-        getSequence(nodeIp).catch(() => null),
-        getPresets(nodeIp).catch(() => [] as ScenePreset[]),
+        getSequence(targetIp).catch(() => null),
+        getPresets(targetIp).catch(() => [] as ScenePreset[]),
       ]);
+      if (gen !== loadGen) return;
 
       if (s && s.tracks) {
         for (let i = 0; i < TRACK_COUNT; i++) {
@@ -69,9 +76,12 @@
       }
       presets = p;
     } catch (e) {
+      if (gen !== loadGen) return;
       error = String(e);
     } finally {
-      loading = false;
+      if (gen === loadGen) {
+        loading = false;
+      }
     }
   }
 
@@ -124,12 +134,23 @@
   }
 
   onMount(() => {
-    nodeIp = getSelectedNodeIp();
-    if (nodeIp) {
-      loadData();
-    } else {
-      loading = false;
-    }
+    const unsub = nodeStore.subscribe(state => {
+      const targetIp = state.nodeIp || getSelectedNodeIp();
+      if (targetIp !== nodeIp) {
+        nodeIp = targetIp;
+        loadGen++;
+        if (nodeIp) {
+          loadData(nodeIp, loadGen);
+        } else {
+          seq = null;
+          savedSnapshot = null;
+          presets = [];
+          loading = false;
+          error = '';
+        }
+      }
+    });
+    return unsub;
   });
 </script>
 

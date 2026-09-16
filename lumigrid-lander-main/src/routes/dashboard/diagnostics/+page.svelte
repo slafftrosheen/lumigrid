@@ -3,6 +3,7 @@
   import { getHealth, getLogs, getAuditLog } from '$lib/api/node';
   import type { HealthSnapshot, AuditEvent } from '$lib/api/node';
   import { getSelectedNodeIp } from '$lib/auth/storage';
+  import { nodeStore } from '$lib/state/nodeStore';
 
   let nodeIp = $state('');
   let loading = $state(true);
@@ -69,21 +70,31 @@
     });
   });
 
-  async function loadData() {
+  let loadGen = 0;
+
+  async function loadData(targetIp = nodeIp, gen = loadGen) {
+    if (!targetIp) {
+      loading = false;
+      return;
+    }
     error = '';
     try {
       const [h, l, a] = await Promise.all([
-        getHealth(nodeIp).catch(() => null),
-        getLogs(nodeIp).catch(() => ''),
-        getAuditLog(nodeIp).catch(() => [] as AuditEvent[]),
+        getHealth(targetIp).catch(() => null),
+        getLogs(targetIp).catch(() => ''),
+        getAuditLog(targetIp).catch(() => [] as AuditEvent[]),
       ]);
+      if (gen !== loadGen) return;
       health = h;
       rawLogs = l;
       audit = a;
     } catch (e) {
+      if (gen !== loadGen) return;
       error = String(e);
     } finally {
-      loading = false;
+      if (gen === loadGen) {
+        loading = false;
+      }
     }
   }
 
@@ -152,12 +163,27 @@
   }
 
   onMount(() => {
-    nodeIp = getSelectedNodeIp();
-    if (nodeIp) {
-      loadData();
-    } else {
-      loading = false;
-    }
+    const unsub = nodeStore.subscribe(state => {
+      const targetIp = state.nodeIp || getSelectedNodeIp();
+      if (targetIp !== nodeIp) {
+        nodeIp = targetIp;
+        loadGen++;
+        if (nodeIp) {
+          health = null;
+          rawLogs = '';
+          audit = [];
+          loading = true;
+          loadData(nodeIp, loadGen);
+        } else {
+          health = null;
+          rawLogs = '';
+          audit = [];
+          loading = false;
+          error = '';
+        }
+      }
+    });
+    return unsub;
   });
 
   onDestroy(() => {
@@ -190,7 +216,7 @@
           <input type="checkbox" checked={autoRefresh} onchange={toggleAutoRefresh} />
           <span>Auto-refresh (3s)</span>
         </label>
-        <button class="btn-refresh" onclick={loadData} type="button">
+        <button class="btn-refresh" onclick={() => loadData()} type="button">
           Refresh
         </button>
       </div>

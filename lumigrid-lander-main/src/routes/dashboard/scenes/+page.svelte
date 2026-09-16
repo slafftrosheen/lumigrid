@@ -16,6 +16,7 @@
     MAX_PRESETS,
   } from '$lib/api/scenes';
   import { getSelectedNodeIp } from '$lib/auth/storage';
+  import { nodeStore } from '$lib/state/nodeStore';
 
   let nodeIp = $state('');
   let presets = $state<ScenePreset[]>([]);
@@ -151,30 +152,54 @@
     }
   }
 
-  async function loadData() {
+  let loadGen = 0;
+
+  async function loadData(targetIp: string, gen: number) {
     loading = true;
     error = '';
+    presets = [];
+    effects = [];
+    selectedIdx = null;
+    editScene = null;
+    savedSnapshot = null;
     try {
-      const [p, e] = await Promise.all([getPresets(nodeIp), getEffects(nodeIp)]);
+      const [p, e] = await Promise.all([getPresets(targetIp), getEffects(targetIp)]);
+      if (gen !== loadGen) return;
       presets = p;
       effects = e;
       if (presets.length > 0 && selectedIdx === null) {
         selectPreset(presets[0].index);
       }
     } catch (e) {
+      if (gen !== loadGen) return;
       error = String(e);
     } finally {
-      loading = false;
+      if (gen === loadGen) {
+        loading = false;
+      }
     }
   }
 
   onMount(() => {
-    nodeIp = getSelectedNodeIp();
-    if (nodeIp) {
-      loadData();
-    } else {
-      loading = false;
-    }
+    const unsub = nodeStore.subscribe(state => {
+      const targetIp = state.nodeIp || getSelectedNodeIp();
+      if (targetIp !== nodeIp) {
+        nodeIp = targetIp;
+        loadGen++;
+        if (nodeIp) {
+          loadData(nodeIp, loadGen);
+        } else {
+          presets = [];
+          effects = [];
+          selectedIdx = null;
+          editScene = null;
+          savedSnapshot = null;
+          loading = false;
+          error = '';
+        }
+      }
+    });
+    return unsub;
   });
 
   function toastMsg(msg: string) {

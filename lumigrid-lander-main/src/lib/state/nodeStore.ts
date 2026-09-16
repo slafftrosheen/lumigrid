@@ -11,6 +11,7 @@ import {
   AUTH_ROLE_KEY,
   AUTH_TIMESTAMP_KEY,
   getSelectedNodeIp,
+  setSelectedNodeIp,
   readString,
   updateNodeLastSeen,
 } from '../auth/storage';
@@ -185,6 +186,7 @@ export function connect(nodeIp = getSelectedNodeIp()): void {
 
   const ip = nodeIp.trim();
   if (!ip) {
+    setSelectedNodeIp('');
     if (socket) {
       const ws = socket;
       socket = null;
@@ -193,6 +195,7 @@ export function connect(nodeIp = getSelectedNodeIp()): void {
     publish({ nodeIp: '', connection: 'idle', error: '' });
     return;
   }
+  setSelectedNodeIp(ip);
 
   // If already connected/connecting to the exact same IP, return early
   if (socket && latestState.nodeIp === ip && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
@@ -350,6 +353,19 @@ export function reconnect(ip?: string): void {
   manualClose = false;
   const target = ip ?? latestState.nodeIp ?? getSelectedNodeIp();
   connect(target);
+}
+
+export const nodeStore = state;
+
+export function selectNode(ip: string): void {
+  const target = (ip || '').trim();
+  setSelectedNodeIp(target);
+  if (!target) {
+    disconnect();
+    publish({ nodeIp: '', ip: '', connection: 'idle' });
+  } else {
+    connect(target);
+  }
 }
 
 export function getNodeLiveState() {

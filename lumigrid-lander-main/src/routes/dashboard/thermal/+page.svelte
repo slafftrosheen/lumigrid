@@ -2,8 +2,8 @@
   import { onMount, onDestroy } from 'svelte';
   import { getInfo } from '$lib/api/node';
   import type { NodeInfo } from '$lib/api/node';
-  import { readString, writeString } from '$lib/auth/storage';
-  import { NODE_IP_KEY } from '$lib/auth/storage';
+  import { getSelectedNodeIp, readString, writeString } from '$lib/auth/storage';
+  import { nodeStore } from '$lib/state/nodeStore';
 
   // ── Feature 2: Thermal Dashboard ─────────────────────────────────────────────
 
@@ -14,6 +14,7 @@
   let alertTemp = $state(65);
   let alertSent = $state(false);
   let polling: ReturnType<typeof setInterval> | null = null;
+  let pollGen   = 0;
 
   function getTemp(i: NodeInfo | null): number | null {
     const arr = i?.u?.Lumigrid_PCA9685?.temp;
@@ -21,10 +22,13 @@
     return Number(arr[0]);
   }
 
-  async function poll() {
-    error = '';
+  async function poll(targetIp = nodeIp, gen = pollGen) {
+    if (!targetIp) return;
     try {
-      info = await getInfo(nodeIp);
+      const res = await getInfo(targetIp);
+      if (gen !== pollGen) return;
+      info = res;
+      error = '';
       const t = getTemp(info);
       if (t !== null) {
         history = [...history.slice(-59), t];
@@ -32,7 +36,7 @@
           alertSent = true;
           if ('Notification' in window && Notification.permission === 'granted') {
             new Notification('LumiGrid Thermal Alert', {
-              body: `Node ${nodeIp} reached ${t.toFixed(1)} °C`,
+              body: `Node ${targetIp} reached ${t.toFixed(1)} °C`,
               icon: '/favicon.ico'
             });
           }
@@ -41,16 +45,40 @@
         }
       }
     } catch (e) {
+      if (gen !== pollGen) return;
       error = String(e);
     }
   }
 
-  onMount(async () => {
-    nodeIp = readString(NODE_IP_KEY);
+  onMount(() => {
     alertTemp = Number(readString('lg_alert_temp', '65'));
-    if (nodeIp) { await poll(); polling = setInterval(poll, 5000); }
+    const unsub = nodeStore.subscribe(state => {
+      const targetIp = state.nodeIp || getSelectedNodeIp();
+      if (targetIp !== nodeIp) {
+        nodeIp = targetIp;
+        pollGen++;
+        if (polling) {
+          clearInterval(polling);
+          polling = null;
+        }
+        if (nodeIp) {
+          info = null;
+          history = [];
+          poll(nodeIp, pollGen);
+          polling = setInterval(() => poll(nodeIp, pollGen), 5000);
+        } else {
+          info = null;
+          history = [];
+          error = '';
+        }
+      }
+    });
+    return unsub;
   });
-  onDestroy(() => { if (polling) clearInterval(polling); });
+
+  onDestroy(() => {
+    if (polling) clearInterval(polling);
+  });
 
   function requestNotifPerm() {
     if ('Notification' in window) Notification.requestPermission();

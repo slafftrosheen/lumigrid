@@ -1,8 +1,9 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { getChannelConfig, setPixels, getState, setBrightness, setPower } from '$lib/api/node';
+  import { getChannelConfig, setPixels, getState, setBrightness, setPower } from '$lib/api/legacy';
   import type { ChannelConfig } from '$lib/api/node';
   import { getSelectedNodeIp } from '$lib/auth/storage';
+  import { nodeStore } from '$lib/state/nodeStore';
 
   const CHANNEL_TYPES = ['Off', 'PWM (Dumb)', 'CCT (2ch)', 'RGB (3ch)', 'RGBW (4ch)'];
   let nodeIp = $state('');
@@ -16,14 +17,54 @@
   let sending = $state(false);
   let lastSent = $state(0);
   let channelRGB = $state<{r:number;g:number;b:number}[]>(Array(8).fill(null).map(() => ({ r: 255, g: 255, b: 255 })));
+  let loadGen = 0;
 
-  async function loadConfig() {
-    loading = true; error = '';
-    try { config = await getChannelConfig(nodeIp); const st = await getState(nodeIp); masterBri = st.bri; masterOn = st.on; }
-    catch (e) { error = String(e); }
-    loading = false;
+  async function loadConfig(targetIp = nodeIp, gen = loadGen) {
+    if (!targetIp) {
+      config = null;
+      loading = false;
+      return;
+    }
+    loading = true;
+    error = '';
+    try {
+      const [cfg, st] = await Promise.all([
+        getChannelConfig(targetIp),
+        getState(targetIp),
+      ]);
+      if (gen !== loadGen) return;
+      config = cfg;
+      masterBri = st.bri;
+      masterOn = st.on;
+    } catch (e) {
+      if (gen !== loadGen) return;
+      error = String(e);
+    } finally {
+      if (gen === loadGen) {
+        loading = false;
+      }
+    }
   }
-  onMount(() => { nodeIp = getSelectedNodeIp(); if (nodeIp) loadConfig(); else loading = false; });
+
+  onMount(() => {
+    const unsub = nodeStore.subscribe(state => {
+      const targetIp = state.nodeIp || getSelectedNodeIp();
+      if (targetIp !== nodeIp) {
+        nodeIp = targetIp;
+        loadGen++;
+        if (nodeIp) {
+          config = null;
+          loading = true;
+          loadConfig(nodeIp, loadGen);
+        } else {
+          config = null;
+          loading = false;
+          error = '';
+        }
+      }
+    });
+    return unsub;
+  });
   async function sendChannels() {
     if (sending || Date.now() - lastSent < 66) return;
     sending = true; lastSent = Date.now(); dirty = false;
@@ -50,7 +91,7 @@
 
 <svelte:head><title>Channel Control — LumiGrid</title></svelte:head>
 <div class="page">
-  <header class="page-header"><div><h1>PWM Channel Control</h1><p class="sub">{nodeIp ? `Node: ${nodeIp}` : 'No node selected'} · {config ? `${config.pwmFrequency} Hz` : ''}</p></div><div class="head-actions"><button class="action-btn" onclick={() => setPower(nodeIp, !masterOn).then(loadConfig)}>{masterOn ? '⏻ Off' : '⏻ On'}</button><button class="action-btn" onclick={loadConfig}>↺</button></div></header>
+  <header class="page-header"><div><h1>PWM Channel Control</h1><p class="sub">{nodeIp ? `Node: ${nodeIp}` : 'No node selected'} · {config ? `${config.pwmFrequency} Hz` : ''}</p></div><div class="head-actions"><button class="action-btn" onclick={() => setPower(nodeIp, !masterOn).then(() => loadConfig())}>{masterOn ? '⏻ Off' : '⏻ On'}</button><button class="action-btn" onclick={() => loadConfig()}>↺</button></div></header>
   {#if !nodeIp}<div class="empty">Select a node in the sidebar to control its PWM channels.</div>
   {:else if loading}<div class="loading"><div class="spinner"></div>Loading…</div>
   {:else if error}<div class="err-box">{error}</div>

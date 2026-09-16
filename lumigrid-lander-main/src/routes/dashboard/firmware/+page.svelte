@@ -11,6 +11,7 @@
     type DeviceConfig,
   } from '$lib/api/node';
   import { getSelectedNodeIp, NODE_LIST_KEY, readStringList } from '$lib/auth/storage';
+  import { nodeStore } from '$lib/state/nodeStore';
 
   type NodeOtaState = {
     ip: string;
@@ -71,18 +72,29 @@
     rollback: '#ff9f0a',
   };
 
-  async function loadConfigForNode() {
-    if (!selectedNodeIp) return;
+  let loadGen = 0;
+
+  async function loadConfigForNode(targetIp = selectedNodeIp, gen = loadGen) {
+    if (!targetIp) {
+      currentConfig = null;
+      savedConfigSnapshot = null;
+      loadingConfig = false;
+      return;
+    }
     loadingConfig = true;
     configError = '';
     try {
-      const cfg = await getDeviceConfig(selectedNodeIp);
+      const cfg = await getDeviceConfig(targetIp);
+      if (gen !== loadGen) return;
       currentConfig = structuredClone(cfg);
       savedConfigSnapshot = structuredClone(cfg);
     } catch (e) {
+      if (gen !== loadGen) return;
       configError = `Failed to load device config: ${e}`;
     } finally {
-      loadingConfig = false;
+      if (gen === loadGen) {
+        loadingConfig = false;
+      }
     }
   }
 
@@ -271,14 +283,30 @@
     }, 3000);
   }
 
-  onMount(async () => {
-    selectedNodeIp = getSelectedNodeIp();
+  onMount(() => {
     nodeList = readStringList(NODE_LIST_KEY);
     selected = new Set(nodeList);
-    if (selectedNodeIp) {
-      await loadConfigForNode();
-    }
-    await refreshVersions();
+    refreshVersions().catch(() => {});
+
+    const unsub = nodeStore.subscribe(state => {
+      const targetIp = state.nodeIp || getSelectedNodeIp();
+      if (targetIp !== selectedNodeIp) {
+        selectedNodeIp = targetIp;
+        loadGen++;
+        if (selectedNodeIp) {
+          currentConfig = null;
+          savedConfigSnapshot = null;
+          loadingConfig = true;
+          loadConfigForNode(selectedNodeIp, loadGen);
+        } else {
+          currentConfig = null;
+          savedConfigSnapshot = null;
+          loadingConfig = false;
+          configError = '';
+        }
+      }
+    });
+    return unsub;
   });
 </script>
 
