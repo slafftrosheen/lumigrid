@@ -92,7 +92,9 @@
     configError = '';
     try {
       await saveDeviceConfig(selectedNodeIp, currentConfig);
-      savedConfigSnapshot = structuredClone(currentConfig);
+      const updated = await getDeviceConfig(selectedNodeIp);
+      currentConfig = structuredClone(updated);
+      savedConfigSnapshot = structuredClone(updated);
       configToastMsg('Configuration saved successfully to hardware');
     } catch (e) {
       configError = `Failed to save configuration: ${e}`;

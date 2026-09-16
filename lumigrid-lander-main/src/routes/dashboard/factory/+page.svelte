@@ -109,6 +109,7 @@
       await postFactoryLane(nodeIp, lane, c.r, c.g, c.b, brightness, durationMs);
       flash = `Lane ${lane} pattern sent (RGB ${c.r},${c.g},${c.b})`;
       setTimeout(() => (flash = ''), 2000);
+      await refresh();
     } catch (e) {
       error = String(e);
     }
@@ -120,6 +121,7 @@
       await postFactoryPwm(nodeIp, channel, pwmDuties[channel], durationMs);
       flash = `PWM channel ${channel} set to ${pwmDuties[channel]}`;
       setTimeout(() => (flash = ''), 2000);
+      await refresh();
     } catch (e) {
       error = String(e);
     }

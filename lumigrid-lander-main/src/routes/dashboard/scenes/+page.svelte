@@ -134,7 +134,7 @@
   }
 
   async function removeScene(idx: number) {
-    if (!confirm(`Delete preset ${idx}? This will clear slot ${idx} on the node.`)) return;
+    if (!confirm(`Clear preset slot ${idx}? This will reset slot ${idx} on the node.`)) return;
     try {
       if (nodeIp) {
         await deletePreset(nodeIp, idx);
@@ -314,7 +314,7 @@
                 title="Clear this preset slot on hardware"
                 type="button"
               >
-                Delete
+                Clear Slot
               </button>
             {/if}
           </div>

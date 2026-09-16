@@ -352,10 +352,12 @@
                     <td>
                       {#if isConnected}
                         <span class="badge badge-live">● CONNECTED</span>
-                      {:else if isSelected}
+                      {:else if isSelected && liveState.connection === 'connecting'}
                         <span class="badge badge-connecting">CONNECTING</span>
+                      {:else if isSelected}
+                        <span class="badge badge-offline">OFFLINE</span>
                       {:else}
-                        <span class="badge badge-offline">READY</span>
+                        <span class="badge badge-registered">REGISTERED</span>
                       {/if}
                     </td>
                     <td class="fn-time">{formatTimeAgo(fn.lastSeen)}</td>

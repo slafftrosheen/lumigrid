@@ -481,10 +481,22 @@ export function getDeviceConfig(ip: string): Promise<DeviceConfig> {
 }
 
 export function saveDeviceConfig(ip: string, config: DeviceConfig): Promise<{ saved: true }> {
+  const sanitized = { ...config };
+  if (sanitized.auth) {
+    const authCopy: DeviceAuthConfig = {};
+    if (sanitized.auth.adminToken?.trim()) authCopy.adminToken = sanitized.auth.adminToken.trim();
+    if (sanitized.auth.installerToken?.trim()) authCopy.installerToken = sanitized.auth.installerToken.trim();
+    if (sanitized.auth.operatorToken?.trim()) authCopy.operatorToken = sanitized.auth.operatorToken.trim();
+    if (Object.keys(authCopy).length > 0) {
+      sanitized.auth = authCopy;
+    } else {
+      delete sanitized.auth;
+    }
+  }
   return apiJson<{ saved: true }>(ip, '/api/v1/config', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(config),
+    body: JSON.stringify(sanitized),
   });
 }
 

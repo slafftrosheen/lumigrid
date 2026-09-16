@@ -12,6 +12,7 @@ import {
   AUTH_TIMESTAMP_KEY,
   getSelectedNodeIp,
   readString,
+  updateNodeLastSeen,
 } from '../auth/storage';
 import { getHealth, type HealthSnapshot } from '../api/node';
 
@@ -141,6 +142,16 @@ export function getWsUrl(ip: string): string {
   return `${scheme}://${ip}/ws`;
 }
 
+let lastFleetUpdate = 0;
+function recordFleetPresence(ip: string) {
+  if (!ip) return;
+  const now = Date.now();
+  if (now - lastFleetUpdate > 5000) {
+    lastFleetUpdate = now;
+    try { updateNodeLastSeen(ip); } catch {}
+  }
+}
+
 function scheduleReconnect() {
   if (manualClose || reconnectTimer) return;
   const targetIp = latestState.nodeIp || getSelectedNodeIp();
@@ -160,6 +171,7 @@ export async function refreshHealth(nodeIp = latestState.nodeIp || getSelectedNo
   try {
     const health = await getHealth(ip);
     publish({ health, healthError: '', healthUpdatedAt: Date.now() });
+    recordFleetPresence(ip);
     return health;
   } catch (err) {
     const healthError = err instanceof Error ? err.message : String(err);
@@ -308,6 +320,7 @@ export function connect(nodeIp = getSelectedNodeIp()): void {
           lastSeen: now,
           lastMessageAt: now,
         }));
+        recordFleetPresence(latestState.nodeIp);
       } catch {
         // Defensive: ignore malformed status frames; maintain last known good state.
       }
