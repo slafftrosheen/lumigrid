@@ -33,42 +33,64 @@ export function cloneSequence(seq: Sequence): Sequence {
   return structuredClone(seq);
 }
 
-export function serializeSequence(seq: Sequence): string {
-  const bpm = Math.max(MIN_BPM, Math.min(MAX_BPM, Math.round(seq.bpm || 120)));
-  const enabled = Boolean(seq.enabled);
+export function normalizeTimelineStep(step?: Partial<SequenceStep> | null): SequenceStep {
+  const presetIndex = typeof step?.presetIndex === 'number' && Number.isFinite(step.presetIndex)
+    ? Math.max(0, Math.min(31, Math.round(step.presetIndex)))
+    : 0;
+  const lengthBeats = typeof step?.lengthBeats === 'number' && Number.isFinite(step.lengthBeats)
+    ? Math.max(1, Math.min(64, Math.round(step.lengthBeats)))
+    : 4;
+  return {
+    presetIndex,
+    lengthBeats,
+  };
+}
 
-  const tracks = (seq.tracks || []).slice(0, TRACK_COUNT).map((t, idx) => {
-    const channelId = typeof t.channelId === 'number' ? t.channelId : idx;
-    const numSteps = Math.max(1, Math.min(STEP_COUNT, Math.round(t.numSteps || 4)));
-    const trackEnabled = Boolean(t.enabled);
-    const steps = (t.steps || []).slice(0, STEP_COUNT).map(s => ({
-      presetIndex: Math.max(0, Math.round(s.presetIndex || 0)),
-      lengthBeats: Math.max(1, Math.min(64, Math.round(s.lengthBeats || 4))),
-    }));
+export function normalizeTimelineTrack(track?: Partial<SequenceTrack> | null, defaultChannelId = 0): SequenceTrack {
+  const channelId = typeof track?.channelId === 'number' && Number.isFinite(track.channelId)
+    ? Math.max(0, Math.min(7, Math.round(track.channelId)))
+    : defaultChannelId;
+  const numSteps = typeof track?.numSteps === 'number' && Number.isFinite(track.numSteps)
+    ? Math.max(1, Math.min(STEP_COUNT, Math.round(track.numSteps)))
+    : 4;
+  const enabled = track?.enabled !== undefined ? Boolean(track.enabled) : true;
 
-    // Pad if fewer than STEP_COUNT
-    while (steps.length < STEP_COUNT) {
-      steps.push(createDefaultStep());
-    }
-
-    return {
-      channelId,
-      numSteps,
-      enabled: trackEnabled,
-      steps,
-    };
-  });
-
-  // Pad if fewer than TRACK_COUNT
-  while (tracks.length < TRACK_COUNT) {
-    tracks.push(createDefaultTrack(tracks.length));
+  const rawSteps = track?.steps || [];
+  const steps: SequenceStep[] = [];
+  for (let i = 0; i < STEP_COUNT; i++) {
+    steps.push(normalizeTimelineStep(rawSteps[i]));
   }
 
-  return JSON.stringify({
+  return {
+    channelId,
+    numSteps,
+    enabled,
+    steps,
+  };
+}
+
+export function normalizeTimelineSequence(seq?: Partial<Sequence> | null): Sequence {
+  const bpm = typeof seq?.bpm === 'number' && Number.isFinite(seq.bpm)
+    ? Math.max(MIN_BPM, Math.min(MAX_BPM, Math.round(seq.bpm)))
+    : 120;
+  const enabled = Boolean(seq?.enabled);
+
+  const rawTracks = seq?.tracks || [];
+  const tracks: SequenceTrack[] = [];
+  for (let i = 0; i < TRACK_COUNT; i++) {
+    tracks.push(normalizeTimelineTrack(rawTracks[i], i));
+  }
+
+  return {
     bpm,
     enabled,
     tracks,
-  });
+  };
+}
+
+export function serializeSequence(seq: Sequence): string {
+  const norm = normalizeTimelineSequence(seq);
+  return JSON.stringify(norm);
 }
 
 export function isSequenceDirty(current: Sequence | null, saved: Sequence | null): boolean {
