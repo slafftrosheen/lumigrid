@@ -34,8 +34,8 @@ export interface NodeLiveStatus {
 }
 
 export interface DashboardNodeState {
-  ip: string;
   nodeIp: string;
+  ip: string;
   connection: NodeConnection;
   authenticated: boolean;
   role: NodeRole;
@@ -43,6 +43,8 @@ export interface DashboardNodeState {
   lastMessageAt: number;
   status: NodeLiveStatus | null;
   health: HealthSnapshot | null;
+  healthError: string;
+  healthUpdatedAt: number;
   error: string;
 }
 
@@ -63,8 +65,8 @@ const EMPTY_STATUS: NodeLiveStatus = {
 };
 
 const initial: NodeLiveState = {
-  ip: '',
   nodeIp: '',
+  ip: '',
   connection: 'idle',
   authenticated: false,
   role: 'unknown',
@@ -72,6 +74,8 @@ const initial: NodeLiveState = {
   lastMessageAt: 0,
   status: { ...EMPTY_STATUS },
   health: null,
+  healthError: '',
+  healthUpdatedAt: 0,
   pixels: new Uint8Array(BUF_SIZE),
   frameCount: 0,
   error: '',
@@ -108,54 +112,92 @@ function isStoredAuthed(): boolean {
 function publish(patch: Partial<NodeLiveState>) {
   state.update(current => {
     const next = { ...current, ...patch };
-    if (patch.ip !== undefined) next.nodeIp = patch.ip;
-    if (patch.nodeIp !== undefined) next.ip = patch.nodeIp;
-    if (patch.lastSeen !== undefined) next.lastMessageAt = patch.lastSeen;
-    if (patch.lastMessageAt !== undefined) next.lastSeen = patch.lastMessageAt;
+    const ipVal = patch.nodeIp ?? patch.ip;
+    if (ipVal !== undefined) {
+      next.nodeIp = ipVal;
+      next.ip = ipVal;
+    }
+    const msgVal = patch.lastMessageAt ?? patch.lastSeen;
+    if (msgVal !== undefined) {
+      next.lastMessageAt = msgVal;
+      next.lastSeen = msgVal;
+    }
     return next;
   });
 }
 
+export function getWsUrl(ip: string): string {
+  const scheme =
+    typeof location !== 'undefined' && location.protocol === 'https:'
+      ? 'wss'
+      : 'ws';
+  return `${scheme}://${ip}/ws`;
+}
+
 function scheduleReconnect() {
-  if (manualClose || reconnectTimer || !getSelectedNodeIp()) return;
+  if (manualClose || reconnectTimer) return;
+  const targetIp = latestState.nodeIp || getSelectedNodeIp();
+  if (!targetIp) return;
+
   const delay = Math.min(10000, 500 * Math.pow(2, reconnectAttempt));
   reconnectAttempt = Math.min(reconnectAttempt + 1, 5);
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
-    connect();
+    connect(targetIp);
   }, delay);
 }
 
-export async function refreshHealth(nodeIp = getSelectedNodeIp()): Promise<HealthSnapshot | null> {
+export async function refreshHealth(nodeIp = latestState.nodeIp || getSelectedNodeIp()): Promise<HealthSnapshot | null> {
   const ip = nodeIp.trim();
   if (!ip) return null;
   try {
     const health = await getHealth(ip);
-    publish({ health, error: '' });
+    publish({ health, healthError: '', healthUpdatedAt: Date.now() });
     return health;
   } catch (err) {
+    const healthError = err instanceof Error ? err.message : String(err);
+    publish({ healthError, healthUpdatedAt: Date.now() });
     return null;
   }
 }
 
 export function connect(nodeIp = getSelectedNodeIp()): void {
   if (typeof WebSocket === 'undefined') return;
-  if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) return;
+
+  const ip = nodeIp.trim();
+  if (!ip) {
+    if (socket) {
+      const ws = socket;
+      socket = null;
+      ws.close();
+    }
+    publish({ nodeIp: '', connection: 'idle', error: '' });
+    return;
+  }
+
+  // If already connected/connecting to the exact same IP, return early
+  if (socket && latestState.nodeIp === ip && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
+    return;
+  }
+
+  // If switching to a different node, close existing socket and clear reconnect timer
+  if (socket && latestState.nodeIp !== ip) {
+    const ws = socket;
+    socket = null;
+    ws.close();
+  }
 
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
   }
-
-  const ip = nodeIp.trim();
-  if (!ip) {
-    publish({ ip: '', nodeIp: '', connection: 'idle', error: '' });
-    return;
+  if (healthPollTimer) {
+    clearInterval(healthPollTimer);
+    healthPollTimer = null;
   }
 
   manualClose = false;
   publish({
-    ip,
     nodeIp: ip,
     connection: 'connecting',
     role: getStoredRole(),
@@ -163,7 +205,7 @@ export function connect(nodeIp = getSelectedNodeIp()): void {
     error: '',
   });
 
-  const ws = new WebSocket(`ws://${ip}/ws`);
+  const ws = new WebSocket(getWsUrl(ip));
   socket = ws;
   ws.binaryType = 'arraybuffer';
 
@@ -180,7 +222,7 @@ export function connect(nodeIp = getSelectedNodeIp()): void {
     // Proactively pull health snapshot on connect
     refreshHealth(ip).catch(() => {});
 
-    // Periodic health poll while connected (every 10 seconds)
+    // Periodic health poll while connected (every 10 seconds, single interval guaranteed)
     if (healthPollTimer) clearInterval(healthPollTimer);
     healthPollTimer = setInterval(() => {
       if (socket && socket.readyState === WebSocket.OPEN) {
@@ -278,7 +320,8 @@ export function disconnect(): void {
 export function reconnect(ip?: string): void {
   disconnect();
   manualClose = false;
-  connect(ip);
+  const target = ip ?? latestState.nodeIp ?? getSelectedNodeIp();
+  connect(target);
 }
 
 export function getNodeLiveState() {
@@ -292,4 +335,13 @@ export function getNodeLiveSnapshot(): NodeLiveState {
     health: latestState.health ? { ...latestState.health } : null,
     pixels: latestState.pixels.slice(),
   };
+}
+
+export function _resetForTesting(): void {
+  disconnect();
+  manualClose = false;
+  reconnectAttempt = 0;
+  state.set({ ...initial, status: { ...EMPTY_STATUS }, pixels: new Uint8Array(BUF_SIZE) });
+  nodePixelStore.set(new Uint8Array(BUF_SIZE));
+  nodeFrameCount.set(0);
 }
