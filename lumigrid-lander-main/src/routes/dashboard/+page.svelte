@@ -81,7 +81,7 @@
     try {
       await postFactoryAbort(nodeIp);
       toast('Emergency blackout applied.');
-      refreshHealth(nodeIp).catch(() => {});
+      refreshHealth().catch(() => {});
     } catch (e) {
       toast(`Blackout failed: ${e}`);
     }
@@ -270,7 +270,7 @@
         class="icon-refresh-btn"
         onclick={() => {
           reconnectNode(nodeIp);
-          refreshHealth(nodeIp);
+          refreshHealth();
         }}
         title="Reconnect and refresh node telemetry"
         type="button"

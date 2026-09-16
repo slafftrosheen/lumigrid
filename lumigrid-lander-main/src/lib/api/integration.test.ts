@@ -7,7 +7,6 @@ import {
 } from '../auth/storage';
 import {
   apiJson,
-  ApiError,
   getPresets,
   savePreset,
   getSequence,

@@ -161,7 +161,7 @@
     );
     nodes = nodeList.map((ip, i) => {
       const r = infos[i];
-      const info: NodeInfo | null = r.status === 'fulfilled' ? r.value.info.info : null;
+      const info: NodeInfo | null = r.status === 'fulfilled' ? r.value.info : null;
       return {
         ip,
         name: info?.name ?? ip,
@@ -224,9 +224,9 @@
       await sleep(3000);
       try {
         const res = await getInfo(node.ip);
-        if (res.info?.ver && res.info.ver !== oldVer) {
+        if (res.ver && res.ver !== oldVer) {
           nodes = nodes.map((n, i) =>
-            i === idx ? { ...n, version: res.info!.ver, status: 'done', progress: 100, error: '' } : n
+            i === idx ? { ...n, version: res.ver, status: 'done', progress: 100, error: '' } : n
           );
           return;
         }

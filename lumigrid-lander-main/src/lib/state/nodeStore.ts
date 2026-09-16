@@ -275,10 +275,10 @@ export function disconnect(): void {
   publish({ connection: 'disconnected' });
 }
 
-export function reconnect(): void {
+export function reconnect(ip?: string): void {
   disconnect();
   manualClose = false;
-  connect();
+  connect(ip);
 }
 
 export function getNodeLiveState() {

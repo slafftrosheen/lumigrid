@@ -24,7 +24,7 @@
     text: string;
   }
 
-  const parsedLogs = $derived<ParsedLogLine[]>(() => {
+  const parsedLogs = $derived.by<ParsedLogLine[]>(() => {
     if (!rawLogs) return [];
     return rawLogs
       .split('\n')
@@ -55,8 +55,8 @@
       });
   });
 
-  const filteredLogs = $derived<ParsedLogLine[]>(() => {
-    const list = parsedLogs();
+  const filteredLogs = $derived.by<ParsedLogLine[]>(() => {
+    const list = parsedLogs;
     const query = logSearch.toLowerCase().trim();
     return list.filter(l => {
       if (logLevelFilter !== 'all') {
@@ -223,8 +223,8 @@
         type="button"
       >
         <span>Chronological Events</span>
-        {#if parsedLogs().length > 0}
-          <span class="tab-badge count">{parsedLogs().length}</span>
+        {#if parsedLogs.length > 0}
+          <span class="tab-badge count">{parsedLogs.length}</span>
         {/if}
       </button>
 

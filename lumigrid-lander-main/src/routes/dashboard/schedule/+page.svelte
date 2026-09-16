@@ -130,11 +130,12 @@
         <span class="week-action-col">Action</span>
       </div>
       {#each schedule.entries as entry, i}
-        <div
+        <button
           class="week-row"
           class:disabled={!entry.enabled}
           class:selected={selectedIdx === i}
           onclick={() => selectedIdx = i}
+          type="button"
         >
           <span class="week-time">{timeStr(entry)}</span>
           {#each DAYS as _, dayIdx}
@@ -153,7 +154,7 @@
               <span class="action-badge preset">P{entry.presetIndex}</span>
             {/if}
           </span>
-        </div>
+        </button>
       {/each}
     </div>
 
@@ -279,6 +280,10 @@
   .week-action-col { text-align: right !important; }
 
   .week-row {
+    width: 100%;
+    border: none;
+    background: transparent;
+    text-align: left;
     display: grid;
     grid-template-columns: 72px repeat(7, 1fr) 72px;
     padding: .5rem .75rem;
