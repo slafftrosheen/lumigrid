@@ -2,15 +2,18 @@
 """Audit the dashboard's browser state and device API surface.
 
 Strict mode distinguishes:
-1. intentional compatibility code in lib/api/legacy.ts;
+1. intentional compatibility code in lib/api/legacy.ts and dedicated OTA transport in lib/api/firmware.ts;
 2. intentional shared storage implementation in lib/auth/storage.ts;
-3. forbidden route/component access.
+3. single WebSocket client in lib/state/nodeStore.ts;
+4. forbidden route/component access.
 
 Output matches the required boundary report:
 storage boundary: OK
 legacy API boundary: OK / explicit compatibility
+websocket boundary: OK
 route-level legacy access: 0
 route-level direct browser storage: 0
+route-level direct WebSocket: 0
 """
 
 from __future__ import annotations
@@ -28,15 +31,18 @@ if sys.stderr.encoding != "utf-8":
 
 ROOT = Path(__file__).resolve().parents[1]
 DASHBOARD_SRC = ROOT / "lumigrid-lander-main" / "src"
-API_FILE = DASHBOARD_SRC / "lib" / "api" / "node.ts"
-LEGACY_COMPAT_FILE = DASHBOARD_SRC / "lib" / "api" / "legacy.ts"
+API_DIR = DASHBOARD_SRC / "lib" / "api"
+LEGACY_COMPAT_FILE = API_DIR / "legacy.ts"
+FIRMWARE_API_FILE = API_DIR / "firmware.ts"
 STORAGE_FILE = DASHBOARD_SRC / "lib" / "auth" / "storage.ts"
+WEBSOCKET_FILE = DASHBOARD_SRC / "lib" / "state" / "nodeStore.ts"
 ROUTES_DIR = DASHBOARD_SRC / "routes"
 
 LEGACY = re.compile(r"['\"](/(?:json|edit|update|animations\.json)(?:/[^'\"\s]*)?)['\"]")
 CANONICAL = re.compile(r"['\"](/api/v1/[^'\"]+)['\"]")
 LOCAL_STORAGE = re.compile(r"\blocalStorage\b")
 SESSION_STORAGE = re.compile(r"\bsessionStorage\b")
+WEBSOCKET = re.compile(r"\bnew\s+WebSocket\b")
 
 
 def scan_source_files(pattern: re.Pattern[str], exclude: set[Path] | None = None) -> list[tuple[Path, int, str]]:
@@ -62,12 +68,16 @@ def scan_source_files(pattern: re.Pattern[str], exclude: set[Path] | None = None
 def main() -> int:
     strict = "--strict" in sys.argv[1:]
 
-    if not API_FILE.exists():
-        print(f"ERROR: API client not found: {API_FILE}", file=sys.stderr)
+    if not API_DIR.exists():
+        print(f"ERROR: API directory not found: {API_DIR}", file=sys.stderr)
         return 2
 
-    api_text = API_FILE.read_text(encoding="utf-8")
-    canonical_endpoints = sorted(set(m.group(1) for m in CANONICAL.finditer(api_text)))
+    canonical_endpoints = set()
+    for p in API_DIR.glob("*.ts"):
+        if not p.name.endswith(".test.ts") and not p.name.endswith(".spec.ts"):
+            text = p.read_text(encoding="utf-8")
+            canonical_endpoints.update(m.group(1) for m in CANONICAL.finditer(text))
+    sorted_canonical = sorted(canonical_endpoints)
 
     # Direct browser storage scan
     all_storage = scan_source_files(LOCAL_STORAGE, exclude={STORAGE_FILE}) + scan_source_files(SESSION_STORAGE, exclude={STORAGE_FILE})
@@ -75,17 +85,27 @@ def main() -> int:
 
     # Legacy endpoint scan
     all_legacy = scan_source_files(LEGACY)
-    compat_legacy = [m for m in all_legacy if m[0].resolve() == LEGACY_COMPAT_FILE.resolve()]
+    compat_legacy = [
+        m for m in all_legacy
+        if m[0].resolve() == LEGACY_COMPAT_FILE.resolve() or (m[0].resolve() == FIRMWARE_API_FILE.resolve() and "/update" in m[2])
+    ]
     route_legacy = [m for m in all_legacy if ROUTES_DIR.resolve() in m[0].resolve().parents or m[0].resolve() == ROUTES_DIR.resolve()]
-    uncontained_legacy = [m for m in all_legacy if m[0].resolve() != LEGACY_COMPAT_FILE.resolve()]
+    uncontained_legacy = [
+        m for m in all_legacy
+        if m[0].resolve() != LEGACY_COMPAT_FILE.resolve() and not (m[0].resolve() == FIRMWARE_API_FILE.resolve() and "/update" in m[2])
+    ]
+
+    # WebSocket construction scan
+    all_websockets = scan_source_files(WEBSOCKET, exclude={WEBSOCKET_FILE})
+    route_websockets = [m for m in all_websockets if ROUTES_DIR.resolve() in m[0].resolve().parents or m[0].resolve() == ROUTES_DIR.resolve()]
 
     print("LumiGrid dashboard surface audit")
     print(f"source: {DASHBOARD_SRC.relative_to(ROOT)}")
     print(f"mode: {'strict' if strict else 'report-only'}")
     print()
 
-    print(f"canonical /api/v1 references in API client: {len(canonical_endpoints)}")
-    for ep in canonical_endpoints:
+    print(f"canonical /api/v1 references in API client modules: {len(sorted_canonical)}")
+    for ep in sorted_canonical:
         print(f"  + {ep}")
     print()
 
@@ -106,19 +126,28 @@ def main() -> int:
             print(f"  ! {path.relative_to(ROOT)}:{line}: {text}")
         print()
 
+    if all_websockets:
+        print(f"direct WebSocket constructions outside nodeStore.ts: {len(all_websockets)}")
+        for path, line, text in all_websockets:
+            print(f"  ! {path.relative_to(ROOT)}:{line}: {text}")
+        print()
+
     storage_ok = len(route_storage) == 0 and len(all_storage) == 0
     legacy_ok = len(route_legacy) == 0 and len(uncontained_legacy) == 0
+    websocket_ok = len(all_websockets) == 0
 
     print("--- Summary Report ---")
     print(f"storage boundary: {'OK' if storage_ok else 'FAIL'}")
     print(f"legacy API boundary: {'OK / explicit compatibility' if legacy_ok else 'FAIL: uncontained legacy calls'}")
+    print(f"websocket boundary: {'OK' if websocket_ok else 'FAIL: uncontained WebSocket creation'}")
     print(f"route-level legacy access: {len(route_legacy)}")
     print(f"route-level direct browser storage: {len(route_storage)}")
+    print(f"route-level direct WebSocket: {len(route_websockets)}")
     print()
 
     if strict:
-        if not storage_ok or not legacy_ok:
-            print("ACTION: eliminate route-level storage/legacy access or contain inside designated boundaries.")
+        if not storage_ok or not legacy_ok or not websocket_ok:
+            print("ACTION: eliminate route-level storage/legacy/websocket access or contain inside designated boundaries.")
             return 1
 
     print("OK: audit complete.")
