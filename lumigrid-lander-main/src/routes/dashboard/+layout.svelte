@@ -13,6 +13,8 @@
     removeValue,
     writeString,
     writeStringList,
+    unlockDashboardSession,
+    lockDashboardSession,
   } from '$lib/auth/storage';
   import {
     connect,
@@ -58,9 +60,29 @@
     const h = await sha256(pinInput);
     const opHash = readString(OPERATOR_HASH_KEY);
     const adHash = readString(ADMIN_HASH_KEY);
-    if (h === adHash) { authed = true; isAdmin = true; showPinWall = false; }
-    else if (h === opHash) { authed = true; isAdmin = false; showPinWall = false; }
-    else { pinError = 'Incorrect PIN'; pinInput = ''; }
+    if (h === adHash) {
+      authed = true;
+      isAdmin = true;
+      showPinWall = false;
+      unlockDashboardSession('admin');
+    } else if (h === opHash) {
+      authed = true;
+      isAdmin = false;
+      showPinWall = false;
+      unlockDashboardSession('operator');
+    } else {
+      pinError = 'Incorrect PIN';
+      pinInput = '';
+    }
+  }
+
+  function lockDashboard() {
+    authed = false;
+    isAdmin = false;
+    showPinWall = true;
+    pinInput = '';
+    pinError = '';
+    lockDashboardSession();
   }
 
   function addNode() {
@@ -95,6 +117,7 @@
       authed = true;
       isAdmin = readString(AUTH_ROLE_KEY) === 'admin';
       showPinWall = false;
+      unlockDashboardSession(isAdmin ? 'admin' : 'operator');
     }
 
     // Keep the shared live connection warm for all dashboard routes.
@@ -104,13 +127,6 @@
       liveState = val;
     });
     return unsub;
-  });
-
-  $effect(() => {
-    if (authed) {
-      writeString(AUTH_TIMESTAMP_KEY, String(Date.now()));
-      writeString(AUTH_ROLE_KEY, isAdmin ? 'admin' : 'operator');
-    }
   });
 
   const navLinks = [
@@ -223,7 +239,7 @@
     <div class="role-badge" class:admin={isAdmin}>
       {isAdmin ? '◈ Admin' : '◦ Operator'}
     </div>
-    <button class="logout-btn" onclick={() => { authed = false; showPinWall = true; removeValue(AUTH_TIMESTAMP_KEY); }}>
+    <button class="logout-btn" onclick={lockDashboard}>
       Lock
     </button>
   </nav>

@@ -37,7 +37,12 @@ export interface DashboardNodeState {
   nodeIp: string;
   ip: string;
   connection: NodeConnection;
+  /** True if local dashboard PIN wall is unlocked. Firmware remains authoritative. */
+  dashboardUnlocked: boolean;
+  dashboardRole: 'admin' | 'operator' | 'installer' | 'unknown';
+  /** @deprecated Use dashboardUnlocked. Indicates local PIN wall state, NOT firmware auth. */
   authenticated: boolean;
+  /** @deprecated Use dashboardRole. Indicates local UI role, NOT firmware auth. */
   role: NodeRole;
   lastSeen: number;
   lastMessageAt: number;
@@ -68,6 +73,8 @@ const initial: NodeLiveState = {
   nodeIp: '',
   ip: '',
   connection: 'idle',
+  dashboardUnlocked: false,
+  dashboardRole: 'unknown',
   authenticated: false,
   role: 'unknown',
   lastSeen: 0,
@@ -197,11 +204,15 @@ export function connect(nodeIp = getSelectedNodeIp()): void {
   }
 
   manualClose = false;
+  const currentRole = getStoredRole();
+  const currentUnlocked = isStoredAuthed();
   publish({
     nodeIp: ip,
     connection: 'connecting',
-    role: getStoredRole(),
-    authenticated: isStoredAuthed(),
+    dashboardRole: currentRole,
+    dashboardUnlocked: currentUnlocked,
+    role: currentRole,
+    authenticated: currentUnlocked,
     error: '',
   });
 
@@ -212,10 +223,14 @@ export function connect(nodeIp = getSelectedNodeIp()): void {
   ws.onopen = () => {
     if (socket !== ws) return;
     reconnectAttempt = 0;
+    const openRole = getStoredRole();
+    const openUnlocked = isStoredAuthed();
     publish({
       connection: 'connected',
-      role: getStoredRole(),
-      authenticated: isStoredAuthed(),
+      dashboardRole: openRole,
+      dashboardUnlocked: openUnlocked,
+      role: openRole,
+      authenticated: openUnlocked,
       error: '',
     });
 

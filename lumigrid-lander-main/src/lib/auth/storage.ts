@@ -56,6 +56,50 @@ export function setSelectedNodeIp(nodeIp: string): void {
   else removeValue(NODE_IP_KEY);
 }
 
+// ── API Credential & Session Management ───────────────────────────────────────
+
+export function getApiToken(): string {
+  return readString(API_TOKEN_KEY, '').trim();
+}
+
+export function setApiToken(token: string): void {
+  const val = token.trim();
+  if (val) writeString(API_TOKEN_KEY, val);
+  else removeValue(API_TOKEN_KEY);
+}
+
+export function clearApiToken(): void {
+  removeValue(API_TOKEN_KEY);
+}
+
+/**
+ * Atomically lock the local dashboard session:
+ * Clears dashboard auth timestamp, dashboard role, and active API token.
+ */
+export function lockDashboardSession(): void {
+  removeValue(AUTH_TIMESTAMP_KEY);
+  removeValue(AUTH_ROLE_KEY);
+  removeValue(API_TOKEN_KEY);
+}
+
+/**
+ * Atomically unlock the local dashboard session with a specific role and corresponding API token:
+ * Admin -> 'lumigrid_admin'
+ * Operator -> 'lumigrid_op'
+ * Installer -> 'lumigrid_install'
+ */
+export function unlockDashboardSession(role: 'admin' | 'operator' | 'installer'): void {
+  writeString(AUTH_TIMESTAMP_KEY, String(Date.now()));
+  writeString(AUTH_ROLE_KEY, role);
+  if (role === 'admin') {
+    setApiToken('lumigrid_admin');
+  } else if (role === 'installer') {
+    setApiToken('lumigrid_install');
+  } else {
+    setApiToken('lumigrid_op');
+  }
+}
+
 // ── Fleet Node Metadata ────────────────────────────────────────────────────────
 
 export const NODE_META_KEY = 'lg_nodes_meta';
