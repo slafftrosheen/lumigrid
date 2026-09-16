@@ -1,19 +1,26 @@
 /**
  * Shared live node connection/state for dashboard views.
  *
- * The node remains the source of truth. This module only owns browser-side
- * connection state and the latest live frame so pages do not open competing
- * WebSocket connections or access browser storage directly.
+ * The node remains the source of truth. This module owns client-side
+ * connection state, high-frequency pixel buffers, live status, and health
+ * metadata without pages opening competing WebSockets or duplicating state.
  */
 
 import { writable } from 'svelte/store';
-import { getSelectedNodeIp } from '../auth/storage';
+import {
+  AUTH_ROLE_KEY,
+  AUTH_TIMESTAMP_KEY,
+  getSelectedNodeIp,
+  readString,
+} from '../auth/storage';
+import { getHealth, type HealthSnapshot } from '../api/node';
 
 export const LANES = 8;
 export const PIXELS_PER_LANE = 144;
 export const BUF_SIZE = LANES * PIXELS_PER_LANE * 3;
 
 export type NodeConnection = 'idle' | 'connecting' | 'connected' | 'disconnected' | 'error';
+export type NodeRole = 'admin' | 'installer' | 'operator' | 'unknown';
 
 export interface NodeLiveStatus {
   effect: string;
@@ -21,39 +28,92 @@ export interface NodeLiveStatus {
   outputsEnabled: boolean;
   testActive: boolean;
   autoLoop: boolean;
+  effectStartedMs?: number;
+  durationMs?: number;
+  commandRejections?: number;
 }
 
-export interface NodeLiveState {
+export interface DashboardNodeState {
+  ip: string;
   nodeIp: string;
   connection: NodeConnection;
-  status: NodeLiveStatus;
-  pixels: Uint8Array;
-  frameCount: number;
+  authenticated: boolean;
+  role: NodeRole;
+  lastSeen: number;
   lastMessageAt: number;
+  status: NodeLiveStatus | null;
+  health: HealthSnapshot | null;
   error: string;
 }
 
+export interface NodeLiveState extends DashboardNodeState {
+  pixels: Uint8Array;
+  frameCount: number;
+}
+
+const EMPTY_STATUS: NodeLiveStatus = {
+  effect: '',
+  brightness: 0,
+  outputsEnabled: false,
+  testActive: false,
+  autoLoop: false,
+  effectStartedMs: 0,
+  durationMs: 0,
+  commandRejections: 0,
+};
+
 const initial: NodeLiveState = {
+  ip: '',
   nodeIp: '',
   connection: 'idle',
-  status: { effect: '', brightness: 0, outputsEnabled: false, testActive: false, autoLoop: false },
+  authenticated: false,
+  role: 'unknown',
+  lastSeen: 0,
+  lastMessageAt: 0,
+  status: { ...EMPTY_STATUS },
+  health: null,
   pixels: new Uint8Array(BUF_SIZE),
   frameCount: 0,
-  lastMessageAt: 0,
   error: '',
 };
 
+// Main node state store (low-frequency metadata)
 const state = writable<NodeLiveState>(initial);
 let latestState = initial;
 state.subscribe(value => { latestState = value; });
 
+// Separate pixel buffer store for high-frequency renders without waking up unrelated UI components
+export const nodePixelStore = writable<Uint8Array>(new Uint8Array(BUF_SIZE));
+export const nodeFrameCount = writable<number>(0);
+
 let socket: WebSocket | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let healthPollTimer: ReturnType<typeof setInterval> | null = null;
 let reconnectAttempt = 0;
 let manualClose = false;
 
+function getStoredRole(): NodeRole {
+  const r = readString(AUTH_ROLE_KEY);
+  if (r === 'admin') return 'admin';
+  if (r === 'installer') return 'installer';
+  if (r === 'operator') return 'operator';
+  return 'unknown';
+}
+
+function isStoredAuthed(): boolean {
+  const ts = Number(readString(AUTH_TIMESTAMP_KEY, '0'));
+  return Date.now() - ts < 8 * 3600 * 1000;
+}
+
 function publish(patch: Partial<NodeLiveState>) {
-  state.update(current => ({ ...current, ...patch }));
+  state.update(current => {
+    const next = { ...current, ...patch };
+    if (patch.ip !== undefined) next.nodeIp = patch.ip;
+    if (patch.nodeIp !== undefined) next.ip = patch.nodeIp;
+    if (patch.lastSeen !== undefined) next.lastMessageAt = patch.lastSeen;
+    if (patch.lastMessageAt !== undefined) next.lastSeen = patch.lastMessageAt;
+    return next;
+  });
 }
 
 function scheduleReconnect() {
@@ -64,6 +124,18 @@ function scheduleReconnect() {
     reconnectTimer = null;
     connect();
   }, delay);
+}
+
+export async function refreshHealth(nodeIp = getSelectedNodeIp()): Promise<HealthSnapshot | null> {
+  const ip = nodeIp.trim();
+  if (!ip) return null;
+  try {
+    const health = await getHealth(ip);
+    publish({ health, error: '' });
+    return health;
+  } catch (err) {
+    return null;
+  }
 }
 
 export function connect(nodeIp = getSelectedNodeIp()): void {
@@ -77,12 +149,19 @@ export function connect(nodeIp = getSelectedNodeIp()): void {
 
   const ip = nodeIp.trim();
   if (!ip) {
-    publish({ nodeIp: '', connection: 'idle', error: '' });
+    publish({ ip: '', nodeIp: '', connection: 'idle', error: '' });
     return;
   }
 
   manualClose = false;
-  publish({ nodeIp: ip, connection: 'connecting', error: '' });
+  publish({
+    ip,
+    nodeIp: ip,
+    connection: 'connecting',
+    role: getStoredRole(),
+    authenticated: isStoredAuthed(),
+    error: '',
+  });
 
   const ws = new WebSocket(`ws://${ip}/ws`);
   socket = ws;
@@ -91,12 +170,32 @@ export function connect(nodeIp = getSelectedNodeIp()): void {
   ws.onopen = () => {
     if (socket !== ws) return;
     reconnectAttempt = 0;
-    publish({ connection: 'connected', error: '' });
+    publish({
+      connection: 'connected',
+      role: getStoredRole(),
+      authenticated: isStoredAuthed(),
+      error: '',
+    });
+
+    // Proactively pull health snapshot on connect
+    refreshHealth(ip).catch(() => {});
+
+    // Periodic health poll while connected (every 10 seconds)
+    if (healthPollTimer) clearInterval(healthPollTimer);
+    healthPollTimer = setInterval(() => {
+      if (socket && socket.readyState === WebSocket.OPEN) {
+        refreshHealth(ip).catch(() => {});
+      }
+    }, 10000);
   };
 
   ws.onclose = () => {
     if (socket !== ws) return;
     socket = null;
+    if (healthPollTimer) {
+      clearInterval(healthPollTimer);
+      healthPollTimer = null;
+    }
     publish({ connection: 'disconnected' });
     scheduleReconnect();
   };
@@ -117,10 +216,17 @@ export function connect(nodeIp = getSelectedNodeIp()): void {
         const len = Math.min(raw.length, BUF_SIZE);
         const pixels = new Uint8Array(BUF_SIZE);
         pixels.set(raw.subarray(0, len));
+
+        // Update dedicated pixel stores
+        nodePixelStore.set(pixels);
+        nodeFrameCount.update(n => n + 1);
+
+        // Update main state snapshot
         state.update(current => ({
           ...current,
           pixels,
           frameCount: current.frameCount + 1,
+          lastSeen: now,
           lastMessageAt: now,
         }));
       }
@@ -133,16 +239,20 @@ export function connect(nodeIp = getSelectedNodeIp()): void {
         state.update(current => ({
           ...current,
           status: {
-            effect: typeof json.effect === 'string' ? json.effect : current.status.effect,
-            brightness: typeof json.brightness === 'number' ? json.brightness : current.status.brightness,
-            outputsEnabled: typeof json.outputsEnabled === 'boolean' ? json.outputsEnabled : current.status.outputsEnabled,
-            testActive: typeof json.testActive === 'boolean' ? json.testActive : current.status.testActive,
-            autoLoop: typeof json.autoLoop === 'boolean' ? json.autoLoop : current.status.autoLoop,
+            effect: typeof json.effect === 'string' ? json.effect : (current.status?.effect ?? ''),
+            brightness: typeof json.brightness === 'number' ? json.brightness : (current.status?.brightness ?? 0),
+            outputsEnabled: typeof json.outputsEnabled === 'boolean' ? json.outputsEnabled : (current.status?.outputsEnabled ?? false),
+            testActive: typeof json.testActive === 'boolean' ? json.testActive : (current.status?.testActive ?? false),
+            autoLoop: typeof json.autoLoop === 'boolean' ? json.autoLoop : (current.status?.autoLoop ?? false),
+            effectStartedMs: typeof json.effectStartedMs === 'number' ? json.effectStartedMs : current.status?.effectStartedMs,
+            durationMs: typeof json.durationMs === 'number' ? json.durationMs : current.status?.durationMs,
+            commandRejections: typeof json.commandRejections === 'number' ? json.commandRejections : current.status?.commandRejections,
           },
+          lastSeen: now,
           lastMessageAt: now,
         }));
       } catch {
-        // Ignore malformed status frames; keep the last known good state.
+        // Defensive: ignore malformed status frames; maintain last known good state.
       }
     }
   };
@@ -153,6 +263,10 @@ export function disconnect(): void {
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
+  }
+  if (healthPollTimer) {
+    clearInterval(healthPollTimer);
+    healthPollTimer = null;
   }
   reconnectAttempt = 0;
   const ws = socket;
@@ -174,7 +288,8 @@ export function getNodeLiveState() {
 export function getNodeLiveSnapshot(): NodeLiveState {
   return {
     ...latestState,
-    status: { ...latestState.status },
+    status: latestState.status ? { ...latestState.status } : null,
+    health: latestState.health ? { ...latestState.health } : null,
     pixels: latestState.pixels.slice(),
   };
 }

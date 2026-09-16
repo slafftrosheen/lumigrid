@@ -16,7 +16,7 @@
   let connected = $state(false);
   let viewMode = $state<ViewMode>('lanes');
 
-  let pixelBuf = new Uint8Array(BUF_SIZE);
+  let pixelBuf: Uint8Array = new Uint8Array(BUF_SIZE);
   let dirty = $state(false);
   let canvasEl: HTMLCanvasElement | null = null;
   let rafId = 0;
@@ -152,7 +152,7 @@
       nodeIp = value.nodeIp;
       connected = value.connection === 'connected';
       pixelBuf = value.pixels;
-      statusInfo = value.status;
+      if (value.status) statusInfo = value.status;
       dirty = true;
     });
 
