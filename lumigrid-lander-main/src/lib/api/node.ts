@@ -59,102 +59,46 @@ export interface NodeStatus {
   latency: number;
 }
 
-// ── Core fetch helper ─────────────────────────────────────────────────────────
+// ── Shared transport ─────────────────────────────────────────────────────────
 
-const API_TOKEN_KEY = 'lg_api_token';
-// Matches ConfigStore's development/default admin credential.
-const DEV_API_TOKEN = 'lumigrid_admin';
+import {
+  apiFetch,
+  apiJson,
+  authHeaders,
+  clearApiToken,
+  DEV_API_TOKEN,
+  getApiToken,
+  setApiToken,
+} from './transport';
 
-/**
- * Returns the node Bearer token used by the operator console.
- * In development the firmware's default admin credential is used. A real
- * configured token can be supplied through localStorage without changing the
- * client code.
- */
-export function getApiToken(): string {
-  if (typeof localStorage === 'undefined') return DEV_API_TOKEN;
-  return localStorage.getItem(API_TOKEN_KEY) ?? DEV_API_TOKEN;
-}
+export {
+  apiFetch,
+  apiJson,
+  authHeaders,
+  clearApiToken,
+  DEV_API_TOKEN,
+  getApiToken,
+  setApiToken,
+};
 
-export function setApiToken(token: string): void {
-  if (typeof localStorage !== 'undefined') {
-    const value = token.trim();
-    if (value) localStorage.setItem(API_TOKEN_KEY, value);
-    else localStorage.removeItem(API_TOKEN_KEY);
-  }
-}
-
-export function clearApiToken(): void {
-  if (typeof localStorage !== 'undefined') localStorage.removeItem(API_TOKEN_KEY);
-}
-
-function authHeaders(extra?: HeadersInit): Headers {
-  const headers = new Headers(extra);
-  const token = getApiToken();
-  if (token) headers.set('Authorization', `Bearer ${token}`);
-  return headers;
-}
-
-async function wfetch<T>(ip: string, path: string, opts?: RequestInit, timeout = 8000): Promise<T> {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), timeout);
-  const url = `http://${ip}${path}`;
-  try {
-    const res = await fetch(url, {
-      ...opts,
-      headers: authHeaders(opts?.headers),
-      signal: ctrl.signal,
-    });
-    if (!res.ok) {
-      let detail = '';
-      try {
-        const body = await res.clone().json() as { error?: string };
-        detail = body?.error ? `: ${body.error}` : '';
-      } catch {
-        // Keep the HTTP status as the useful fallback for non-JSON responses.
-      }
-      throw new Error(`HTTP ${res.status} ${res.statusText}${detail}`);
-    }
-    return (await res.json()) as T;
-  } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : String(e);
-    throw new Error(`[${ip}] ${path} → ${msg}`);
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-async function rawFetch(ip: string, path: string, opts?: RequestInit, timeout = 8000): Promise<Response> {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), timeout);
-  try {
-    return await fetch(`http://${ip}${path}`, {
-      ...opts,
-      headers: authHeaders(opts?.headers),
-      signal: ctrl.signal,
-    });
-  } finally {
-    clearTimeout(timer);
-  }
-}
 
 // ── Read endpoints ─────────────────────────────────────────────────────────────
 
 export function getInfo(ip: string): Promise<NodeInfo> {
-  return wfetch<NodeInfo>(ip, '/json/info');
+  return apiJson<NodeInfo>(ip, '/json/info');
 }
 
 export function getState(ip: string): Promise<NodeState> {
-  return wfetch<NodeState>(ip, '/json/state');
+  return apiJson<NodeState>(ip, '/json/state');
 }
 
 export function getNodes(ip: string): Promise<{ nodes: ApiNode[] }> {
-  return wfetch<{ nodes: ApiNode[] }>(ip, '/json/nodes');
+  return apiJson<{ nodes: ApiNode[] }>(ip, '/json/nodes');
 }
 
 export async function getChannelConfig(ip: string): Promise<ChannelConfig | null> {
   try {
-    const cfg = await wfetch<{ um?: { Lumigrid_PCA9685?: ChannelConfig } }>(ip, '/json/cfg');
+    const cfg = await apiJson<{ um?: { Lumigrid_PCA9685?: ChannelConfig } }>(ip, '/json/cfg');
     return cfg?.um?.Lumigrid_PCA9685 ?? null;
   } catch {
     return null;
@@ -164,7 +108,7 @@ export async function getChannelConfig(ip: string): Promise<ChannelConfig | null
 /** Read /animations.json from LED Node Storage. Returns null if not found. */
 export async function getSchedule(ip: string): Promise<AnimationBlock[] | null> {
   try {
-    const res = await rawFetch(ip, '/animations.json');
+    const res = await apiFetch(ip, '/animations.json');
     if (!res.ok) return null;
     const j = await res.json() as { animations?: AnimationBlock[] };
     return j.animations ?? [];
@@ -176,7 +120,7 @@ export async function getSchedule(ip: string): Promise<AnimationBlock[] | null> 
 // ── Write endpoints ────────────────────────────────────────────────────────────
 
 export function setState(ip: string, state: Partial<NodeState> | Record<string, unknown>): Promise<NodeState> {
-  return wfetch<NodeState>(ip, '/json/state', {
+  return apiJson<NodeState>(ip, '/json/state', {
     method:  'POST',
     headers: { 'Content-Type': 'application/json' },
     body:    JSON.stringify(state)
@@ -217,7 +161,7 @@ export function setPixels(ip: string, pixels: Array<[number, [number, number, nu
 export async function uploadFile(ip: string, filename: string, content: string): Promise<void> {
   const form = new FormData();
   form.append('data', new Blob([content], { type: 'application/json' }), filename);
-  const res = await rawFetch(ip, '/edit', { method: 'POST', body: form });
+  const res = await apiFetch(ip, '/edit', { method: 'POST', body: form });
   if (!res.ok) throw new Error(`Upload failed: HTTP ${res.status}`);
 }
 
@@ -316,11 +260,11 @@ export interface EffectMeta {
 }
 
 export function getPresets(ip: string): Promise<ScenePreset[]> {
-  return wfetch<ScenePreset[]>(ip, '/api/v1/presets');
+  return apiJson<ScenePreset[]>(ip, '/api/v1/presets');
 }
 
 export function savePreset(ip: string, preset: Partial<ScenePreset> & { index: number }): Promise<{ saved: true }> {
-  return wfetch<{ saved: true }>(ip, '/api/v1/presets', {
+  return apiJson<{ saved: true }>(ip, '/api/v1/presets', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(preset),
@@ -328,7 +272,7 @@ export function savePreset(ip: string, preset: Partial<ScenePreset> & { index: n
 }
 
 export function activatePreset(ip: string, index: number, durationMs = 60000): Promise<{ activated: true }> {
-  return wfetch<{ activated: true }>(ip, '/api/v1/activate', {
+  return apiJson<{ activated: true }>(ip, '/api/v1/activate', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ preset: index, durationMs }),
@@ -336,7 +280,7 @@ export function activatePreset(ip: string, index: number, durationMs = 60000): P
 }
 
 export function getEffects(ip: string): Promise<EffectMeta[]> {
-  return wfetch<EffectMeta[]>(ip, '/api/v1/effects');
+  return apiJson<EffectMeta[]>(ip, '/api/v1/effects');
 }
 
 // ── Sequence / Timeline types & API ────────────────────────────────────────────
@@ -360,11 +304,11 @@ export interface Sequence {
 }
 
 export function getSequence(ip: string): Promise<Sequence> {
-  return wfetch<Sequence>(ip, '/api/v1/sequence');
+  return apiJson<Sequence>(ip, '/api/v1/sequence');
 }
 
 export function saveSequence(ip: string, seq: Sequence): Promise<{ saved: true }> {
-  return wfetch<{ saved: true }>(ip, '/api/v1/sequence', {
+  return apiJson<{ saved: true }>(ip, '/api/v1/sequence', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(seq),
@@ -390,11 +334,11 @@ export interface CalendarSchedule {
 }
 
 export function getCalendarSchedule(ip: string): Promise<CalendarSchedule> {
-  return wfetch<CalendarSchedule>(ip, '/api/v1/schedules');
+  return apiJson<CalendarSchedule>(ip, '/api/v1/schedules');
 }
 
 export function saveCalendarSchedule(ip: string, schedule: CalendarSchedule): Promise<{ saved: true }> {
-  return wfetch<{ saved: true }>(ip, '/api/v1/schedules', {
+  return apiJson<{ saved: true }>(ip, '/api/v1/schedules', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(schedule),
@@ -497,18 +441,18 @@ export interface AuditEvent {
 }
 
 export function getHealth(ip: string): Promise<HealthSnapshot> {
-  return wfetch<HealthSnapshot>(ip, '/api/v1/health');
+  return apiJson<HealthSnapshot>(ip, '/api/v1/health');
 }
 
 export function getLogs(ip: string): Promise<string> {
-  return rawFetch(ip, '/api/v1/logs').then(async res => {
+  return apiFetch(ip, '/api/v1/logs').then(async res => {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return res.text();
   });
 }
 
 export function getAuditLog(ip: string): Promise<AuditEvent[]> {
-  return wfetch<AuditEvent[]>(ip, '/api/v1/audit');
+  return apiJson<AuditEvent[]>(ip, '/api/v1/audit');
 }
 
 // ── Factory / Burn-in types & API ──────────────────────────────────────────────
@@ -536,7 +480,7 @@ export interface FactoryStatus {
 }
 
 export function getFactoryStatus(ip: string): Promise<FactoryStatus> {
-  return wfetch<FactoryStatus>(ip, '/api/v1/factory/status');
+  return apiJson<FactoryStatus>(ip, '/api/v1/factory/status');
 }
 
 export function postFactoryEffect(
@@ -548,7 +492,7 @@ export function postFactoryEffect(
   const body: Record<string, unknown> = { effect };
   if (brightness !== undefined) body.brightness = brightness;
   if (durationMs !== undefined) body.durationMs = durationMs;
-  return wfetch<{ accepted: boolean }>(ip, '/api/v1/factory/effect', {
+  return apiJson<{ accepted: boolean }>(ip, '/api/v1/factory/effect', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -567,7 +511,7 @@ export function postFactoryLane(
   const body: Record<string, unknown> = { lane, red, green, blue };
   if (brightness !== undefined) body.brightness = brightness;
   if (durationMs !== undefined) body.durationMs = durationMs;
-  return wfetch<{ accepted: boolean }>(ip, '/api/v1/factory/lane', {
+  return apiJson<{ accepted: boolean }>(ip, '/api/v1/factory/lane', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -582,7 +526,7 @@ export function postFactoryPwm(
 ): Promise<{ accepted: boolean }> {
   const body: Record<string, unknown> = { channel, duty };
   if (durationMs !== undefined) body.durationMs = durationMs;
-  return wfetch<{ accepted: boolean }>(ip, '/api/v1/factory/pwm', {
+  return apiJson<{ accepted: boolean }>(ip, '/api/v1/factory/pwm', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -590,7 +534,7 @@ export function postFactoryPwm(
 }
 
 export function postFactoryAbort(ip: string): Promise<{ accepted: boolean; action: string }> {
-  return wfetch<{ accepted: boolean; action: string }>(ip, '/api/v1/factory/abort', {
+  return apiJson<{ accepted: boolean; action: string }>(ip, '/api/v1/factory/abort', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: '{}',
@@ -598,7 +542,7 @@ export function postFactoryAbort(ip: string): Promise<{ accepted: boolean; actio
 }
 
 export function postFactoryAutoLoop(ip: string, enabled: boolean): Promise<{ accepted: boolean }> {
-  return wfetch<{ accepted: boolean }>(ip, '/api/v1/factory/auto-loop', {
+  return apiJson<{ accepted: boolean }>(ip, '/api/v1/factory/auto-loop', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ enabled }),
