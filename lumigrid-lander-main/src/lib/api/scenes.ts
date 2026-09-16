@@ -41,34 +41,85 @@ export function clonePreset(preset: ScenePreset): ScenePreset {
   return structuredClone(preset);
 }
 
+export function normalizeLayer(layer?: Partial<SceneLayer> | null): SceneLayer {
+  const d = createDefaultLayer();
+  if (!layer) return d;
+
+  const clampU8 = (v: unknown, def: number) =>
+    typeof v === 'number' && Number.isFinite(v) ? Math.max(0, Math.min(255, Math.round(v))) : def;
+  const clampSpeed = (v: unknown, def: number) =>
+    typeof v === 'number' && Number.isFinite(v) ? Math.max(10, Math.min(60000, Math.round(v))) : def;
+
+  const primary: RgbColor = {
+    r: clampU8(layer.primaryColor?.r, d.primaryColor.r),
+    g: clampU8(layer.primaryColor?.g, d.primaryColor.g),
+    b: clampU8(layer.primaryColor?.b, d.primaryColor.b),
+  };
+
+  const secondary: RgbColor = {
+    r: clampU8(layer.secondaryColor?.r, d.secondaryColor.r),
+    g: clampU8(layer.secondaryColor?.g, d.secondaryColor.g),
+    b: clampU8(layer.secondaryColor?.b, d.secondaryColor.b),
+  };
+
+  const validBlend = typeof layer.blendMode === 'string' && (BLEND_MODES as readonly string[]).includes(layer.blendMode)
+    ? layer.blendMode
+    : 'normal';
+
+  return {
+    effect: typeof layer.effect === 'string' && layer.effect.trim() ? layer.effect.trim() : 'solid',
+    blendMode: validBlend,
+    primaryColor: primary,
+    secondaryColor: secondary,
+    speedMs: clampSpeed(layer.speedMs, d.speedMs),
+    fxParam: clampU8(layer.fxParam, d.fxParam),
+    paletteId: clampU8(layer.paletteId, d.paletteId),
+    opacity: clampU8(layer.opacity, d.opacity),
+    enabled: Boolean(layer.enabled),
+  };
+}
+
+export function normalizeZone(zone?: Partial<SceneZone> | null): SceneZone {
+  const rawLayers = (zone?.layers || []).slice(0, LAYER_COUNT);
+  const layers: SceneLayer[] = [];
+  for (let i = 0; i < LAYER_COUNT; i++) {
+    layers.push(normalizeLayer(rawLayers[i]));
+  }
+  return {
+    layers: [layers[0], layers[1], layers[2]],
+  };
+}
+
+export function normalizeScene(preset: Partial<ScenePreset> | null, defaultIndex = 0): ScenePreset {
+  const index = typeof preset?.index === 'number' && Number.isFinite(preset.index)
+    ? Math.max(0, Math.min(MAX_PRESETS - 1, Math.round(preset.index)))
+    : defaultIndex;
+  const name = typeof preset?.name === 'string' ? preset.name.slice(0, 31).trim() : `Scene ${index}`;
+  const globalBrightness = typeof preset?.globalBrightness === 'number' && Number.isFinite(preset.globalBrightness)
+    ? Math.max(0, Math.min(255, Math.round(preset.globalBrightness)))
+    : 128;
+  const transitionMs = typeof preset?.transitionMs === 'number' && Number.isFinite(preset.transitionMs)
+    ? Math.max(0, Math.min(10000, Math.round(preset.transitionMs)))
+    : 1000;
+
+  const rawZones = preset?.zones || [];
+  const zones: SceneZone[] = [];
+  for (let z = 0; z < ZONE_COUNT; z++) {
+    zones.push(normalizeZone(rawZones[z]));
+  }
+
+  return {
+    index,
+    name,
+    globalBrightness,
+    transitionMs,
+    zones,
+  };
+}
+
 export function serializePreset(preset: ScenePreset): string {
-  return JSON.stringify({
-    index: preset.index,
-    name: preset.name.trim(),
-    globalBrightness: Math.max(0, Math.min(255, Math.round(preset.globalBrightness))),
-    transitionMs: Math.max(0, Math.round(preset.transitionMs)),
-    zones: (preset.zones || []).map(zone => ({
-      layers: (zone.layers || []).map(layer => ({
-        effect: layer.effect,
-        blendMode: layer.blendMode,
-        primaryColor: {
-          r: Math.max(0, Math.min(255, Math.round(layer.primaryColor.r))),
-          g: Math.max(0, Math.min(255, Math.round(layer.primaryColor.g))),
-          b: Math.max(0, Math.min(255, Math.round(layer.primaryColor.b))),
-        },
-        secondaryColor: {
-          r: Math.max(0, Math.min(255, Math.round(layer.secondaryColor.r))),
-          g: Math.max(0, Math.min(255, Math.round(layer.secondaryColor.g))),
-          b: Math.max(0, Math.min(255, Math.round(layer.secondaryColor.b))),
-        },
-        speedMs: Math.max(10, Math.round(layer.speedMs)),
-        fxParam: Math.max(0, Math.min(255, Math.round(layer.fxParam))),
-        paletteId: Math.max(0, Math.round(layer.paletteId)),
-        opacity: Math.max(0, Math.min(255, Math.round(layer.opacity))),
-        enabled: Boolean(layer.enabled),
-      })),
-    })),
-  });
+  const norm = normalizeScene(preset, preset.index);
+  return JSON.stringify(norm);
 }
 
 export function isPresetDirty(current: ScenePreset | null, saved: ScenePreset | null): boolean {
@@ -83,10 +134,21 @@ export function rgbToHex(c: RgbColor): string {
   return `#${hex}`;
 }
 
-export function hexToRgb(hex: string): RgbColor {
-  const clean = hex.replace('#', '');
-  const n = parseInt(clean.length === 3 ? clean.split('').map(x => x + x).join('') : clean, 16);
-  if (isNaN(n)) return { r: 255, g: 255, b: 255 };
+export function isValidHex(hex: unknown): boolean {
+  if (typeof hex !== 'string') return false;
+  return /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(hex.trim());
+}
+
+export function hexToRgb(hex: string, fallback: RgbColor = { r: 255, g: 255, b: 255 }): RgbColor {
+  const trimmed = typeof hex === 'string' ? hex.trim() : '';
+  if (!isValidHex(trimmed)) {
+    return { ...fallback };
+  }
+  const clean = trimmed.replace('#', '');
+  const expanded = clean.length === 3
+    ? clean.split('').map(x => x + x).join('')
+    : clean;
+  const n = parseInt(expanded, 16);
   return { r: (n >> 16) & 0xff, g: (n >> 8) & 0xff, b: n & 0xff };
 }
 
