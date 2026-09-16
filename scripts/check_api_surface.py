@@ -43,7 +43,7 @@ def scan_source_files(pattern: re.Pattern[str], exclude: set[Path] | None = None
     matches: list[tuple[Path, int, str]] = []
     exclude_paths = {p.resolve() for p in (exclude or set())}
     for path in sorted(DASHBOARD_SRC.rglob("*.svelte")) + sorted(DASHBOARD_SRC.rglob("*.ts")):
-        if path.resolve() in exclude_paths:
+        if path.resolve() in exclude_paths or path.name.endswith(".test.ts") or path.name.endswith(".spec.ts"):
             continue
         try:
             lines = path.read_text(encoding="utf-8").splitlines()
