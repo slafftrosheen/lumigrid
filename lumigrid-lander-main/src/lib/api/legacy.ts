@@ -102,37 +102,6 @@ export async function saveSchedule(ip: string, blocks: AnimationBlock[]): Promis
   return uploadFile(ip, 'animations.json', json);
 }
 
-// ── OTA ───────────────────────────────────────────────────────────────────────
-
-/**
- * Upload firmware binary to a LumiGrid LED Node's /update endpoint.
- * Returns a promise that resolves when the upload is accepted (not when rebooted).
- */
-export function uploadFirmware(
-  ip: string,
-  binary: File | Blob,
-  onProgress?: (pct: number) => void,
-): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open('POST', `http://${ip}/update`, true);
-    xhr.setRequestHeader('Authorization', `Bearer ${getApiToken()}`);
-    xhr.upload.onprogress = (e) => {
-      if (e.lengthComputable && onProgress) onProgress(Math.round((e.loaded / e.total) * 100));
-    };
-    xhr.onload = () => {
-      if (xhr.status >= 200 && xhr.status < 300) resolve();
-      else reject(new Error(`OTA failed: HTTP ${xhr.status}`));
-    };
-    xhr.onerror = () => reject(new Error('OTA network error'));
-    xhr.ontimeout = () => reject(new Error('OTA timeout'));
-    xhr.timeout = 120_000; // 2 min
-    const form = new FormData();
-    form.append('update', binary instanceof File ? binary : new File([binary], 'firmware.bin'), 'firmware.bin');
-    xhr.send(form);
-  });
-}
-
 // ── Status snapshot ───────────────────────────────────────────────────────────
 
 /** Fetch info + state for a node and measure latency. Returns NodeStatus. */
@@ -145,11 +114,3 @@ export async function getNodeStatus(ip: string): Promise<NodeStatus> {
     return { ip, info: null, state: null, error: String(e), latency: Math.round(performance.now() - t0) };
   }
 }
-
-// ── Deprecated alias helpers ──────────────────────────────────────────────────
-
-export const getInfoLegacy = getInfo;
-export const getStateLegacy = getState;
-export const getNodesLegacy = getNodes;
-export const getChannelConfigLegacy = getChannelConfig;
-export const getScheduleLegacy = getSchedule;

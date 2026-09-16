@@ -11,7 +11,7 @@ import {
   hexToRgb,
   deletePreset,
 } from './scenes';
-import * as nodeApi from './node';
+import * as scenesApi from './scenes';
 
 describe('scenes model & serialization', () => {
   it('creates valid default layers and zones', () => {
@@ -94,9 +94,20 @@ describe('scenes model & serialization', () => {
   });
 
   it('calls savePreset with empty name on deletePreset', async () => {
-    const spy = vi.spyOn(nodeApi, 'savePreset').mockResolvedValue({ saved: true });
-    await deletePreset('192.168.1.50', 5);
-    expect(spy).toHaveBeenCalledWith('192.168.1.50', { index: 5, name: '' });
-    spy.mockRestore();
+    const originalFetch = globalThis.fetch;
+    const mockFetch = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ saved: true }), { status: 200 })
+    );
+    vi.stubGlobal('fetch', mockFetch);
+    try {
+      await deletePreset('192.168.1.50', 5);
+      expect(mockFetch).toHaveBeenCalled();
+      const [url, opts] = mockFetch.mock.calls[0];
+      expect(url).toBe('http://192.168.1.50/api/v1/presets');
+      expect(opts.method).toBe('PUT');
+      expect(JSON.parse(opts.body)).toEqual({ index: 5, name: '' });
+    } finally {
+      vi.stubGlobal('fetch', originalFetch);
+    }
   });
 });

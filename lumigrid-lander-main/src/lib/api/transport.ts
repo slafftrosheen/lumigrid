@@ -43,27 +43,45 @@ export async function apiFetch(
   }
 }
 
+export class ApiError extends Error {
+  constructor(
+    public status: number,
+    public endpoint: string,
+    public nodeIp: string,
+    public serverMessage: string,
+  ) {
+    const text = serverMessage ? ` ${serverMessage}` : '';
+    super(`[${nodeIp}] ${endpoint} → HTTP ${status}${text}`);
+    this.name = 'ApiError';
+  }
+}
+
 export async function apiJson<T>(
   ip: string,
   path: string,
   options: RequestInit = {},
   timeoutMs = 8000,
 ): Promise<T> {
+  let response: Response;
   try {
-    const response = await apiFetch(ip, path, options, timeoutMs);
-    if (!response.ok) {
-      let detail = '';
-      try {
-        const body = await response.clone().json() as { error?: string };
-        if (body?.error) detail = `: ${body.error}`;
-      } catch {
-        // Keep HTTP status when the node returns a non-JSON error body.
-      }
-      throw new Error(`HTTP ${response.status} ${response.statusText}${detail}`);
-    }
-    return await response.json() as T;
+    response = await apiFetch(ip, path, options, timeoutMs);
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`[${ip}] ${path} → ${message}`);
   }
+
+  if (!response.ok) {
+    let detail = response.statusText;
+    try {
+      const body = await response.clone().json() as { error?: string };
+      if (body?.error) {
+        detail = response.statusText ? `${response.statusText}: ${body.error}` : body.error;
+      }
+    } catch {
+      // Keep HTTP status text when the node returns a non-JSON error body.
+    }
+    throw new ApiError(response.status, path, ip, detail);
+  }
+
+  return await response.json() as T;
 }

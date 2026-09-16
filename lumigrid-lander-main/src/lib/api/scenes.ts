@@ -1,5 +1,70 @@
-import type { ScenePreset, SceneZone, SceneLayer, RgbColor } from './node';
-import { savePreset } from './node';
+import { apiJson } from './transport';
+
+export interface RgbColor {
+  r: number;
+  g: number;
+  b: number;
+}
+
+export interface SceneLayer {
+  effect: string;
+  blendMode: string;
+  primaryColor: RgbColor;
+  secondaryColor: RgbColor;
+  speedMs: number;
+  fxParam: number;
+  paletteId: number;
+  opacity: number;
+  enabled: boolean;
+}
+
+export interface SceneZone {
+  layers: [SceneLayer, SceneLayer, SceneLayer];
+}
+
+export interface ScenePreset {
+  index: number;
+  name: string;
+  globalBrightness: number;
+  transitionMs: number;
+  zones: SceneZone[];
+}
+
+export interface EffectMeta {
+  id: string;
+  label: string;
+  description: string;
+  hasParameter: boolean;
+  parameterLabel?: string;
+  parameterUnit?: string;
+  parameterMin?: number;
+  parameterMax?: number;
+  parameterDefault?: number;
+}
+
+export function getPresets(ip: string): Promise<ScenePreset[]> {
+  return apiJson<ScenePreset[]>(ip, '/api/v1/presets');
+}
+
+export function savePreset(ip: string, preset: Partial<ScenePreset> & { index: number }): Promise<{ saved: true }> {
+  return apiJson<{ saved: true }>(ip, '/api/v1/presets', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(preset),
+  });
+}
+
+export function activatePreset(ip: string, index: number, durationMs = 60000): Promise<{ activated: true }> {
+  return apiJson<{ activated: true }>(ip, '/api/v1/activate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ preset: index, durationMs }),
+  });
+}
+
+export function getEffects(ip: string): Promise<EffectMeta[]> {
+  return apiJson<EffectMeta[]>(ip, '/api/v1/effects');
+}
 
 export const ZONE_COUNT = 8;
 export const LAYER_COUNT = 3;

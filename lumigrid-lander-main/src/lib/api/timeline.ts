@@ -1,4 +1,34 @@
-import type { Sequence, SequenceTrack, SequenceStep } from './node';
+import { apiJson } from './transport';
+
+export interface SequenceStep {
+  presetIndex: number;
+  lengthBeats: number;
+}
+
+export interface SequenceTrack {
+  channelId: number;
+  numSteps: number;
+  enabled: boolean;
+  steps: SequenceStep[];
+}
+
+export interface Sequence {
+  bpm: number;
+  enabled: boolean;
+  tracks: SequenceTrack[];
+}
+
+export function getSequence(ip: string): Promise<Sequence> {
+  return apiJson<Sequence>(ip, '/api/v1/sequence');
+}
+
+export function saveSequence(ip: string, seq: Sequence): Promise<{ saved: true }> {
+  return apiJson<{ saved: true }>(ip, '/api/v1/sequence', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(seq),
+  });
+}
 
 export const TRACK_COUNT = 8;
 export const STEP_COUNT = 16;
