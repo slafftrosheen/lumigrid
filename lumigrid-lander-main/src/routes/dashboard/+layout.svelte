@@ -14,7 +14,12 @@
     writeString,
     writeStringList,
   } from '$lib/auth/storage';
-  import { connect, reconnect as reconnectNode } from '$lib/state/nodeStore';
+  import {
+    connect,
+    reconnect as reconnectNode,
+    getNodeLiveState,
+    getNodeLiveSnapshot,
+  } from '$lib/state/nodeStore';
 
   // ── Feature 5: PIN Gate ──────────────────────────────────────────────────────
   const OPERATOR_HASH_KEY = 'lg_op_hash';
@@ -32,6 +37,7 @@
   let nodeIp   = $state('');
   let nodeList = $state<string[]>([]);
   let addIpVal = $state('');
+  let liveState = $state(getNodeLiveSnapshot());
 
   async function sha256(s: string): Promise<string> {
     const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));
@@ -93,6 +99,11 @@
 
     // Keep the shared live connection warm for all dashboard routes.
     if (nodeIp) connect(nodeIp);
+
+    const unsub = getNodeLiveState().subscribe(val => {
+      liveState = val;
+    });
+    return unsub;
   });
 
   $effect(() => {
@@ -152,13 +163,35 @@
     </a>
 
     <div class="node-section">
-      <p class="nav-label">ACTIVE NODE</p>
+      <div class="nav-label-row">
+        <p class="nav-label">ACTIVE NODE</p>
+        {#if nodeIp}
+          <span class="status-indicator {liveState.connection}" title={liveState.connection}>
+            <span class="status-dot"></span>
+            <span class="status-text">{liveState.connection === 'connected' ? 'Live' : liveState.connection === 'connecting' ? 'Connecting' : 'Offline'}</span>
+          </span>
+        {/if}
+      </div>
       <select class="node-select" value={nodeIp} onchange={(e) => selectNode((e.target as HTMLSelectElement).value)}>
         {#if !nodeList.length}<option value="">— no nodes —</option>{/if}
         {#each nodeList as ip}
           <option value={ip}>{ip}</option>
         {/each}
       </select>
+      {#if nodeIp && liveState.connection === 'connected'}
+        <div class="node-live-telemetry">
+          {#if liveState.health}
+            <span class="telemetry-pill" class:fault={liveState.health.output.fault} title="Output state">
+              {liveState.health.output.state}
+            </span>
+          {/if}
+          {#if liveState.status?.effect}
+            <span class="telemetry-pill effect" title="Current effect">
+              {liveState.status.effect}
+            </span>
+          {/if}
+        </div>
+      {/if}
       <div class="node-add-row">
         <input
           class="node-add-input"
@@ -425,6 +458,59 @@
     padding: 2rem;
     overflow-y: auto;
     max-height: 100dvh;
+  }
+  .nav-label-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: .4rem;
+  }
+  .nav-label-row .nav-label { margin: 0; }
+  .status-indicator {
+    display: inline-flex;
+    align-items: center;
+    gap: .3rem;
+    font-size: .68rem;
+    font-weight: 600;
+  }
+  .status-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #8e8e93;
+  }
+  .status-indicator.connected .status-dot { background: #30d158; box-shadow: 0 0 6px rgba(48,209,88,.6); }
+  .status-indicator.connected .status-text { color: #30d158; }
+  .status-indicator.connecting .status-dot { background: #00d4ff; }
+  .status-indicator.connecting .status-text { color: #00d4ff; }
+  .status-indicator.disconnected .status-dot { background: #8e8e93; }
+  .status-indicator.disconnected .status-text { color: #8e8e93; }
+  .status-indicator.error .status-dot { background: #ff453a; }
+  .status-indicator.error .status-text { color: #ff453a; }
+  .node-live-telemetry {
+    display: flex;
+    gap: .35rem;
+    margin-top: .35rem;
+    flex-wrap: wrap;
+  }
+  .telemetry-pill {
+    font-size: .68rem;
+    padding: .15rem .45rem;
+    border-radius: 6px;
+    background: rgba(48,209,88,.12);
+    color: #30d158;
+    border: 1px solid rgba(48,209,88,.25);
+    font-weight: 600;
+  }
+  .telemetry-pill.fault {
+    background: rgba(255,69,58,.15);
+    color: #ff453a;
+    border-color: rgba(255,69,58,.3);
+  }
+  .telemetry-pill.effect {
+    background: rgba(0,212,255,.10);
+    color: #00d4ff;
+    border-color: rgba(0,212,255,.2);
   }
   @media (max-width: 768px) {
     .dash-nav { width: 56px; padding: 1rem .5rem; }
