@@ -25,9 +25,12 @@
     postFactoryAbort,
     postFactoryEffect,
     postFactoryAutoLoop,
+    getInfo,
+    type NodeInfo,
   } from '$lib/api/node';
 
   let nodeIp = $state('');
+  let nodeInfo = $state<NodeInfo | null>(null);
   let liveState = $state<NodeLiveState>(getNodeLiveSnapshot());
   let canvasEl = $state<HTMLCanvasElement | null>(null);
   let rafId = 0;
@@ -121,6 +124,7 @@
     setSelectedNodeIp(ip);
     nodeIp = ip;
     connect(ip);
+    getInfo(ip).then(info => { nodeInfo = info; }).catch(() => {});
     activeTab = 'node';
     toast(`Connected to node ${ip}`);
   }
@@ -205,6 +209,7 @@
 
     if (nodeIp) {
       connect(nodeIp);
+      getInfo(nodeIp).then(info => { nodeInfo = info; }).catch(() => {});
     }
 
     unsubscribeState = getNodeLiveState().subscribe(val => {
@@ -428,7 +433,11 @@
         <div class="node-sub-meta">
           <span>Uptime: <strong>{formatUptime(liveState.health?.system.uptime_s)}</strong></span>
           <span>·</span>
-          <span>Firmware: <strong>v{liveState.health?.schema_version ?? '1'}</strong></span>
+          <span>Firmware: <strong>{nodeInfo?.ver || 'v1.0.0-dev'}</strong></span>
+          {#if liveState.health}
+            <span>·</span>
+            <span>Health Schema: <strong>v{liveState.health.schema_version}</strong></span>
+          {/if}
           <span>·</span>
           <span>Outputs: <strong>{liveState.status?.outputsEnabled ? 'ENABLED' : 'DISABLED'}</strong></span>
           {#if liveState.health}

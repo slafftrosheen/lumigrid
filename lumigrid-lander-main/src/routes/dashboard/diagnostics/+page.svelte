@@ -181,7 +181,7 @@
       <div class="header-left">
         <h2>Diagnostics & Telemetry</h2>
         <p class="diag-sub">
-          Node: <span class="ip-tag">{nodeIp}</span> · Firmware Schema v{health?.schema_version ?? '1'}
+          Node: <span class="ip-tag">{nodeIp}</span> · Health Schema: v{health?.schema_version ?? '1'}
         </p>
       </div>
 
