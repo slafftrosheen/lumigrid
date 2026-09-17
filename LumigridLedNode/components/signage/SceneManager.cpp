@@ -67,11 +67,12 @@ void SceneManager::update_device_config(const DeviceConfig& cfg) {
     device_cfg_ = cfg;
 }
 
-void SceneManager::activate_scene(uint8_t index, uint32_t current_ms) {
+bool SceneManager::activate_scene(uint8_t index, uint32_t current_ms) {
     SceneConfig scene;
-    if (config_.load_scene(index, scene) != ESP_OK) {
-        ESP_LOGW(TAG, "Preset %u not found", index);
-        return;
+    const esp_err_t load_result = config_.load_scene(index, scene);
+    if (load_result != ESP_OK) {
+        ESP_LOGW(TAG, "Preset %u cannot be activated: load failed (%s)", index, esp_err_to_name(load_result));
+        return false;
     }
 
     last_command_ms_ = current_ms;
@@ -89,8 +90,14 @@ void SceneManager::activate_scene(uint8_t index, uint32_t current_ms) {
     active_index_ = index;
     fallback_active_ = false;
 
-    config_.save_active_state(index);
+    const esp_err_t persist_result = config_.save_active_state(index);
+    if (persist_result != ESP_OK) {
+        // Runtime activation is still valid. Persistence failure is observable in
+        // firmware logs and must not roll back a scene already accepted by runtime.
+        ESP_LOGW(TAG, "Preset %u activated but active-state persistence failed (%s)", index, esp_err_to_name(persist_result));
+    }
     ESP_LOGI(TAG, "Transitioning to preset %u: \"%s\" (%u ms fade)", index, scene.name, scene.transition_ms);
+    return true;
 }
 
 void SceneManager::activate_scene_direct(const SceneConfig& scene, uint32_t current_ms, bool immediate) {

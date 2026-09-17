@@ -12,7 +12,9 @@ public:
     void init();
     void update_device_config(const DeviceConfig& cfg);
 
-    void activate_scene(uint8_t index, uint32_t current_ms);
+    // Returns false when the requested preset cannot be loaded. Callers must not
+    // report an activation as accepted unless this returns true.
+    bool activate_scene(uint8_t index, uint32_t current_ms);
     void activate_scene_direct(const SceneConfig& scene, uint32_t current_ms, bool immediate = false);
     void feed_watchdog(uint32_t current_ms);
 
