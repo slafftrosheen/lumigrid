@@ -1,5 +1,4 @@
 #pragma once
-#include <cstddef>
 #include "driver/gpio.h"
 
 namespace lg::board {
@@ -26,7 +25,7 @@ constexpr gpio_num_t kAledPins[] = {
 constexpr uint8_t kAledCount = 8;
 constexpr uint8_t kPwmCount = 8;
 
-static_assert(std::size(kAledPins) == kAledCount,
+static_assert((sizeof(kAledPins) / sizeof(kAledPins[0])) == kAledCount,
               "Addressable output pin map must match advertised lane count");
 static_assert(kPcaAddress >= 0x40 && kPcaAddress <= 0x7F,
               "Configured PCA9685 address is outside the valid 7-bit device range");
