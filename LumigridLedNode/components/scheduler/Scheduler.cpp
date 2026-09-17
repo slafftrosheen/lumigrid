@@ -55,13 +55,10 @@ esp_err_t Scheduler::start(const char* timezone) {
 esp_err_t Scheduler::stop() {
     if (!running_) return ESP_OK;
     running_ = false;
-    // Wake the task immediately so it sees running_=false rather than waiting
-    // for the next 50 ms vTaskDelayUntil tick.
     if (task_handle_) {
         xTaskAbortDelay(task_handle_);
     }
     esp_sntp_stop();
-    // Wait for the task to signal exit (up to 3 s).
     if (shutdown_sem_ && task_handle_) {
         if (xSemaphoreTake(shutdown_sem_, pdMS_TO_TICKS(3000)) != pdTRUE) {
             ESP_LOGW(TAG, "Scheduler task did not exit within 3s — possible resource leak");
@@ -73,7 +70,6 @@ esp_err_t Scheduler::stop() {
 
 void Scheduler::task_entry(void* arg) {
     static_cast<Scheduler*>(arg)->task();
-    // Signal stop() that the task is done before deleting ourselves.
     Scheduler* self = static_cast<Scheduler*>(arg);
     if (self->shutdown_sem_) {
         xSemaphoreGive(self->shutdown_sem_);
@@ -83,16 +79,14 @@ void Scheduler::task_entry(void* arg) {
 
 void Scheduler::task() {
     for (int attempt = 0; attempt < 30; ++attempt) {
-        if (!running_) return;  // Allow stop() to interrupt SNTP sync
+        if (!running_) return;
         if (clock_.has_epoch()) {
             time_synced_ = true;
             break;
         }
         vTaskDelay(pdMS_TO_TICKS(2000));
-        if (!running_) return;  // Re-check after delay
+        if (!running_) return;
 
-        // Use the authoritative ESP-IDF sync status rather than a year heuristic
-        // which can accept a stale RTC value as synced.
         if (esp_sntp_get_sync_status() == SNTP_SYNC_STATUS_COMPLETED) {
             time_t now_epoch;
             time(&now_epoch);
@@ -108,10 +102,9 @@ void Scheduler::task() {
 
     TickType_t xLastWakeTime = xTaskGetTickCount();
     while (running_) {
-        vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(50)); // Evaluate 20x a second
+        vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(50));
 
         if (!time_synced_) {
-            // Authoritative sync status check — avoids accepting a stale RTC year
             if (esp_sntp_get_sync_status() == SNTP_SYNC_STATUS_COMPLETED) {
                 time_t now_epoch;
                 time(&now_epoch);
@@ -194,8 +187,11 @@ void Scheduler::evaluate_calendar(
             calendar_sequence_active_ = false;
             engine_.release_control(ControlSource::Scheduler);
             engine_.release_control(ControlSource::ManualOverride);
-            engine_.activate_scene(entry.preset_index);
-            ESP_LOGI(TAG, "Calendar activated preset %u", entry.preset_index);
+            if (engine_.activate_scene_checked(entry.preset_index)) {
+                ESP_LOGI(TAG, "Calendar activated preset %u", entry.preset_index);
+            } else {
+                ESP_LOGW(TAG, "Calendar rejected preset %u: scene unavailable or runtime stopping", entry.preset_index);
+            }
         }
     }
 }
@@ -208,7 +204,6 @@ void Scheduler::evaluate(const Sequence& seq, uint64_t clock_ms) {
     ));
 
     SceneConfig active_composite;
-    // Just use a base preset name for reference
     strncpy(active_composite.name, "Sequenced", sizeof(active_composite.name) - 1);
     active_composite.name[sizeof(active_composite.name) - 1] = '\0';
     active_composite.global_brightness = 255;
