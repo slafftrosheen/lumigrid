@@ -28,10 +28,10 @@ public:
 
     void activate_scene(uint8_t index);
     // Truthful control-plane activation boundary. Unlike the legacy void method,
-    // this reports load/rejection failures and refuses activation during shutdown
-    // or when the runtime mutex is unavailable.
+    // this reports load/rejection failures and refuses activation before start,
+    // during shutdown, or when the runtime mutex is unavailable.
     bool activate_scene_checked(uint8_t index) {
-        if (!mutex_ || shutting_down_.load(std::memory_order_acquire)) return false;
+        if (!mutex_ || !task_handle_ || shutting_down_.load(std::memory_order_acquire)) return false;
         xSemaphoreTake(mutex_, portMAX_DELAY);
         const bool accepted = scene_manager_.activate_scene(
             index,
