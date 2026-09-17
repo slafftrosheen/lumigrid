@@ -884,16 +884,15 @@ esp_err_t post_activate(httpd_req_t* request) {
         return send_error(request, "400 Bad Request", "missing_preset_index");
     }
 
-    uint32_t duration_ms = 60000;
-    json_u32(root, "durationMs", 0, 86400000, duration_ms);
-    cJSON_Delete(root);
-
     api_ptr->signage()->feed_watchdog();
     api_ptr->signage()->release_control(ControlSource::EStop);
-    api_ptr->signage()->acquire_control(ControlSource::ManualOverride, duration_ms);
+    api_ptr->signage()->acquire_control(ControlSource::ManualOverride, 0);
+    cJSON_Delete(root);
     api_ptr->signage()->activate_scene(index);
 
-    return send_json(request, R"({"activated":true})", "202 Accepted");
+    char resp[64];
+    snprintf(resp, sizeof(resp), R"({"activated":true,"preset":%u})", index);
+    return send_json(request, resp, "202 Accepted");
 }
 
 esp_err_t get_device_config(httpd_req_t* request) {
@@ -1273,6 +1272,30 @@ esp_err_t get_signage_status(httpd_req_t* request) {
             "transitioning",
             api_ptr->signage()->is_transitioning()
         );
+        cJSON_AddNumberToObject(
+            response,
+            "estimatedMilliwatts",
+            api_ptr->signage()->power_budget().current_power_mw()
+        );
+        cJSON_AddBoolToObject(
+            response,
+            "outputsEnabled",
+            api_ptr->signage()->controller().output_enabled()
+        );
+        
+        const char* owner = "Unknown";
+        switch (api_ptr->signage()->current_control_source()) {
+            case ControlSource::ScenePlayback: owner = "ScenePlayback"; break;
+            case ControlSource::Factory: owner = "Factory"; break;
+            case ControlSource::LiveDmx: owner = "LiveDmx"; break;
+            case ControlSource::ManualOverride: owner = "ManualOverride"; break;
+            case ControlSource::EStop: owner = "EStop"; break;
+            default: break;
+        }
+        cJSON_AddStringToObject(response, "controlOwner", owner);
+        cJSON_AddNumberToObject(response, "frameCount", api_ptr->signage()->frame_count());
+        cJSON_AddNumberToObject(response, "brightness", api_ptr->signage()->current_brightness());
+        cJSON_AddBoolToObject(response, "testActive", api_ptr->runner().status().test_active);
 
         // Encode DMX telemetry as a compact hex string instead of 512 individual
         // cJSON number objects (~41 KB heap) to prevent OOM on status polls.
@@ -2101,50 +2124,23 @@ esp_err_t FactoryApi::start(
             arg->api = this;
             
             try {
-                // Format: 0x01 followed by raw RGB data from RenderFrame
-                arg->payload.reserve(1 + 8 * 128 * 3);
-                arg->payload.push_back(0x01);
+                // Fixed payload size: 1 byte header + 8 lanes * 144 pixels * 3 colors = 3457 bytes
+                arg->payload.resize(3457, 0);
+                arg->payload[0] = 0x01; // Header
 
-                for (uint8_t f = 0; f < 16; ++f) {
+                for (uint8_t f = 0; f < 8; ++f) {
                     const auto& fix = cfg.fixtures[f];
                     const auto& ff = frame.fixtures[f];
-                    bool is_pwm = (fix.profile == FixtureProfile::PWM_Single ||
-                                   fix.profile == FixtureProfile::PWM_RGB ||
-                                   fix.profile == FixtureProfile::PWM_RGBW);
-                    if (fix.num_pixels == 0 && !is_pwm) continue;
-
-                    if (!is_pwm) {
-                        uint16_t pcount = std::min<uint16_t>(fix.num_pixels, 128);
+                    bool is_addressable = (fix.profile == FixtureProfile::WS2812 || fix.profile == FixtureProfile::SK6812);
+                    
+                    if (is_addressable && fix.num_pixels > 0) {
+                        uint16_t pcount = std::min<uint16_t>(fix.num_pixels, 144);
+                        size_t offset = 1 + (f * 144 * 3);
                         for (uint16_t p = 0; p < pcount; ++p) {
                             const auto& lv = ff.pixels[p];
-                            uint8_t r = (std::min)(255, int(lv.r) + lv.w);
-                            uint8_t g = (std::min)(255, int(lv.g) + lv.w);
-                            uint8_t b = (std::min)(255, int(lv.b) + lv.w);
-                            arg->payload.push_back(r);
-                            arg->payload.push_back(g);
-                            arg->payload.push_back(b);
-                        }
-                    } else {
-                        if (fix.profile == FixtureProfile::PWM_Single) {
-                            uint8_t v = static_cast<uint8_t>((uint32_t(ff.pwm[0]) * 255) / 4095);
-                            arg->payload.push_back(v);
-                            arg->payload.push_back(v);
-                            arg->payload.push_back(v);
-                        } else if (fix.profile == FixtureProfile::PWM_RGB) {
-                            uint8_t r = static_cast<uint8_t>((uint32_t(ff.pwm[0]) * 255) / 4095);
-                            uint8_t g = static_cast<uint8_t>((uint32_t(ff.pwm[1]) * 255) / 4095);
-                            uint8_t b = static_cast<uint8_t>((uint32_t(ff.pwm[2]) * 255) / 4095);
-                            arg->payload.push_back(r);
-                            arg->payload.push_back(g);
-                            arg->payload.push_back(b);
-                        } else if (fix.profile == FixtureProfile::PWM_RGBW) {
-                            uint8_t r = static_cast<uint8_t>((uint32_t(ff.pwm[0]) * 255) / 4095);
-                            uint8_t g = static_cast<uint8_t>((uint32_t(ff.pwm[1]) * 255) / 4095);
-                            uint8_t b = static_cast<uint8_t>((uint32_t(ff.pwm[2]) * 255) / 4095);
-                            uint8_t w = static_cast<uint8_t>((uint32_t(ff.pwm[3]) * 255) / 4095);
-                            arg->payload.push_back((std::min)(255, int(r) + w));
-                            arg->payload.push_back((std::min)(255, int(g) + w));
-                            arg->payload.push_back((std::min)(255, int(b) + w));
+                            arg->payload[offset++] = (std::min)(255, int(lv.r) + lv.w);
+                            arg->payload[offset++] = (std::min)(255, int(lv.g) + lv.w);
+                            arg->payload[offset++] = (std::min)(255, int(lv.b) + lv.w);
                         }
                     }
                 }

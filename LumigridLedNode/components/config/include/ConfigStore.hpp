@@ -124,6 +124,9 @@ public:
     /// Determines if a fixture is configured vs unused/disabled (Batch 6 Item 10)
     static bool is_fixture_configured(const FixtureConfig& fixture, const DeviceConfig& config);
 
+    /// Determines if ANY fixture is configured
+    static bool has_configured_fixtures(const DeviceConfig& config);
+
     /// Pure configuration validator (Batch 4, 5, 6)
     static esp_err_t validate_config(const DeviceConfig& config, ConfigValidationResult* out_result = nullptr);
 
@@ -152,6 +155,9 @@ private:
 
     /// Creates a default "Warm White" preset if no presets exist.
     void ensure_defaults();
+
+    /// Populates physical hardware definitions based on board constants
+    void populate_default_topology(DeviceConfig& config);
 };
 
 } // namespace lg

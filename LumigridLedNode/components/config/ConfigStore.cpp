@@ -8,6 +8,7 @@
 #include <cstdarg>
 #include <memory>
 #include "esp_rom_crc.h"
+#include "lg_board_pins.hpp"
 
 static const char* TAG = "config";
 
@@ -291,6 +292,15 @@ bool ConfigStore::is_fixture_configured(const FixtureConfig& fix, const DeviceCo
     for (uint8_t ch = 0; ch < channels; ++ch) {
         uint8_t p_idx = fix.physical_output_index[ch];
         if (p_idx < 16 && cfg.physical_outputs[p_idx].enabled) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool ConfigStore::has_configured_fixtures(const DeviceConfig& config) {
+    for (uint8_t i = 0; i < 16; ++i) {
+        if (is_fixture_configured(config.fixtures[i], config)) {
             return true;
         }
     }
@@ -710,6 +720,8 @@ esp_err_t ConfigStore::load_config(DeviceConfig& config) {
         
         ESP_LOGI(TAG, "Default credentials active: Admin: %s", config.admin_token);
 
+        populate_default_topology(config);
+
         config.schema_version = 2;
         config.checksum = calc_device_crc(config);
         save_config(config);
@@ -734,6 +746,15 @@ esp_err_t ConfigStore::load_config(DeviceConfig& config) {
             ESP_LOGI(TAG, "Migrated config successfully persisted and verified from NVS");
         }
     }
+
+    if (err == ESP_OK && !has_configured_fixtures(config)) {
+        ESP_LOGW(TAG, "No configured fixtures found in loaded config, forcing default hardware topology");
+        populate_default_topology(config);
+        config.checksum = calc_device_crc(config);
+        save_config(config);
+        needs_persist = true;
+    }
+
     if (err == ESP_OK) {
         validate_config(config, &cached_val_res_);
     } else {
@@ -742,6 +763,41 @@ esp_err_t ConfigStore::load_config(DeviceConfig& config) {
         safe_strncpy(cached_val_res_.first_error, "Failed to load device config from NVS", sizeof(cached_val_res_.first_error));
     }
     return err;
+}
+
+void ConfigStore::populate_default_topology(DeviceConfig& config) {
+    uint8_t out_idx = 0;
+    
+    // 1. Setup RMT Addressable Pins
+    for (uint8_t i = 0; i < lg::board::kAledCount && out_idx < 16; ++i) {
+        config.physical_outputs[out_idx].type = OutputType::RMT;
+        config.physical_outputs[out_idx].hardware_id = i;
+        config.physical_outputs[out_idx].gpio_pin = lg::board::kAledPins[i];
+        config.physical_outputs[out_idx].enabled = true;
+        
+        // Setup matching fixture mapping
+        config.fixtures[i].profile = FixtureProfile::WS2812;
+        config.fixtures[i].pixel_order = PixelOrder::GRB;
+        config.fixtures[i].physical_output_index[0] = out_idx;
+        config.fixtures[i].num_pixels = 144; // Give it a sane default so it tests out of the box
+        config.fixtures[i].max_brightness = 255;
+        config.fixtures[i].gamma_correction = true;
+        config.fixtures[i].zone_id = 0; 
+        
+        out_idx++;
+    }
+    
+    // 2. Setup PWM Pins (e.g. 8 channels)
+    // Map them in pairs of RGB or single channels if we wanted to
+    // For now we just map the physical outputs and let the fixture mapping be unconfigured
+    uint8_t fixture_idx = lg::board::kAledCount;
+    for (uint8_t i = 0; i < lg::board::kPwmCount && out_idx < 16; ++i) {
+        config.physical_outputs[out_idx].type = OutputType::PWM;
+        config.physical_outputs[out_idx].hardware_id = i;
+        config.physical_outputs[out_idx].gpio_pin = 0; // PWM uses PCA so GPIO pin might not matter as much, or mapping to PCA pin
+        config.physical_outputs[out_idx].enabled = true;
+        out_idx++;
+    }
 }
 
 // ── Sequences ───────────────────────────────────────────────────────

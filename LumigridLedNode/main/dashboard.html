@@ -1306,7 +1306,7 @@ window.lg = (() => {
         if (ownerEl) ownerEl.textContent = owner;
         if (ownerTextEl) ownerTextEl.textContent = owner;
 
-        const estMw = st?.estimatedMilliwatts ?? 2450;
+        const estMw = st?.estimatedMilliwatts ?? 0;
         const maxMw = state.config?.maxPowerMw || 30000;
         const pct = Math.min(100, Math.round((estMw / maxMw) * 100));
 

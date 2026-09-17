@@ -54,11 +54,11 @@ export function savePreset(ip: string, preset: Partial<ScenePreset> & { index: n
   });
 }
 
-export function activatePreset(ip: string, index: number, durationMs = 60000): Promise<{ activated: true }> {
+export function activatePreset(ip: string, index: number): Promise<{ activated: true }> {
   return apiJson<{ activated: true }>(ip, '/api/v1/activate', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ preset: index, durationMs }),
+    body: JSON.stringify({ preset: index }),
   });
 }
 
@@ -87,8 +87,10 @@ export function createDefaultLayer(): SceneLayer {
 }
 
 export function createDefaultZone(): SceneZone {
+  const l0 = createDefaultLayer();
+  l0.enabled = true;
   return {
-    layers: [createDefaultLayer(), createDefaultLayer(), createDefaultLayer()],
+    layers: [l0, createDefaultLayer(), createDefaultLayer()],
   };
 }
 

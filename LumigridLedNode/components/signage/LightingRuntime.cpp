@@ -281,8 +281,11 @@ void LightingRuntime::render_frame(uint32_t current_ms) {
         output_fault_frame_count_.fetch_add(1, std::memory_order_relaxed);
         controller_.blackout();
     } else {
-        const esp_err_t sched_err = OutputScheduler::schedule(render_frame, local_cfg, controller_);
-        if (sched_err != ESP_OK) { report_output_fault(sched_err); return; }
+        ControlSource dominant = source_manager_.current_owner();
+        if (dominant != ControlSource::Factory && dominant != ControlSource::EStop) {
+            const esp_err_t sched_err = OutputScheduler::schedule(render_frame, local_cfg, controller_);
+            if (sched_err != ESP_OK) { report_output_fault(sched_err); return; }
+        }
         if (state == OutputState::Armed) {
             output_state_.store(OutputState::Healthy, std::memory_order_release);
             ESP_LOGI(TAG, "Armed commit succeeded: output state restored to HEALTHY");

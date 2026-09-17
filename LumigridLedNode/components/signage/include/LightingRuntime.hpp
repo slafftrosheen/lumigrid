@@ -113,6 +113,12 @@ public:
     uint32_t output_fault_frame_count() const {
         return output_fault_frame_count_.load(std::memory_order_relaxed);
     }
+    uint32_t frame_count() const {
+        return frame_count_;
+    }
+    uint8_t current_brightness() const {
+        return current_render_scene_.global_brightness;
+    }
     uint8_t active_live_objects() const;
 
     DeviceConfig get_config_snapshot() const;

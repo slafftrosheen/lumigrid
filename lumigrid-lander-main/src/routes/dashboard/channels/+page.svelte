@@ -34,7 +34,7 @@
   let loadGen = 0;
 
   // Derived list of all controllable PWM channels from the firmware topology
-  const pwmChannels = $derived<PwmChannel[]>(() => {
+  const pwmChannels = $derived.by<PwmChannel[]>(() => {
     if (!config?.fixtures || !config?.physicalOutputs) return [];
     const channels: PwmChannel[] = [];
     config.fixtures.forEach((fix, fIdx) => {
@@ -58,7 +58,7 @@
     return channels;
   });
 
-  const addressableFixtures = $derived(() => {
+  const addressableFixtures = $derived.by(() => {
     if (!config?.fixtures) return [];
     return config.fixtures
       .map((f, i) => ({ ...f, index: i }))

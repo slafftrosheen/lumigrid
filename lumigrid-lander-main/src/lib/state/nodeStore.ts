@@ -33,6 +33,7 @@ export interface NodeLiveStatus {
   effectStartedMs?: number;
   durationMs?: number;
   commandRejections?: number;
+  activePreset?: number;
 }
 
 export interface DashboardNodeState {
@@ -69,6 +70,7 @@ const EMPTY_STATUS: NodeLiveStatus = {
   effectStartedMs: 0,
   durationMs: 0,
   commandRejections: 0,
+  activePreset: -1,
 };
 
 const initial: NodeLiveState = {
@@ -314,7 +316,8 @@ export function connect(nodeIp = getSelectedNodeIp()): void {
           'brightness' in json ||
           'outputsEnabled' in json ||
           'testActive' in json ||
-          'autoLoop' in json;
+          'autoLoop' in json ||
+          'activePreset' in json;
         if (!hasStatusFields) return;
 
         state.update(current => ({
@@ -328,6 +331,7 @@ export function connect(nodeIp = getSelectedNodeIp()): void {
             effectStartedMs: typeof json.effectStartedMs === 'number' ? json.effectStartedMs : current.status?.effectStartedMs,
             durationMs: typeof json.durationMs === 'number' ? json.durationMs : current.status?.durationMs,
             commandRejections: typeof json.commandRejections === 'number' ? json.commandRejections : current.status?.commandRejections,
+            activePreset: typeof json.activePreset === 'number' ? json.activePreset : current.status?.activePreset,
           },
           lastSeen: now,
           lastMessageAt: now,

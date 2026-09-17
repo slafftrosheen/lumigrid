@@ -269,6 +269,34 @@ esp_err_t OutputTransaction::abort() {
 }
 
 esp_err_t OutputController::try_commit_locked() {
+    static uint32_t s_commit_count = 0;
+    static uint32_t s_last_log_ms = 0;
+    s_commit_count++;
+    
+    uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+    if (now - s_last_log_ms >= 1000) {
+        s_last_log_ms = now;
+        uint32_t non_zero_pixels = 0;
+        uint32_t non_zero_bytes = 0;
+        uint32_t pixel_count = 0;
+        auto& buf = pixels_.buffer();
+        for (uint8_t l = 0; l < 8; ++l) {
+            for (uint16_t p = 0; p < 144; ++p) {
+                pixel_count++;
+                if (buf[l][p].r > 0 || buf[l][p].g > 0 || buf[l][p].b > 0) {
+                    non_zero_pixels++;
+                    non_zero_bytes += (buf[l][p].r > 0 ? 1 : 0) + (buf[l][p].g > 0 ? 1 : 0) + (buf[l][p].b > 0 ? 1 : 0);
+                }
+            }
+        }
+        bool enabled = output_enabled_.load(std::memory_order_acquire);
+        bool estop = estop_latched_.load(std::memory_order_acquire);
+        bool valid = topology_valid_.load(std::memory_order_acquire);
+        ESP_LOGI("output_diag", "OUTPUT frame=%lu enabled=%d lanes=8 pixels=%lu nonZeroPx=%lu nonZeroBytes=%lu estop=%d valid=%d",
+                 s_commit_count, enabled, pixel_count, non_zero_pixels, non_zero_bytes, estop, valid);
+    }
+
+
     if (estop_latched_.load(std::memory_order_acquire) ||
         !output_enabled_.load(std::memory_order_acquire) ||
         !topology_valid_.load(std::memory_order_acquire)) {

@@ -64,7 +64,7 @@ describe('canonical dashboard API contracts (/api/v1/*)', () => {
   it('activates a preset via POST /api/v1/activate', async () => {
     vi.mocked(fetch).mockResolvedValue(new Response(JSON.stringify({ activated: true }), { status: 200 }));
 
-    const res = await activatePreset('192.168.1.50', 2, 30000);
+    const res = await activatePreset('192.168.1.50', 2);
     expect(res).toEqual({ activated: true });
 
     expect(vi.mocked(fetch)).toHaveBeenCalledWith(

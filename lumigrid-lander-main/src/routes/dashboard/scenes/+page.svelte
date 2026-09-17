@@ -125,11 +125,9 @@
     error = '';
     try {
       await activatePreset(nodeIp, idx);
-      activePreset = idx;
-      toastMsg(`Activated Scene ${idx} on node`);
+      // Activating state will be cleared when telemetry confirms activePreset === idx
     } catch (e) {
       error = String(e);
-    } finally {
       activating = false;
     }
   }
@@ -182,6 +180,14 @@
 
   onMount(() => {
     const unsub = nodeStore.subscribe(state => {
+      if (state.status?.activePreset !== undefined) {
+        if (activating && state.status.activePreset === editScene?.index) {
+          activating = false;
+          toastMsg(`Activated Scene ${editScene.index} on node`);
+        }
+        activePreset = state.status.activePreset;
+      }
+
       const targetIp = state.nodeIp || getSelectedNodeIp();
       if (targetIp !== nodeIp) {
         nodeIp = targetIp;
