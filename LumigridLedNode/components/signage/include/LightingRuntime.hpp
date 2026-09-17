@@ -25,8 +25,7 @@ public:
 
     esp_err_t start();
 
-    // Returns false when the requested scene cannot be loaded/accepted.
-    bool activate_scene(uint8_t index);
+    void activate_scene(uint8_t index);
     void activate_scene_direct(const SceneConfig& scene, bool immediate = false);
 
     /// Atomically submit a full live DMX frame from DmxRouter (returns false if rejected or unavailable)
