@@ -12,6 +12,7 @@
 #include "SceneManager.hpp"
 #include "RenderTypes.hpp"
 
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -27,16 +28,15 @@ public:
 
     void activate_scene(uint8_t index);
     // Truthful control-plane activation boundary. Unlike the legacy void method,
-    // this reports load/rejection failures and refuses activation when the runtime
-    // is stopping, stopped, faulted, or its mutex is unavailable.
+    // this reports load/rejection failures and refuses activation during shutdown
+    // or when the runtime mutex is unavailable.
     bool activate_scene_checked(uint8_t index) {
-        const LifecycleState state = lifecycle_state_.load(std::memory_order_acquire);
-        if (!mutex_ || state == LifecycleState::Stopping ||
-            state == LifecycleState::Stopped || state == LifecycleState::Faulted) {
-            return false;
-        }
+        if (!mutex_ || shutting_down_.load(std::memory_order_acquire)) return false;
         xSemaphoreTake(mutex_, portMAX_DELAY);
-        const bool accepted = scene_manager_.activate_scene(index, static_cast<uint32_t>(esp_timer_get_time() / 1000ULL));
+        const bool accepted = scene_manager_.activate_scene(
+            index,
+            static_cast<uint32_t>(esp_timer_get_time() / 1000ULL)
+        );
         xSemaphoreGive(mutex_);
         return accepted;
     }
