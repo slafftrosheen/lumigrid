@@ -2094,65 +2094,7 @@ esp_err_t FactoryApi::start(
     runner_.set_status_callback([this]() { this->notify_status_async(); });
     
     if (signage_) {
-        signage_->set_preview_callback([this](const RenderFrame& frame, const DeviceConfig& cfg) {
-            if (this->factory_server_ == nullptr) return;
-
-            // Rate limit to ~10 fps (100ms)
-            static uint32_t last_preview_ms = 0;
-            uint32_t now = esp_log_timestamp();
-            if (now - last_preview_ms < 100) return;
-            
-            bool expected = false;
-            if (!this->preview_pending_.compare_exchange_strong(expected, true)) {
-                return; // Already pending
-            }
-            last_preview_ms = now;
-
-            // Only generate preview frames if there are active WebSocket clients connected
-            size_t client_count = 4;
-            int client_fds[4];
-            if (httpd_get_client_list(this->factory_server_, &client_count, client_fds) != ESP_OK || client_count == 0) {
-                this->preview_pending_ = false;
-                return;
-            }
-
-            auto* arg = new (std::nothrow) WsPreviewArg{};
-            if (!arg) {
-                this->preview_pending_ = false;
-                return;
-            }
-            arg->api = this;
-            
-            try {
-                // Fixed payload size: 1 byte header + 8 lanes * 144 pixels * 3 colors = 3457 bytes
-                arg->payload.resize(3457, 0);
-                arg->payload[0] = 0x01; // Header
-
-                for (uint8_t f = 0; f < 8; ++f) {
-                    const auto& fix = cfg.fixtures[f];
-                    const auto& ff = frame.fixtures[f];
-                    bool is_addressable = (fix.profile == FixtureProfile::WS2812 || fix.profile == FixtureProfile::SK6812);
-                    
-                    if (is_addressable && fix.num_pixels > 0) {
-                        uint16_t pcount = std::min<uint16_t>(fix.num_pixels, 144);
-                        size_t offset = 1 + (f * 144 * 3);
-                        for (uint16_t p = 0; p < pcount; ++p) {
-                            const auto& lv = ff.pixels[p];
-                            arg->payload[offset++] = (std::min)(255, int(lv.r) + lv.w);
-                            arg->payload[offset++] = (std::min)(255, int(lv.g) + lv.w);
-                            arg->payload[offset++] = (std::min)(255, int(lv.b) + lv.w);
-                        }
-                    }
-                }
-
-                if (httpd_queue_work(this->factory_server_, ws_broadcast_preview_work, arg) != ESP_OK) {
-                    this->preview_pending_ = false;
-                    delete arg;
-                }
-            } catch (...) {
-                this->preview_pending_ = false;
-                delete arg;
-            }
+            // WebSocket Pixel Streaming deferred until end-to-end control is proven.
         });
     }
 
@@ -2181,28 +2123,8 @@ void FactoryApi::ws_broadcast_work(void* arg) {
     }
 }
 
-void FactoryApi::ws_broadcast_preview_work(void* arg) {
-    std::unique_ptr<WsPreviewArg> msg(static_cast<WsPreviewArg*>(arg));
-    msg->api->preview_pending_ = false;
+// ws_broadcast_preview_work deferred
 
-    std::vector<int> client_fds(msg->api->max_open_sockets_);
-    size_t clients = client_fds.size();
-
-    if (httpd_get_client_list(msg->api->factory_server_, &clients, client_fds.data()) != ESP_OK || clients == 0) {
-        return;
-    }
-
-    httpd_ws_frame_t frame = {};
-    frame.type = HTTPD_WS_TYPE_BINARY;
-    frame.payload = msg->payload.data();
-    frame.len = msg->payload.size();
-
-    for (size_t i = 0; i < clients; ++i) {
-        if (httpd_ws_get_fd_info(msg->api->factory_server_, client_fds[i]) == HTTPD_WS_CLIENT_WEBSOCKET) {
-            httpd_ws_send_frame_async(msg->api->factory_server_, client_fds[i], &frame);
-        }
-    }
-}
 
 void FactoryApi::notify_status_async() {
     if (factory_server_ == nullptr) return;

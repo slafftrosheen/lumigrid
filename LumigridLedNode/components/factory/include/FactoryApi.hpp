@@ -129,7 +129,6 @@ public:
     void notify_status_async();
 
     static void ws_broadcast_work(void* arg);
-    static void ws_broadcast_preview_work(void* arg);
     static esp_err_t serve_dashboard(httpd_req_t* request);
 
     FactoryRunner& runner_;

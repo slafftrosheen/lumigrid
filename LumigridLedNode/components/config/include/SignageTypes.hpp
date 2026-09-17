@@ -334,6 +334,8 @@ struct DeviceConfig {
     FixtureConfig fixtures[16]          = {};
     ZoneConfig zones[8]                 = {};
     ProtocolConfig protocol             = {};
+    
+    uint32_t reserved_padding_v3        = 0; // Forces NVS size mismatch to reload defaults
 
     uint32_t checksum                   = 0;
 };
