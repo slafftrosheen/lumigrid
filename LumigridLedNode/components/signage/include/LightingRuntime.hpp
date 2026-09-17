@@ -21,6 +21,15 @@ namespace lg {
 
 class LightingRuntime {
 public:
+    enum class LifecycleState : uint8_t {
+        Constructed = 0,
+        Starting = 1,
+        Running = 2,
+        Stopping = 3,
+        Stopped = 4,
+        Faulted = 5
+    };
+
     LightingRuntime(ControlSourceManager& source_manager, OutputController& controller, ConfigStore& config);
     ~LightingRuntime();
 
@@ -28,10 +37,14 @@ public:
 
     void activate_scene(uint8_t index);
     // Truthful control-plane activation boundary. Unlike the legacy void method,
-    // this reports load/rejection failures and refuses activation before start,
-    // during shutdown, or when the runtime mutex is unavailable.
+    // this reports load/rejection failures and only accepts activation while the
+    // runtime is atomically observed in the Running lifecycle state.
     bool activate_scene_checked(uint8_t index) {
-        if (!mutex_ || !task_handle_ || shutting_down_.load(std::memory_order_acquire)) return false;
+        if (!mutex_ ||
+            lifecycle_state_.load(std::memory_order_acquire) != LifecycleState::Running ||
+            shutting_down_.load(std::memory_order_acquire)) {
+            return false;
+        }
         xSemaphoreTake(mutex_, portMAX_DELAY);
         const bool accepted = scene_manager_.activate_scene(
             index,
@@ -71,14 +84,6 @@ public:
 
     // Absolute E-Stop safety state with latched recovery semantics
     void trigger_estop();
-    enum class LifecycleState : uint8_t {
-        Constructed = 0,
-        Starting = 1,
-        Running = 2,
-        Stopping = 3,
-        Stopped = 4,
-        Faulted = 5
-    };
 
     LifecycleState lifecycle_state() const {
         return lifecycle_state_.load(std::memory_order_acquire);
