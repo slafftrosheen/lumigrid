@@ -1,2 +1,4 @@
 dependencies:
-  espressif/led_strip: "^3.0.0"
+  # Pin the tested driver release. 3.0.3 includes the extended WS2812B-V5 reset
+  # timing introduced in 2.5.3 and avoids unreviewed minor-version drift.
+  espressif/led_strip: "3.0.3"
