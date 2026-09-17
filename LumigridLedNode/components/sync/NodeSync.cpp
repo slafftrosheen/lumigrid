@@ -389,11 +389,18 @@ bool NodeSync::handle_heartbeat(
     clock_.discipline(packet.global_clock_ms, (packet.flags & 0x01) != 0);
     engine_.feed_watchdog();
 
-    // Multi-node fleet preset synchronization
+    // Multi-node fleet preset synchronization is part of accepting a heartbeat.
+    // Do not ACK a master state that this worker could not actually apply.
     if ((packet.flags & 0x02) != 0) {
         const uint8_t master_preset = (packet.flags >> 2) & 0x1F;
-        if (master_preset < kMaxPresets && engine_.active_scene_index() != master_preset) {
-            engine_.activate_scene(master_preset);
+        if (master_preset >= kMaxPresets) {
+            ESP_LOGW(TAG, "Rejected master preset %u: out of range", master_preset);
+            return false;
+        }
+        if (engine_.active_scene_index() != master_preset &&
+            !engine_.activate_scene_checked(master_preset)) {
+            ESP_LOGW(TAG, "Rejected master preset %u: scene unavailable or runtime stopping", master_preset);
+            return false;
         }
     }
     return true;
