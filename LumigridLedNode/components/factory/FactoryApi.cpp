@@ -39,12 +39,6 @@ namespace {
 
 constexpr size_t kMaxBodyBytes = 8192;
 
-void safe_strncpy(char* dst, const char* src, size_t dst_size) {
-    if (dst_size == 0) return;
-    std::memcpy(dst, src, dst_size - 1);
-    dst[dst_size - 1] = '\0';
-}
-
 
 esp_err_t send_json(httpd_req_t* request,
                     const char* body,
@@ -52,6 +46,9 @@ esp_err_t send_json(httpd_req_t* request,
     httpd_resp_set_status(request, status);
     httpd_resp_set_type(request, "application/json");
     httpd_resp_set_hdr(request, "Cache-Control", "no-store");
+    httpd_resp_set_hdr(request, "Access-Control-Allow-Origin", "*");
+    httpd_resp_set_hdr(request, "Access-Control-Allow-Headers", "Authorization, Content-Type, X-Auth-Token, X-API-Key");
+    httpd_resp_set_hdr(request, "Access-Control-Allow-Methods", "GET, POST, PUT, OPTIONS");
     return httpd_resp_sendstr(request, body);
 }
 

@@ -29,11 +29,15 @@ export async function apiFetch(
   options: RequestInit = {},
   timeoutMs = 8000,
 ): Promise<Response> {
+  // Derive http/https from the page's own protocol so that Mixed Content errors
+  // don't block requests when the dashboard is served over HTTPS (e.g. Vercel).
+  const scheme =
+    typeof location !== 'undefined' && location.protocol === 'https:' ? 'https' : 'http';
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    return await fetch(`http://${ip}${path}`, {
+    return await fetch(`${scheme}://${ip}${path}`, {
       ...options,
       headers: authHeaders(options.headers),
       signal: controller.signal,

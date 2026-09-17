@@ -118,7 +118,7 @@ esp_err_t OutputController::reconfigure(const DeviceConfig& cfg) {
         }
     }
 
-    // 2. Hardware Configuration: Option A topology (Addressable fixture uses physical_output_index[0])
+    // 2. Hardware Configuration: Addressable fixtures (RMT lanes)
     for (uint8_t f = 0; f < 16; ++f) {
         const FixtureConfig& fix = cfg.fixtures[f];
         if (fix.num_pixels == 0) continue;
@@ -144,9 +144,35 @@ esp_err_t OutputController::reconfigure(const DeviceConfig& cfg) {
         }
     }
 
+    // 3. Hardware Configuration: PWM fixtures (PCA9685 channels)
+    // Clear the PWM driver to a known-zero state after any topology change.
+    // Per-frame channel driving is handled by OutputScheduler using physical_output_index.
+    if (pwm_ok) {
+        esp_err_t pwm_clr = pwm_.clear();
+        if (pwm_clr != ESP_OK) {
+            ESP_LOGW("output", "PWM clear after reconfigure failed: %s (non-fatal, channels may retain stale state)", esp_err_to_name(pwm_clr));
+        }
+        // Log the resolved channel mapping for each active PWM fixture (aids hardware bring-up)
+        for (uint8_t f = 0; f < 16; ++f) {
+            const FixtureConfig& fix = cfg.fixtures[f];
+            const bool is_pwm = (fix.profile == FixtureProfile::PWM_Single ||
+                                 fix.profile == FixtureProfile::PWM_RGB ||
+                                 fix.profile == FixtureProfile::PWM_RGBW);
+            if (!is_pwm) continue;
+            uint8_t pwm_chans = (fix.profile == FixtureProfile::PWM_Single) ? 1 :
+                                (fix.profile == FixtureProfile::PWM_RGB ? 3 : 4);
+            for (uint8_t ch = 0; ch < pwm_chans; ++ch) {
+                uint8_t p_idx = fix.physical_output_index[ch];
+                const PhysicalOutput& phys = cfg.physical_outputs[p_idx];
+                ESP_LOGI("output", "Fixture[%u] PWM ch[%u] -> PCA9685 channel %u", f, ch, phys.hardware_id);
+            }
+        }
+    }
+
     topology_valid_.store(true, std::memory_order_release);
     unlock();
     return ESP_OK;
+
 }
 
 esp_err_t OutputController::blackout_locked() {

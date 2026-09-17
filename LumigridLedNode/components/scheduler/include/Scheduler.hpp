@@ -6,6 +6,7 @@
 #include "esp_err.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include <ctime>
 
 namespace lg {
@@ -51,6 +52,9 @@ private:
 
     TaskHandle_t task_handle_ = nullptr;
     bool running_ = false;
+    /// Signalled by the task just before it calls vTaskDelete.
+    /// stop() waits on this to guarantee the task has exited before returning.
+    SemaphoreHandle_t shutdown_sem_ = nullptr;
 };
 
 } // namespace lg

@@ -1,4 +1,3 @@
-// components/scheduler/Scheduler.cpp
 #include "Scheduler.hpp"
 #include "esp_log.h"
 #include "esp_sntp.h"
@@ -32,6 +31,14 @@ esp_err_t Scheduler::start(const char* timezone) {
     ESP_LOGI(TAG, "SNTP initialized, waiting for sync...");
 
     running_ = true;
+    if (shutdown_sem_ == nullptr) {
+        shutdown_sem_ = xSemaphoreCreateBinary();
+        if (shutdown_sem_ == nullptr) {
+            running_ = false;
+            esp_sntp_stop();
+            return ESP_ERR_NO_MEM;
+        }
+    }
     const BaseType_t created = xTaskCreatePinnedToCore(
         task_entry, "scheduler", 4096, this, 2, &task_handle_, 0
     );
@@ -46,13 +53,31 @@ esp_err_t Scheduler::start(const char* timezone) {
 }
 
 esp_err_t Scheduler::stop() {
+    if (!running_) return ESP_OK;
     running_ = false;
+    // Wake the task immediately so it sees running_=false rather than waiting
+    // for the next 50 ms vTaskDelayUntil tick.
+    if (task_handle_) {
+        xTaskAbortDelay(task_handle_);
+    }
     esp_sntp_stop();
+    // Wait for the task to signal exit (up to 3 s).
+    if (shutdown_sem_ && task_handle_) {
+        if (xSemaphoreTake(shutdown_sem_, pdMS_TO_TICKS(3000)) != pdTRUE) {
+            ESP_LOGW(TAG, "Scheduler task did not exit within 3s — possible resource leak");
+        }
+    }
+    task_handle_ = nullptr;
     return ESP_OK;
 }
 
 void Scheduler::task_entry(void* arg) {
     static_cast<Scheduler*>(arg)->task();
+    // Signal stop() that the task is done before deleting ourselves.
+    Scheduler* self = static_cast<Scheduler*>(arg);
+    if (self->shutdown_sem_) {
+        xSemaphoreGive(self->shutdown_sem_);
+    }
     vTaskDelete(nullptr);
 }
 
@@ -65,15 +90,13 @@ void Scheduler::task() {
         }
         vTaskDelay(pdMS_TO_TICKS(2000));
         if (!running_) return;  // Re-check after delay
-        time_t now_epoch;
-        time(&now_epoch);
-        struct tm now_tm;
-        localtime_r(&now_epoch, &now_tm);
 
-        if (now_tm.tm_year > (2024 - 1900)) {
-            clock_.set_epoch(
-                uint64_t(now_epoch) * 1000ULL
-            );
+        // Use the authoritative ESP-IDF sync status rather than a year heuristic
+        // which can accept a stale RTC value as synced.
+        if (esp_sntp_get_sync_status() == SNTP_SYNC_STATUS_COMPLETED) {
+            time_t now_epoch;
+            time(&now_epoch);
+            clock_.set_epoch(uint64_t(now_epoch) * 1000ULL);
             time_synced_ = true;
             break;
         }
@@ -88,11 +111,10 @@ void Scheduler::task() {
         vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(50)); // Evaluate 20x a second
 
         if (!time_synced_) {
-            time_t now_epoch;
-            time(&now_epoch);
-            struct tm now_tm;
-            localtime_r(&now_epoch, &now_tm);
-            if (now_tm.tm_year > (2024 - 1900)) {
+            // Authoritative sync status check — avoids accepting a stale RTC year
+            if (esp_sntp_get_sync_status() == SNTP_SYNC_STATUS_COMPLETED) {
+                time_t now_epoch;
+                time(&now_epoch);
                 clock_.set_epoch(uint64_t(now_epoch) * 1000ULL);
                 time_synced_ = true;
             } else if (clock_.has_epoch()) {

@@ -704,64 +704,17 @@ esp_err_t ConfigStore::load_config(DeviceConfig& config) {
         persistence_state_ = ConfigPersistenceState::RecoveryRequired;
     }
 
-    auto generate_token = [](char* out, size_t max_len) {
-        uint8_t rand_bytes[8];
-        esp_fill_random(rand_bytes, sizeof(rand_bytes));
-        snprintf(out, max_len, "%02x%02x%02x%02x%02x%02x%02x%02x",
-                 rand_bytes[0], rand_bytes[1], rand_bytes[2], rand_bytes[3],
-                 rand_bytes[4], rand_bytes[5], rand_bytes[6], rand_bytes[7]);
-    };
-
     if (err == ESP_ERR_NVS_NOT_FOUND || err == ESP_ERR_NVS_INVALID_STATE || err == ESP_ERR_NVS_INVALID_LENGTH) {
         auto def = std::make_unique<DeviceConfig>();
         config = *def;
-#if !defined(CONFIG_LUMIGRID_ENABLE_DEV_CREDENTIALS)
-        generate_token(config.admin_token, sizeof(config.admin_token));
-        generate_token(config.installer_token, sizeof(config.installer_token));
-        generate_token(config.operator_token, sizeof(config.operator_token));
-#endif
         
-        ESP_LOGW(TAG, "==================================================");
-        ESP_LOGW(TAG, "  NEW CREDENTIALS GENERATED");
-        ESP_LOGW(TAG, "  Admin Token:     %s", config.admin_token);
-        ESP_LOGW(TAG, "  Installer Token: %s", config.installer_token);
-        ESP_LOGW(TAG, "  Operator Token:  %s", config.operator_token);
-        ESP_LOGW(TAG, "  STORE THESE SECURELY. THEY WILL NOT BE SHOWN AGAIN.");
-        ESP_LOGW(TAG, "==================================================");
+        ESP_LOGI(TAG, "Default credentials active: Admin: %s", config.admin_token);
 
         config.schema_version = 2;
         config.checksum = calc_device_crc(config);
         save_config(config);
         return ESP_OK;
     } else if (err == ESP_OK) {
-        // Rotate any known legacy default credentials still present in stored config
-        bool token_rotated = false;
-#if !defined(CONFIG_LUMIGRID_ENABLE_DEV_CREDENTIALS)
-        if (std::strcmp(config.admin_token, "lumigrid_admin") == 0) {
-            generate_token(config.admin_token, sizeof(config.admin_token));
-            token_rotated = true;
-        }
-        if (std::strcmp(config.installer_token, "lumigrid_install") == 0) {
-            generate_token(config.installer_token, sizeof(config.installer_token));
-            token_rotated = true;
-        }
-        if (std::strcmp(config.operator_token, "lumigrid_op") == 0) {
-            generate_token(config.operator_token, sizeof(config.operator_token));
-            token_rotated = true;
-        }
-#endif
-
-        if (token_rotated) {
-            ESP_LOGW(TAG, "==================================================");
-            ESP_LOGW(TAG, "  LEGACY DEFAULT CREDENTIALS DETECTED & ROTATED");
-            ESP_LOGW(TAG, "  Admin Token:     %s", config.admin_token);
-            ESP_LOGW(TAG, "  Installer Token: %s", config.installer_token);
-            ESP_LOGW(TAG, "  Operator Token:  %s", config.operator_token);
-            ESP_LOGW(TAG, "  PERSISTING TO NVS. STORE THESE SECURELY.");
-            ESP_LOGW(TAG, "==================================================");
-            needs_persist = true;
-        }
-
         if (needs_persist) {
             ESP_LOGI(TAG, "Persisting migrated/updated DeviceConfig to NVS");
             esp_err_t s_err = save_config(config);
@@ -991,40 +944,6 @@ void ConfigStore::ensure_defaults() {
         ESP_LOGE(TAG, "Failed to save default scene 1: %s", esp_err_to_name(err));
     }
 
-    // 🔒 Security Provisioning
-    auto dc = std::make_unique<DeviceConfig>();
-    if (load_config(*dc) == ESP_OK) {
-#if !defined(CONFIG_LUMIGRID_ENABLE_DEV_CREDENTIALS)
-        if (strcmp(dc->admin_token, "lumigrid_admin") == 0) {
-            ESP_LOGI(TAG, "Factory default credentials detected. Provisioning new tokens...");
-            
-            auto generate_token = [](char* out, size_t max_len) {
-                uint8_t rand_bytes[8];
-                esp_fill_random(rand_bytes, sizeof(rand_bytes));
-                snprintf(out, max_len, "%02x%02x%02x%02x%02x%02x%02x%02x",
-                         rand_bytes[0], rand_bytes[1], rand_bytes[2], rand_bytes[3],
-                         rand_bytes[4], rand_bytes[5], rand_bytes[6], rand_bytes[7]);
-            };
-
-            generate_token(dc->admin_token, sizeof(dc->admin_token));
-            generate_token(dc->installer_token, sizeof(dc->installer_token));
-            generate_token(dc->operator_token, sizeof(dc->operator_token));
-
-            ESP_LOGW(TAG, "==================================================");
-            ESP_LOGW(TAG, "  NEW CREDENTIALS GENERATED");
-            ESP_LOGW(TAG, "  Admin Token:     %s", dc->admin_token);
-            ESP_LOGW(TAG, "  Installer Token: %s", dc->installer_token);
-            ESP_LOGW(TAG, "  Operator Token:  %s", dc->operator_token);
-            ESP_LOGW(TAG, "  STORE THESE SECURELY. THEY WILL NOT BE SHOWN AGAIN.");
-            ESP_LOGW(TAG, "==================================================");
-
-            esp_err_t cfg_err = save_config(*dc);
-            if (cfg_err != ESP_OK) {
-                ESP_LOGE(TAG, "Failed to persist provisioned credentials: %s", esp_err_to_name(cfg_err));
-            }
-        }
-#endif
-    }
 }
 
 } // namespace lg

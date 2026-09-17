@@ -1,23 +1,69 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
-  import { getChannelConfig, setPixels, getState, setBrightness, setPower } from '$lib/api/legacy';
-  import type { ChannelConfig } from '$lib/api/node';
+  import { onMount } from 'svelte';
+  import { getDeviceConfig } from '$lib/api/config';
+  import { postFactoryPwm } from '$lib/api/factory';
+  import type { DeviceConfig, FixtureConfig, PhysicalOutput } from '$lib/api/config';
   import { getSelectedNodeIp } from '$lib/auth/storage';
   import { nodeStore } from '$lib/state/nodeStore';
 
-  const CHANNEL_TYPES = ['Off', 'PWM (Dumb)', 'CCT (2ch)', 'RGB (3ch)', 'RGBW (4ch)'];
+  // Profile constants mirroring firmware FixtureProfile enum
+  const PROFILE_NAMES: Record<number, string> = {
+    0: 'WS2812',
+    1: 'SK6812',
+    2: 'PWM Single',
+    3: 'PWM RGB',
+    4: 'PWM RGBW',
+  };
+  const PWM_PROFILES = new Set([2, 3, 4]);
+
+  interface PwmChannel {
+    fixtureIdx: number;
+    fixtureLabel: string;
+    profile: number;
+    channelLabel: string;
+    pca9685Channel: number;
+    duty: number; // 0–4095
+  }
+
   let nodeIp = $state('');
-  let config = $state<ChannelConfig | null>(null);
+  let config = $state<DeviceConfig | null>(null);
   let loading = $state(true);
   let error = $state('');
-  let channelValues = $state<number[]>(Array(8).fill(128));
-  let masterBri = $state(255);
-  let masterOn = $state(true);
-  let dirty = $state(false);
+  let toast = $state('');
   let sending = $state(false);
-  let lastSent = $state(0);
-  let channelRGB = $state<{r:number;g:number;b:number}[]>(Array(8).fill(null).map(() => ({ r: 255, g: 255, b: 255 })));
   let loadGen = 0;
+
+  // Derived list of all controllable PWM channels from the firmware topology
+  const pwmChannels = $derived<PwmChannel[]>(() => {
+    if (!config?.fixtures || !config?.physicalOutputs) return [];
+    const channels: PwmChannel[] = [];
+    config.fixtures.forEach((fix, fIdx) => {
+      if (!PWM_PROFILES.has(fix.profile)) return;
+      const numCh = fix.profile === 2 ? 1 : fix.profile === 3 ? 3 : 4;
+      const chLabels = fix.profile === 2 ? ['W'] : fix.profile === 3 ? ['R', 'G', 'B'] : ['R', 'G', 'B', 'W'];
+      for (let ch = 0; ch < numCh; ch++) {
+        const pIdx = fix.physicalOutputIndex[ch];
+        const phys: PhysicalOutput | undefined = config!.physicalOutputs![pIdx];
+        if (!phys || !phys.enabled) continue;
+        channels.push({
+          fixtureIdx: fIdx,
+          fixtureLabel: `Fixture ${fIdx}`,
+          profile: fix.profile,
+          channelLabel: chLabels[ch],
+          pca9685Channel: phys.hardwareId,
+          duty: 0,
+        });
+      }
+    });
+    return channels;
+  });
+
+  const addressableFixtures = $derived(() => {
+    if (!config?.fixtures) return [];
+    return config.fixtures
+      .map((f, i) => ({ ...f, index: i }))
+      .filter(f => !PWM_PROFILES.has(f.profile) && f.numPixels > 0);
+  });
 
   async function loadConfig(targetIp = nodeIp, gen = loadGen) {
     if (!targetIp) {
@@ -28,22 +74,32 @@
     loading = true;
     error = '';
     try {
-      const [cfg, st] = await Promise.all([
-        getChannelConfig(targetIp),
-        getState(targetIp),
-      ]);
+      const cfg = await getDeviceConfig(targetIp);
       if (gen !== loadGen) return;
       config = cfg;
-      masterBri = st.bri;
-      masterOn = st.on;
     } catch (e) {
       if (gen !== loadGen) return;
       error = String(e);
     } finally {
-      if (gen === loadGen) {
-        loading = false;
-      }
+      if (gen === loadGen) loading = false;
     }
+  }
+
+  async function sendPwm(ch: PwmChannel) {
+    if (sending || !nodeIp) return;
+    sending = true;
+    try {
+      await postFactoryPwm(nodeIp, ch.pca9685Channel, ch.duty);
+    } catch (e) {
+      error = String(e);
+    } finally {
+      sending = false;
+    }
+  }
+
+  function toastMsg(msg: string) {
+    toast = msg;
+    setTimeout(() => { if (toast === msg) toast = ''; }, 2500);
   }
 
   onMount(() => {
@@ -52,60 +108,162 @@
       if (targetIp !== nodeIp) {
         nodeIp = targetIp;
         loadGen++;
-        if (nodeIp) {
-          config = null;
-          loading = true;
-          loadConfig(nodeIp, loadGen);
-        } else {
-          config = null;
-          loading = false;
-          error = '';
-        }
+        config = null;
+        loading = !!nodeIp;
+        error = '';
+        if (nodeIp) loadConfig(nodeIp, loadGen);
       }
     });
     return unsub;
   });
-  async function sendChannels() {
-    if (sending || Date.now() - lastSent < 66) return;
-    sending = true; lastSent = Date.now(); dirty = false;
-    try {
-      const pixels: Array<[number, [number, number, number, number]]> = [];
-      if (!config) for (let i = 0; i < 8; i++) { const v = channelValues[i]; pixels.push([i, [v, v, v, v]]); }
-      else { let pixelIdx = 0; let ch = 0; while (ch < 8) { const type = config.channelType[ch] ?? 1; const v = channelValues[ch]; const rgb = channelRGB[ch]; switch (type) {
-        case 0: pixels.push([pixelIdx, [0,0,0,0]]); ch++; pixelIdx++; break;
-        case 1: pixels.push([pixelIdx, [v,v,v,v]]); ch++; pixelIdx++; break;
-        case 2: { const warm = channelValues[ch] ?? 128; const cool = ch + 1 < 8 ? (channelValues[ch + 1] ?? 128) : 0; pixels.push([pixelIdx, [warm,cool,0,0]]); ch += 2; pixelIdx++; break; }
-        case 3: pixels.push([pixelIdx, [rgb.r,rgb.g,rgb.b,0]]); ch += 3; pixelIdx++; break;
-        case 4: pixels.push([pixelIdx, [rgb.r,rgb.g,rgb.b,v]]); ch += 4; pixelIdx++; break;
-        default: ch++; pixelIdx++; break;
-      } } }
-      await setPixels(nodeIp, pixels);
-    } catch (e) { error = String(e); }
-    sending = false; if (dirty) sendChannels();
-  }
-  function onSliderChange() { dirty = true; sendChannels(); }
-  function channelLabel(ch: number) { return config?.channelLabel?.[ch] ?? `LED ${ch}`; }
-  function channelType(ch: number) { return config?.channelType?.[ch] ?? 1; }
-  function isPrimary(ch: number) { let c = 0; while (c < ch) { const t = channelType(c); c += t === 2 ? 2 : t === 3 ? 3 : t === 4 ? 4 : 1; } return c === ch; }
 </script>
 
-<svelte:head><title>Channel Control — LumiGrid</title></svelte:head>
+<svelte:head><title>Channels — LumiGrid</title></svelte:head>
+
 <div class="page">
-  <header class="page-header"><div><h1>PWM Channel Control</h1><p class="sub">{nodeIp ? `Node: ${nodeIp}` : 'No node selected'} · {config ? `${config.pwmFrequency} Hz` : ''}</p></div><div class="head-actions"><button class="action-btn" onclick={() => setPower(nodeIp, !masterOn).then(() => loadConfig())}>{masterOn ? '⏻ Off' : '⏻ On'}</button><button class="action-btn" onclick={() => loadConfig()}>↺</button></div></header>
-  {#if !nodeIp}<div class="empty">Select a node in the sidebar to control its PWM channels.</div>
-  {:else if loading}<div class="loading"><div class="spinner"></div>Loading…</div>
-  {:else if error}<div class="err-box">{error}</div>
+  {#if toast}
+    <div class="toast">{toast}</div>
+  {/if}
+
+  <header class="page-header">
+    <div>
+      <h1>Output Channels</h1>
+      <p class="sub">
+        {nodeIp ? `Node: ${nodeIp}` : 'No node selected'}
+        {#if config?.physicalOutputs}
+          · {config.physicalOutputs.filter(p => p.enabled).length} physical outputs configured
+        {/if}
+      </p>
+    </div>
+    <button class="action-btn" onclick={() => loadConfig()} disabled={loading}>↺ Refresh</button>
+  </header>
+
+  {#if !nodeIp}
+    <div class="empty">Select a node in the sidebar to view its output channels.</div>
+
+  {:else if loading}
+    <div class="loading"><div class="spinner"></div>Loading topology…</div>
+
+  {:else if error}
+    <div class="err-box">
+      <strong>Failed to load config:</strong> {error}
+      <br><small>Ensure the node is reachable and at firmware v1.0+</small>
+    </div>
+
+  {:else if !config}
+    <div class="empty">No configuration returned from node.</div>
+
   {:else}
-    <div class="master-card"><div class="master-label"><span>Master Brightness</span><span class="master-val">{masterBri}</span></div><input type="range" min="0" max="255" bind:value={masterBri} class="master-range" oninput={() => setBrightness(nodeIp, masterBri)} /></div>
-    <div class="channel-grid">{#each {length: 8} as _, ch}{@const type = channelType(ch)}{@const primary = isPrimary(ch)}
-      <div class="channel-card" class:secondary={!primary} class:off-type={type === 0}><div class="ch-header"><span class="ch-index">CH{ch}</span><span class="ch-name">{channelLabel(ch)}</span><span class="ch-type-badge">{CHANNEL_TYPES[type] ?? 'Unknown'}</span></div>
-      {#if type === 0}<div class="ch-off">Channel disabled</div>
-      {:else if type === 1 || type === 2}<div class="slider-row"><div class="slider-track" style:background={`linear-gradient(to right, #ff2d55 ${channelValues[ch]/255*100}%, rgba(255,255,255,.08) 0)`}><input type="range" min="0" max="255" bind:value={channelValues[ch]} oninput={onSliderChange} class="ch-range" /></div><span class="ch-val">{channelValues[ch]}</span></div>
-      {:else if type === 3 || type === 4}<div class="rgb-row">{#each ['r','g','b'] as c}<div class="rgb-col"><label class="rgb-label" for={`rgb-${ch}-${c}`}>{c.toUpperCase()}</label><input id={`rgb-${ch}-${c}`} type="range" min="0" max="255" bind:value={channelRGB[ch][c as 'r'|'g'|'b']} oninput={onSliderChange} class="rgb-range" style:accent-color={c === 'r' ? '#ff453a' : c === 'g' ? '#34c759' : '#0a84ff'} /><span class="rgb-val">{channelRGB[ch][c as 'r'|'g'|'b']}</span></div>{/each}{#if type === 4}<div class="rgb-col"><label class="rgb-label" for={`rgb-${ch}-w`}>W</label><input id={`rgb-${ch}-w`} type="range" min="0" max="255" bind:value={channelValues[ch]} oninput={onSliderChange} class="rgb-range" style:accent-color="#fff" /><span class="rgb-val">{channelValues[ch]}</span></div>{/if}</div><div class="swatch" style:background={`rgb(${channelRGB[ch].r},${channelRGB[ch].g},${channelRGB[ch].b})`}></div>{/if}</div>
-    {/each}</div>
+    <!-- PWM Channels -->
+    <section class="section-card">
+      <h2 class="section-title">
+        <span class="icon">⚡</span> PWM Channels (PCA9685)
+        <span class="count-pill">{pwmChannels.length} channels</span>
+      </h2>
+
+      {#if pwmChannels.length === 0}
+        <div class="empty-section">
+          No PWM fixtures configured.
+          {#if !config.physicalOutputs || config.physicalOutputs.length === 0}
+            The hardware topology has not been set up — configure fixtures in the device settings first.
+          {/if}
+        </div>
+      {:else}
+        <div class="channel-grid">
+          {#each pwmChannels as ch, i (ch.pca9685Channel + '_' + ch.channelLabel)}
+            <div class="channel-card pwm">
+              <div class="ch-header">
+                <span class="ch-index">PCA9685 ch{ch.pca9685Channel}</span>
+                <span class="ch-name">{ch.fixtureLabel} · {ch.channelLabel}</span>
+                <span class="ch-badge">{PROFILE_NAMES[ch.profile]}</span>
+              </div>
+              <div class="slider-row">
+                <div class="slider-track">
+                  <input
+                    type="range"
+                    min="0"
+                    max="4095"
+                    bind:value={pwmChannels[i].duty}
+                    oninput={() => sendPwm(ch)}
+                    class="ch-range"
+                  />
+                </div>
+                <span class="ch-val">{ch.duty}</span>
+              </div>
+              <div class="duty-bar" style:width={`${(ch.duty / 4095) * 100}%`}></div>
+            </div>
+          {/each}
+        </div>
+      {/if}
+    </section>
+
+    <!-- Addressable Fixtures (read-only info) -->
+    <section class="section-card">
+      <h2 class="section-title">
+        <span class="icon">💡</span> Addressable LED Fixtures (RMT)
+        <span class="count-pill">{addressableFixtures.length} fixtures</span>
+      </h2>
+
+      {#if addressableFixtures.length === 0}
+        <div class="empty-section">No addressable fixtures configured.</div>
+      {:else}
+        <div class="fixture-list">
+          {#each addressableFixtures as fix}
+            <div class="fixture-row">
+              <span class="fix-idx">Fixture {fix.index}</span>
+              <span class="fix-profile">{PROFILE_NAMES[fix.profile] ?? 'Unknown'}</span>
+              <span class="fix-pixels">{fix.numPixels} px</span>
+              <span class="fix-zone">Zone {fix.zoneId}</span>
+              <span class="fix-phys">RMT lane {config!.physicalOutputs?.[fix.physicalOutputIndex[0]]?.hardwareId ?? '?'}</span>
+            </div>
+          {/each}
+        </div>
+      {/if}
+    </section>
   {/if}
 </div>
 
 <style>
-  .page{max-width:900px}.page-header{display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:1.5rem;gap:1rem;flex-wrap:wrap}h1{margin:0;font-size:1.6rem;font-weight:700;color:#f5f5f7}.sub{margin:.25rem 0 0;color:#a1a1a6;font-size:.85rem}.head-actions{display:flex;gap:.5rem}.action-btn{background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.12);border-radius:999px;color:#f5f5f7;padding:.5rem 1rem;cursor:pointer;font-size:.85rem}.action-btn:hover{background:rgba(255,255,255,.14)}.loading{display:flex;align-items:center;gap:.75rem;color:#a1a1a6;padding:3rem;justify-content:center}.spinner{width:18px;height:18px;border:2px solid rgba(255,255,255,.1);border-top-color:#ff2d55;border-radius:50%;animation:spin .8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}.empty{color:#a1a1a6;padding:3rem;text-align:center}.err-box{background:rgba(255,69,58,.12);border:1px solid rgba(255,69,58,.3);border-radius:12px;color:#ff453a;padding:1rem;font-size:.85rem;font-family:monospace}.master-card{background:rgba(29,29,31,.72);border:1px solid rgba(255,255,255,.08);border-radius:16px;padding:1rem 1.25rem;margin-bottom:1.25rem}.master-label{display:flex;justify-content:space-between;margin-bottom:.5rem;color:#f5f5f7;font-weight:600;font-size:.9rem}.master-val{color:#a1a1a6;font-family:monospace}.master-range{width:100%;accent-color:#ff2d55;height:4px}.channel-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:1rem}.channel-card{background:rgba(29,29,31,.72);border:1px solid rgba(255,255,255,.08);border-radius:16px;padding:1rem;display:flex;flex-direction:column;gap:.6rem}.channel-card.off-type{opacity:.45}.ch-header{display:flex;align-items:center;gap:.4rem;flex-wrap:wrap}.ch-index{font-size:.65rem;font-weight:700;color:#a1a1a6;background:rgba(255,255,255,.06);padding:.1rem .35rem;border-radius:4px;font-family:monospace}.ch-name{flex:1;font-size:.85rem;font-weight:600;color:#f5f5f7;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.ch-type-badge{font-size:.65rem;color:#ff9500;background:rgba(255,149,0,.12);padding:.1rem .4rem;border-radius:999px;white-space:nowrap}.ch-off{color:#a1a1a6;font-size:.78rem;text-align:center;padding:.5rem 0}.slider-row{display:flex;align-items:center;gap:.5rem}.slider-track{flex:1;border-radius:999px;height:6px;position:relative}.ch-range{width:100%;accent-color:#ff2d55}.ch-val{min-width:2.5ch;font-family:monospace;font-size:.8rem;color:#f5f5f7;text-align:right}.rgb-row{display:flex;flex-direction:column;gap:.3rem}.rgb-col{display:flex;align-items:center;gap:.4rem}.rgb-label{width:1.2rem;font-size:.72rem;font-weight:700;color:#a1a1a6;text-align:right}.rgb-range{flex:1;height:4px}.rgb-val{min-width:2.5ch;font-family:monospace;font-size:.72rem;color:#a1a1a6}.swatch{width:100%;height:24px;border-radius:8px;border:1px solid rgba(255,255,255,.1)}
+  .page { max-width: 920px; }
+  .page-header { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 1.5rem; gap: 1rem; flex-wrap: wrap; }
+  h1 { margin: 0; font-size: 1.6rem; font-weight: 700; color: #f5f5f7; }
+  .sub { margin: .25rem 0 0; color: #a1a1a6; font-size: .85rem; }
+  .action-btn { background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.12); border-radius: 999px; color: #f5f5f7; padding: .5rem 1rem; cursor: pointer; font-size: .85rem; }
+  .action-btn:hover { background: rgba(255,255,255,.14); }
+  .action-btn:disabled { opacity: .5; cursor: default; }
+
+  .toast { position: fixed; top: 1.5rem; right: 2rem; background: rgba(29,29,31,.95); border: 1px solid rgba(0,113,227,.4); color: #f5f5f7; padding: .75rem 1.25rem; border-radius: 12px; font-size: .88rem; z-index: 1000; }
+
+  .loading { display: flex; align-items: center; gap: .75rem; color: #a1a1a6; padding: 3rem; justify-content: center; }
+  .spinner { width: 18px; height: 18px; border: 2px solid rgba(255,255,255,.1); border-top-color: #ff2d55; border-radius: 50%; animation: spin .8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .empty { color: #a1a1a6; padding: 3rem; text-align: center; }
+  .err-box { background: rgba(255,69,58,.12); border: 1px solid rgba(255,69,58,.3); border-radius: 12px; color: #ff453a; padding: 1rem 1.25rem; font-size: .85rem; line-height: 1.6; }
+
+  .section-card { background: rgba(29,29,31,.72); border: 1px solid rgba(255,255,255,.08); border-radius: 16px; padding: 1.25rem 1.5rem; margin-bottom: 1.25rem; }
+  .section-title { display: flex; align-items: center; gap: .5rem; margin: 0 0 1.25rem; font-size: 1.05rem; font-weight: 600; color: #f5f5f7; }
+  .icon { font-size: 1.1rem; }
+  .count-pill { margin-left: auto; font-size: .72rem; font-weight: 500; color: #a1a1a6; background: rgba(255,255,255,.07); padding: .15rem .55rem; border-radius: 999px; }
+  .empty-section { color: #a1a1a6; font-size: .9rem; padding: 1rem 0; }
+
+  .channel-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 1rem; }
+  .channel-card { background: rgba(255,255,255,.03); border: 1px solid rgba(255,255,255,.07); border-radius: 12px; padding: 1rem; display: flex; flex-direction: column; gap: .6rem; position: relative; overflow: hidden; }
+  .channel-card.pwm { border-color: rgba(255,149,0,.18); }
+  .ch-header { display: flex; align-items: center; gap: .4rem; flex-wrap: wrap; }
+  .ch-index { font-size: .65rem; font-weight: 700; color: #a1a1a6; background: rgba(255,255,255,.06); padding: .1rem .35rem; border-radius: 4px; font-family: monospace; }
+  .ch-name { flex: 1; font-size: .85rem; font-weight: 600; color: #f5f5f7; }
+  .ch-badge { font-size: .65rem; color: #ff9500; background: rgba(255,149,0,.12); padding: .1rem .4rem; border-radius: 999px; white-space: nowrap; }
+  .slider-row { display: flex; align-items: center; gap: .5rem; }
+  .slider-track { flex: 1; }
+  .ch-range { width: 100%; accent-color: #ff9500; }
+  .ch-val { min-width: 3ch; font-family: monospace; font-size: .8rem; color: #f5f5f7; text-align: right; }
+  .duty-bar { position: absolute; bottom: 0; left: 0; height: 3px; background: linear-gradient(90deg, #ff9500, #ff6b00); border-radius: 0 0 12px 12px; transition: width .1s; }
+
+  .fixture-list { display: flex; flex-direction: column; gap: .5rem; }
+  .fixture-row { display: flex; align-items: center; gap: .75rem; padding: .6rem .9rem; background: rgba(255,255,255,.03); border-radius: 8px; font-size: .85rem; flex-wrap: wrap; }
+  .fix-idx { font-family: monospace; font-size: .72rem; color: #a1a1a6; min-width: 4.5rem; }
+  .fix-profile { color: #64d2ff; font-weight: 600; }
+  .fix-pixels { color: #a1a1a6; min-width: 4rem; }
+  .fix-zone { color: #a1a1a6; }
+  .fix-phys { margin-left: auto; font-family: monospace; font-size: .72rem; color: #a1a1a6; }
 </style>

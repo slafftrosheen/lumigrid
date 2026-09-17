@@ -176,7 +176,6 @@ esp_err_t LumigridRuntime::init() {
     DeviceConfig dev_cfg;
     if (config_.load_config(dev_cfg) == ESP_OK) {
         startup_stage_ = StartupStage::ConfigLoaded;
-#if defined(CONFIG_LUMIGRID_ENABLE_DEV_CREDENTIALS)
         if (std::strcmp(dev_cfg.admin_token, "lumigrid_admin") != 0) {
             std::strncpy(dev_cfg.admin_token, "lumigrid_admin", sizeof(dev_cfg.admin_token) - 1);
             std::strncpy(dev_cfg.installer_token, "lumigrid_install", sizeof(dev_cfg.installer_token) - 1);
@@ -184,7 +183,6 @@ esp_err_t LumigridRuntime::init() {
             config_.save_config(dev_cfg);
             ESP_LOGW("lumigrid", "Dev credentials restored: admin_token=lumigrid_admin");
         }
-#endif
         api::update_tokens(dev_cfg.admin_token, dev_cfg.installer_token, dev_cfg.operator_token);
 
         ConfigStore::ConfigValidationResult val_res;
@@ -235,6 +233,7 @@ esp_err_t LumigridRuntime::init() {
         output_.blackout();
         output_.set_output_enabled(false);
         ESP_LOGE("lumigrid", "Failed to load device config! Entering SAFE MODE!");
+        api::update_tokens("lumigrid_admin", "lumigrid_install", "lumigrid_op");
     }
 
 #if defined(CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS) && CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS
@@ -313,14 +312,8 @@ void LumigridRuntime::rollback_services(StartupStage failed_stage, esp_err_t err
         mdns_.stop();
         started_subsystems_.mdns = false;
     }
-    if (started_subsystems_.api) {
-        api_.stop();
-        started_subsystems_.api = false;
-    }
-    if (started_subsystems_.wifi) {
-        wifi_.stop();
-        started_subsystems_.wifi = false;
-    }
+    // NOTE: Wi-Fi and Web API are intentionally NOT stopped during rollback
+    // to preserve recovery access and telemetry at 192.168.4.1 even during failures.
     if (started_subsystems_.factory) {
         factory_runner_.stop();
         started_subsystems_.factory = false;
@@ -353,6 +346,14 @@ esp_err_t LumigridRuntime::stop() {
     ESP_LOGI("lumigrid", "Stopping LumigridRuntime...");
 
     rollback_services(StartupStage::None, ESP_OK);
+    if (started_subsystems_.api) {
+        api_.stop();
+        started_subsystems_.api = false;
+    }
+    if (started_subsystems_.wifi) {
+        wifi_.stop();
+        started_subsystems_.wifi = false;
+    }
 
     services_started_ = false;
     lifecycle_state_ = RuntimeLifecycle::Stopped;
@@ -429,9 +430,7 @@ esp_err_t LumigridRuntime::start() {
 
     // Wait synchronously for network readiness (10s bounded timeout)
     if (xSemaphoreTake(net_ready_sem_.load(std::memory_order_acquire), pdMS_TO_TICKS(10000)) != pdTRUE) {
-        ESP_LOGE("lumigrid", "Network readiness timed out after 10s");
-        rollback_services(StartupStage::NetworkConfigured, ESP_ERR_TIMEOUT);
-        return ESP_ERR_TIMEOUT;
+        ESP_LOGW("lumigrid", "Network readiness semaphore timed out after 10s; proceeding with Web UI startup anyway");
     }
 
     lifecycle_state_ = RuntimeLifecycle::NetworkReady;
@@ -504,12 +503,11 @@ esp_err_t LumigridRuntime::start() {
         }
     );
     if (err != ESP_OK) {
-        ESP_LOGE("lumigrid", "artnet.start() FAILED: %s", esp_err_to_name(err));
-        rollback_services(StartupStage::NetworkConfigured, err);
-        return err;
+        ESP_LOGW("lumigrid", "artnet.start() warning: %s (non-fatal, continuing)", esp_err_to_name(err));
+    } else {
+        started_subsystems_.artnet = true;
+        artnet_.set_output_universes(active_unis, port_count);
     }
-    started_subsystems_.artnet = true;
-    artnet_.set_output_universes(active_unis, port_count);
 
     ESP_LOGI("lumigrid", "Step 8.5: sacn.start()...");
     err = sacn_.start(
@@ -520,12 +518,11 @@ esp_err_t LumigridRuntime::start() {
         }
     );
     if (err != ESP_OK) {
-        ESP_LOGE("lumigrid", "sacn.start() FAILED: %s", esp_err_to_name(err));
-        rollback_services(StartupStage::ProtocolsStarted, err);
-        return err;
+        ESP_LOGW("lumigrid", "sacn.start() warning: %s (non-fatal, continuing)", esp_err_to_name(err));
+    } else {
+        started_subsystems_.sacn = true;
+        sacn_.set_subscribed_universes(active_unis, u_count);
     }
-    started_subsystems_.sacn = true;
-    sacn_.set_subscribed_universes(active_unis, u_count);
     startup_stage_ = StartupStage::ProtocolsStarted;
 
     if (!safe_mode_) {

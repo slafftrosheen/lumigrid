@@ -10,7 +10,7 @@ cmd = [
     esptool,
     "--chip", "esp32",
     "--port", "COM7",
-    "--baud", "115200",
+    "--baud", "460800",
     "--before", "default_reset",
     "--after", "hard_reset",
     "write_flash", "-z",
@@ -28,8 +28,8 @@ print(" Please hold the BOOT (or IO0) button on the ESP32 board now!")
 print(" (If it has an EN/RST button, tap EN while holding BOOT, then release)")
 print("=" * 60)
 
-for i in range(1, 10):
-    print(f"\n[Attempt {i}/9] Connecting...")
+for i in range(1, 51):
+    print(f"\n[Attempt {i}/50] Connecting to ESP32 on COM7...")
     res = subprocess.run(cmd)
     if res.returncode == 0:
         print("\n" + "=" * 60)
@@ -38,5 +38,5 @@ for i in range(1, 10):
         sys.exit(0)
     time.sleep(0.5)
 
-print("\nFlashing timed out after 9 attempts.")
+print("\nFlashing timed out after 50 attempts.")
 sys.exit(1)

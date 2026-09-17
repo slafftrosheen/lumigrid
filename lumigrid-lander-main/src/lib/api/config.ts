@@ -5,6 +5,9 @@ export interface DeviceProtocolConfig {
   sacnEnabled: boolean;
   universeStart: number;
   liveStreamLayer: number;
+  mergeMode?: number;
+  streamTimeoutMs?: number;
+  zoneStartChannel?: number;
 }
 
 export interface DeviceAuthConfig {
@@ -16,6 +19,35 @@ export interface DeviceAuthConfig {
 export interface DeviceZoneConfig {
   name: string;
   role: string;
+}
+
+/** Mirrors firmware PhysicalOutput — a single hardware output pin/channel. */
+export interface PhysicalOutput {
+  /** 0=RMT, 1=PWM, 2=SPI */
+  type: number;
+  /** RMT lane 0-7, PWM channel 0-7, etc. */
+  hardwareId: number;
+  gpioPin: number;
+  enabled: boolean;
+}
+
+/** Mirrors firmware FixtureConfig — a logical fixture mapped to physical outputs. */
+export interface FixtureConfig {
+  /** 0=WS2812, 1=SK6812, 2=PWM_Single, 3=PWM_RGB, 4=PWM_RGBW */
+  profile: number;
+  /** 0=RGB, 1=GRB, 2=RGBW, 3=GRBW */
+  pixelOrder: number;
+  /** Indices into physical_outputs (1-4 entries depending on profile) */
+  physicalOutputIndex: number[];
+  zoneId: number;
+  numPixels: number;
+  maxBrightness: number;
+  whiteBalance: [number, number, number];
+  gammaCorrection: boolean;
+  maxMilliwatts: number;
+  dmxUniverse: number;
+  dmxStartChannel: number;
+  dmxMode: number;
 }
 
 export interface DeviceConfig {
@@ -35,7 +67,12 @@ export interface DeviceConfig {
   protocol: DeviceProtocolConfig;
   auth?: DeviceAuthConfig;
   zones?: DeviceZoneConfig[];
+  /** Hardware output pin/channel definitions (must be preserved on every save). */
+  physicalOutputs?: PhysicalOutput[];
+  /** Logical fixture → physical output mappings (must be preserved on every save). */
+  fixtures?: FixtureConfig[];
 }
+
 
 export function getDeviceConfig(ip: string): Promise<DeviceConfig> {
   return apiJson<DeviceConfig>(ip, '/api/v1/config');
