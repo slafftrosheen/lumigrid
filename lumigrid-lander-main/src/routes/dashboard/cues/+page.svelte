@@ -31,6 +31,7 @@
   let error = $state('');
   let toast = $state('');
   let deleteListDialogOpen = $state(false);
+  let deletingList = $state(false);
 
   // Live telemetry from nodeStore
   let liveStatus = $derived($nodeStore.status);
@@ -176,7 +177,8 @@
   }
 
   async function confirmDeleteCurrentList() {
-    if (!nodeIp || !currentList) return;
+    if (!nodeIp || !currentList || deletingList) return;
+    deletingList = true;
     try {
       await deleteCueList(nodeIp, currentList.index);
       toastMsg('Cue list deleted');
@@ -190,6 +192,8 @@
       deleteListDialogOpen = false;
     } catch (e: any) {
       toastMsg(`Delete failed: ${e?.message || e}`);
+    } finally {
+      deletingList = false;
     }
   }
 
@@ -495,6 +499,7 @@
     : ''}
   confirmLabel="Delete Cue List"
   tone="danger"
+  busy={deletingList}
   onconfirm={confirmDeleteCurrentList}
   oncancel={() => (deleteListDialogOpen = false)}
 />
