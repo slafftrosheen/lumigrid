@@ -331,6 +331,47 @@
     cursor: not-allowed;
   }
 
+  :global(.dash-root .loading),
+  :global(.dash-root .diag-loading),
+  :global(.dash-root .diag-empty),
+  :global(.dash-root .loading-state),
+  :global(.dash-root .empty-state),
+  :global(.dash-root .loading-box),
+  :global(.dash-root .empty-box),
+  :global(.dash-root .loading-panel),
+  :global(.dash-root .empty-panel),
+  :global(.dash-root .tl-loading),
+  :global(.dash-root .tl-empty) {
+    min-height: 220px;
+    display: grid;
+    place-items: center;
+    align-content: center;
+    gap: .75rem;
+    padding: 2rem;
+    color: var(--dash-muted);
+    text-align: center;
+    background: linear-gradient(180deg, rgba(29,29,31,.56), rgba(18,18,20,.48));
+    border: 1px dashed rgba(255,255,255,.10);
+    border-radius: var(--dash-radius-lg);
+  }
+
+  :global(.dash-root .toast),
+  :global(.dash-root .toast-bar),
+  :global(.dash-root .toast-pill) {
+    backdrop-filter: blur(18px);
+    -webkit-backdrop-filter: blur(18px);
+    border: 1px solid rgba(255,255,255,.12);
+    box-shadow: 0 14px 36px rgba(0,0,0,.36);
+  }
+
+  :global(.dash-root .error-bar),
+  :global(.dash-root .error-banner),
+  :global(.dash-root .err-box) {
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    box-shadow: 0 10px 30px rgba(0,0,0,.24);
+  }
+
   /* The public Lander intentionally gives headings animated gradients and all
      buttons a 44px minimum. The operator app uses the same design tokens, but
      needs denser controls and calmer typography. Keep those concerns isolated. */
@@ -605,6 +646,10 @@
     padding: clamp(1.25rem, 2.4vw, 2.25rem);
     overflow-y: auto;
     max-height: 100dvh;
+    overscroll-behavior-y: contain;
+    scrollbar-gutter: stable;
+    scrollbar-color: rgba(255,255,255,.14) transparent;
+    scrollbar-width: thin;
   }
   .nav-label-row {
     display: flex;
@@ -775,7 +820,11 @@
       overflow-x: auto;
       overflow-y: hidden;
       scroll-snap-type: x proximity;
+      overscroll-behavior-x: contain;
+      scrollbar-width: none;
+      -webkit-overflow-scrolling: touch;
     }
+    .nav-links::-webkit-scrollbar { display: none; }
     .nav-links > li:not(.nav-group-label) {
       flex: 0 0 62px;
       scroll-snap-align: center;
