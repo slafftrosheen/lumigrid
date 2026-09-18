@@ -31,7 +31,9 @@ describe('timeline model & serialization', () => {
     const seq = createDefaultSequence();
     expect(seq.bpm).toBe(120);
     expect(seq.enabled).toBe(false);
-    expect(seq.tracks).toHaveLength(TRACK_COUNT);
+    expect(TRACK_COUNT).toBe(16);
+    expect(seq.tracks).toHaveLength(16);
+    expect(seq.tracks[15].channelId).toBe(15);
   });
 
   it('clones sequence deeply without mutating the source', () => {
