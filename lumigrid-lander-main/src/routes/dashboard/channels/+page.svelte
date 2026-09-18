@@ -940,11 +940,13 @@
 
   /* Hardware Banks */
   .bank-section {
-    background: var(--dash-surface);
+    position: relative;
+    overflow: hidden;
+    background: linear-gradient(180deg, rgba(29,29,31,.76), rgba(16,16,18,.76));
     backdrop-filter: blur(18px);
     -webkit-backdrop-filter: blur(18px);
     border: 1px solid var(--dash-border);
-    border-radius: var(--dash-radius-lg);
+    border-radius: var(--dash-radius-xl);
     padding: 1.35rem;
     margin-bottom: 1.25rem;
     box-shadow: var(--dash-shadow);
@@ -1012,7 +1014,9 @@
   }
 
   .connector-card {
-    background: rgba(255, 255, 255, 0.035);
+    isolation: isolate;
+    min-height: 172px;
+    background: linear-gradient(180deg, rgba(255,255,255,.04), rgba(255,255,255,.018));
     border: 1px solid rgba(255, 255, 255, 0.08);
     border-radius: var(--dash-radius-md);
     padding: 1.1rem;
@@ -1020,18 +1024,23 @@
     flex-direction: column;
     gap: 0.85rem;
     cursor: pointer;
-    transition: all 0.2s ease;
+    transition: transform .18s var(--ease-out), border-color .18s ease, background .18s ease, box-shadow .18s ease;
     position: relative;
     user-select: none;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.035);
   }
 
-  .connector-card:hover,
-  .connector-card:focus-visible {
-    background: rgba(255, 255, 255, 0.065);
-    border-color: rgba(255, 255, 255, 0.2);
+  .connector-card:hover {
+    background: linear-gradient(180deg, rgba(255,255,255,.06), rgba(255,255,255,.026));
+    border-color: rgba(255, 255, 255, 0.18);
     transform: translateY(-2px);
-    box-shadow: 0 14px 28px rgba(0,0,0,.2);
+    box-shadow: var(--dash-shadow-hover), inset 0 1px 0 rgba(255,255,255,.05);
   }
+  .connector-card:focus-visible {
+    outline: 2px solid var(--dash-accent);
+    outline-offset: 3px;
+  }
+  .connector-card.pwm:focus-visible { outline-color: var(--dash-warm); }
 
   .connector-card.is-active.addr {
     border-color: rgba(var(--dash-accent-rgb), 0.35);
@@ -1105,6 +1114,7 @@
   }
 
   .ch-name {
+    min-height: 1.35rem;
     font-size: 0.92rem;
     font-weight: 600;
     color: #f5f5f7;
@@ -1134,9 +1144,17 @@
   }
 
   .setup-hint {
-    color: #636366;
+    color: #7c7c80;
     font-size: 0.8rem;
-    font-style: italic;
+    font-style: normal;
+    display: inline-flex;
+    align-items: center;
+    gap: .35rem;
+  }
+  .setup-hint::before {
+    content: "+";
+    color: currentColor;
+    font-weight: 800;
   }
 
   .slider-block {
