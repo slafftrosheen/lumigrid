@@ -143,7 +143,7 @@
     <div class="err-box">{error}</div>
   {:else}
     <div class="dash-grid">
-      <div class="card gauge-card">
+      <div class="thermal-card gauge-card">
         <h2>Current Temperature</h2>
         <svg viewBox="0 0 128 128" class="gauge-svg" aria-label="Temperature gauge">
           <path d={arcPath(1)} stroke="rgba(255,255,255,.08)" stroke-width="10" fill="none" stroke-linecap="round" />
@@ -160,7 +160,7 @@
         </div>
       </div>
 
-      <div class="card info-card">
+      <div class="thermal-card info-card">
         <h2>Node Info</h2>
         {#if info}
           <dl class="info-dl">
@@ -244,7 +244,7 @@
   .err-box { background: rgba(255,69,58,.12); border: 1px solid rgba(255,69,58,.3); border-radius: 12px; color: #ff453a; padding: 1rem; font-size: .85rem; font-family: monospace; }
   .dash-grid { display: grid; grid-template-columns: 180px 1fr; grid-template-rows: auto auto; gap: 1rem; }
   @media (max-width: 600px) { .dash-grid { grid-template-columns: 1fr; } }
-  .card {
+  .thermal-card {
     background: linear-gradient(180deg, rgba(29,29,31,.74), rgba(18,18,20,.74));
     backdrop-filter: blur(18px);
     border: 1px solid var(--dash-border);
