@@ -601,7 +601,7 @@
             {@const label = getChannelLabel(ci)}
             {@const preview = computeZonePreviewColor(channel, editScene.globalBrightness)}
             {@const enabledCount = channel.layers.filter(l => l.enabled).length}
-            <div class="zone-card" class:active-zone={expandedChannel === ci}>
+            <div class="zone-card" class:active-zone={expandedChannel === ci} class:pwm-channel={ci >= 8}>
               <button
                 class="zone-header"
                 onclick={() => (expandedChannel = expandedChannel === ci ? null : ci)}
@@ -797,8 +797,8 @@
     flex-direction: column;
     gap: 0.65rem;
     padding: 1rem;
-    background: var(--dash-surface);
-    backdrop-filter: blur(18px);
+    background: rgba(22,22,24,.90);
+    backdrop-filter: blur(22px);
     -webkit-backdrop-filter: blur(18px);
     border: 1px solid var(--dash-border);
     border-radius: var(--dash-radius-lg);
@@ -855,9 +855,10 @@
     border-color: rgba(255, 255, 255, 0.12);
   }
   .lib-item.active {
-    background: rgba(var(--dash-accent-rgb), 0.14);
-    border-color: rgba(var(--dash-accent-rgb), 0.38);
-    color: #f5f5f7;
+    background: linear-gradient(90deg, rgba(var(--dash-accent-rgb),.18), rgba(var(--dash-accent-rgb),.08));
+    border-color: rgba(var(--dash-accent-rgb), 0.34);
+    color: #fff;
+    box-shadow: inset 3px 0 0 var(--dash-accent);
   }
   .lib-item.empty {
     opacity: 0.45;
@@ -914,6 +915,9 @@
   }
 
   .ed-toolbar {
+    position: sticky;
+    top: 0;
+    z-index: 20;
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -1148,6 +1152,13 @@
   }
   .zone-card.active-zone {
     border-color: rgba(var(--dash-accent-rgb), 0.35);
+    background: linear-gradient(180deg, rgba(var(--dash-accent-rgb),.055), rgba(255,255,255,.018));
+    box-shadow: inset 3px 0 0 rgba(var(--dash-accent-rgb),.5);
+  }
+  .zone-card.pwm-channel.active-zone {
+    border-color: color-mix(in oklab, var(--dash-warm) 36%, transparent);
+    background: linear-gradient(180deg, color-mix(in oklab, var(--dash-warm) 6%, transparent), rgba(255,255,255,.018));
+    box-shadow: inset 3px 0 0 color-mix(in oklab, var(--dash-warm) 58%, transparent);
   }
   .zone-header {
     display: flex;
@@ -1194,8 +1205,8 @@
 
   /* Layers */
   .layer-card {
-    padding: 0.65rem 0.75rem;
-    background: rgba(255, 255, 255, 0.03);
+    padding: 0.72rem 0.8rem;
+    background: linear-gradient(180deg, rgba(255,255,255,.035), rgba(255,255,255,.02));
     border: 1px solid rgba(255, 255, 255, 0.06);
     border-radius: 8px;
     transition: opacity 0.2s ease;
