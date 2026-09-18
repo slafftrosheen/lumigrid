@@ -420,11 +420,11 @@
                   {@const isSelected = fn.ip === nodeIp}
                   {@const isConnected = isSelected && liveState.connection === 'connected'}
                   <tr class:selected-row={isSelected}>
-                    <td>
+                    <td data-label="Node">
                       <span class="fn-name">{fn.name}</span>
                     </td>
-                    <td class="mono">{fn.ip}</td>
-                    <td>
+                    <td class="mono" data-label="Address">{fn.ip}</td>
+                    <td data-label="Status">
                       {#if isConnected}
                         <span class="badge badge-live">● CONNECTED</span>
                       {:else if isSelected && liveState.connection === 'connecting'}
@@ -435,11 +435,11 @@
                         <span class="badge badge-registered">REGISTERED</span>
                       {/if}
                     </td>
-                    <td class="fn-time">{formatTimeAgo(fn.lastSeen)}</td>
-                    <td class="fn-effect mono">
+                    <td class="fn-time" data-label="Last Seen">{formatTimeAgo(fn.lastSeen)}</td>
+                    <td class="fn-effect mono" data-label="Effect">
                       {isSelected ? (liveState.status?.effect || '—') : '—'}
                     </td>
-                    <td>
+                    <td data-label="Health">
                       {#if isSelected && liveState.health}
                         <span class="badge" class:badge-live={!liveState.health.output.fault} class:badge-fault={liveState.health.output.fault}>
                           {liveState.health.output.state}
@@ -448,7 +448,7 @@
                         <span class="text-muted">—</span>
                       {/if}
                     </td>
-                    <td class="fn-actions">
+                    <td class="fn-actions" data-label="Actions">
                       <button
                         class="btn-action-select"
                         onclick={() => handleSelectFleetNode(fn.ip)}
@@ -1304,7 +1304,62 @@
     .add-node-form { flex-direction: column; }
     .input-ip, .input-name { min-width: 0; width: 100%; }
     .btn-add-fleet { min-height: 42px; }
-    .fleet-table { min-width: 720px; }
+    .fleet-table-wrap { overflow: visible; }
+    .fleet-table,
+    .fleet-table tbody,
+    .fleet-table tr,
+    .fleet-table td {
+      display: block;
+      width: 100%;
+    }
+    .fleet-table thead { display: none; }
+    .fleet-table {
+      min-width: 0;
+      border-collapse: separate;
+      border-spacing: 0 10px;
+    }
+    .fleet-table tr {
+      padding: .8rem;
+      border: 1px solid rgba(255,255,255,.075);
+      border-radius: 14px;
+      background: linear-gradient(180deg, rgba(255,255,255,.035), rgba(255,255,255,.018));
+    }
+    .fleet-table tr.selected-row {
+      border-color: rgba(var(--dash-accent-rgb),.28);
+      background: linear-gradient(135deg, rgba(var(--dash-accent-rgb),.11), rgba(255,255,255,.018));
+    }
+    .fleet-table td {
+      display: grid;
+      grid-template-columns: 82px minmax(0, 1fr);
+      align-items: center;
+      gap: .65rem;
+      padding: .42rem .2rem;
+      border-bottom: 1px solid rgba(255,255,255,.04);
+    }
+    .fleet-table td:last-child { border-bottom: 0; }
+    .fleet-table td::before {
+      content: attr(data-label);
+      color: #737378;
+      font-size: .62rem;
+      font-weight: 800;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+    }
+    .fn-actions {
+      display: grid;
+      grid-template-columns: 82px repeat(3, minmax(0, 1fr));
+      gap: .45rem;
+    }
+    .fn-actions::before {
+      content: attr(data-label);
+      align-self: center;
+      color: #737378;
+      font-size: .62rem;
+      font-weight: 800;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+    }
+    .fn-actions button { min-height: 38px; }
     .node-header { padding: 1rem; }
     .section-card { padding: 1rem; }
     .actions-grid, .health-grid { grid-template-columns: 1fr; }
