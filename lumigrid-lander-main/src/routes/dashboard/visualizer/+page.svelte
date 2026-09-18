@@ -260,13 +260,18 @@
     gap: 1rem;
   }
   .viz-toolbar {
+    position: sticky;
+    top: 0;
+    z-index: 18;
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 1rem;
     flex-wrap: wrap;
     padding: .8rem 1rem;
-    background: var(--dash-surface);
+    background: rgba(22,22,24,.90);
+    backdrop-filter: blur(22px);
+    -webkit-backdrop-filter: blur(22px);
     border: 1px solid var(--dash-border);
     border-radius: var(--dash-radius-lg);
     box-shadow: var(--dash-shadow);
@@ -283,6 +288,7 @@
   .btn-reconnect { background: var(--dash-accent); color: #fff; border: none; border-radius: 9px; padding: .4rem .75rem; font-size: .78rem; font-weight: 600; cursor: pointer; }
   .btn-reconnect:hover { background: var(--dash-accent-hover); }
   .viz-canvas-wrap {
+    position: relative;
     background: #070708;
     border: 1px solid var(--dash-border);
     border-radius: var(--dash-radius-lg);
@@ -290,9 +296,18 @@
     line-height: 0;
     box-shadow: var(--dash-shadow);
   }
+  .viz-canvas-wrap::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.055), inset 0 0 80px rgba(0,0,0,.22);
+    z-index: 2;
+  }
   .viz-canvas-wrap canvas { width: 100%; height: auto; display: block; image-rendering: pixelated; }
   .viz-status {
-    display: flex;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
     gap: 1.5rem;
     padding: .7rem 1rem;
     background: var(--dash-surface);
@@ -300,13 +315,20 @@
     border-radius: var(--dash-radius-md);
     flex-wrap: wrap;
   }
-  .stat { display: flex; align-items: center; gap: .4rem; }
+  .stat {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: .15rem;
+    min-width: 0;
+    padding: .25rem .1rem;
+  }
   .stat-label { font-size: .72rem; color: #86868b; text-transform: uppercase; letter-spacing: .04em; }
   .stat-val { font-size: .82rem; color: var(--dash-text); font-family: monospace; }
   .stat-val.on { color: var(--dash-ok); }
 
   @media (max-width: 680px) {
-    .viz-toolbar { align-items: stretch; }
+    .viz-toolbar { position: static; align-items: stretch; }
     .viz-left, .viz-right { width: 100%; justify-content: space-between; }
     .viz-views { flex: 1; }
     .view-btn { flex: 1; }
