@@ -551,7 +551,7 @@
           <span class="btn-icon">◆</span>
           <span class="btn-text">
             <strong>Scene Studio</strong>
-            <small>8 Zones & Layer composer</small>
+            <small>16 Channels & Layer composer</small>
           </span>
         </a>
 
