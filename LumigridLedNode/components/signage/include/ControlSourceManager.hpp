@@ -29,19 +29,35 @@ struct ControlSnapshot {
         return ControlSource::Idle;
     }
 
-    ControlSource resolve_fixture(uint8_t fixture_idx, uint8_t zone_idx, uint32_t current_ms) const {
-        const uint16_t f_bit = (fixture_idx < 16) ? (1U << fixture_idx) : 0;
-        const uint8_t  z_bit = (zone_idx < 8) ? (1U << zone_idx) : 0;
-
-        // Resolution order per Item 7:
-        // 1. Explicit fixture LiveDmx / fixture overrides take precedence
+    ControlSource resolve_channel(uint8_t channel_idx, uint32_t current_ms) const {
+        const uint16_t ch_bit = (channel_idx < 16) ? (1U << channel_idx) : 0;
         for (ControlSource src : kPriorityOrder) {
             uint8_t i = static_cast<uint8_t>(src);
             if (states[i].active) {
                 if (states[i].expires_ms != 0 && current_ms >= states[i].expires_ms) {
                     continue;
                 }
-                if (states[i].fixture_mask & f_bit) {
+                if (states[i].channel_mask & ch_bit) {
+                    return src;
+                }
+            }
+        }
+        return ControlSource::Idle;
+    }
+
+    ControlSource resolve_fixture(uint8_t fixture_idx, uint8_t zone_idx, uint32_t current_ms) const {
+        const uint16_t f_bit = (fixture_idx < 16) ? (1U << fixture_idx) : 0;
+        const uint8_t  z_bit = (zone_idx < 8) ? (1U << zone_idx) : 0;
+
+        // Resolution order per Item 7:
+        // 1. Explicit fixture/channel LiveDmx overrides take precedence
+        for (ControlSource src : kPriorityOrder) {
+            uint8_t i = static_cast<uint8_t>(src);
+            if (states[i].active) {
+                if (states[i].expires_ms != 0 && current_ms >= states[i].expires_ms) {
+                    continue;
+                }
+                if (states[i].channel_mask & f_bit) {
                     return src;
                 }
             }

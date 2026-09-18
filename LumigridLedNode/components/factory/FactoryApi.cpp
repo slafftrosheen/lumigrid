@@ -13,12 +13,14 @@
 #include "ConfigStore.hpp"
 #include "LightingRuntime.hpp"
 #include "SignageTypes.hpp"
+#include "ChannelHardware.hpp"
 #include "Scheduler.hpp"
 #include "NodeSync.hpp"
 #include "DmxRouter.hpp"
 #include "esp_check.h"
 #include "NodeIdentity.hpp"
 #include "Capabilities.hpp"
+#include "CueRunner.hpp"
 #include <inttypes.h>
 
 #include "cJSON.h"
@@ -268,6 +270,7 @@ esp_err_t post_effect(httpd_req_t* request) {
     }
 
     FactoryCommand command{
+        .command_id = 0,
         .type = FactoryCommandType::SelectEffect,
         .effect = effect,
         .brightness = brightness,
@@ -276,13 +279,12 @@ esp_err_t post_effect(httpd_req_t* request) {
 
     FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
     uint32_t cmd_id = api_ptr->command_journal().accept(CommandDomain::Factory);
+    command.command_id = cmd_id;
     if (!api_ptr->runner().enqueue(command)) {
         api_ptr->command_journal().failed(cmd_id, ESP_ERR_INVALID_STATE);
         return send_error(request, "409 Conflict", "command_queue_full");
     }
 
-    api_ptr->command_journal().applied(cmd_id);
-    api_ptr->notify_status_async();
     char resp[64];
     snprintf(resp, sizeof(resp), "{\"accepted\":true,\"commandId\":%" PRIu32 "}", cmd_id);
     return send_json(request, resp, "202 Accepted");
@@ -320,6 +322,7 @@ esp_err_t post_lane(httpd_req_t* request) {
     }
 
     FactoryCommand command{
+        .command_id = 0,
         .type = FactoryCommandType::PixelLaneSolid,
         .lane_or_channel = lane,
         .red = red,
@@ -331,13 +334,12 @@ esp_err_t post_lane(httpd_req_t* request) {
 
     FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
     uint32_t cmd_id = api_ptr->command_journal().accept(CommandDomain::Factory);
+    command.command_id = cmd_id;
     if (!api_ptr->runner().enqueue(command)) {
         api_ptr->command_journal().failed(cmd_id, ESP_ERR_INVALID_STATE);
         return send_error(request, "409 Conflict", "command_queue_full");
     }
 
-    api_ptr->command_journal().applied(cmd_id);
-    api_ptr->notify_status_async();
     char resp[64];
     snprintf(resp, sizeof(resp), "{\"accepted\":true,\"commandId\":%" PRIu32 "}", cmd_id);
     return send_json(request, resp, "202 Accepted");
@@ -368,6 +370,7 @@ esp_err_t post_pwm(httpd_req_t* request) {
     }
 
     FactoryCommand command{
+        .command_id = 0,
         .type = FactoryCommandType::PwmChannelLevel,
         .lane_or_channel = channel,
         .pwm_duty = duty,
@@ -376,13 +379,12 @@ esp_err_t post_pwm(httpd_req_t* request) {
 
     FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
     uint32_t cmd_id = api_ptr->command_journal().accept(CommandDomain::Factory);
+    command.command_id = cmd_id;
     if (!api_ptr->runner().enqueue(command)) {
         api_ptr->command_journal().failed(cmd_id, ESP_ERR_INVALID_STATE);
         return send_error(request, "409 Conflict", "command_queue_full");
     }
 
-    api_ptr->command_journal().applied(cmd_id);
-    api_ptr->notify_status_async();
     char resp[64];
     snprintf(resp, sizeof(resp), "{\"accepted\":true,\"commandId\":%" PRIu32 "}", cmd_id);
     return send_json(request, resp, "202 Accepted");
@@ -394,17 +396,16 @@ esp_err_t post_abort(httpd_req_t* request) {
     FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
     uint32_t cmd_id = api_ptr->command_journal().accept(CommandDomain::Factory);
     if (!api_ptr->runner().enqueue({
+            .command_id = cmd_id,
             .type = FactoryCommandType::Abort
         })) {
         api_ptr->command_journal().failed(cmd_id, ESP_ERR_INVALID_STATE);
         return send_error(request, "409 Conflict", "command_queue_full");
     }
 
-    api_ptr->command_journal().applied(cmd_id);
-    api_ptr->notify_status_async();
     char resp[96];
     snprintf(resp, sizeof(resp), "{\"accepted\":true,\"commandId\":%" PRIu32 ",\"action\":\"blackout\"}", cmd_id);
-    return send_json(request, resp);
+    return send_json(request, resp, "202 Accepted");
 }
 
 esp_err_t post_auto_loop(httpd_req_t* request) {
@@ -428,6 +429,7 @@ esp_err_t post_auto_loop(httpd_req_t* request) {
     FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
     uint32_t cmd_id = api_ptr->command_journal().accept(CommandDomain::Factory);
     if (!api_ptr->runner().enqueue({
+            .command_id = cmd_id,
             .type = FactoryCommandType::SetAutoLoop,
             .enabled = value
         })) {
@@ -435,8 +437,6 @@ esp_err_t post_auto_loop(httpd_req_t* request) {
         return send_error(request, "409 Conflict", "command_queue_full");
     }
 
-    api_ptr->command_journal().applied(cmd_id);
-    api_ptr->notify_status_async();
     char resp[64];
     snprintf(resp, sizeof(resp), "{\"accepted\":true,\"commandId\":%" PRIu32 "}", cmd_id);
     return send_json(request, resp, "202 Accepted");
@@ -726,33 +726,52 @@ esp_err_t get_presets(httpd_req_t* request) {
         cJSON_AddNumberToObject(obj, "globalBrightness", scene.global_brightness);
         cJSON_AddNumberToObject(obj, "transitionMs", scene.transition_ms);
 
+        cJSON* channels = cJSON_CreateArray();
+        for (uint8_t c = 0; c < 16; ++c) {
+            cJSON* ch_obj = cJSON_CreateObject();
+            cJSON* layers = cJSON_CreateArray();
+            for (uint8_t l = 0; l < 3; ++l) {
+                const auto& layer = scene.channels[c].layers[l];
+                cJSON* layer_obj = cJSON_CreateObject();
+                cJSON_AddStringToObject(layer_obj, "effect", signage_effect_name(static_cast<SignageEffect>(layer.effect)));
+                cJSON_AddStringToObject(layer_obj, "blendMode", blend_mode_name(layer.blend_mode));
+                
+                cJSON* pcolor = cJSON_CreateObject();
+                cJSON_AddNumberToObject(pcolor, "r", layer.primary_color.r);
+                cJSON_AddNumberToObject(pcolor, "g", layer.primary_color.g);
+                cJSON_AddNumberToObject(pcolor, "b", layer.primary_color.b);
+                cJSON_AddItemToObject(layer_obj, "primaryColor", pcolor);
+                
+                cJSON* scolor = cJSON_CreateObject();
+                cJSON_AddNumberToObject(scolor, "r", layer.secondary_color.r);
+                cJSON_AddNumberToObject(scolor, "g", layer.secondary_color.g);
+                cJSON_AddNumberToObject(scolor, "b", layer.secondary_color.b);
+                cJSON_AddItemToObject(layer_obj, "secondaryColor", scolor);
+
+                cJSON_AddNumberToObject(layer_obj, "speedMs", layer.speed_ms);
+                cJSON_AddNumberToObject(layer_obj, "fxParam", layer.fx_param);
+                cJSON_AddNumberToObject(layer_obj, "paletteId", layer.palette_id);
+                cJSON_AddNumberToObject(layer_obj, "opacity", layer.opacity);
+                cJSON_AddBoolToObject(layer_obj, "enabled", layer.enabled);
+                cJSON_AddItemToArray(layers, layer_obj);
+            }
+            cJSON_AddItemToObject(ch_obj, "layers", layers);
+            cJSON_AddItemToArray(channels, ch_obj);
+        }
+        cJSON_AddItemToObject(obj, "channels", channels);
+
+        // Legacy compatibility: mirror first 8 channels into zones array
         cJSON* zones = cJSON_CreateArray();
         for (uint8_t z = 0; z < 8; ++z) {
             cJSON* zone_obj = cJSON_CreateObject();
             cJSON* layers = cJSON_CreateArray();
             for (uint8_t l = 0; l < 3; ++l) {
-                cJSON* layer = cJSON_CreateObject();
-                cJSON_AddStringToObject(layer, "effect", signage_effect_name(static_cast<SignageEffect>(scene.zones[z].layers[l].effect)));
-                cJSON_AddStringToObject(layer, "blendMode", blend_mode_name(scene.zones[z].layers[l].blend_mode));
-                
-                cJSON* pcolor = cJSON_CreateObject();
-                cJSON_AddNumberToObject(pcolor, "r", scene.zones[z].layers[l].primary_color.r);
-                cJSON_AddNumberToObject(pcolor, "g", scene.zones[z].layers[l].primary_color.g);
-                cJSON_AddNumberToObject(pcolor, "b", scene.zones[z].layers[l].primary_color.b);
-                cJSON_AddItemToObject(layer, "primaryColor", pcolor);
-                
-                cJSON* scolor = cJSON_CreateObject();
-                cJSON_AddNumberToObject(scolor, "r", scene.zones[z].layers[l].secondary_color.r);
-                cJSON_AddNumberToObject(scolor, "g", scene.zones[z].layers[l].secondary_color.g);
-                cJSON_AddNumberToObject(scolor, "b", scene.zones[z].layers[l].secondary_color.b);
-                cJSON_AddItemToObject(layer, "secondaryColor", scolor);
-
-                cJSON_AddNumberToObject(layer, "speedMs", scene.zones[z].layers[l].speed_ms);
-                cJSON_AddNumberToObject(layer, "fxParam", scene.zones[z].layers[l].fx_param);
-                cJSON_AddNumberToObject(layer, "paletteId", scene.zones[z].layers[l].palette_id);
-                cJSON_AddNumberToObject(layer, "opacity", scene.zones[z].layers[l].opacity);
-                cJSON_AddBoolToObject(layer, "enabled", scene.zones[z].layers[l].enabled);
-                cJSON_AddItemToArray(layers, layer);
+                const auto& layer = scene.channels[z].layers[l];
+                cJSON* layer_obj = cJSON_CreateObject();
+                cJSON_AddStringToObject(layer_obj, "effect", signage_effect_name(static_cast<SignageEffect>(layer.effect)));
+                cJSON_AddStringToObject(layer_obj, "blendMode", blend_mode_name(layer.blend_mode));
+                cJSON_AddBoolToObject(layer_obj, "enabled", layer.enabled);
+                cJSON_AddItemToArray(layers, layer_obj);
             }
             cJSON_AddItemToObject(zone_obj, "layers", layers);
             cJSON_AddItemToArray(zones, zone_obj);
@@ -811,75 +830,97 @@ esp_err_t put_preset(httpd_req_t* request) {
     P_VALIDATE_U8(root, "globalBrightness", 0, 255, scene.global_brightness);
     P_VALIDATE_U16(root, "transitionMs", 0, 10000, scene.transition_ms);
 
-    const cJSON* zones = cJSON_GetObjectItemCaseSensitive(root, "zones");
-    if (zones) {
-        if (!cJSON_IsArray(zones) || cJSON_GetArraySize(zones) > 8) {
-            cJSON_Delete(root);
-            return send_error(request, "400 Bad Request", "invalid_field_zones");
+    auto parse_layer_obj = [](const cJSON* l_item, LayerConfig& layer) {
+        const cJSON* effect_j = cJSON_GetObjectItemCaseSensitive(l_item, "effect");
+        if (effect_j && cJSON_IsString(effect_j)) {
+            SignageEffect eff = SignageEffect::Solid;
+            if (parse_signage_effect(effect_j->valuestring, eff)) {
+                layer.effect = static_cast<uint8_t>(eff);
+            }
+        } else if (effect_j && cJSON_IsNumber(effect_j)) {
+            layer.effect = static_cast<uint8_t>(effect_j->valueint);
         }
-        int z_idx = 0;
-        cJSON* z_item = nullptr;
-        cJSON_ArrayForEach(z_item, zones) {
-            if (z_idx >= 8) break;
-            
-            const cJSON* layers = cJSON_GetObjectItemCaseSensitive(z_item, "layers");
-            if (layers) {
-                if (!cJSON_IsArray(layers) || cJSON_GetArraySize(layers) > 3) {
-                    cJSON_Delete(root);
-                    return send_error(request, "400 Bad Request", "invalid_field_layers");
-                }
+
+        const cJSON* blend_j = cJSON_GetObjectItemCaseSensitive(l_item, "blendMode");
+        if (blend_j && cJSON_IsString(blend_j)) {
+            parse_blend_mode(blend_j->valuestring, layer.blend_mode);
+        } else if (blend_j && cJSON_IsNumber(blend_j)) {
+            layer.blend_mode = static_cast<BlendMode>(blend_j->valueint);
+        }
+
+        const cJSON* pc = cJSON_GetObjectItemCaseSensitive(l_item, "primaryColor");
+        if (pc) {
+            const cJSON* r = cJSON_GetObjectItemCaseSensitive(pc, "r");
+            const cJSON* g = cJSON_GetObjectItemCaseSensitive(pc, "g");
+            const cJSON* b = cJSON_GetObjectItemCaseSensitive(pc, "b");
+            if (r && cJSON_IsNumber(r)) layer.primary_color.r = static_cast<uint8_t>(r->valueint);
+            if (g && cJSON_IsNumber(g)) layer.primary_color.g = static_cast<uint8_t>(g->valueint);
+            if (b && cJSON_IsNumber(b)) layer.primary_color.b = static_cast<uint8_t>(b->valueint);
+        }
+
+        const cJSON* sc = cJSON_GetObjectItemCaseSensitive(l_item, "secondaryColor");
+        if (sc) {
+            const cJSON* r = cJSON_GetObjectItemCaseSensitive(sc, "r");
+            const cJSON* g = cJSON_GetObjectItemCaseSensitive(sc, "g");
+            const cJSON* b = cJSON_GetObjectItemCaseSensitive(sc, "b");
+            if (r && cJSON_IsNumber(r)) layer.secondary_color.r = static_cast<uint8_t>(r->valueint);
+            if (g && cJSON_IsNumber(g)) layer.secondary_color.g = static_cast<uint8_t>(g->valueint);
+            if (b && cJSON_IsNumber(b)) layer.secondary_color.b = static_cast<uint8_t>(b->valueint);
+        }
+
+        const cJSON* spd = cJSON_GetObjectItemCaseSensitive(l_item, "speedMs");
+        if (spd && cJSON_IsNumber(spd)) layer.speed_ms = static_cast<uint16_t>(spd->valueint);
+
+        const cJSON* fx = cJSON_GetObjectItemCaseSensitive(l_item, "fxParam");
+        if (fx && cJSON_IsNumber(fx)) layer.fx_param = static_cast<uint8_t>(fx->valueint);
+
+        const cJSON* pal = cJSON_GetObjectItemCaseSensitive(l_item, "paletteId");
+        if (pal && cJSON_IsNumber(pal)) layer.palette_id = static_cast<uint8_t>(pal->valueint);
+
+        const cJSON* op = cJSON_GetObjectItemCaseSensitive(l_item, "opacity");
+        if (op && cJSON_IsNumber(op)) layer.opacity = static_cast<uint8_t>(op->valueint);
+
+        const cJSON* en = cJSON_GetObjectItemCaseSensitive(l_item, "enabled");
+        if (en && cJSON_IsBool(en)) layer.enabled = cJSON_IsTrue(en);
+    };
+
+    const cJSON* channels = cJSON_GetObjectItemCaseSensitive(root, "channels");
+    if (channels && cJSON_IsArray(channels)) {
+        int c_idx = 0;
+        cJSON* ch_item = nullptr;
+        cJSON_ArrayForEach(ch_item, channels) {
+            if (c_idx >= 16) break;
+            const cJSON* layers = cJSON_GetObjectItemCaseSensitive(ch_item, "layers");
+            if (layers && cJSON_IsArray(layers)) {
                 int l_idx = 0;
                 cJSON* l_item = nullptr;
                 cJSON_ArrayForEach(l_item, layers) {
                     if (l_idx >= 3) break;
-                    
-                    const cJSON* effect_j = cJSON_GetObjectItemCaseSensitive(l_item, "effect");
-                    if (effect_j) {
-                        SignageEffect eff = SignageEffect::Solid;
-                        if (!cJSON_IsString(effect_j) || !parse_signage_effect(effect_j->valuestring, eff)) {
-                            cJSON_Delete(root);
-                            return send_error(request, "400 Bad Request", "invalid_field_effect");
-                        }
-                        scene.zones[z_idx].layers[l_idx].effect = static_cast<uint8_t>(eff);
-                    }
-                    
-                    const cJSON* blend_j = cJSON_GetObjectItemCaseSensitive(l_item, "blendMode");
-                    if (blend_j) {
-                        if (!cJSON_IsString(blend_j) || !parse_blend_mode(blend_j->valuestring, scene.zones[z_idx].layers[l_idx].blend_mode)) {
-                            cJSON_Delete(root);
-                            return send_error(request, "400 Bad Request", "invalid_field_blendMode");
-                        }
-                    }
-                    
-                    const cJSON* pc = cJSON_GetObjectItemCaseSensitive(l_item, "primaryColor");
-                    if (pc) {
-                        P_VALIDATE_U8(pc, "r", 0, 255, scene.zones[z_idx].layers[l_idx].primary_color.r);
-                        P_VALIDATE_U8(pc, "g", 0, 255, scene.zones[z_idx].layers[l_idx].primary_color.g);
-                        P_VALIDATE_U8(pc, "b", 0, 255, scene.zones[z_idx].layers[l_idx].primary_color.b);
-                    }
-                    
-                    const cJSON* sc = cJSON_GetObjectItemCaseSensitive(l_item, "secondaryColor");
-                    if (sc) {
-                        P_VALIDATE_U8(sc, "r", 0, 255, scene.zones[z_idx].layers[l_idx].secondary_color.r);
-                        P_VALIDATE_U8(sc, "g", 0, 255, scene.zones[z_idx].layers[l_idx].secondary_color.g);
-                        P_VALIDATE_U8(sc, "b", 0, 255, scene.zones[z_idx].layers[l_idx].secondary_color.b);
-                    }
-                    
-                    P_VALIDATE_U16(l_item, "speedMs", 10, 60000, scene.zones[z_idx].layers[l_idx].speed_ms);
-                    P_VALIDATE_U8(l_item, "fxParam", 0, 255, scene.zones[z_idx].layers[l_idx].fx_param);
-                    P_VALIDATE_U8(l_item, "paletteId", 0, 255, scene.zones[z_idx].layers[l_idx].palette_id);
-                    P_VALIDATE_U8(l_item, "opacity", 0, 255, scene.zones[z_idx].layers[l_idx].opacity);
-                    
-                    const cJSON* en = cJSON_GetObjectItemCaseSensitive(l_item, "enabled");
-                    if (en) {
-                        if (!cJSON_IsBool(en)) { cJSON_Delete(root); return send_error(request, "400 Bad Request", "invalid_field_enabled"); }
-                        scene.zones[z_idx].layers[l_idx].enabled = cJSON_IsTrue(en);
-                    }
-                    
+                    parse_layer_obj(l_item, scene.channels[c_idx].layers[l_idx]);
                     l_idx++;
                 }
             }
-            z_idx++;
+            c_idx++;
+        }
+    } else {
+        const cJSON* zones = cJSON_GetObjectItemCaseSensitive(root, "zones");
+        if (zones && cJSON_IsArray(zones)) {
+            int z_idx = 0;
+            cJSON* z_item = nullptr;
+            cJSON_ArrayForEach(z_item, zones) {
+                if (z_idx >= 8) break;
+                const cJSON* layers = cJSON_GetObjectItemCaseSensitive(z_item, "layers");
+                if (layers && cJSON_IsArray(layers)) {
+                    int l_idx = 0;
+                    cJSON* l_item = nullptr;
+                    cJSON_ArrayForEach(l_item, layers) {
+                        if (l_idx >= 3) break;
+                        parse_layer_obj(l_item, scene.channels[z_idx].layers[l_idx]);
+                        l_idx++;
+                    }
+                }
+                z_idx++;
+            }
         }
     }
 #undef P_VALIDATE_U8
@@ -897,6 +938,471 @@ esp_err_t put_preset(httpd_req_t* request) {
     api::AuditLog::instance().log(api::ApiRole::Operator, "preset_update", detail);
 
     return send_json(request, R"({"saved":true})", "200 OK");
+}
+
+esp_err_t get_scene_motion(httpd_req_t* request) {
+    if (!api::authorize(request, api::ApiRole::Operator)) return ESP_OK;
+
+    FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+    if (!api_ptr->config()) return send_error(request, "503 Service Unavailable", "config_not_ready");
+
+    uint8_t target_index = 255;
+    size_t qlen = httpd_req_get_url_query_len(request);
+    if (qlen > 0 && qlen < 64) {
+        char query[64];
+        if (httpd_req_get_url_query_str(request, query, sizeof(query)) == ESP_OK) {
+            char param[16];
+            if (httpd_query_key_value(query, "index", param, sizeof(param)) == ESP_OK) {
+                target_index = static_cast<uint8_t>(atoi(param));
+            }
+        }
+    }
+
+    auto serialize_motion = [](uint8_t idx, const SceneMotionConfig& sm) -> cJSON* {
+        cJSON* obj = cJSON_CreateObject();
+        cJSON_AddNumberToObject(obj, "schema_version", sm.schema_version);
+        cJSON_AddNumberToObject(obj, "index", idx);
+        cJSON_AddStringToObject(obj, "transitionCurve", transition_curve_name(sm.transition_curve));
+        cJSON_AddNumberToObject(obj, "trackCount", sm.track_count);
+        cJSON* tracks = cJSON_CreateArray();
+        for (uint8_t t = 0; t < sm.track_count && t < kAutomationTracksPerScene; ++t) {
+            const auto& tr = sm.tracks[t];
+            cJSON* tobj = cJSON_CreateObject();
+            cJSON_AddStringToObject(tobj, "target", automation_target_name(tr.target));
+            cJSON_AddNumberToObject(tobj, "zone", tr.zone);
+            cJSON_AddNumberToObject(tobj, "layer", tr.layer);
+            cJSON_AddStringToObject(tobj, "curve", automation_curve_name(tr.curve));
+            cJSON_AddBoolToObject(tobj, "loop", tr.loop);
+            cJSON_AddNumberToObject(tobj, "periodMs", tr.period_ms);
+            cJSON* pts = cJSON_CreateArray();
+            for (uint8_t p = 0; p < tr.point_count && p < kAutomationPointsPerTrack; ++p) {
+                cJSON* pobj = cJSON_CreateObject();
+                cJSON_AddNumberToObject(pobj, "position", tr.points[p].position);
+                cJSON_AddNumberToObject(pobj, "value", tr.points[p].value);
+                cJSON_AddItemToArray(pts, pobj);
+            }
+            cJSON_AddItemToObject(tobj, "points", pts);
+            cJSON_AddItemToArray(tracks, tobj);
+        }
+        cJSON_AddItemToObject(obj, "tracks", tracks);
+        return obj;
+    };
+
+    if (target_index < kMaxPresets) {
+        SceneMotionConfig sm{};
+        (void)api_ptr->config()->load_scene_motion(target_index, sm);
+        cJSON* obj = serialize_motion(target_index, sm);
+        char* json = cJSON_PrintUnformatted(obj);
+        cJSON_Delete(obj);
+        if (!json) return send_error(request, "500 Internal Server Error", "out_of_memory");
+        esp_err_t res = send_json(request, json);
+        cJSON_free(json);
+        return res;
+    }
+
+    httpd_resp_set_type(request, "application/json");
+    httpd_resp_set_status(request, "200 OK");
+    httpd_resp_send_chunk(request, "[", 1);
+    bool first = true;
+    for (uint8_t i = 0; i < kMaxPresets; ++i) {
+        SceneMotionConfig sm{};
+        if (api_ptr->config()->load_scene_motion(i, sm) != ESP_OK && sm.track_count == 0 && sm.transition_curve == TransitionCurve::EaseInOut) {
+            continue;
+        }
+        cJSON* obj = serialize_motion(i, sm);
+        if (!obj) continue;
+        char* json = cJSON_PrintUnformatted(obj);
+        cJSON_Delete(obj);
+        if (json) {
+            if (!first) httpd_resp_send_chunk(request, ",", 1);
+            first = false;
+            httpd_resp_send_chunk(request, json, strlen(json));
+            cJSON_free(json);
+        }
+    }
+    httpd_resp_send_chunk(request, "]", 1);
+    httpd_resp_send_chunk(request, nullptr, 0);
+    return ESP_OK;
+}
+
+esp_err_t put_scene_motion(httpd_req_t* request) {
+    if (!api::authorize(request, api::ApiRole::Operator)) return ESP_OK;
+
+    FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+    if (!api_ptr->config()) return send_error(request, "503 Service Unavailable", "config_not_ready");
+
+    cJSON* root = nullptr;
+    if (read_json(request, &root) != ESP_OK) return send_error(request, "400 Bad Request", "invalid_json");
+
+    uint8_t index = 0;
+    if (!json_u8(root, "index", 0, kMaxPresets - 1, index)) {
+        size_t qlen = httpd_req_get_url_query_len(request);
+        if (qlen > 0 && qlen < 64) {
+            char query[64];
+            if (httpd_req_get_url_query_str(request, query, sizeof(query)) == ESP_OK) {
+                char param[16];
+                if (httpd_query_key_value(query, "index", param, sizeof(param)) == ESP_OK) {
+                    index = static_cast<uint8_t>(atoi(param));
+                }
+            }
+        }
+    }
+    if (index >= kMaxPresets) {
+        cJSON_Delete(root);
+        return send_error(request, "400 Bad Request", "invalid_index");
+    }
+
+    SceneMotionConfig motion{};
+    motion.schema_version = 1;
+
+    const cJSON* cur_j = cJSON_GetObjectItemCaseSensitive(root, "transitionCurve");
+    if (cur_j && cJSON_IsString(cur_j)) {
+        parse_transition_curve(cur_j->valuestring, motion.transition_curve);
+    }
+
+    const cJSON* tracks = cJSON_GetObjectItemCaseSensitive(root, "tracks");
+    if (tracks && cJSON_IsArray(tracks)) {
+        uint8_t t_count = 0;
+        const cJSON* t_item = nullptr;
+        cJSON_ArrayForEach(t_item, tracks) {
+            if (t_count >= kAutomationTracksPerScene) break;
+            auto& tr = motion.tracks[t_count];
+
+            const cJSON* tgt_j = cJSON_GetObjectItemCaseSensitive(t_item, "target");
+            if (tgt_j && cJSON_IsString(tgt_j)) parse_automation_target(tgt_j->valuestring, tr.target);
+
+            const cJSON* z_j = cJSON_GetObjectItemCaseSensitive(t_item, "zone");
+            if (z_j && cJSON_IsNumber(z_j)) tr.zone = std::min<uint8_t>(7, std::max<int>(0, z_j->valueint));
+
+            const cJSON* l_j = cJSON_GetObjectItemCaseSensitive(t_item, "layer");
+            if (l_j && cJSON_IsNumber(l_j)) tr.layer = std::min<uint8_t>(2, std::max<int>(0, l_j->valueint));
+
+            const cJSON* c_j = cJSON_GetObjectItemCaseSensitive(t_item, "curve");
+            if (c_j && cJSON_IsString(c_j)) parse_automation_curve(c_j->valuestring, tr.curve);
+
+            const cJSON* loop_j = cJSON_GetObjectItemCaseSensitive(t_item, "loop");
+            if (loop_j && cJSON_IsBool(loop_j)) tr.loop = cJSON_IsTrue(loop_j);
+
+            const cJSON* per_j = cJSON_GetObjectItemCaseSensitive(t_item, "periodMs");
+            if (per_j && cJSON_IsNumber(per_j)) tr.period_ms = std::max<uint32_t>(100, std::min<uint32_t>(3600000, per_j->valueint));
+
+            const cJSON* pts = cJSON_GetObjectItemCaseSensitive(t_item, "points");
+            if (pts && cJSON_IsArray(pts)) {
+                uint8_t p_count = 0;
+                const cJSON* p_item = nullptr;
+                cJSON_ArrayForEach(p_item, pts) {
+                    if (p_count >= kAutomationPointsPerTrack) break;
+                    const cJSON* pos_j = cJSON_GetObjectItemCaseSensitive(p_item, "position");
+                    const cJSON* val_j = cJSON_GetObjectItemCaseSensitive(p_item, "value");
+                    if (pos_j && val_j && cJSON_IsNumber(pos_j) && cJSON_IsNumber(val_j)) {
+                        tr.points[p_count].position = static_cast<uint16_t>(std::max<int>(0, std::min<int>(65535, pos_j->valueint)));
+                        tr.points[p_count].value = static_cast<uint16_t>(std::max<int>(0, std::min<int>(65535, val_j->valueint)));
+                        p_count++;
+                    }
+                }
+                tr.point_count = p_count;
+            }
+            t_count++;
+        }
+        motion.track_count = t_count;
+    }
+
+    cJSON_Delete(root);
+
+    esp_err_t err = api_ptr->config()->save_scene_motion(index, motion);
+    if (err != ESP_OK) return send_error(request, "500 Internal Server Error", "nvs_write_failed");
+
+    if (api_ptr->signage()) {
+        api_ptr->signage()->scene_manager().reload_motion(index);
+    }
+
+    uint32_t cmd_id = api_ptr->command_journal().accept(CommandDomain::SceneMotion);
+    api_ptr->command_journal().applied(cmd_id);
+
+    char resp[96];
+    snprintf(resp, sizeof(resp), "{\"saved\":true,\"commandId\":%" PRIu32 "}", cmd_id);
+    return send_json(request, resp, "200 OK");
+}
+
+esp_err_t get_cue_lists(httpd_req_t* request) {
+    if (!api::authorize(request, api::ApiRole::Operator)) return ESP_OK;
+
+    FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+    if (!api_ptr->config()) return send_error(request, "503 Service Unavailable", "config_not_ready");
+
+    cJSON* arr = cJSON_CreateArray();
+    for (uint8_t i = 0; i < kMaxCueLists; ++i) {
+        CueList cl;
+        if (api_ptr->config()->load_cue_list(i, cl) == ESP_OK && cl.count > 0) {
+            cJSON* obj = cJSON_CreateObject();
+            cJSON_AddNumberToObject(obj, "index", i);
+            cJSON_AddStringToObject(obj, "name", cl.name);
+            cJSON_AddStringToObject(obj, "mode", cue_run_mode_name(cl.mode));
+            cJSON_AddNumberToObject(obj, "count", cl.count);
+            cJSON_AddNumberToObject(obj, "endAction", cl.end_action);
+            cJSON_AddItemToArray(arr, obj);
+        }
+    }
+    char* json = cJSON_PrintUnformatted(arr);
+    cJSON_Delete(arr);
+    if (!json) return send_error(request, "500 Internal Server Error", "out_of_memory");
+    esp_err_t res = send_json(request, json);
+    cJSON_free(json);
+    return res;
+}
+
+esp_err_t get_cue_list(httpd_req_t* request) {
+    if (!api::authorize(request, api::ApiRole::Operator)) return ESP_OK;
+
+    FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+    if (!api_ptr->config()) return send_error(request, "503 Service Unavailable", "config_not_ready");
+
+    uint8_t index = 0;
+    size_t qlen = httpd_req_get_url_query_len(request);
+    if (qlen > 0 && qlen < 64) {
+        char query[64];
+        if (httpd_req_get_url_query_str(request, query, sizeof(query)) == ESP_OK) {
+            char param[16];
+            if (httpd_query_key_value(query, "index", param, sizeof(param)) == ESP_OK) {
+                index = static_cast<uint8_t>(atoi(param));
+            }
+        }
+    }
+    if (index >= kMaxCueLists) return send_error(request, "400 Bad Request", "invalid_index");
+
+    CueList cl;
+    esp_err_t err = api_ptr->config()->load_cue_list(index, cl);
+    if (err != ESP_OK) return send_error(request, "404 Not Found", "cue_list_not_found");
+
+    cJSON* obj = cJSON_CreateObject();
+    cJSON_AddNumberToObject(obj, "index", index);
+    cJSON_AddStringToObject(obj, "name", cl.name);
+    cJSON_AddStringToObject(obj, "mode", cue_run_mode_name(cl.mode));
+    cJSON_AddNumberToObject(obj, "count", cl.count);
+    cJSON_AddNumberToObject(obj, "endAction", cl.end_action);
+
+    cJSON* cues = cJSON_CreateArray();
+    for (uint8_t c = 0; c < cl.count && c < kMaxCuesPerList; ++c) {
+        cJSON* cobj = cJSON_CreateObject();
+        cJSON_AddNumberToObject(cobj, "sceneIndex", cl.cues[c].scene_index);
+        cJSON_AddNumberToObject(cobj, "holdMs", cl.cues[c].hold_ms);
+        cJSON_AddNumberToObject(cobj, "fadeMs", cl.cues[c].fade_ms);
+        cJSON_AddStringToObject(cobj, "curve", transition_curve_name(cl.cues[c].curve));
+        cJSON_AddStringToObject(cobj, "label", cl.cues[c].label);
+        cJSON_AddItemToArray(cues, cobj);
+    }
+    cJSON_AddItemToObject(obj, "cues", cues);
+
+    char* json = cJSON_PrintUnformatted(obj);
+    cJSON_Delete(obj);
+    if (!json) return send_error(request, "500 Internal Server Error", "out_of_memory");
+    esp_err_t res = send_json(request, json);
+    cJSON_free(json);
+    return res;
+}
+
+esp_err_t put_cue_list(httpd_req_t* request) {
+    if (!api::authorize(request, api::ApiRole::Operator)) return ESP_OK;
+
+    FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+    if (!api_ptr->config()) return send_error(request, "503 Service Unavailable", "config_not_ready");
+
+    cJSON* root = nullptr;
+    if (read_json(request, &root) != ESP_OK) return send_error(request, "400 Bad Request", "invalid_json");
+
+    uint8_t index = 0;
+    if (!json_u8(root, "index", 0, kMaxCueLists - 1, index)) {
+        size_t qlen = httpd_req_get_url_query_len(request);
+        if (qlen > 0 && qlen < 64) {
+            char query[64];
+            if (httpd_req_get_url_query_str(request, query, sizeof(query)) == ESP_OK) {
+                char param[16];
+                if (httpd_query_key_value(query, "index", param, sizeof(param)) == ESP_OK) {
+                    index = static_cast<uint8_t>(atoi(param));
+                }
+            }
+        }
+    }
+    if (index >= kMaxCueLists) {
+        cJSON_Delete(root);
+        return send_error(request, "400 Bad Request", "invalid_index");
+    }
+
+    CueList cl{};
+    const cJSON* name_j = cJSON_GetObjectItemCaseSensitive(root, "name");
+    if (name_j && cJSON_IsString(name_j)) {
+        strncpy(cl.name, name_j->valuestring, sizeof(cl.name) - 1);
+    }
+    const cJSON* mode_j = cJSON_GetObjectItemCaseSensitive(root, "mode");
+    if (mode_j && cJSON_IsString(mode_j)) {
+        parse_cue_run_mode(mode_j->valuestring, cl.mode);
+    }
+    const cJSON* ea_j = cJSON_GetObjectItemCaseSensitive(root, "endAction");
+    if (ea_j && cJSON_IsNumber(ea_j)) cl.end_action = ea_j->valueint;
+
+    const cJSON* cues = cJSON_GetObjectItemCaseSensitive(root, "cues");
+    if (cues && cJSON_IsArray(cues)) {
+        uint8_t c_idx = 0;
+        const cJSON* c_item = nullptr;
+        cJSON_ArrayForEach(c_item, cues) {
+            if (c_idx >= kMaxCuesPerList) break;
+            auto& cue = cl.cues[c_idx];
+
+            const cJSON* sc_j = cJSON_GetObjectItemCaseSensitive(c_item, "sceneIndex");
+            if (sc_j && cJSON_IsNumber(sc_j)) cue.scene_index = sc_j->valueint;
+
+            const cJSON* hold_j = cJSON_GetObjectItemCaseSensitive(c_item, "holdMs");
+            if (hold_j && cJSON_IsNumber(hold_j)) cue.hold_ms = hold_j->valueint;
+
+            const cJSON* fade_j = cJSON_GetObjectItemCaseSensitive(c_item, "fadeMs");
+            if (fade_j && cJSON_IsNumber(fade_j)) cue.fade_ms = fade_j->valueint;
+
+            const cJSON* cur_j = cJSON_GetObjectItemCaseSensitive(c_item, "curve");
+            if (cur_j && cJSON_IsString(cur_j)) parse_transition_curve(cur_j->valuestring, cue.curve);
+
+            const cJSON* lbl_j = cJSON_GetObjectItemCaseSensitive(c_item, "label");
+            if (lbl_j && cJSON_IsString(lbl_j)) strncpy(cue.label, lbl_j->valuestring, sizeof(cue.label) - 1);
+
+            c_idx++;
+        }
+        cl.count = c_idx;
+    }
+
+    cJSON_Delete(root);
+
+    esp_err_t err = api_ptr->config()->save_cue_list(index, cl);
+    if (err != ESP_OK) return send_error(request, "500 Internal Server Error", "nvs_write_failed");
+
+    uint32_t cmd_id = api_ptr->command_journal().accept(CommandDomain::Cue);
+    api_ptr->command_journal().applied(cmd_id);
+
+    char resp[96];
+    snprintf(resp, sizeof(resp), "{\"saved\":true,\"commandId\":%" PRIu32 "}", cmd_id);
+    return send_json(request, resp, "200 OK");
+}
+
+esp_err_t delete_cue_list(httpd_req_t* request) {
+    if (!api::authorize(request, api::ApiRole::Operator)) return ESP_OK;
+
+    FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+    if (!api_ptr->config()) return send_error(request, "503 Service Unavailable", "config_not_ready");
+
+    uint8_t index = 0;
+    size_t qlen = httpd_req_get_url_query_len(request);
+    if (qlen > 0 && qlen < 64) {
+        char query[64];
+        if (httpd_req_get_url_query_str(request, query, sizeof(query)) == ESP_OK) {
+            char param[16];
+            if (httpd_query_key_value(query, "index", param, sizeof(param)) == ESP_OK) {
+                index = static_cast<uint8_t>(atoi(param));
+            }
+        }
+    }
+    if (index >= kMaxCueLists) return send_error(request, "400 Bad Request", "invalid_index");
+
+    esp_err_t err = api_ptr->config()->delete_cue_list(index);
+    if (err != ESP_OK) return send_error(request, "500 Internal Server Error", "delete_failed");
+
+    return send_json(request, "{\"deleted\":true}", "200 OK");
+}
+
+esp_err_t post_cue_control(httpd_req_t* request) {
+    if (!api::authorize(request, api::ApiRole::Operator)) return ESP_OK;
+
+    FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+    if (!api_ptr->cue_runner()) return send_error(request, "503 Service Unavailable", "cue_runner_not_ready");
+
+    cJSON* root = nullptr;
+    if (read_json(request, &root) != ESP_OK) return send_error(request, "400 Bad Request", "invalid_json");
+
+    const cJSON* act_j = cJSON_GetObjectItemCaseSensitive(root, "action");
+    if (!act_j || !cJSON_IsString(act_j)) {
+        cJSON_Delete(root);
+        return send_error(request, "400 Bad Request", "missing_action");
+    }
+
+    const char* action = act_j->valuestring;
+    uint32_t now = esp_log_timestamp();
+    uint32_t cmd_id = api_ptr->command_journal().accept(CommandDomain::Cue);
+
+    if (strcmp(action, "start") == 0) {
+        uint8_t list_idx = 0;
+        uint8_t start_cue = 0;
+        const cJSON* li = cJSON_GetObjectItemCaseSensitive(root, "cueListIndex");
+        if (li && cJSON_IsNumber(li)) list_idx = li->valueint;
+        const cJSON* ci = cJSON_GetObjectItemCaseSensitive(root, "cueIndex");
+        if (ci && cJSON_IsNumber(ci)) start_cue = ci->valueint;
+        esp_err_t err = api_ptr->cue_runner()->start(list_idx, start_cue, now);
+        if (err != ESP_OK) {
+            api_ptr->command_journal().failed(cmd_id, err);
+            cJSON_Delete(root);
+            return send_error(request, "400 Bad Request", "start_failed");
+        }
+    } else if (strcmp(action, "stop") == 0) {
+        api_ptr->cue_runner()->stop(now);
+    } else if (strcmp(action, "pause") == 0) {
+        api_ptr->cue_runner()->pause();
+    } else if (strcmp(action, "resume") == 0) {
+        api_ptr->cue_runner()->resume(now);
+    } else if (strcmp(action, "next") == 0) {
+        api_ptr->cue_runner()->next(now);
+    } else if (strcmp(action, "previous") == 0) {
+        api_ptr->cue_runner()->previous(now);
+    } else if (strcmp(action, "jump") == 0) {
+        uint8_t cue_idx = 0;
+        const cJSON* ci = cJSON_GetObjectItemCaseSensitive(root, "cueIndex");
+        if (ci && cJSON_IsNumber(ci)) cue_idx = ci->valueint;
+        api_ptr->cue_runner()->jump(cue_idx, now);
+    } else if (strcmp(action, "crossfade") == 0) {
+        uint16_t fade_q15 = 0;
+        const cJSON* f_j = cJSON_GetObjectItemCaseSensitive(root, "crossfade");
+        if (f_j && cJSON_IsNumber(f_j)) {
+            if (f_j->valuedouble <= 1.0) {
+                fade_q15 = static_cast<uint16_t>(f_j->valuedouble * 32768.0);
+            } else {
+                fade_q15 = static_cast<uint16_t>(std::min<int>(32768, f_j->valueint));
+            }
+        }
+        api_ptr->cue_runner()->set_manual_fade(fade_q15);
+    } else {
+        cJSON_Delete(root);
+        api_ptr->command_journal().failed(cmd_id, ESP_ERR_INVALID_ARG);
+        return send_error(request, "400 Bad Request", "unknown_action");
+    }
+
+    cJSON_Delete(root);
+    api_ptr->command_journal().applied(cmd_id);
+    api_ptr->notify_status_async();
+
+    char resp[96];
+    snprintf(resp, sizeof(resp), "{\"accepted\":true,\"commandId\":%" PRIu32 "}", cmd_id);
+    return send_json(request, resp, "200 OK");
+}
+
+esp_err_t get_cue_status(httpd_req_t* request) {
+    if (!api::authorize(request, api::ApiRole::Operator)) return ESP_OK;
+
+    FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+    if (!api_ptr->cue_runner()) {
+        return send_json(request, "{\"running\":false}", "200 OK");
+    }
+
+    const auto* cr = api_ptr->cue_runner();
+    uint32_t now = esp_log_timestamp();
+    char body[320];
+    snprintf(body, sizeof(body),
+        "{\"running\":%s,\"state\":\"%s\",\"listIndex\":%u,\"cueIndex\":%u,\"nextCueIndex\":%u,\"mode\":\"%s\",\"elapsedMs\":%" PRIu32 ",\"remainingMs\":%" PRIu32 ",\"manualFade\":%u}",
+        cr->is_running() ? "true" : "false",
+        cr->state_name(),
+        cr->active_list_index(),
+        cr->current_cue_index(),
+        cr->next_cue_index(),
+        cue_run_mode_name(cr->current_list().mode),
+        cr->cue_elapsed_ms(now),
+        cr->cue_remaining_ms(now),
+        cr->manual_fade_q15());
+
+    return send_json(request, body, "200 OK");
 }
 
 esp_err_t post_activate(httpd_req_t* request) {
@@ -1043,48 +1549,69 @@ esp_err_t get_device_config(httpd_req_t* request) {
     cJSON_AddStringToObject(response, "mqttBroker", cfg.mqtt_broker);
     cJSON_AddNumberToObject(response, "mqttPort", cfg.mqtt_port);
 
+    cJSON* channels = cJSON_CreateArray();
+    for (uint8_t i = 0; i < 16; ++i) {
+        const auto& c = cfg.channels[i];
+        auto hw = channel_hardware(i);
+        char port[8];
+        channel_port_name(i, port, sizeof(port));
+
+        bool is_configured = (hw.kind == ChannelKind::Addressable)
+            ? (c.pixel_count > 0 || c.enabled || c.name[0] != '\0')
+            : (c.enabled || c.name[0] != '\0');
+
+        cJSON* ch = cJSON_CreateObject();
+        cJSON_AddNumberToObject(ch, "index", i);
+        cJSON_AddStringToObject(ch, "port", port);
+        cJSON_AddStringToObject(ch, "kind", hw.kind == ChannelKind::Addressable ? "addressable" : "pwm");
+        cJSON_AddNumberToObject(ch, "hardwareId", hw.hardware_id);
+        if (hw.kind == ChannelKind::Addressable) {
+            cJSON_AddNumberToObject(ch, "gpio", hw.gpio);
+        }
+        cJSON_AddBoolToObject(ch, "configured", is_configured);
+        cJSON_AddBoolToObject(ch, "enabled", c.enabled);
+        cJSON_AddStringToObject(ch, "name", c.name);
+        cJSON_AddNumberToObject(ch, "maxBrightness", c.max_brightness);
+        cJSON_AddBoolToObject(ch, "gammaCorrection", c.gamma_correction);
+        cJSON_AddNumberToObject(ch, "maxMilliwatts", c.max_milliwatts);
+        cJSON_AddNumberToObject(ch, "dmxUniverse", c.dmx_universe);
+        cJSON_AddNumberToObject(ch, "dmxStartChannel", c.dmx_start_channel);
+        cJSON_AddNumberToObject(ch, "dmxMode", c.dmx_mode);
+
+        if (hw.kind == ChannelKind::Addressable) {
+            cJSON* addr = cJSON_CreateObject();
+            cJSON_AddStringToObject(addr, "type", c.addressable_type == AddressableType::SK6812 ? "SK6812" : "WS2812");
+            cJSON_AddNumberToObject(addr, "pixels", c.pixel_count);
+            cJSON_AddStringToObject(addr, "pixelOrder", pixel_order_name(c.pixel_order));
+            cJSON_AddItemToObject(ch, "addressable", addr);
+        }
+
+        cJSON_AddItemToArray(channels, ch);
+    }
+    cJSON_AddItemToObject(response, "channels", channels);
+
+    cJSON* groups = cJSON_CreateArray();
+    for (uint8_t i = 0; i < 8; ++i) {
+        const auto& g = cfg.groups[i];
+        cJSON* grp = cJSON_CreateObject();
+        cJSON_AddNumberToObject(grp, "index", i);
+        cJSON_AddStringToObject(grp, "name", g.name);
+        cJSON_AddNumberToObject(grp, "channelMask", g.channel_mask);
+        cJSON_AddStringToObject(grp, "role", zone_role_name(g.role));
+        cJSON_AddBoolToObject(grp, "enabled", g.enabled);
+        cJSON_AddItemToArray(groups, grp);
+    }
+    cJSON_AddItemToObject(response, "groups", groups);
+
+    // Legacy synthesis for older dashboards
     cJSON* zones = cJSON_CreateArray();
     for (uint8_t i = 0; i < 8; ++i) {
         cJSON* z = cJSON_CreateObject();
-        cJSON_AddStringToObject(z, "name", cfg.zones[i].name);
-        cJSON_AddStringToObject(z, "role", zone_role_name(cfg.zones[i].role));
+        cJSON_AddStringToObject(z, "name", cfg.groups[i].name);
+        cJSON_AddStringToObject(z, "role", zone_role_name(cfg.groups[i].role));
         cJSON_AddItemToArray(zones, z);
     }
     cJSON_AddItemToObject(response, "zones", zones);
-
-    cJSON* phys = cJSON_CreateArray();
-    for (uint8_t i = 0; i < 16; ++i) {
-        cJSON* p = cJSON_CreateObject();
-        cJSON_AddNumberToObject(p, "type", static_cast<int>(cfg.physical_outputs[i].type));
-        cJSON_AddNumberToObject(p, "hardwareId", cfg.physical_outputs[i].hardware_id);
-        cJSON_AddNumberToObject(p, "gpioPin", cfg.physical_outputs[i].gpio_pin);
-        cJSON_AddBoolToObject(p, "enabled", cfg.physical_outputs[i].enabled);
-        cJSON_AddItemToArray(phys, p);
-    }
-    cJSON_AddItemToObject(response, "physicalOutputs", phys);
-
-    cJSON* fixt = cJSON_CreateArray();
-    for (uint8_t i = 0; i < 16; ++i) {
-        cJSON* f = cJSON_CreateObject();
-        cJSON_AddNumberToObject(f, "profile", static_cast<int>(cfg.fixtures[i].profile));
-        cJSON_AddNumberToObject(f, "pixelOrder", static_cast<int>(cfg.fixtures[i].pixel_order));
-        cJSON* p_idx = cJSON_CreateArray();
-        for (uint8_t j = 0; j < 4; ++j) cJSON_AddItemToArray(p_idx, cJSON_CreateNumber(cfg.fixtures[i].physical_output_index[j]));
-        cJSON_AddItemToObject(f, "physicalOutputIndex", p_idx);
-        cJSON_AddNumberToObject(f, "numPixels", cfg.fixtures[i].num_pixels);
-        cJSON_AddNumberToObject(f, "maxBrightness", cfg.fixtures[i].max_brightness);
-        cJSON* wb = cJSON_CreateArray();
-        for (uint8_t j = 0; j < 3; ++j) cJSON_AddItemToArray(wb, cJSON_CreateNumber(cfg.fixtures[i].white_balance[j]));
-        cJSON_AddItemToObject(f, "whiteBalance", wb);
-        cJSON_AddBoolToObject(f, "gammaCorrection", cfg.fixtures[i].gamma_correction);
-        cJSON_AddNumberToObject(f, "maxMilliwatts", cfg.fixtures[i].max_milliwatts);
-        cJSON_AddNumberToObject(f, "zoneId", cfg.fixtures[i].zone_id);
-        cJSON_AddNumberToObject(f, "dmxUniverse", cfg.fixtures[i].dmx_universe);
-        cJSON_AddNumberToObject(f, "dmxStartChannel", cfg.fixtures[i].dmx_start_channel);
-        cJSON_AddNumberToObject(f, "dmxMode", cfg.fixtures[i].dmx_mode);
-        cJSON_AddItemToArray(fixt, f);
-    }
-    cJSON_AddItemToObject(response, "fixtures", fixt);
 
     cJSON* prot_json = cJSON_CreateObject();
     cJSON_AddBoolToObject(prot_json, "artnetEnabled", cfg.protocol.artnet_enabled);
@@ -1204,123 +1731,85 @@ esp_err_t put_device_config(httpd_req_t* request) {
 
     VALIDATE_U8("syncRole", 0, 2, cfg.sync_role);
 
-    const cJSON* zones_arr = cJSON_GetObjectItemCaseSensitive(root, "zones");
-    if (zones_arr) {
-        if (!cJSON_IsArray(zones_arr) || cJSON_GetArraySize(zones_arr) > 8) {
-            cJSON_Delete(root);
-            return send_error(request, "400 Bad Request", "invalid_field_zones");
-        }
-        int z_idx = 0;
-        cJSON* z_item = nullptr;
-        cJSON_ArrayForEach(z_item, zones_arr) {
-            if (z_idx >= 8) break;
-            const cJSON* z_name = cJSON_GetObjectItemCaseSensitive(z_item, "name");
-            if (z_name) {
-                if (!cJSON_IsString(z_name) || strlen(z_name->valuestring) >= sizeof(cfg.zones[z_idx].name)) {
-                    cJSON_Delete(root);
-                    return send_error(request, "400 Bad Request", "invalid_field_zones_name");
-                }
-                strncpy(cfg.zones[z_idx].name, z_name->valuestring, sizeof(cfg.zones[z_idx].name) - 1);
-                cfg.zones[z_idx].name[sizeof(cfg.zones[z_idx].name) - 1] = '\0';
+    const cJSON* channels_arr = cJSON_GetObjectItemCaseSensitive(root, "channels");
+    if (channels_arr && cJSON_IsArray(channels_arr)) {
+        int ch_idx = 0;
+        cJSON* ch_item = nullptr;
+        cJSON_ArrayForEach(ch_item, channels_arr) {
+            if (ch_idx >= 16) break;
+            const cJSON* name_j = cJSON_GetObjectItemCaseSensitive(ch_item, "name");
+            if (name_j && cJSON_IsString(name_j)) {
+                strncpy(cfg.channels[ch_idx].name, name_j->valuestring, sizeof(cfg.channels[ch_idx].name) - 1);
+                cfg.channels[ch_idx].name[sizeof(cfg.channels[ch_idx].name) - 1] = '\0';
             }
-            const cJSON* z_role = cJSON_GetObjectItemCaseSensitive(z_item, "role");
-            if (z_role) {
-                if (!cJSON_IsString(z_role) || !parse_zone_role(z_role->valuestring, cfg.zones[z_idx].role)) {
-                    cJSON_Delete(root);
-                    return send_error(request, "400 Bad Request", "invalid_field_zones_role");
+            const cJSON* en_j = cJSON_GetObjectItemCaseSensitive(ch_item, "enabled");
+            if (en_j && cJSON_IsBool(en_j)) cfg.channels[ch_idx].enabled = cJSON_IsTrue(en_j);
+
+            const cJSON* mb_j = cJSON_GetObjectItemCaseSensitive(ch_item, "maxBrightness");
+            if (mb_j && cJSON_IsNumber(mb_j)) cfg.channels[ch_idx].max_brightness = static_cast<uint8_t>(mb_j->valueint);
+
+            const cJSON* gc_j = cJSON_GetObjectItemCaseSensitive(ch_item, "gammaCorrection");
+            if (gc_j && cJSON_IsBool(gc_j)) cfg.channels[ch_idx].gamma_correction = cJSON_IsTrue(gc_j);
+
+            const cJSON* mw_j = cJSON_GetObjectItemCaseSensitive(ch_item, "maxMilliwatts");
+            if (mw_j && cJSON_IsNumber(mw_j)) cfg.channels[ch_idx].max_milliwatts = static_cast<uint16_t>(mw_j->valueint);
+
+            const cJSON* du_j = cJSON_GetObjectItemCaseSensitive(ch_item, "dmxUniverse");
+            if (du_j && cJSON_IsNumber(du_j)) cfg.channels[ch_idx].dmx_universe = static_cast<uint16_t>(du_j->valueint);
+
+            const cJSON* ds_j = cJSON_GetObjectItemCaseSensitive(ch_item, "dmxStartChannel");
+            if (ds_j && cJSON_IsNumber(ds_j)) cfg.channels[ch_idx].dmx_start_channel = static_cast<uint16_t>(ds_j->valueint);
+
+            const cJSON* dm_j = cJSON_GetObjectItemCaseSensitive(ch_item, "dmxMode");
+            if (dm_j && cJSON_IsNumber(dm_j)) cfg.channels[ch_idx].dmx_mode = static_cast<uint8_t>(dm_j->valueint);
+
+            const cJSON* addr_obj = cJSON_GetObjectItemCaseSensitive(ch_item, "addressable");
+            const cJSON* src_addr = addr_obj ? addr_obj : ch_item;
+            const cJSON* atype_j = cJSON_GetObjectItemCaseSensitive(src_addr, "type");
+            if (!atype_j) atype_j = cJSON_GetObjectItemCaseSensitive(src_addr, "addressableType");
+            if (atype_j) {
+                if (cJSON_IsString(atype_j)) {
+                    cfg.channels[ch_idx].addressable_type = (strcmp(atype_j->valuestring, "SK6812") == 0) ? AddressableType::SK6812 : AddressableType::WS2812;
+                } else if (cJSON_IsNumber(atype_j)) {
+                    cfg.channels[ch_idx].addressable_type = static_cast<AddressableType>(atype_j->valueint);
                 }
             }
-            ++z_idx;
+            const cJSON* px_j = cJSON_GetObjectItemCaseSensitive(src_addr, "pixels");
+            if (!px_j) px_j = cJSON_GetObjectItemCaseSensitive(src_addr, "pixelCount");
+            if (px_j && cJSON_IsNumber(px_j)) {
+                cfg.channels[ch_idx].pixel_count = static_cast<uint16_t>(std::min(px_j->valueint, static_cast<int>(MAX_PIXELS)));
+            }
+            const cJSON* po_j = cJSON_GetObjectItemCaseSensitive(src_addr, "pixelOrder");
+            if (po_j) {
+                if (cJSON_IsNumber(po_j)) cfg.channels[ch_idx].pixel_order = static_cast<PixelOrder>(po_j->valueint);
+                else if (cJSON_IsString(po_j)) parse_pixel_order(po_j->valuestring, cfg.channels[ch_idx].pixel_order);
+            }
+
+            ++ch_idx;
         }
     }
 
-    const cJSON* phys_arr = cJSON_GetObjectItemCaseSensitive(root, "physicalOutputs");
-    if (phys_arr && cJSON_IsArray(phys_arr)) {
-        int p_idx = 0;
-        cJSON* p_item = nullptr;
-        cJSON_ArrayForEach(p_item, phys_arr) {
-            if (p_idx >= 16) break;
-            const cJSON* p_type = cJSON_GetObjectItemCaseSensitive(p_item, "type");
-            if (p_type && cJSON_IsNumber(p_type)) cfg.physical_outputs[p_idx].type = static_cast<OutputType>(p_type->valueint);
-            
-            const cJSON* p_hwid = cJSON_GetObjectItemCaseSensitive(p_item, "hardwareId");
-            if (p_hwid && cJSON_IsNumber(p_hwid)) cfg.physical_outputs[p_idx].hardware_id = static_cast<uint8_t>(p_hwid->valueint);
-            
-            const cJSON* p_pin = cJSON_GetObjectItemCaseSensitive(p_item, "gpioPin");
-            if (p_pin && cJSON_IsNumber(p_pin)) cfg.physical_outputs[p_idx].gpio_pin = static_cast<uint8_t>(p_pin->valueint);
-            
-            const cJSON* p_en = cJSON_GetObjectItemCaseSensitive(p_item, "enabled");
-            if (p_en && cJSON_IsBool(p_en)) cfg.physical_outputs[p_idx].enabled = cJSON_IsTrue(p_en);
-            
-            ++p_idx;
-        }
-    }
-
-    const cJSON* fixt_arr = cJSON_GetObjectItemCaseSensitive(root, "fixtures");
-    if (fixt_arr && cJSON_IsArray(fixt_arr)) {
-        int f_idx = 0;
-        cJSON* f_item = nullptr;
-        cJSON_ArrayForEach(f_item, fixt_arr) {
-            if (f_idx >= 16) break;
-            const cJSON* f_prof = cJSON_GetObjectItemCaseSensitive(f_item, "profile");
-            if (f_prof && cJSON_IsNumber(f_prof)) cfg.fixtures[f_idx].profile = static_cast<FixtureProfile>(f_prof->valueint);
-            
-            const cJSON* f_po = cJSON_GetObjectItemCaseSensitive(f_item, "pixelOrder");
-            if (f_po && cJSON_IsNumber(f_po)) cfg.fixtures[f_idx].pixel_order = static_cast<PixelOrder>(f_po->valueint);
-            
-            const cJSON* f_idx_arr = cJSON_GetObjectItemCaseSensitive(f_item, "physicalOutputIndex");
-            if (f_idx_arr && cJSON_IsArray(f_idx_arr)) {
-                int j = 0;
-                cJSON* i_item = nullptr;
-                cJSON_ArrayForEach(i_item, f_idx_arr) {
-                    if (j >= 4) break;
-                    if (cJSON_IsNumber(i_item)) cfg.fixtures[f_idx].physical_output_index[j] = static_cast<uint8_t>(i_item->valueint);
-                    ++j;
-                }
+    const cJSON* groups_arr = cJSON_GetObjectItemCaseSensitive(root, "groups");
+    if (groups_arr && cJSON_IsArray(groups_arr)) {
+        int g_idx = 0;
+        cJSON* g_item = nullptr;
+        cJSON_ArrayForEach(g_item, groups_arr) {
+            if (g_idx >= 8) break;
+            const cJSON* name_j = cJSON_GetObjectItemCaseSensitive(g_item, "name");
+            if (name_j && cJSON_IsString(name_j)) {
+                strncpy(cfg.groups[g_idx].name, name_j->valuestring, sizeof(cfg.groups[g_idx].name) - 1);
+                cfg.groups[g_idx].name[sizeof(cfg.groups[g_idx].name) - 1] = '\0';
             }
-            
-            const cJSON* f_np = cJSON_GetObjectItemCaseSensitive(f_item, "numPixels");
-            if (f_np && cJSON_IsNumber(f_np)) {
-                if (f_np->valueint < 0 || f_np->valueint > MAX_FIXTURE_PIXELS) {
-                    cJSON_Delete(root);
-                    return send_error(request, "400 Bad Request", "fixture_pixel_limit_exceeded_max_256");
-                }
-                cfg.fixtures[f_idx].num_pixels = static_cast<uint16_t>(f_np->valueint);
-            }
-            
-            const cJSON* f_mb = cJSON_GetObjectItemCaseSensitive(f_item, "maxBrightness");
-            if (f_mb && cJSON_IsNumber(f_mb)) cfg.fixtures[f_idx].max_brightness = static_cast<uint8_t>(f_mb->valueint);
-            
-            const cJSON* f_wb = cJSON_GetObjectItemCaseSensitive(f_item, "whiteBalance");
-            if (f_wb && cJSON_IsArray(f_wb)) {
-                int j = 0;
-                cJSON* w_item = nullptr;
-                cJSON_ArrayForEach(w_item, f_wb) {
-                    if (j >= 3) break;
-                    if (cJSON_IsNumber(w_item)) cfg.fixtures[f_idx].white_balance[j] = static_cast<uint8_t>(w_item->valueint);
-                    ++j;
-                }
-            }
-            
-            const cJSON* f_gc = cJSON_GetObjectItemCaseSensitive(f_item, "gammaCorrection");
-            if (f_gc && cJSON_IsBool(f_gc)) cfg.fixtures[f_idx].gamma_correction = cJSON_IsTrue(f_gc);
-            
-            const cJSON* f_mm = cJSON_GetObjectItemCaseSensitive(f_item, "maxMilliwatts");
-            if (f_mm && cJSON_IsNumber(f_mm)) cfg.fixtures[f_idx].max_milliwatts = static_cast<uint16_t>(f_mm->valueint);
-            
-            const cJSON* f_zi = cJSON_GetObjectItemCaseSensitive(f_item, "zoneId");
-            if (f_zi && cJSON_IsNumber(f_zi)) cfg.fixtures[f_idx].zone_id = static_cast<uint8_t>(f_zi->valueint);
+            const cJSON* mask_j = cJSON_GetObjectItemCaseSensitive(g_item, "channelMask");
+            if (mask_j && cJSON_IsNumber(mask_j)) cfg.groups[g_idx].channel_mask = static_cast<uint16_t>(mask_j->valueint);
 
-            const cJSON* f_du = cJSON_GetObjectItemCaseSensitive(f_item, "dmxUniverse");
-            if (f_du && cJSON_IsNumber(f_du)) cfg.fixtures[f_idx].dmx_universe = static_cast<uint16_t>(f_du->valueint);
+            const cJSON* en_j = cJSON_GetObjectItemCaseSensitive(g_item, "enabled");
+            if (en_j && cJSON_IsBool(en_j)) cfg.groups[g_idx].enabled = cJSON_IsTrue(en_j);
 
-            const cJSON* f_dc = cJSON_GetObjectItemCaseSensitive(f_item, "dmxStartChannel");
-            if (f_dc && cJSON_IsNumber(f_dc)) cfg.fixtures[f_idx].dmx_start_channel = static_cast<uint16_t>(f_dc->valueint);
+            const cJSON* role_j = cJSON_GetObjectItemCaseSensitive(g_item, "role");
+            if (role_j && cJSON_IsString(role_j)) parse_zone_role(role_j->valuestring, cfg.groups[g_idx].role);
 
-            const cJSON* f_dm = cJSON_GetObjectItemCaseSensitive(f_item, "dmxMode");
-            if (f_dm && cJSON_IsNumber(f_dm)) cfg.fixtures[f_idx].dmx_mode = static_cast<uint8_t>(f_dm->valueint);
-            
-            ++f_idx;
+            ++g_idx;
         }
     }
 
@@ -1373,6 +1862,113 @@ esp_err_t put_device_config(httpd_req_t* request) {
     char resp[96];
     snprintf(resp, sizeof(resp), "{\"saved\":true,\"accepted\":true,\"commandId\":%" PRIu32 "}", cmd_id);
     return send_json(request, resp);
+}
+
+esp_err_t get_channels(httpd_req_t* request) {
+    if (!api::authorize(request, api::ApiRole::Operator)) return ESP_OK;
+
+    FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+    if (!api_ptr->config()) return send_error(request, "503 Service Unavailable", "config_not_ready");
+
+    DeviceConfig cfg;
+    api_ptr->config()->load_config(cfg);
+
+    cJSON* response = cJSON_CreateObject();
+    cJSON* ch_arr = cJSON_CreateArray();
+
+    for (uint8_t i = 0; i < kChannelCount; ++i) {
+        const auto& c = cfg.channels[i];
+        auto hw = channel_hardware(i);
+        char port[8];
+        channel_port_name(i, port, sizeof(port));
+
+        bool configured = (hw.kind == ChannelKind::Addressable)
+            ? (c.pixel_count > 0 || c.enabled || c.name[0] != '\0')
+            : (c.enabled || c.name[0] != '\0');
+
+        cJSON* ch = cJSON_CreateObject();
+        cJSON_AddNumberToObject(ch, "index", i);
+        cJSON_AddStringToObject(ch, "port", port);
+        cJSON_AddStringToObject(ch, "kind", hw.kind == ChannelKind::Addressable ? "addressable" : "pwm");
+        cJSON_AddNumberToObject(ch, "hardwareId", hw.hardware_id);
+        if (hw.kind == ChannelKind::Addressable) {
+            cJSON_AddNumberToObject(ch, "gpio", hw.gpio);
+        }
+        cJSON_AddBoolToObject(ch, "configured", configured);
+        cJSON_AddBoolToObject(ch, "enabled", c.enabled);
+        cJSON_AddStringToObject(ch, "name", c.name);
+        cJSON_AddNumberToObject(ch, "maxBrightness", c.max_brightness);
+        cJSON_AddBoolToObject(ch, "gammaCorrection", c.gamma_correction);
+        cJSON_AddNumberToObject(ch, "maxMilliwatts", c.max_milliwatts);
+        cJSON_AddNumberToObject(ch, "dmxUniverse", c.dmx_universe);
+        cJSON_AddNumberToObject(ch, "dmxStartChannel", c.dmx_start_channel);
+        cJSON_AddNumberToObject(ch, "dmxMode", c.dmx_mode);
+
+        if (hw.kind == ChannelKind::Addressable) {
+            cJSON* addr = cJSON_CreateObject();
+            cJSON_AddStringToObject(addr, "type", c.addressable_type == AddressableType::SK6812 ? "SK6812" : "WS2812");
+            cJSON_AddNumberToObject(addr, "pixels", c.pixel_count);
+            cJSON_AddStringToObject(addr, "pixelOrder", pixel_order_name(c.pixel_order));
+            cJSON_AddItemToObject(ch, "addressable", addr);
+        }
+
+        cJSON_AddItemToArray(ch_arr, ch);
+    }
+    cJSON_AddItemToObject(response, "channels", ch_arr);
+
+    char* json = cJSON_PrintUnformatted(response);
+    cJSON_Delete(response);
+    if (!json) return send_error(request, "500 Internal Server Error", "json_encode_failed");
+
+    const esp_err_t result = send_json(request, json);
+    cJSON_free(json);
+    return result;
+}
+
+esp_err_t post_channel_test(httpd_req_t* request) {
+    if (!api::authorize(request, api::ApiRole::Operator)) return ESP_OK;
+
+    FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+    cJSON* root = nullptr;
+    if (read_json(request, &root) != ESP_OK) {
+        return send_error(request, "400 Bad Request", "invalid_json");
+    }
+
+    uint8_t channel = 0;
+    if (!json_u8(root, "channel", 0, 15, channel)) {
+        cJSON_Delete(root);
+        return send_error(request, "400 Bad Request", "invalid_field_channel_0_15");
+    }
+
+    char mode[32] = "identify";
+    const cJSON* m_item = cJSON_GetObjectItemCaseSensitive(root, "mode");
+    if (m_item && cJSON_IsString(m_item) && strlen(m_item->valuestring) < sizeof(mode)) {
+        strncpy(mode, m_item->valuestring, sizeof(mode) - 1);
+        mode[sizeof(mode) - 1] = '\0';
+    }
+
+    uint32_t duration_ms = 3000;
+    const cJSON* d_item = cJSON_GetObjectItemCaseSensitive(root, "durationMs");
+    if (d_item && cJSON_IsNumber(d_item) && d_item->valueint > 0 && d_item->valueint <= 60000) {
+        duration_ms = static_cast<uint32_t>(d_item->valueint);
+    }
+
+    cJSON_Delete(root);
+
+    bool accepted = api_ptr->runner().test_channel(channel, mode, duration_ms);
+    if (!accepted) {
+        return send_error(request, "503 Service Unavailable", "test_runner_busy");
+    }
+
+    char port[8];
+    channel_port_name(channel, port, sizeof(port));
+
+    char test_resp[128];
+    snprintf(test_resp, sizeof(test_resp),
+        "{\"accepted\":true,\"channel\":%u,\"port\":\"%s\",\"mode\":\"%s\",\"durationMs\":%" PRIu32 "}",
+        channel, port, mode, duration_ms);
+
+    return send_json(request, test_resp, "202 Accepted");
 }
 
 esp_err_t get_signage_status(httpd_req_t* request) {
@@ -1527,18 +2123,20 @@ esp_err_t get_capabilities(httpd_req_t* request) {
         dev_name = cfg.device_name;
     }
     NodeIdentity id = get_node_identity(dev_name);
-    char body[640];
+    char body[800];
     snprintf(body, sizeof(body),
         "{\"schema\":%u,"
         "\"node\":{\"family\":\"%s\",\"model\":\"%s\",\"firmware\":\"%s\",\"hardwareRevision\":\"%s\"},"
-        "\"limits\":{\"pixelLanes\":%u,\"pwmChannels\":%u,\"zones\":%u,\"layersPerZone\":%u,\"presets\":%u,\"timelineSteps\":%u},"
-        "\"features\":{\"addressable\":%s,\"pwm\":%s,\"artnet\":%s,\"sacn\":%s,\"sync\":%s,\"mqtt\":%s,\"factory\":%s,\"ota\":%s,\"signedOta\":%s,\"backup\":%s},"
+        "\"limits\":{\"pixelLanes\":%u,\"pwmChannels\":%u,\"zones\":%u,\"layersPerZone\":%u,\"presets\":%u,\"timelineSteps\":%u,\"cueLists\":%u,\"cuesPerList\":%u,\"automationTracks\":%u,\"automationPoints\":%u},"
+        "\"features\":{\"addressable\":%s,\"pwm\":%s,\"artnet\":%s,\"sacn\":%s,\"sync\":%s,\"mqtt\":%s,\"factory\":%s,\"ota\":%s,\"signedOta\":%s,\"backup\":%s,\"sceneMotion\":%s,\"cueLists\":%s,\"transitionEngineV2\":%s},"
         "\"protocols\":{\"httpApi\":%u,\"websocket\":%u,\"sync\":%u}}",
         CapabilitiesManifest::kSchema,
         id.family, id.model, id.fw_version, id.hw_revision,
         CapabilitiesManifest::kPixelLanes, CapabilitiesManifest::kPwmChannels,
         CapabilitiesManifest::kZones, CapabilitiesManifest::kLayersPerZone,
         CapabilitiesManifest::kPresets, CapabilitiesManifest::kTimelineSteps,
+        CapabilitiesManifest::kCueLists, CapabilitiesManifest::kCuesPerList,
+        CapabilitiesManifest::kAutomationTracks, CapabilitiesManifest::kAutomationPoints,
         CapabilitiesManifest::kFeatureAddressable ? "true" : "false",
         CapabilitiesManifest::kFeaturePwm ? "true" : "false",
         CapabilitiesManifest::kFeatureArtnet ? "true" : "false",
@@ -1549,6 +2147,9 @@ esp_err_t get_capabilities(httpd_req_t* request) {
         CapabilitiesManifest::kFeatureOta ? "true" : "false",
         CapabilitiesManifest::kFeatureSignedOta ? "true" : "false",
         CapabilitiesManifest::kFeatureBackup ? "true" : "false",
+        CapabilitiesManifest::kFeatureSceneMotion ? "true" : "false",
+        CapabilitiesManifest::kFeatureCueLists ? "true" : "false",
+        CapabilitiesManifest::kFeatureTransitionEngineV2 ? "true" : "false",
         CapabilitiesManifest::kProtocolHttpApi,
         CapabilitiesManifest::kProtocolWebsocket,
         CapabilitiesManifest::kProtocolSync
@@ -1655,8 +2256,94 @@ void build_schema2_status_json(FactoryApi* api, char* response, size_t max_len) 
     const char* sync_role = api->node_sync() ? node_role_name(api->node_sync()->role()) : "auto";
     bool in_sync = api->node_sync() ? api->node_sync()->status().clock_locked : false;
 
+    uint64_t clock_ms = 0;
+    int32_t drift_ppm = 0;
+    bool time_synced = false;
+    if (api->scheduler()) {
+        clock_ms = api->scheduler()->current_clock_ms();
+        drift_ppm = api->scheduler()->estimated_drift_ppm();
+        time_synced = api->scheduler()->is_time_synced();
+    }
+
+    const char* trans_curve = "easeInOut";
+    uint8_t motion_tracks = 0;
+    if (api->signage()) {
+        trans_curve = transition_curve_name(api->signage()->transition_curve());
+        motion_tracks = api->signage()->scene_manager().current_motion().track_count;
+    }
+
+    char cue_str[256] = "{\"running\":false}";
+    if (api->cue_runner()) {
+        const auto* cr = api->cue_runner();
+        snprintf(cue_str, sizeof(cue_str),
+            "{\"running\":%s,\"state\":\"%s\",\"listIndex\":%u,\"cueIndex\":%u,\"nextCueIndex\":%u,\"mode\":\"%s\",\"elapsedMs\":%" PRIu32 ",\"remainingMs\":%" PRIu32 ",\"manualFade\":%u}",
+            cr->is_running() ? "true" : "false",
+            cr->state_name(),
+            cr->active_list_index(),
+            cr->current_cue_index(),
+            cr->next_cue_index(),
+            cue_run_mode_name(cr->current_list().mode),
+            cr->cue_elapsed_ms(now),
+            cr->cue_remaining_ms(now),
+            cr->manual_fade_q15());
+    }
+
+    DeviceConfig status_cfg{};
+    if (api->config()) {
+        api->config()->load_config(status_cfg);
+    }
+
+    char channels_buf[2048] = "[";
+    size_t ch_pos = 1;
+    for (uint8_t i = 0; i < kChannelCount; ++i) {
+        char port[8];
+        channel_port_name(i, port, sizeof(port));
+        auto hw = channel_hardware(i);
+        const auto& ch_cfg = status_cfg.channels[i];
+        bool ch_configured = (hw.kind == ChannelKind::Addressable)
+            ? (ch_cfg.pixel_count > 0 || ch_cfg.enabled || ch_cfg.name[0] != '\0')
+            : (ch_cfg.enabled || ch_cfg.name[0] != '\0');
+        bool ch_enabled = ch_cfg.enabled;
+        const char* ch_owner = owner;
+        bool ch_fault = fault;
+
+        char item[140];
+        if (hw.kind == ChannelKind::Addressable) {
+            uint8_t ch_brightness = (brightness * ch_cfg.max_brightness) / 255;
+            snprintf(item, sizeof(item),
+                "%s{\"index\":%u,\"port\":\"%s\",\"configured\":%s,\"enabled\":%s,\"owner\":\"%s\",\"fault\":%s,\"brightness\":%u,\"pixels\":%u}",
+                i > 0 ? "," : "",
+                i, port,
+                ch_configured ? "true" : "false",
+                ch_enabled ? "true" : "false",
+                ch_owner,
+                ch_fault ? "true" : "false",
+                ch_brightness,
+                ch_cfg.pixel_count);
+        } else {
+            uint16_t ch_level = api->signage() ? api->signage()->last_pwm_level(i) : 0;
+            snprintf(item, sizeof(item),
+                "%s{\"index\":%u,\"port\":\"%s\",\"configured\":%s,\"enabled\":%s,\"owner\":\"%s\",\"fault\":%s,\"level\":%u}",
+                i > 0 ? "," : "",
+                i, port,
+                ch_configured ? "true" : "false",
+                ch_enabled ? "true" : "false",
+                ch_owner,
+                ch_fault ? "true" : "false",
+                ch_level);
+        }
+        size_t ilen = strlen(item);
+        if (ch_pos + ilen < sizeof(channels_buf) - 2) {
+            memcpy(channels_buf + ch_pos, item, ilen);
+            ch_pos += ilen;
+        }
+    }
+    channels_buf[ch_pos++] = ']';
+    channels_buf[ch_pos] = '\0';
+
     snprintf(response, max_len,
         "{\"schema\":2,\"seq\":%" PRIu32 ",\"nodeId\":\"%s\",\"uptimeMs\":%" PRIu32 ","
+        "\"channels\":%s,"
         "\"state\":{"
           "\"runtime\":{\"effect\":\"%s\",\"brightness\":%u,\"testActive\":%s,\"autoLoop\":%s,\"controlOwner\":\"%s\",\"frameCount\":%" PRIu32 "},"
           "\"output\":{\"outputsEnabled\":%s,\"powerMw\":%" PRIu32 ",\"fault\":%s,\"faultCount\":%" PRIu32 "},"
@@ -1666,10 +2353,14 @@ void build_schema2_status_json(FactoryApi* api, char* response, size_t max_len) 
           "\"protocol\":{\"artnet\":{\"enabled\":true,\"sources\":%" PRIu32 ",\"packetsPerSecond\":%" PRIu32 ",\"lastPacketAgeMs\":%" PRIu32 "},"
                         "\"sacn\":{\"enabled\":true,\"sources\":%" PRIu32 ",\"packetsPerSecond\":%" PRIu32 "},"
                         "\"owner\":\"%s\"},"
+          "\"timeline\":{\"clockMs\":%" PRIu64 ",\"driftPpm\":%" PRId32 ",\"synced\":%s},"
+          "\"automation\":{\"activeTracks\":%u,\"transitionCurve\":\"%s\"},"
+          "\"cue\":%s,"
           "\"job\":%s"
         "},"
         "\"effect\":\"%s\",\"brightness\":%u,\"outputsEnabled\":%s,\"testActive\":%s,\"autoLoop\":%s,\"activePreset\":%u,\"appliedGeneration\":%" PRIu32 "}",
         seq, identity.id, now,
+        channels_buf,
         effect_name(api->runner().status().active_effect), brightness,
         api->runner().status().test_active ? "true" : "false",
         api->runner().status().auto_loop ? "true" : "false",
@@ -1682,6 +2373,9 @@ void build_schema2_status_json(FactoryApi* api, char* response, size_t max_len) 
         artnet_sources, artnet_pps, artnet_age_ms,
         sacn_sources, sacn_pps,
         owner,
+        clock_ms, drift_ppm, time_synced ? "true" : "false",
+        motion_tracks, trans_curve,
+        cue_str,
         job_str,
         effect_name(api->runner().status().active_effect), brightness,
         outputs_enabled ? "true" : "false",
@@ -2012,7 +2706,9 @@ esp_err_t FactoryApi::serve_dashboard(httpd_req_t* request) {
     return httpd_resp_send_chunk(request, nullptr, 0);
 }
 
-FactoryApi::FactoryApi(FactoryRunner& runner) : runner_(runner) {}
+FactoryApi::FactoryApi(FactoryRunner& runner) : runner_(runner) {
+    runner_.set_command_journal(&command_journal_);
+}
 
 
 // ── Phase 4: OTA & Config Export/Import ──
@@ -2022,7 +2718,12 @@ esp_err_t post_ota(httpd_req_t* request) {
 
     FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
     uint32_t cmd_id = api_ptr->command_journal().accept(CommandDomain::Ota);
-    uint32_t job_id = api_ptr->job_manager().start_job(JobType::Ota);
+    uint32_t job_id = 0;
+    esp_err_t job_err = api_ptr->job_manager().start_job(JobType::Ota, &job_id);
+    if (job_err != ESP_OK) {
+        api_ptr->command_journal().failed(cmd_id, job_err);
+        return send_error(request, "409 Conflict", "job_already_running");
+    }
     api_ptr->job_manager().update_progress(job_id, JobState::Preparing, 5);
 
     const esp_partition_t* update_partition = esp_ota_get_next_update_partition(nullptr);
@@ -2142,12 +2843,47 @@ esp_err_t get_backup(httpd_req_t* request) {
     cJSON_AddStringToObject(auth_json, "operatorToken", cfg.operator_token);
     cJSON_AddItemToObject(cfg_json, "auth", auth_json);
 
-    // Zones
+    // Channels
+    cJSON* channels_arr = cJSON_CreateArray();
+    for (uint8_t c = 0; c < 16; ++c) {
+        const auto& ch = cfg.channels[c];
+        cJSON* cj = cJSON_CreateObject();
+        cJSON_AddNumberToObject(cj, "index", c);
+        cJSON_AddStringToObject(cj, "name", ch.name);
+        cJSON_AddBoolToObject(cj, "enabled", ch.enabled);
+        cJSON_AddNumberToObject(cj, "addressableType", static_cast<int>(ch.addressable_type));
+        cJSON_AddNumberToObject(cj, "pixelOrder", static_cast<int>(ch.pixel_order));
+        cJSON_AddNumberToObject(cj, "pixelCount", ch.pixel_count);
+        cJSON_AddNumberToObject(cj, "maxBrightness", ch.max_brightness);
+        cJSON_AddBoolToObject(cj, "gammaCorrection", ch.gamma_correction);
+        cJSON_AddNumberToObject(cj, "maxMilliwatts", ch.max_milliwatts);
+        cJSON_AddNumberToObject(cj, "dmxUniverse", ch.dmx_universe);
+        cJSON_AddNumberToObject(cj, "dmxStartChannel", ch.dmx_start_channel);
+        cJSON_AddNumberToObject(cj, "dmxMode", ch.dmx_mode);
+        cJSON_AddItemToArray(channels_arr, cj);
+    }
+    cJSON_AddItemToObject(cfg_json, "channels", channels_arr);
+
+    // Groups
+    cJSON* groups_arr = cJSON_CreateArray();
+    for (uint8_t g = 0; g < 8; ++g) {
+        const auto& grp = cfg.groups[g];
+        cJSON* gj = cJSON_CreateObject();
+        cJSON_AddNumberToObject(gj, "index", g);
+        cJSON_AddStringToObject(gj, "name", grp.name);
+        cJSON_AddNumberToObject(gj, "channelMask", grp.channel_mask);
+        cJSON_AddStringToObject(gj, "role", zone_role_name(grp.role));
+        cJSON_AddBoolToObject(gj, "enabled", grp.enabled);
+        cJSON_AddItemToArray(groups_arr, gj);
+    }
+    cJSON_AddItemToObject(cfg_json, "groups", groups_arr);
+
+    // Zones (compatibility mirror)
     cJSON* zones_arr = cJSON_CreateArray();
     for (uint8_t z = 0; z < 8; ++z) {
         cJSON* zj = cJSON_CreateObject();
-        cJSON_AddStringToObject(zj, "name", cfg.zones[z].name);
-        cJSON_AddStringToObject(zj, "role", zone_role_name(cfg.zones[z].role));
+        cJSON_AddStringToObject(zj, "name", cfg.groups[z].name);
+        cJSON_AddStringToObject(zj, "role", zone_role_name(cfg.groups[z].role));
         cJSON_AddItemToArray(zones_arr, zj);
     }
     cJSON_AddItemToObject(cfg_json, "zones", zones_arr);
@@ -2165,12 +2901,12 @@ esp_err_t get_backup(httpd_req_t* request) {
             cJSON_AddNumberToObject(s, "globalBrightness", sc.global_brightness);
             cJSON_AddNumberToObject(s, "transitionMs", sc.transition_ms);
 
-            cJSON* z_arr = cJSON_CreateArray();
-            for (uint8_t z = 0; z < 8; ++z) {
-                cJSON* z_obj = cJSON_CreateObject();
+            cJSON* ch_arr = cJSON_CreateArray();
+            for (uint8_t c = 0; c < 16; ++c) {
+                cJSON* c_obj = cJSON_CreateObject();
                 cJSON* l_arr = cJSON_CreateArray();
                 for (uint8_t l = 0; l < 3; ++l) {
-                    const auto& layer = sc.zones[z].layers[l];
+                    const auto& layer = sc.channels[c].layers[l];
                     cJSON* l_obj = cJSON_CreateObject();
                     cJSON_AddBoolToObject(l_obj, "enabled", layer.enabled);
                     cJSON_AddNumberToObject(l_obj, "effect", static_cast<int>(layer.effect));
@@ -2193,19 +2929,98 @@ esp_err_t get_backup(httpd_req_t* request) {
                     cJSON_AddNumberToObject(l_obj, "parameter", layer.fx_param);
                     cJSON_AddItemToArray(l_arr, l_obj);
                 }
+                cJSON_AddItemToObject(c_obj, "layers", l_arr);
+                cJSON_AddItemToArray(ch_arr, c_obj);
+            }
+            cJSON_AddItemToObject(s, "channels", ch_arr);
+
+            // Legacy zones mirror
+            cJSON* z_arr = cJSON_CreateArray();
+            for (uint8_t z = 0; z < 8; ++z) {
+                cJSON* z_obj = cJSON_CreateObject();
+                cJSON* l_arr = cJSON_CreateArray();
+                for (uint8_t l = 0; l < 3; ++l) {
+                    const auto& layer = sc.channels[z].layers[l];
+                    cJSON* l_obj = cJSON_CreateObject();
+                    cJSON_AddBoolToObject(l_obj, "enabled", layer.enabled);
+                    cJSON_AddNumberToObject(l_obj, "effect", static_cast<int>(layer.effect));
+                    cJSON_AddNumberToObject(l_obj, "speedMs", layer.speed_ms);
+                    cJSON_AddItemToArray(l_arr, l_obj);
+                }
                 cJSON_AddItemToObject(z_obj, "layers", l_arr);
                 cJSON_AddItemToArray(z_arr, z_obj);
             }
             cJSON_AddItemToObject(s, "zones", z_arr);
 
             // Legacy v1 proxy fields
-            cJSON_AddNumberToObject(s, "effect", sc.zones[0].layers[0].effect);
-            cJSON_AddNumberToObject(s, "speedMs", sc.zones[0].layers[0].speed_ms);
+            cJSON_AddNumberToObject(s, "effect", sc.channels[0].layers[0].effect);
+            cJSON_AddNumberToObject(s, "speedMs", sc.channels[0].layers[0].speed_ms);
             
             cJSON_AddItemToArray(presets_arr, s);
         }
     }
     cJSON_AddItemToObject(root, "presets", presets_arr);
+
+    // Scene motion
+    cJSON* motion_arr = cJSON_CreateArray();
+    for (uint8_t i = 0; i < lg::kMaxPresets; ++i) {
+        SceneMotionConfig sm;
+        if (api_ptr->config()->load_scene_motion(i, sm) == ESP_OK && (sm.track_count > 0 || sm.transition_curve != TransitionCurve::EaseInOut)) {
+            cJSON* m_obj = cJSON_CreateObject();
+            cJSON_AddNumberToObject(m_obj, "index", i);
+            cJSON_AddStringToObject(m_obj, "transitionCurve", transition_curve_name(sm.transition_curve));
+            cJSON_AddNumberToObject(m_obj, "trackCount", sm.track_count);
+            cJSON* tracks = cJSON_CreateArray();
+            for (uint8_t t = 0; t < sm.track_count && t < kAutomationTracksPerScene; ++t) {
+                const auto& tr = sm.tracks[t];
+                cJSON* tobj = cJSON_CreateObject();
+                cJSON_AddStringToObject(tobj, "target", automation_target_name(tr.target));
+                cJSON_AddNumberToObject(tobj, "zone", tr.zone);
+                cJSON_AddNumberToObject(tobj, "layer", tr.layer);
+                cJSON_AddStringToObject(tobj, "curve", automation_curve_name(tr.curve));
+                cJSON_AddBoolToObject(tobj, "loop", tr.loop);
+                cJSON_AddNumberToObject(tobj, "periodMs", tr.period_ms);
+                cJSON* pts = cJSON_CreateArray();
+                for (uint8_t p = 0; p < tr.point_count && p < kAutomationPointsPerTrack; ++p) {
+                    cJSON* pobj = cJSON_CreateObject();
+                    cJSON_AddNumberToObject(pobj, "position", tr.points[p].position);
+                    cJSON_AddNumberToObject(pobj, "value", tr.points[p].value);
+                    cJSON_AddItemToArray(pts, pobj);
+                }
+                cJSON_AddItemToObject(tobj, "points", pts);
+                cJSON_AddItemToArray(tracks, tobj);
+            }
+            cJSON_AddItemToObject(m_obj, "tracks", tracks);
+            cJSON_AddItemToArray(motion_arr, m_obj);
+        }
+    }
+    cJSON_AddItemToObject(root, "scene_motion", motion_arr);
+
+    // Cue lists
+    cJSON* cue_lists_arr = cJSON_CreateArray();
+    for (uint8_t i = 0; i < lg::kMaxCueLists; ++i) {
+        CueList cl;
+        if (api_ptr->config()->load_cue_list(i, cl) == ESP_OK && cl.count > 0) {
+            cJSON* cl_obj = cJSON_CreateObject();
+            cJSON_AddNumberToObject(cl_obj, "index", i);
+            cJSON_AddStringToObject(cl_obj, "name", cl.name);
+            cJSON_AddStringToObject(cl_obj, "mode", cue_run_mode_name(cl.mode));
+            cJSON_AddNumberToObject(cl_obj, "endAction", cl.end_action);
+            cJSON* cues = cJSON_CreateArray();
+            for (uint8_t c = 0; c < cl.count && c < kMaxCuesPerList; ++c) {
+                cJSON* cobj = cJSON_CreateObject();
+                cJSON_AddNumberToObject(cobj, "sceneIndex", cl.cues[c].scene_index);
+                cJSON_AddNumberToObject(cobj, "holdMs", cl.cues[c].hold_ms);
+                cJSON_AddNumberToObject(cobj, "fadeMs", cl.cues[c].fade_ms);
+                cJSON_AddStringToObject(cobj, "curve", transition_curve_name(cl.cues[c].curve));
+                cJSON_AddStringToObject(cobj, "label", cl.cues[c].label);
+                cJSON_AddItemToArray(cues, cobj);
+            }
+            cJSON_AddItemToObject(cl_obj, "cues", cues);
+            cJSON_AddItemToArray(cue_lists_arr, cl_obj);
+        }
+    }
+    cJSON_AddItemToObject(root, "cue_lists", cue_lists_arr);
 
     char* json_str = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
@@ -2281,18 +3096,57 @@ esp_err_t post_restore(httpd_req_t* request) {
             lg::json::get_string(auth, "operatorToken", cfg.operator_token, sizeof(cfg.operator_token));
         }
 
-        cJSON* z_arr = cJSON_GetObjectItem(cfg_json, "zones");
-        if (z_arr && cJSON_IsArray(z_arr)) {
-            int z_idx = 0;
-            cJSON* zj;
-            cJSON_ArrayForEach(zj, z_arr) {
-                if (z_idx >= 8) break;
+        cJSON* ch_arr = cJSON_GetObjectItem(cfg_json, "channels");
+        if (ch_arr && cJSON_IsArray(ch_arr)) {
+            int c_idx = 0;
+            cJSON* cj;
+            cJSON_ArrayForEach(cj, ch_arr) {
+                if (c_idx >= 16) break;
+                lg::json::get_string(cj, "name", cfg.channels[c_idx].name, sizeof(cfg.channels[c_idx].name));
+                lg::json::get_bool(cj, "enabled", cfg.channels[c_idx].enabled);
+                int atype = 0;
+                if (lg::json::get_number(cj, "addressableType", atype)) cfg.channels[c_idx].addressable_type = static_cast<AddressableType>(atype);
+                int pord = 0;
+                if (lg::json::get_number(cj, "pixelOrder", pord)) cfg.channels[c_idx].pixel_order = static_cast<PixelOrder>(pord);
+                lg::json::get_number(cj, "pixelCount", cfg.channels[c_idx].pixel_count);
+                lg::json::get_number(cj, "maxBrightness", cfg.channels[c_idx].max_brightness);
+                lg::json::get_bool(cj, "gammaCorrection", cfg.channels[c_idx].gamma_correction);
+                lg::json::get_number(cj, "maxMilliwatts", cfg.channels[c_idx].max_milliwatts);
+                lg::json::get_number(cj, "dmxUniverse", cfg.channels[c_idx].dmx_universe);
+                lg::json::get_number(cj, "dmxStartChannel", cfg.channels[c_idx].dmx_start_channel);
+                lg::json::get_number(cj, "dmxMode", cfg.channels[c_idx].dmx_mode);
+                c_idx++;
+            }
+        }
+        cJSON* grp_arr = cJSON_GetObjectItem(cfg_json, "groups");
+        if (grp_arr && cJSON_IsArray(grp_arr)) {
+            int g_idx = 0;
+            cJSON* gj;
+            cJSON_ArrayForEach(gj, grp_arr) {
+                if (g_idx >= 8) break;
                 char role_buf[32] = "";
-                lg::json::get_string(zj, "name", cfg.zones[z_idx].name, sizeof(cfg.zones[z_idx].name));
-                if (lg::json::get_string(zj, "role", role_buf, sizeof(role_buf))) {
-                    parse_zone_role(role_buf, cfg.zones[z_idx].role);
+                lg::json::get_string(gj, "name", cfg.groups[g_idx].name, sizeof(cfg.groups[g_idx].name));
+                lg::json::get_number(gj, "channelMask", cfg.groups[g_idx].channel_mask);
+                lg::json::get_bool(gj, "enabled", cfg.groups[g_idx].enabled);
+                if (lg::json::get_string(gj, "role", role_buf, sizeof(role_buf))) {
+                    parse_zone_role(role_buf, cfg.groups[g_idx].role);
                 }
-                z_idx++;
+                g_idx++;
+            }
+        } else {
+            cJSON* z_arr = cJSON_GetObjectItem(cfg_json, "zones");
+            if (z_arr && cJSON_IsArray(z_arr)) {
+                int z_idx = 0;
+                cJSON* zj;
+                cJSON_ArrayForEach(zj, z_arr) {
+                    if (z_idx >= 8) break;
+                    char role_buf[32] = "";
+                    lg::json::get_string(zj, "name", cfg.groups[z_idx].name, sizeof(cfg.groups[z_idx].name));
+                    if (lg::json::get_string(zj, "role", role_buf, sizeof(role_buf))) {
+                        parse_zone_role(role_buf, cfg.groups[z_idx].role);
+                    }
+                    z_idx++;
+                }
             }
         }
         
@@ -2312,30 +3166,28 @@ esp_err_t post_restore(httpd_req_t* request) {
                 lg::json::get_number(p, "globalBrightness", sc.global_brightness);
                 lg::json::get_number(p, "transitionMs", sc.transition_ms);
 
-                cJSON* z_arr = cJSON_GetObjectItem(p, "zones");
-                if (z_arr && cJSON_IsArray(z_arr)) {
-                    int z_idx = 0;
-                    cJSON* zj;
-                    cJSON_ArrayForEach(zj, z_arr) {
-                        if (z_idx >= 8) break;
-                        cJSON* l_arr = cJSON_GetObjectItem(zj, "layers");
+                cJSON* c_arr = cJSON_GetObjectItem(p, "channels");
+                if (c_arr && cJSON_IsArray(c_arr)) {
+                    int c_idx = 0;
+                    cJSON* cj;
+                    cJSON_ArrayForEach(cj, c_arr) {
+                        if (c_idx >= 16) break;
+                        cJSON* l_arr = cJSON_GetObjectItem(cj, "layers");
                         if (l_arr && cJSON_IsArray(l_arr)) {
                             int l_idx = 0;
                             cJSON* lj;
                             cJSON_ArrayForEach(lj, l_arr) {
                                 if (l_idx >= 3) break;
-                                auto& layer = sc.zones[z_idx].layers[l_idx];
+                                auto& layer = sc.channels[c_idx].layers[l_idx];
                                 lg::json::get_bool(lj, "enabled", layer.enabled);
                                 lg::json::get_number(lj, "effect", layer.effect);
                                 lg::json::get_number(lj, "speedMs", layer.speed_ms);
                                 lg::json::get_number(lj, "opacity", layer.opacity);
-                                
                                 int blend = 0;
                                 if (lg::json::get_number(lj, "blendMode", blend)) {
                                     layer.blend_mode = static_cast<BlendMode>(blend);
                                 }
                                 lg::json::get_number(lj, "parameter", layer.fx_param);
-
                                 cJSON* pcol = cJSON_GetObjectItem(lj, "primaryColor");
                                 if (pcol) {
                                     lg::json::get_number(pcol, "r", layer.primary_color.r);
@@ -2351,15 +3203,148 @@ esp_err_t post_restore(httpd_req_t* request) {
                                 l_idx++;
                             }
                         }
-                        z_idx++;
+                        c_idx++;
                     }
                 } else {
-                    // Fallback for v1 legacy backups
-                    lg::json::get_number(p, "effect", sc.zones[0].layers[0].effect);
-                    lg::json::get_number(p, "speedMs", sc.zones[0].layers[0].speed_ms);
+                    cJSON* z_arr = cJSON_GetObjectItem(p, "zones");
+                    if (z_arr && cJSON_IsArray(z_arr)) {
+                        int z_idx = 0;
+                        cJSON* zj;
+                        cJSON_ArrayForEach(zj, z_arr) {
+                            if (z_idx >= 8) break;
+                            cJSON* l_arr = cJSON_GetObjectItem(zj, "layers");
+                            if (l_arr && cJSON_IsArray(l_arr)) {
+                                int l_idx = 0;
+                                cJSON* lj;
+                                cJSON_ArrayForEach(lj, l_arr) {
+                                    if (l_idx >= 3) break;
+                                    auto& layer = sc.channels[z_idx].layers[l_idx];
+                                    lg::json::get_bool(lj, "enabled", layer.enabled);
+                                    lg::json::get_number(lj, "effect", layer.effect);
+                                    lg::json::get_number(lj, "speedMs", layer.speed_ms);
+                                    lg::json::get_number(lj, "opacity", layer.opacity);
+                                    int blend = 0;
+                                    if (lg::json::get_number(lj, "blendMode", blend)) {
+                                        layer.blend_mode = static_cast<BlendMode>(blend);
+                                    }
+                                    lg::json::get_number(lj, "parameter", layer.fx_param);
+                                    cJSON* pcol = cJSON_GetObjectItem(lj, "primaryColor");
+                                    if (pcol) {
+                                        lg::json::get_number(pcol, "r", layer.primary_color.r);
+                                        lg::json::get_number(pcol, "g", layer.primary_color.g);
+                                        lg::json::get_number(pcol, "b", layer.primary_color.b);
+                                    }
+                                    cJSON* scol = cJSON_GetObjectItem(lj, "secondaryColor");
+                                    if (scol) {
+                                        lg::json::get_number(scol, "r", layer.secondary_color.r);
+                                        lg::json::get_number(scol, "g", layer.secondary_color.g);
+                                        lg::json::get_number(scol, "b", layer.secondary_color.b);
+                                    }
+                                    l_idx++;
+                                }
+                            }
+                            z_idx++;
+                        }
+                    } else {
+                        // Fallback for v1 legacy backups
+                        lg::json::get_number(p, "effect", sc.channels[0].layers[0].effect);
+                        lg::json::get_number(p, "speedMs", sc.channels[0].layers[0].speed_ms);
+                    }
                 }
                 
                 api_ptr->config()->save_scene(idx->valueint, sc);
+            }
+        }
+    }
+
+    cJSON* motion_arr = cJSON_GetObjectItem(root, "scene_motion");
+    if (motion_arr && cJSON_IsArray(motion_arr)) {
+        cJSON* m;
+        cJSON_ArrayForEach(m, motion_arr) {
+            cJSON* idx = cJSON_GetObjectItem(m, "index");
+            if (idx && idx->valueint >= 0 && idx->valueint < lg::kMaxPresets) {
+                SceneMotionConfig sm{};
+                sm.schema_version = 1;
+                cJSON* cur_j = cJSON_GetObjectItem(m, "transitionCurve");
+                if (cur_j && cJSON_IsString(cur_j)) parse_transition_curve(cur_j->valuestring, sm.transition_curve);
+                cJSON* trs = cJSON_GetObjectItem(m, "tracks");
+                if (trs && cJSON_IsArray(trs)) {
+                    uint8_t t_idx = 0;
+                    cJSON* t_item;
+                    cJSON_ArrayForEach(t_item, trs) {
+                        if (t_idx >= kAutomationTracksPerScene) break;
+                        auto& tr = sm.tracks[t_idx];
+                        cJSON* target_j = cJSON_GetObjectItem(t_item, "target");
+                        if (target_j && cJSON_IsString(target_j)) parse_automation_target(target_j->valuestring, tr.target);
+                        cJSON* z_j = cJSON_GetObjectItem(t_item, "zone");
+                        if (z_j && cJSON_IsNumber(z_j)) tr.zone = z_j->valueint;
+                        cJSON* l_j = cJSON_GetObjectItem(t_item, "layer");
+                        if (l_j && cJSON_IsNumber(l_j)) tr.layer = l_j->valueint;
+                        cJSON* c_j = cJSON_GetObjectItem(t_item, "curve");
+                        if (c_j && cJSON_IsString(c_j)) parse_automation_curve(c_j->valuestring, tr.curve);
+                        cJSON* loop_j = cJSON_GetObjectItem(t_item, "loop");
+                        if (loop_j && cJSON_IsBool(loop_j)) tr.loop = cJSON_IsTrue(loop_j);
+                        cJSON* per_j = cJSON_GetObjectItem(t_item, "periodMs");
+                        if (per_j && cJSON_IsNumber(per_j)) tr.period_ms = per_j->valueint;
+                        cJSON* pts = cJSON_GetObjectItem(t_item, "points");
+                        if (pts && cJSON_IsArray(pts)) {
+                            uint8_t p_idx = 0;
+                            cJSON* p_item;
+                            cJSON_ArrayForEach(p_item, pts) {
+                                if (p_idx >= kAutomationPointsPerTrack) break;
+                                cJSON* pos_j = cJSON_GetObjectItem(p_item, "position");
+                                cJSON* val_j = cJSON_GetObjectItem(p_item, "value");
+                                if (pos_j && val_j) {
+                                    tr.points[p_idx].position = pos_j->valueint;
+                                    tr.points[p_idx].value = val_j->valueint;
+                                    p_idx++;
+                                }
+                            }
+                            tr.point_count = p_idx;
+                        }
+                        t_idx++;
+                    }
+                    sm.track_count = t_idx;
+                }
+                api_ptr->config()->save_scene_motion(idx->valueint, sm);
+            }
+        }
+    }
+
+    cJSON* cue_lists_arr = cJSON_GetObjectItem(root, "cue_lists");
+    if (cue_lists_arr && cJSON_IsArray(cue_lists_arr)) {
+        cJSON* cl_item;
+        cJSON_ArrayForEach(cl_item, cue_lists_arr) {
+            cJSON* idx = cJSON_GetObjectItem(cl_item, "index");
+            if (idx && idx->valueint >= 0 && idx->valueint < lg::kMaxCueLists) {
+                CueList cl{};
+                cJSON* name_j = cJSON_GetObjectItem(cl_item, "name");
+                if (name_j && cJSON_IsString(name_j)) strncpy(cl.name, name_j->valuestring, sizeof(cl.name) - 1);
+                cJSON* mode_j = cJSON_GetObjectItem(cl_item, "mode");
+                if (mode_j && cJSON_IsString(mode_j)) parse_cue_run_mode(mode_j->valuestring, cl.mode);
+                cJSON* ea_j = cJSON_GetObjectItem(cl_item, "endAction");
+                if (ea_j && cJSON_IsNumber(ea_j)) cl.end_action = ea_j->valueint;
+                cJSON* cues = cJSON_GetObjectItem(cl_item, "cues");
+                if (cues && cJSON_IsArray(cues)) {
+                    uint8_t c_idx = 0;
+                    cJSON* c_item;
+                    cJSON_ArrayForEach(c_item, cues) {
+                        if (c_idx >= kMaxCuesPerList) break;
+                        cJSON* sc_j = cJSON_GetObjectItem(c_item, "sceneIndex");
+                        if (sc_j && cJSON_IsNumber(sc_j)) cl.cues[c_idx].scene_index = sc_j->valueint;
+                        cJSON* hold_j = cJSON_GetObjectItem(c_item, "holdMs");
+                        if (hold_j && cJSON_IsNumber(hold_j)) cl.cues[c_idx].hold_ms = hold_j->valueint;
+                        cJSON* fade_j = cJSON_GetObjectItem(c_item, "fadeMs");
+                        if (fade_j && cJSON_IsNumber(fade_j)) cl.cues[c_idx].fade_ms = fade_j->valueint;
+                        cJSON* cur_j = cJSON_GetObjectItem(c_item, "curve");
+                        if (cur_j && cJSON_IsString(cur_j)) parse_transition_curve(cur_j->valuestring, cl.cues[c_idx].curve);
+                        cJSON* lbl_j = cJSON_GetObjectItem(c_item, "label");
+                        if (lbl_j && cJSON_IsString(lbl_j)) strncpy(cl.cues[c_idx].label, lbl_j->valuestring, sizeof(cl.cues[c_idx].label) - 1);
+                        c_idx++;
+                    }
+                    cl.count = c_idx;
+                }
+                api_ptr->config()->save_cue_list(idx->valueint, cl);
             }
         }
     }
@@ -2367,7 +3352,12 @@ esp_err_t post_restore(httpd_req_t* request) {
     cJSON_Delete(root);
 
     uint32_t cmd_id = api_ptr->command_journal().accept(CommandDomain::Restore);
-    uint32_t job_id = api_ptr->job_manager().start_job(JobType::Restore);
+    uint32_t job_id = 0;
+    esp_err_t job_err = api_ptr->job_manager().start_job(JobType::Restore, &job_id);
+    if (job_err != ESP_OK) {
+        api_ptr->command_journal().failed(cmd_id, job_err);
+        return send_error(request, "409 Conflict", "job_already_running");
+    }
     api_ptr->job_manager().update_progress(job_id, JobState::Running, 50);
     api_ptr->job_manager().complete_job(job_id);
     api_ptr->command_journal().applied(cmd_id);
@@ -2387,7 +3377,7 @@ esp_err_t post_restore(httpd_req_t* request) {
 
 struct WsBroadcastArg {
     FactoryApi* api;
-    char payload[1536];
+    char payload[4096];
 };
 
 struct WsPreviewArg {
@@ -2407,13 +3397,15 @@ esp_err_t FactoryApi::start(
     LightingRuntime* signage,
     Scheduler* scheduler,
     NodeSync* node_sync,
-    DmxRouter* dmx_router
+    DmxRouter* dmx_router,
+    CueRunner* cue_runner
 ) {
     config_ = config;
     signage_ = signage;
     scheduler_ = scheduler;
     node_sync_ = node_sync;
     dmx_router_ = dmx_router;
+    cue_runner_ = cue_runner;
 
     const char* dev_name = nullptr;
     DeviceConfig cfg;
@@ -2423,7 +3415,7 @@ esp_err_t FactoryApi::start(
     identity_ = get_node_identity(dev_name);
 
     httpd_config_t http_config = HTTPD_DEFAULT_CONFIG();
-    http_config.max_uri_handlers = 48;
+    http_config.max_uri_handlers = 64;
     http_config.stack_size = 8192;
     http_config.lru_purge_enable = true;
     http_config.recv_wait_timeout = 10;
@@ -2455,6 +3447,8 @@ esp_err_t FactoryApi::start(
         { .uri = "/api/v1/identity",          .method = HTTP_GET,  .handler = get_identity,       .user_ctx = this },
         { .uri = "/api/v1/capabilities",      .method = HTTP_GET,  .handler = get_capabilities,   .user_ctx = this },
         { .uri = "/api/v1/jobs/current",      .method = HTTP_GET,  .handler = get_current_job,    .user_ctx = this },
+        { .uri = "/api/v1/channels",          .method = HTTP_GET,  .handler = get_channels,       .user_ctx = this },
+        { .uri = "/api/v1/channel/test",      .method = HTTP_POST, .handler = post_channel_test,  .user_ctx = this },
         { .uri = "/api/v1/presets",           .method = HTTP_GET,  .handler = get_presets,      .user_ctx = this },
         { .uri = "/api/v1/presets",           .method = HTTP_PUT,  .handler = put_preset,       .user_ctx = this },
         { .uri = "/api/v1/auth/update",       .method = HTTP_POST, .handler = post_auth_update, .user_ctx = this },
@@ -2469,6 +3463,14 @@ esp_err_t FactoryApi::start(
         { .uri = "/api/v1/sequence",          .method = HTTP_PUT,  .handler = put_sequence,     .user_ctx = this },
         { .uri = "/api/v1/schedules",         .method = HTTP_GET,  .handler = get_calendar_schedule, .user_ctx = this },
         { .uri = "/api/v1/schedules",         .method = HTTP_PUT,  .handler = put_calendar_schedule, .user_ctx = this },
+        { .uri = "/api/v1/scene-motion",      .method = HTTP_GET,  .handler = get_scene_motion, .user_ctx = this },
+        { .uri = "/api/v1/scene-motion",      .method = HTTP_PUT,  .handler = put_scene_motion, .user_ctx = this },
+        { .uri = "/api/v1/cue-lists",         .method = HTTP_GET,  .handler = get_cue_lists,    .user_ctx = this },
+        { .uri = "/api/v1/cue-list",          .method = HTTP_GET,  .handler = get_cue_list,     .user_ctx = this },
+        { .uri = "/api/v1/cue-list",          .method = HTTP_PUT,  .handler = put_cue_list,     .user_ctx = this },
+        { .uri = "/api/v1/cue-list",          .method = HTTP_DELETE,.handler = delete_cue_list,  .user_ctx = this },
+        { .uri = "/api/v1/cue/control",       .method = HTTP_POST, .handler = post_cue_control, .user_ctx = this },
+        { .uri = "/api/v1/cue/status",        .method = HTTP_GET,  .handler = get_cue_status,   .user_ctx = this },
         { .uri = "/api/v1/sync",              .method = HTTP_GET,  .handler = get_sync_status,     .user_ctx = this },
         { .uri = "/api/v1/audit",             .method = HTTP_GET,  .handler = get_audit_log,       .user_ctx = this },
         { .uri = "/api/v1/ota",               .method = HTTP_POST, .handler = post_ota,           .user_ctx = this },
@@ -2537,15 +3539,14 @@ esp_err_t FactoryApi::start(
                 arg->payload[0] = 0x01; // Header
 
                 for (uint8_t f = 0; f < 8; ++f) {
-                    const auto& fix = cfg.fixtures[f];
-                    const auto& ff = frame.fixtures[f];
-                    bool is_addressable = (fix.profile == FixtureProfile::WS2812 || fix.profile == FixtureProfile::SK6812);
+                    const auto& ch_cfg = cfg.channels[f];
+                    const auto& ch_frame = frame.channels[f];
                     
-                    if (is_addressable && fix.num_pixels > 0) {
-                        uint16_t pcount = std::min<uint16_t>(fix.num_pixels, 144);
+                    if (ch_cfg.pixel_count > 0) {
+                        uint16_t pcount = std::min<uint16_t>(ch_cfg.pixel_count, 144);
                         size_t offset = 1 + (f * 144 * 3);
                         for (uint16_t p = 0; p < pcount; ++p) {
-                            const auto& lv = ff.pixels[p];
+                            const auto& lv = ch_frame.pixels[p];
                             arg->payload[offset++] = (std::min)(255, int(lv.r) + lv.w);
                             arg->payload[offset++] = (std::min)(255, int(lv.g) + lv.w);
                             arg->payload[offset++] = (std::min)(255, int(lv.b) + lv.w);

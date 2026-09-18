@@ -19,6 +19,9 @@ export interface Caps {
     artnet?: boolean;
     ota?: boolean;
     factory?: boolean;
+    scene_motion?: boolean;
+    cue_lists?: boolean;
+    transition_engine_v2?: boolean;
   };
 }
 
@@ -57,6 +60,9 @@ export async function loadCaps(ipOrUrl: string = ''): Promise<void> {
         artnet: manifest.features.artnet,
         ota: manifest.features.ota,
         factory: manifest.features.factory,
+        scene_motion: manifest.features.sceneMotion ?? false,
+        cue_lists: manifest.features.cueLists ?? false,
+        transition_engine_v2: manifest.features.transitionEngineV2 ?? false,
       },
     });
     capsError.set(null);

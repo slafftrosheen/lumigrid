@@ -1,6 +1,7 @@
 // components/factory/FactoryRunner.cpp
 #include "FactoryRunner.hpp"
 #include "FactoryApp.hpp"
+#include "ChannelHardware.hpp"
 
 #include "esp_err.h"
 #include "esp_check.h"
@@ -165,6 +166,10 @@ void FactoryRunner::stop() {
     }
 
     blackout();
+    if (pending_command_id_ != 0 && journal_) {
+        journal_->failed(pending_command_id_, ESP_ERR_INVALID_STATE);
+        pending_command_id_ = 0;
+    }
     if (status_mutex_) {
         vSemaphoreDelete(status_mutex_);
         status_mutex_ = nullptr;
@@ -185,6 +190,15 @@ bool FactoryRunner::enqueue(const FactoryCommand& command) {
         xSemaphoreGive(status_mutex_);
     }
     return false;
+}
+
+bool FactoryRunner::test_channel(uint8_t channel, const char* mode, uint32_t duration_ms) {
+    if (channel >= kChannelCount) return false;
+    FactoryCommand cmd;
+    cmd.type = FactoryCommandType::ChannelTest;
+    cmd.lane_or_channel = channel;
+    cmd.duration_ms = (duration_ms == 0) ? 3000 : duration_ms;
+    return enqueue(cmd);
 }
 
 FactoryStatus FactoryRunner::status() const {
@@ -253,6 +267,16 @@ void FactoryRunner::set_stream_frame(const StreamFramePayload& payload,
 
 void FactoryRunner::apply_command(const FactoryCommand& command,
                                   uint32_t current_ms) {
+    if (command.command_id != 0) {
+        if (pending_command_id_ != 0 && pending_command_id_ != command.command_id && journal_) {
+            journal_->superseded(pending_command_id_);
+        }
+        pending_command_id_ = command.command_id;
+        if (journal_) {
+            journal_->applying(pending_command_id_);
+        }
+    }
+
     switch (command.type) {
         case FactoryCommandType::Abort:
             direct_test_active_ = false;
@@ -261,6 +285,10 @@ void FactoryRunner::apply_command(const FactoryCommand& command,
             status_.auto_loop = false;
             xSemaphoreGive(status_mutex_);
             blackout();
+            if (pending_command_id_ != 0 && journal_) {
+                journal_->applied(pending_command_id_);
+                pending_command_id_ = 0;
+            }
             return;
         case FactoryCommandType::SetAutoLoop:
             direct_test_active_ = false;
@@ -279,6 +307,10 @@ void FactoryRunner::apply_command(const FactoryCommand& command,
                 status_.auto_loop = false;
                 xSemaphoreGive(status_mutex_);
                 blackout();
+                if (pending_command_id_ != 0 && journal_) {
+                    journal_->applied(pending_command_id_);
+                    pending_command_id_ = 0;
+                }
             }
             if (status_callback_) status_callback_();
             return;
@@ -293,6 +325,7 @@ void FactoryRunner::apply_command(const FactoryCommand& command,
             return;
         case FactoryCommandType::PixelLaneSolid:
         case FactoryCommandType::PwmChannelLevel:
+        case FactoryCommandType::ChannelTest:
             source_manager_.acquire(ControlSource::Factory);
             direct_test_ = command;
             direct_test_active_ = true;
@@ -362,9 +395,17 @@ void FactoryRunner::task() {
             esp_err_t commit_err = controller_.try_commit_locked();
             controller_.unlock();
             if (commit_err != ESP_OK) {
+                if (pending_command_id_ != 0 && journal_) {
+                    journal_->failed(pending_command_id_, commit_err);
+                    pending_command_id_ = 0;
+                }
                 blackout();
                 vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(kFramePeriodMs));
                 continue;
+            }
+            if (pending_command_id_ != 0 && journal_) {
+                journal_->applied(pending_command_id_);
+                pending_command_id_ = 0;
             }
             if (current_ms - local_stream_last_ms > 1000) {
                 xSemaphoreTake(status_mutex_, portMAX_DELAY);
@@ -391,12 +432,42 @@ void FactoryRunner::task() {
             if (direct_test_.type == FactoryCommandType::PwmChannelLevel) {
                 controller_.pwm().set(direct_test_.lane_or_channel, direct_test_.pwm_duty);
             }
+            if (direct_test_.type == FactoryCommandType::ChannelTest) {
+                const uint8_t ch = direct_test_.lane_or_channel;
+                const ChannelHardwareDescriptor hw = channel_hardware(ch);
+                if (hw.kind == ChannelKind::Addressable) {
+                    // red green blue white black
+                    const uint32_t step = (elapsed / 400) % 5;
+                    uint8_t r = 0, g = 0, b = 0;
+                    if (step == 0) r = 255;
+                    else if (step == 1) g = 255;
+                    else if (step == 2) b = 255;
+                    else if (step == 3) { r = 255; g = 255; b = 255; }
+                    controller_.pixels().fill(hw.hardware_id, r, g, b);
+                } else {
+                    // 0% 25% 50% 100% 0%
+                    const uint32_t step = (elapsed / 400) % 5;
+                    uint16_t duty = 0;
+                    if (step == 1) duty = 1024;
+                    else if (step == 2) duty = 2048;
+                    else if (step == 3) duty = 4095;
+                    controller_.pwm().set(hw.hardware_id, duty);
+                }
+            }
             esp_err_t commit_err = controller_.try_commit_locked();
             controller_.unlock();
             if (commit_err != ESP_OK) {
+                if (pending_command_id_ != 0 && journal_) {
+                    journal_->failed(pending_command_id_, commit_err);
+                    pending_command_id_ = 0;
+                }
                 blackout();
                 vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(kFramePeriodMs));
                 continue;
+            }
+            if (pending_command_id_ != 0 && journal_) {
+                journal_->applied(pending_command_id_);
+                pending_command_id_ = 0;
             }
             if (elapsed >= current.effect_duration_ms) {
                 direct_test_active_ = false;
@@ -437,9 +508,17 @@ void FactoryRunner::task() {
             esp_err_t commit_err = controller_.try_commit_locked();
             controller_.unlock();
             if (commit_err != ESP_OK) {
+                if (pending_command_id_ != 0 && journal_) {
+                    journal_->failed(pending_command_id_, commit_err);
+                    pending_command_id_ = 0;
+                }
                 blackout();
                 vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(kFramePeriodMs));
                 continue;
+            }
+            if (pending_command_id_ != 0 && journal_) {
+                journal_->applied(pending_command_id_);
+                pending_command_id_ = 0;
             }
         }
         vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(kFramePeriodMs));

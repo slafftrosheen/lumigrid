@@ -21,9 +21,10 @@ LumigridRuntime::LumigridRuntime()
       factory_runner_(source_manager_, output_),
       api_(factory_runner_),
       lighting_(source_manager_, output_, config_),
+      cue_runner_(config_, lighting_),
       dmx_router_(lighting_),
       clock_(),
-      scheduler_(config_, lighting_, clock_),
+      scheduler_(config_, lighting_, clock_, &cue_runner_),
       node_sync_(lighting_, config_, clock_) {
     lighting_.set_config_reload_callback([this](const DeviceConfig& cfg) {
         dmx_router_.update_config(cfg);
@@ -478,7 +479,7 @@ esp_err_t LumigridRuntime::start() {
     std::memcpy(node.mac, mac, 6);
 
     ESP_LOGI("lumigrid", "Step 6: api.start(80, 8080)...");
-    err = api_.start(80, 8080, &config_, &lighting_, &scheduler_, &node_sync_, &dmx_router_);
+    err = api_.start(80, 8080, &config_, &lighting_, &scheduler_, &node_sync_, &dmx_router_, &cue_runner_);
     if (err != ESP_OK) {
         ESP_LOGE("lumigrid", "api.start() FAILED: %s", esp_err_to_name(err));
         rollback_services(StartupStage::NetworkConfigured, err);

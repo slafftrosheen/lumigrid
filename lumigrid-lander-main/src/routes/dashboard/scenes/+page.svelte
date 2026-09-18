@@ -17,6 +17,16 @@
   } from '$lib/api/scenes';
   import { getSelectedNodeIp } from '$lib/auth/storage';
   import { nodeStore, commandTracker } from '$lib/state/nodeStore';
+  import {
+    getSceneMotion,
+    saveSceneMotion,
+    createDefaultSceneMotion,
+    createDefaultTrack,
+    type SceneMotionConfig,
+  } from '$lib/api/sceneMotion';
+  import TransitionEditor from '$lib/components/automation/TransitionEditor.svelte';
+  import AutomationTrackEditor from '$lib/components/automation/AutomationTrackEditor.svelte';
+  import type { TransitionCurve } from '$lib/runtime/curves';
 
   let nodeIp = $state('');
   let presets = $state<ScenePreset[]>([]);
@@ -32,6 +42,9 @@
   let activationGeneration = $state(0);
   let activationPreset = $state(-1);
   let expandedZone = $state<number | null>(0);
+  let currentMotion = $state<SceneMotionConfig | null>(null);
+  let transitionCurve = $state<TransitionCurve>('easeInOut');
+  let showMotion = $state(false);
 
   let editScene = $state<ScenePreset | null>(null);
   let savedSnapshot = $state<ScenePreset | null>(null);
@@ -55,6 +68,33 @@
     }
     selectedIdx = idx;
     error = '';
+
+    if (nodeIp) {
+      getSceneMotion(nodeIp, idx)
+        .then(m => {
+          currentMotion = m;
+          if (m.transitionCurve) transitionCurve = m.transitionCurve;
+        })
+        .catch(() => {
+          currentMotion = createDefaultSceneMotion(idx);
+        });
+    } else {
+      currentMotion = createDefaultSceneMotion(idx);
+    }
+  }
+
+  function addMotionTrack() {
+    if (!currentMotion) return;
+    if (currentMotion.tracks.length >= 4) {
+      toastMsg('Maximum 4 motion tracks per scene');
+      return;
+    }
+    currentMotion.tracks = [...currentMotion.tracks, createDefaultTrack()];
+  }
+
+  function deleteMotionTrack(idx: number) {
+    if (!currentMotion) return;
+    currentMotion.tracks = currentMotion.tracks.filter((_, i) => i !== idx);
   }
 
   function findFreeSlot(): number {
@@ -107,6 +147,10 @@
     error = '';
     try {
       await savePreset(nodeIp, editScene);
+      if (currentMotion && nodeIp) {
+        currentMotion.transitionCurve = transitionCurve;
+        await saveSceneMotion(nodeIp, editScene.index, currentMotion).catch(() => {});
+      }
       const idx = editScene.index;
       const name = editScene.name;
       const saved = clonePreset(editScene);
@@ -453,6 +497,54 @@
             />
             <span class="field-val">{editScene.transitionMs} ms</span>
           </label>
+        </div>
+
+        <!-- Transition & Motion Engine (LG-022) -->
+        <div class="ed-motion-section">
+          <TransitionEditor
+            bind:curve={transitionCurve}
+            bind:durationMs={editScene.transitionMs}
+          />
+
+          {#if currentMotion}
+            <div class="motion-tracks-card">
+              <div class="motion-header">
+                <button
+                  type="button"
+                  class="btn-motion-toggle"
+                  onclick={() => (showMotion = !showMotion)}
+                >
+                  <span class="chevron">{showMotion ? '▾' : '▸'}</span>
+                  <span class="motion-title">Value Curves & Automation ({currentMotion.tracks.length}/4)</span>
+                </button>
+                {#if showMotion}
+                  <button
+                    type="button"
+                    class="btn-add-track"
+                    onclick={addMotionTrack}
+                    disabled={currentMotion.tracks.length >= 4}
+                  >
+                    + Add Track
+                  </button>
+                {/if}
+              </div>
+
+              {#if showMotion}
+                <div class="motion-tracks-list">
+                  {#if currentMotion.tracks.length === 0}
+                    <p class="no-tracks-hint">No automation tracks configured. Click "+ Add Track" to animate parameters.</p>
+                  {/if}
+                  {#each currentMotion.tracks as track, ti}
+                    <AutomationTrackEditor
+                      bind:track={currentMotion.tracks[ti]}
+                      trackIndex={ti}
+                      onDelete={() => deleteMotionTrack(ti)}
+                    />
+                  {/each}
+                </div>
+              {/if}
+            </div>
+          {/if}
         </div>
 
         <!-- Zones and Layers Editor -->
@@ -1213,6 +1305,78 @@
     color: #fff;
     cursor: pointer;
     font-weight: bold;
+  }
+
+  /* Motion Section */
+  .ed-motion-section {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    margin-top: 8px;
+  }
+
+  .motion-tracks-card {
+    background: rgba(15, 23, 42, 0.5);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 8px;
+    padding: 12px;
+  }
+
+  .motion-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  .btn-motion-toggle {
+    background: none;
+    border: none;
+    color: #fff;
+    font-size: 0.9rem;
+    font-weight: 600;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0;
+  }
+
+  .motion-title {
+    color: #00f0ff;
+  }
+
+  .btn-add-track {
+    background: rgba(0, 240, 255, 0.1);
+    border: 1px solid rgba(0, 240, 255, 0.3);
+    color: #00f0ff;
+    border-radius: 4px;
+    padding: 4px 10px;
+    font-size: 0.8rem;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+
+  .btn-add-track:hover:not(:disabled) {
+    background: rgba(0, 240, 255, 0.2);
+  }
+
+  .btn-add-track:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+
+  .motion-tracks-list {
+    margin-top: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .no-tracks-hint {
+    font-size: 0.8rem;
+    color: rgba(255, 255, 255, 0.4);
+    font-style: italic;
+    margin: 4px 0;
   }
 
   @media (max-width: 900px) {

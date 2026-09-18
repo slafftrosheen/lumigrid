@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <atomic>
 #include <cstddef>
+#include <mutex>
 
 namespace lg {
 
@@ -14,7 +15,9 @@ enum class CommandDomain : uint8_t {
     Factory,
     Ota,
     Restore,
-    Sync
+    Sync,
+    SceneMotion,
+    Cue
 };
 
 enum class CommandState : uint8_t {
@@ -49,6 +52,11 @@ public:
     bool get_latest(CommandDomain domain, CommandReceipt& out) const;
 
 private:
+    static bool newer(uint32_t a, uint32_t b) {
+        return static_cast<int32_t>(a - b) > 0;
+    }
+
+    mutable std::mutex mutex_;
     std::atomic<uint32_t> next_id_{1};
     CommandReceipt entries_[kCapacity]{};
 };

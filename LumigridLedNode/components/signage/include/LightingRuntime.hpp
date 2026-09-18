@@ -64,6 +64,50 @@ public:
         xSemaphoreGive(mutex_);
         return accepted;
     }
+
+    bool activate_scene_custom(uint8_t index, uint16_t fade_ms, TransitionCurve curve, uint32_t* generation = nullptr) {
+        if (!mutex_ ||
+            lifecycle_state_.load(std::memory_order_acquire) != LifecycleState::Running ||
+            shutting_down_.load(std::memory_order_acquire)) {
+            return false;
+        }
+
+        xSemaphoreTake(mutex_, portMAX_DELAY);
+        const bool accepted = scene_manager_.activate_scene_custom(
+            index,
+            fade_ms,
+            curve,
+            static_cast<uint32_t>(esp_timer_get_time() / 1000ULL)
+        );
+
+        if (accepted) {
+            const uint32_t next_generation =
+                requested_scene_generation_.fetch_add(1, std::memory_order_acq_rel) + 1;
+            requested_scene_index_.store(index, std::memory_order_release);
+            if (generation) {
+                *generation = next_generation;
+            }
+        }
+
+        xSemaphoreGive(mutex_);
+        return accepted;
+    }
+
+    bool prepare_manual_transition(uint8_t target_index) {
+        if (!mutex_ || lifecycle_state_.load(std::memory_order_acquire) != LifecycleState::Running) return false;
+        xSemaphoreTake(mutex_, portMAX_DELAY);
+        bool res = scene_manager_.prepare_manual_transition(target_index);
+        xSemaphoreGive(mutex_);
+        return res;
+    }
+
+    void set_manual_transition_progress(uint16_t progress_q15) {
+        if (!mutex_) return;
+        xSemaphoreTake(mutex_, portMAX_DELAY);
+        scene_manager_.set_manual_transition_progress(progress_q15);
+        xSemaphoreGive(mutex_);
+    }
+
     void activate_scene_direct(const SceneConfig& scene, bool immediate = false);
 
     /// Atomically submit a full live DMX frame from DmxRouter (returns false if rejected or unavailable)
@@ -82,6 +126,11 @@ public:
     uint8_t active_scene_index() const;
     bool is_fallback_active() const;
     bool is_transitioning() const;
+    uint16_t transition_progress_q15() const;
+    TransitionCurve transition_curve() const;
+    void set_transition_curve(TransitionCurve curve);
+    SceneManager& scene_manager() { return scene_manager_; }
+    const SceneManager& scene_manager() const { return scene_manager_; }
 
     uint8_t requested_scene_index() const {
         return requested_scene_index_.load(std::memory_order_acquire);
@@ -162,6 +211,12 @@ public:
     uint8_t current_brightness() const {
         return current_render_scene_.global_brightness;
     }
+    uint16_t last_pwm_level(uint8_t channel) const {
+        if (channel >= 8 && channel < 16) {
+            return last_pwm_duty_[channel - 8];
+        }
+        return 0;
+    }
     uint8_t active_live_objects() const;
 
     DeviceConfig get_config_snapshot() const;
@@ -226,9 +281,11 @@ private:
     RenderFrame current_render_frame_;
     FixtureFrame current_composited_zone_;
     FixtureFrame current_layer_frame_;
+    FixtureFrame transition_layer_frame_;
     FixtureFrame current_live_src_;
     SceneConfig current_render_scene_{};
     DeviceConfig current_local_cfg_{};
+    std::array<uint16_t, 8> last_pwm_duty_{};
 
     uint16_t beat_period_ms_ = 500;
     uint32_t enable_ms_ = 0;

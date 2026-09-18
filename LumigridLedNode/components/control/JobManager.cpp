@@ -14,17 +14,25 @@ static uint32_t current_time_ms() {
 
 namespace lg {
 
-uint32_t JobManager::start_job(JobType type) {
+esp_err_t JobManager::start_job(JobType type, uint32_t* job_id) {
     std::lock_guard<std::mutex> lock(mutex_);
+
+    if (current_job_.job_id != 0) {
+        if (current_job_.state == JobState::Queued ||
+            current_job_.state == JobState::Preparing ||
+            current_job_.state == JobState::Running ||
+            current_job_.state == JobState::Verifying) {
+            return ESP_ERR_INVALID_STATE;
+        }
+
+        // Terminal jobs (Completed, Failed, Cancelled) may be archived to history
+        size_t hist_slot = current_job_.job_id % kHistoryCapacity;
+        history_[hist_slot] = current_job_;
+    }
+
     uint32_t id = next_id_.fetch_add(1, std::memory_order_relaxed);
     if (id == 0) {
         id = next_id_.fetch_add(1, std::memory_order_relaxed);
-    }
-
-    // Archive previous job to history if valid
-    if (current_job_.job_id != 0) {
-        size_t hist_slot = current_job_.job_id % kHistoryCapacity;
-        history_[hist_slot] = current_job_;
     }
 
     current_job_ = OperationJob{};
@@ -35,7 +43,10 @@ uint32_t JobManager::start_job(JobType type) {
     current_job_.started_ms = current_time_ms();
     current_job_.updated_ms = current_job_.started_ms;
 
-    return id;
+    if (job_id) {
+        *job_id = id;
+    }
+    return ESP_OK;
 }
 
 void JobManager::update_progress(uint32_t job_id, JobState state, uint8_t progress, int32_t error, const char* detail) {

@@ -20,20 +20,25 @@ uint32_t CommandJournal::accept(CommandDomain domain, uint32_t generation) {
         id = next_id_.fetch_add(1, std::memory_order_relaxed);
     }
 
+    const uint32_t timestamp = current_time_ms();
+    std::lock_guard<std::mutex> lock(mutex_);
     size_t slot = id % kCapacity;
-    entries_[slot].id = id;
-    entries_[slot].domain = domain;
-    entries_[slot].state = CommandState::Accepted;
-    entries_[slot].accepted_ms = current_time_ms();
-    entries_[slot].applied_ms = 0;
-    entries_[slot].error_code = 0;
-    entries_[slot].generation = generation;
+    CommandReceipt& entry = entries_[slot];
+    entry = {};
+    entry.id = id;
+    entry.domain = domain;
+    entry.state = CommandState::Accepted;
+    entry.accepted_ms = timestamp;
+    entry.applied_ms = 0;
+    entry.error_code = 0;
+    entry.generation = generation;
 
     return id;
 }
 
 void CommandJournal::applying(uint32_t id) {
     if (id == 0) return;
+    std::lock_guard<std::mutex> lock(mutex_);
     size_t slot = id % kCapacity;
     if (entries_[slot].id == id) {
         entries_[slot].state = CommandState::Applying;
@@ -42,15 +47,18 @@ void CommandJournal::applying(uint32_t id) {
 
 void CommandJournal::applied(uint32_t id) {
     if (id == 0) return;
+    const uint32_t timestamp = current_time_ms();
+    std::lock_guard<std::mutex> lock(mutex_);
     size_t slot = id % kCapacity;
     if (entries_[slot].id == id) {
         entries_[slot].state = CommandState::Applied;
-        entries_[slot].applied_ms = current_time_ms();
+        entries_[slot].applied_ms = timestamp;
     }
 }
 
 void CommandJournal::failed(uint32_t id, int32_t error) {
     if (id == 0) return;
+    std::lock_guard<std::mutex> lock(mutex_);
     size_t slot = id % kCapacity;
     if (entries_[slot].id == id) {
         entries_[slot].state = CommandState::Failed;
@@ -60,6 +68,7 @@ void CommandJournal::failed(uint32_t id, int32_t error) {
 
 void CommandJournal::superseded(uint32_t id) {
     if (id == 0) return;
+    std::lock_guard<std::mutex> lock(mutex_);
     size_t slot = id % kCapacity;
     if (entries_[slot].id == id) {
         entries_[slot].state = CommandState::Superseded;
@@ -68,6 +77,7 @@ void CommandJournal::superseded(uint32_t id) {
 
 bool CommandJournal::get(uint32_t id, CommandReceipt& out) const {
     if (id == 0) return false;
+    std::lock_guard<std::mutex> lock(mutex_);
     size_t slot = id % kCapacity;
     if (entries_[slot].id == id) {
         out = entries_[slot];
@@ -77,12 +87,15 @@ bool CommandJournal::get(uint32_t id, CommandReceipt& out) const {
 }
 
 bool CommandJournal::get_latest(CommandDomain domain, CommandReceipt& out) const {
+    std::lock_guard<std::mutex> lock(mutex_);
     uint32_t max_id = 0;
     int best_slot = -1;
     for (size_t i = 0; i < kCapacity; ++i) {
-        if (entries_[i].id != 0 && entries_[i].domain == domain && entries_[i].id > max_id) {
-            max_id = entries_[i].id;
-            best_slot = static_cast<int>(i);
+        if (entries_[i].id != 0 && entries_[i].domain == domain) {
+            if (best_slot < 0 || newer(entries_[i].id, max_id)) {
+                max_id = entries_[i].id;
+                best_slot = static_cast<int>(i);
+            }
         }
     }
     if (best_slot >= 0) {

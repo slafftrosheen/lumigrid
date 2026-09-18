@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstring>
 #include "OutputCapabilities.hpp"
+#include "ChannelHardware.hpp"
 
 namespace lg {
 
@@ -20,7 +21,96 @@ constexpr uint16_t MAX_PIXELS = MAX_FIXTURE_PIXELS;
 constexpr uint8_t MAX_RMT_LANES = OutputCapabilities::kRmtLanes;
 constexpr uint8_t MAX_PWM_CHANNELS = OutputCapabilities::kPca9685Channels;
 
-// ──────────────────────────── New Product Schema ─────────────────────────
+// ──────────────────────────── Channel Topology (Hardware Truth) ───────
+
+enum class AddressableType : uint8_t {
+    WS2812 = 0,
+    SK6812 = 1
+};
+
+enum class PixelOrder : uint8_t {
+    RGB = 0,
+    GRB = 1,
+    RGBW = 2,
+    GRBW = 3
+};
+
+inline const char* pixel_order_name(PixelOrder order) {
+    switch (order) {
+        case PixelOrder::RGB: return "RGB";
+        case PixelOrder::GRB: return "GRB";
+        case PixelOrder::RGBW: return "RGBW";
+        case PixelOrder::GRBW: return "GRBW";
+    }
+    return "GRB";
+}
+
+inline bool parse_pixel_order(const char* str, PixelOrder& out) {
+    if (!str) return false;
+    if (strcmp(str, "RGB") == 0) { out = PixelOrder::RGB; return true; }
+    if (strcmp(str, "GRB") == 0) { out = PixelOrder::GRB; return true; }
+    if (strcmp(str, "RGBW") == 0) { out = PixelOrder::RGBW; return true; }
+    if (strcmp(str, "GRBW") == 0) { out = PixelOrder::GRBW; return true; }
+    return false;
+}
+
+enum class ZoneRole : uint8_t {
+    Unassigned = 0,
+    Sign = 1,
+    SignElement = 2,
+    AmbianceLight = 3,
+    MainLight = 4
+};
+
+inline const char* zone_role_name(ZoneRole role) {
+    switch (role) {
+        case ZoneRole::Sign: return "Sign";
+        case ZoneRole::SignElement: return "Sign Element";
+        case ZoneRole::AmbianceLight: return "Ambiance Light";
+        case ZoneRole::MainLight: return "Main Light";
+        default: return "Unassigned";
+    }
+}
+
+inline bool parse_zone_role(const char* name, ZoneRole& out) {
+    if (!name) return false;
+    if (strcmp(name, "Sign") == 0) { out = ZoneRole::Sign; return true; }
+    if (strcmp(name, "Sign Element") == 0) { out = ZoneRole::SignElement; return true; }
+    if (strcmp(name, "Ambiance Light") == 0) { out = ZoneRole::AmbianceLight; return true; }
+    if (strcmp(name, "Main Light") == 0) { out = ZoneRole::MainLight; return true; }
+    out = ZoneRole::Unassigned;
+    return true;
+}
+
+struct ChannelConfig {
+    char name[24] = "";
+    bool enabled = false;
+
+    // Addressable-only configuration
+    AddressableType addressable_type = AddressableType::WS2812;
+    PixelOrder pixel_order = PixelOrder::GRB;
+    uint16_t pixel_count = 0;
+
+    // Common
+    uint8_t max_brightness = 255;
+    bool gamma_correction = true;
+    uint16_t max_milliwatts = 0;
+
+    // DMX patch
+    uint16_t dmx_universe = 0;
+    uint16_t dmx_start_channel = 0;
+    // Addressable: 0 = wash, 1 = direct pixel; PWM: single dimmer channel
+    uint8_t dmx_mode = 0;
+};
+
+struct ChannelGroup {
+    char name[24] = "";
+    uint16_t channel_mask = 0;
+    ZoneRole role = ZoneRole::Unassigned;
+    bool enabled = false;
+};
+
+// ──────────────────────────── Legacy Output Schema (Compatibility) ───────
 
 enum class OutputType : uint8_t { RMT = 0, PWM = 1, SPI = 2 };
 
@@ -32,8 +122,6 @@ struct PhysicalOutput {
 };
 
 enum class FixtureProfile : uint8_t { WS2812 = 0, SK6812 = 1, PWM_Single = 2, PWM_RGB = 3, PWM_RGBW = 4 };
-
-enum class PixelOrder : uint8_t { RGB = 0, GRB = 1, RGBW = 2, GRBW = 3 };
 
 /// Physical Output Topology Model (Batch 7 Item 1 - Option A):
 /// - Addressable fixtures (WS2812, SK6812): Exactly 1 physical RMT output mapped via
@@ -99,12 +187,160 @@ struct ZoneContent {
     LayerConfig layers[3] = {};
 };
 
+struct ChannelContent {
+    LayerConfig layers[3] = {};
+};
+
 struct SceneConfig {
+    uint8_t schema_version = 2;
     char name[24] = "";
-    ZoneContent zones[8] = {}; // Content per zone index
+    ChannelContent channels[16] = {};
     uint8_t global_brightness = 128;
     uint16_t transition_ms = 1000;
     uint32_t checksum = 0;
+
+    void reset() {
+        schema_version = 2;
+        name[0] = '\0';
+        global_brightness = 128;
+        transition_ms = 1000;
+        checksum = 0;
+        auto* p = reinterpret_cast<uint8_t*>(channels);
+        for (size_t i = 0; i < sizeof(channels); ++i) p[i] = 0;
+    }
+};
+
+struct SceneConfigV1 {
+    char name[24] = "";
+    ZoneContent zones[8] = {};
+    uint8_t global_brightness = 128;
+    uint16_t transition_ms = 1000;
+    uint32_t checksum = 0;
+};
+
+// ──────────────────────────── Scene Motion / Automation ───────────────
+
+enum class TransitionCurve : uint8_t {
+    Linear = 0,
+    EaseIn,
+    EaseOut,
+    EaseInOut,
+    Step
+};
+
+inline const char* transition_curve_name(TransitionCurve curve) {
+    switch (curve) {
+        case TransitionCurve::Linear:    return "linear";
+        case TransitionCurve::EaseIn:    return "easeIn";
+        case TransitionCurve::EaseOut:   return "easeOut";
+        case TransitionCurve::EaseInOut: return "easeInOut";
+        case TransitionCurve::Step:      return "step";
+    }
+    return "linear";
+}
+
+inline bool parse_transition_curve(const char* name, TransitionCurve& out) {
+    if (!name) return false;
+    if (strcmp(name, "linear") == 0)    { out = TransitionCurve::Linear; return true; }
+    if (strcmp(name, "easeIn") == 0)    { out = TransitionCurve::EaseIn; return true; }
+    if (strcmp(name, "easeOut") == 0)   { out = TransitionCurve::EaseOut; return true; }
+    if (strcmp(name, "easeInOut") == 0) { out = TransitionCurve::EaseInOut; return true; }
+    if (strcmp(name, "step") == 0)      { out = TransitionCurve::Step; return true; }
+    return false;
+}
+
+constexpr uint8_t kAutomationTracksPerScene = 4;
+constexpr uint8_t kAutomationPointsPerTrack = 6;
+
+enum class AutomationTarget : uint8_t {
+    GlobalBrightness = 0,
+    LayerOpacity,
+    LayerSpeed,
+    LayerParameter
+};
+
+inline const char* automation_target_name(AutomationTarget target) {
+    switch (target) {
+        case AutomationTarget::GlobalBrightness: return "globalBrightness";
+        case AutomationTarget::LayerOpacity:     return "layerOpacity";
+        case AutomationTarget::LayerSpeed:       return "layerSpeed";
+        case AutomationTarget::LayerParameter:   return "layerParameter";
+    }
+    return "globalBrightness";
+}
+
+inline bool parse_automation_target(const char* name, AutomationTarget& out) {
+    if (!name) return false;
+    if (strcmp(name, "globalBrightness") == 0) return (out = AutomationTarget::GlobalBrightness, true);
+    if (strcmp(name, "layerOpacity") == 0)     return (out = AutomationTarget::LayerOpacity, true);
+    if (strcmp(name, "layerSpeed") == 0)       return (out = AutomationTarget::LayerSpeed, true);
+    if (strcmp(name, "layerParameter") == 0)   return (out = AutomationTarget::LayerParameter, true);
+    return false;
+}
+
+enum class AutomationCurve : uint8_t {
+    Linear = 0,
+    EaseIn,
+    EaseOut,
+    EaseInOut,
+    Step
+};
+
+inline const char* automation_curve_name(AutomationCurve curve) {
+    switch (curve) {
+        case AutomationCurve::Linear:    return "linear";
+        case AutomationCurve::EaseIn:    return "easeIn";
+        case AutomationCurve::EaseOut:   return "easeOut";
+        case AutomationCurve::EaseInOut: return "easeInOut";
+        case AutomationCurve::Step:      return "step";
+    }
+    return "linear";
+}
+
+inline bool parse_automation_curve(const char* name, AutomationCurve& out) {
+    if (!name) return false;
+    if (strcmp(name, "linear") == 0)    return (out = AutomationCurve::Linear, true);
+    if (strcmp(name, "easeIn") == 0)    return (out = AutomationCurve::EaseIn, true);
+    if (strcmp(name, "easeOut") == 0)   return (out = AutomationCurve::EaseOut, true);
+    if (strcmp(name, "easeInOut") == 0) return (out = AutomationCurve::EaseInOut, true);
+    if (strcmp(name, "step") == 0)      return (out = AutomationCurve::Step, true);
+    return false;
+}
+
+struct AutomationPoint {
+    uint16_t position = 0; // 0..65535 normalized
+    uint16_t value = 0;
+};
+
+struct AutomationTrack {
+    AutomationTarget target = AutomationTarget::GlobalBrightness;
+    union {
+        uint8_t channel = 0;
+        uint8_t zone;
+    };
+    uint8_t layer = 0;
+    AutomationCurve curve = AutomationCurve::Linear;
+    uint8_t point_count = 0;
+    bool loop = true;
+    uint32_t period_ms = 5000;
+    AutomationPoint points[kAutomationPointsPerTrack]{};
+};
+
+struct SceneMotionConfig {
+    uint8_t schema_version = 1;
+    TransitionCurve transition_curve = TransitionCurve::EaseInOut;
+    uint8_t track_count = 0;
+    AutomationTrack tracks[kAutomationTracksPerScene]{};
+    uint32_t checksum = 0;
+
+    void reset() {
+        schema_version = 1;
+        transition_curve = TransitionCurve::EaseInOut;
+        track_count = 0;
+        checksum = 0;
+        auto* p = reinterpret_cast<uint8_t*>(tracks);
+        for (size_t i = 0; i < sizeof(tracks); ++i) p[i] = 0;
+    }
 };
 
 
@@ -233,6 +469,7 @@ struct Sequence {
 enum class CalendarAction : uint8_t {
     Preset   = 0,
     Sequence = 1,
+    CueList  = 2,
 };
 
 struct CalendarScheduleEntry {
@@ -242,7 +479,8 @@ struct CalendarScheduleEntry {
     uint8_t        preset_index = 0;
     CalendarAction action = CalendarAction::Preset;
     bool           enabled = false;
-    uint8_t        _reserved[2] = {};
+    uint8_t        cue_list_index = 0;
+    uint8_t        _reserved[1] = {};
 };
 
 struct CalendarSchedule {
@@ -250,35 +488,68 @@ struct CalendarSchedule {
     uint32_t checksum = 0;
 };
 
-// ──────────────────────────── Device Config ───────────────────────────
+// ──────────────────────────── Cue Lists ───────────────────────────────
 
-enum class ZoneRole : uint8_t {
-    Unassigned = 0,
-    Sign = 1,
-    SignElement = 2,
-    AmbianceLight = 3,
-    MainLight = 4
+constexpr uint8_t kMaxCueLists = 8;
+constexpr uint8_t kMaxCuesPerList = 16;
+
+enum class CueRunMode : uint8_t {
+    SingleShot = 0,
+    Loop       = 1,
+    PingPong   = 2,
+    Random     = 3,
+    Manual     = 4
 };
 
-inline const char* zone_role_name(ZoneRole role) {
-    switch(role) {
-        case ZoneRole::Sign: return "Sign";
-        case ZoneRole::SignElement: return "Sign Element";
-        case ZoneRole::AmbianceLight: return "Ambiance Light";
-        case ZoneRole::MainLight: return "Main Light";
-        default: return "Unassigned";
+inline const char* cue_run_mode_name(CueRunMode mode) {
+    switch (mode) {
+        case CueRunMode::SingleShot: return "single_shot";
+        case CueRunMode::Loop:       return "loop";
+        case CueRunMode::PingPong:   return "ping_pong";
+        case CueRunMode::Random:     return "random";
+        case CueRunMode::Manual:     return "manual";
+        default:                     return "unknown";
     }
 }
 
-inline bool parse_zone_role(const char* name, ZoneRole& out) {
-    if(!name) return false;
-    if(strcmp(name, "Sign") == 0) { out = ZoneRole::Sign; return true; }
-    if(strcmp(name, "Sign Element") == 0) { out = ZoneRole::SignElement; return true; }
-    if(strcmp(name, "Ambiance Light") == 0) { out = ZoneRole::AmbianceLight; return true; }
-    if(strcmp(name, "Main Light") == 0) { out = ZoneRole::MainLight; return true; }
-    out = ZoneRole::Unassigned;
-    return true;
+inline bool parse_cue_run_mode(const char* name, CueRunMode& out) {
+    if (!name) return false;
+    if (strcmp(name, "single_shot") == 0) return (out = CueRunMode::SingleShot, true);
+    if (strcmp(name, "loop") == 0)        return (out = CueRunMode::Loop, true);
+    if (strcmp(name, "ping_pong") == 0)   return (out = CueRunMode::PingPong, true);
+    if (strcmp(name, "random") == 0)      return (out = CueRunMode::Random, true);
+    if (strcmp(name, "manual") == 0)      return (out = CueRunMode::Manual, true);
+    return false;
 }
+
+struct CueEntry {
+    uint8_t scene_index = 0;
+    uint32_t hold_ms = 3000;
+    uint16_t fade_ms = 1000;
+    TransitionCurve curve = TransitionCurve::EaseInOut;
+    char label[24] = "";
+};
+
+struct CueList {
+    char name[32] = "";
+    CueRunMode mode = CueRunMode::Loop;
+    uint8_t count = 0;
+    uint8_t end_action = 0; // 0 = hold last, 1 = blackout, 2 = restore fallback
+    CueEntry cues[kMaxCuesPerList]{};
+    uint32_t checksum = 0;
+
+    void reset() {
+        name[0] = '\0';
+        mode = CueRunMode::Loop;
+        count = 0;
+        end_action = 0;
+        checksum = 0;
+        auto* p = reinterpret_cast<uint8_t*>(cues);
+        for (size_t i = 0; i < sizeof(cues); ++i) p[i] = 0;
+    }
+};
+
+// ──────────────────────────── Device Config ───────────────────────────
 
 struct ZoneConfig {
     char name[24] = "";
@@ -300,7 +571,7 @@ struct ProtocolConfig {
     uint16_t zone_start_channel   = 1; // 1-512 (default 1: Zone 0 = Ch 1..3, Zone 1 = Ch 4..6, etc.)
 };
 
-struct DeviceConfig {
+struct DeviceConfigV2 {
     uint8_t  schema_version         = 2;
     char     device_name[32]        = "lumigrid";
     uint8_t  active_preset_index    = 0;
@@ -335,9 +606,78 @@ struct DeviceConfig {
     ZoneConfig zones[8]                 = {};
     ProtocolConfig protocol             = {};
     
-    uint32_t reserved_padding_v3        = 0; // Forces NVS size mismatch to reload defaults
+    uint32_t reserved_padding_v3        = 0;
 
     uint32_t checksum                   = 0;
+};
+
+struct DeviceConfig {
+    uint8_t  schema_version         = 3;
+    char     device_name[32]        = "lumigrid";
+    uint8_t  active_preset_index    = 0;
+    uint8_t  fallback_preset_index  = 0;
+    uint16_t watchdog_timeout_s     = 60;   // System/Network timeout
+    uint16_t max_power_mw           = 0;    // 0 = no limit
+    uint8_t  gamma_x10              = 22;   // 2.2 gamma
+    bool     soft_start_enabled     = true;
+    uint16_t soft_start_ms          = 500;
+    bool     mqtt_enabled           = false;
+    char     mqtt_broker[64]        = {};
+    uint16_t mqtt_port              = 1883;
+    char     timezone[48]           = "UTC0";
+    bool     sync_enabled           = false;
+    uint8_t  sync_role              = 0;    // 0=Auto, 1=Master, 2=Worker
+    uint32_t sync_token             = 0;
+    
+    // RBAC tokens
+    char     admin_token[32]        = "lumigrid_admin";
+    char     installer_token[32]    = "lumigrid_install";
+    char     operator_token[32]     = "lumigrid_op";
+
+    // Device Identity
+    char     serial_number[32]      = "";
+    char     hardware_revision[16]  = "v1.0";
+    char     site_label[64]         = "";
+    char     group_label[64]        = "";
+    
+    // Hardware-truth 16-channel topology
+    ChannelConfig channels[16]          = {};
+    ChannelGroup  groups[8]             = {};
+    ProtocolConfig protocol             = {};
+
+    uint32_t checksum                   = 0;
+
+    void reset() {
+        schema_version = 3;
+        strncpy(device_name, "lumigrid", sizeof(device_name) - 1);
+        active_preset_index = 0;
+        fallback_preset_index = 0;
+        watchdog_timeout_s = 60;
+        max_power_mw = 0;
+        gamma_x10 = 22;
+        soft_start_enabled = true;
+        soft_start_ms = 500;
+        mqtt_enabled = false;
+        mqtt_broker[0] = '\0';
+        mqtt_port = 1883;
+        strncpy(timezone, "UTC0", sizeof(timezone) - 1);
+        sync_enabled = false;
+        sync_role = 0;
+        sync_token = 0;
+        strncpy(admin_token, "lumigrid_admin", sizeof(admin_token) - 1);
+        strncpy(installer_token, "lumigrid_install", sizeof(installer_token) - 1);
+        strncpy(operator_token, "lumigrid_op", sizeof(operator_token) - 1);
+        serial_number[0] = '\0';
+        strncpy(hardware_revision, "v1.0", sizeof(hardware_revision) - 1);
+        site_label[0] = '\0';
+        group_label[0] = '\0';
+        checksum = 0;
+        auto* pc = reinterpret_cast<uint8_t*>(channels);
+        for (size_t i = 0; i < sizeof(channels); ++i) pc[i] = 0;
+        auto* pg = reinterpret_cast<uint8_t*>(groups);
+        for (size_t i = 0; i < sizeof(groups); ++i) pg[i] = 0;
+        protocol = ProtocolConfig{};
+    }
 };
 
 // ──────────────────────────── Sync Protocol ──────────────────────────

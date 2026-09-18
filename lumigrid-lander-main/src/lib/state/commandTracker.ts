@@ -11,7 +11,9 @@ export type CommandDomain =
   | 'factory'
   | 'ota'
   | 'restore'
-  | 'sync';
+  | 'sync'
+  | 'sceneMotion'
+  | 'cue';
 
 export type CommandState =
   | 'accepted'

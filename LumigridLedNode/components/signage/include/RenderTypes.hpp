@@ -28,13 +28,15 @@ struct LightValue {
         : r(bc.r), g(bc.g), b(bc.b), w(0) {}
 };
 
-struct FixtureFrame {
+struct ChannelFrame {
     std::array<LightValue, MAX_PIXELS> pixels = {};
-    std::array<uint16_t, 4> pwm = {}; // 12-bit PCA9685 duty cycles (0..4095) for up to 4 physical channels
+    uint16_t pwm = 0; // 12-bit PCA9685 duty cycle (0..4095) for PWM channels
 };
 
+using FixtureFrame = ChannelFrame;
+
 struct RenderFrame {
-    std::array<FixtureFrame, MAX_FIXTURES> fixtures = {};
+    std::array<ChannelFrame, kChannelCount> channels = {};
 };
 
 // ── Persistent Live DMX Buffering ──
@@ -46,18 +48,20 @@ struct LiveDmxLayer {
     bool active = false;
 };
 
-struct LiveDmxFixture {
+struct LiveDmxChannel {
     std::array<LightValue, MAX_PIXELS> pixels = {};
-    std::array<uint16_t, 4> pwm = {};
+    uint16_t pwm = 0;
     uint16_t pixel_count = 0;
     uint8_t opacity = 0;
     uint32_t timestamp_ms = 0;
     bool active = false;
 };
 
+using LiveDmxFixture = LiveDmxChannel;
+
 struct LiveDmxFrame {
     std::array<std::array<LiveDmxLayer, 3>, 8> layers = {};
-    std::array<LiveDmxFixture, MAX_FIXTURES> fixtures = {};
+    std::array<LiveDmxChannel, kChannelCount> channels = {};
     std::array<uint8_t, 512> dmx_telemetry = {};
     uint16_t dmx_telemetry_len = 0;
     uint32_t timestamp_ms = 0;

@@ -1,6 +1,6 @@
 // components/signage/OutputScheduler.cpp
 #include "OutputScheduler.hpp"
-#include "ConfigStore.hpp"
+#include "ChannelHardware.hpp"
 #include <algorithm>
 
 namespace lg {
@@ -10,94 +10,43 @@ esp_err_t OutputScheduler::schedule(
     const DeviceConfig& device_cfg,
     OutputController& controller
 ) {
-    // ── Pass 1: Validate entire render/output mapping before modifying driver state (Batch 6 Item 9) ──
-    uint16_t rmt_lanes_claimed = 0;
-    uint16_t pwm_channels_claimed = 0;
-
-    for (uint8_t f = 0; f < 16; ++f) {
-        const FixtureConfig& fixture = device_cfg.fixtures[f];
-        if (!ConfigStore::is_fixture_configured(fixture, device_cfg)) {
+    // ── Pass 1: Validate configured channels ──
+    for (uint8_t ch = 0; ch < kChannelCount; ++ch) {
+        const ChannelConfig& ccfg = device_cfg.channels[ch];
+        if (!ccfg.enabled) {
             continue;
         }
 
-        const bool is_pwm = (fixture.profile == FixtureProfile::PWM_Single ||
-                             fixture.profile == FixtureProfile::PWM_RGB ||
-                             fixture.profile == FixtureProfile::PWM_RGBW);
-        const bool is_addressable = (fixture.profile == FixtureProfile::WS2812 ||
-                                     fixture.profile == FixtureProfile::SK6812);
-
-        if (!is_pwm && !is_addressable) {
-            return ESP_ERR_INVALID_ARG;
-        }
-
-        if (is_addressable) {
-            if (fixture.num_pixels == 0 || fixture.num_pixels > MAX_PIXELS) {
+        const auto hw = channel_hardware(ch);
+        if (hw.kind == ChannelKind::Addressable) {
+            if (ccfg.pixel_count == 0 || ccfg.pixel_count > MAX_PIXELS) {
                 return ESP_ERR_INVALID_ARG;
-            }
-            uint8_t p_idx = fixture.physical_output_index[0];
-            if (p_idx >= 16) {
-                return ESP_ERR_INVALID_ARG;
-            }
-            const PhysicalOutput& phys = device_cfg.physical_outputs[p_idx];
-            if (!phys.enabled || phys.type != OutputType::RMT || phys.hardware_id >= AddressableDriver::kLanes) {
-                return ESP_ERR_INVALID_ARG;
-            }
-            if (rmt_lanes_claimed & (1U << phys.hardware_id)) {
-                return ESP_ERR_INVALID_ARG; // Duplicate incompatible physical mapping
-            }
-            rmt_lanes_claimed |= (1U << phys.hardware_id);
-        } else if (is_pwm) {
-            uint8_t pwm_chans = (fixture.profile == FixtureProfile::PWM_Single) ? 1 :
-                                (fixture.profile == FixtureProfile::PWM_RGB ? 3 : 4);
-            for (uint8_t ch = 0; ch < pwm_chans; ++ch) {
-                uint8_t p_idx = fixture.physical_output_index[ch];
-                if (p_idx >= 16) {
-                    return ESP_ERR_INVALID_ARG;
-                }
-                const PhysicalOutput& phys = device_cfg.physical_outputs[p_idx];
-                if (!phys.enabled || phys.type != OutputType::PWM || phys.hardware_id >= Pca9685Driver::kChannels) {
-                    return ESP_ERR_INVALID_ARG;
-                }
-                if (pwm_channels_claimed & (1U << phys.hardware_id)) {
-                    return ESP_ERR_INVALID_ARG; // Duplicate incompatible physical mapping
-                }
-                pwm_channels_claimed |= (1U << phys.hardware_id);
             }
         }
     }
 
-    // ── Pass 2: Driver state mutation & staging via RAII OutputTransaction (Batch 8 Item 8) ──
+    // ── Pass 2: Driver state mutation & staging via RAII OutputTransaction ──
     OutputTransaction tx = controller.begin_transaction();
     tx.pixels().clear_buffer();
     tx.pwm().set_all(0);
 
-    for (uint8_t f = 0; f < 16; ++f) {
-        const FixtureConfig& fixture = device_cfg.fixtures[f];
-        if (!ConfigStore::is_fixture_configured(fixture, device_cfg)) {
+    for (uint8_t ch = 0; ch < kChannelCount; ++ch) {
+        const ChannelConfig& ccfg = device_cfg.channels[ch];
+        if (!ccfg.enabled) {
             continue;
         }
 
-        bool is_pwm = (fixture.profile == FixtureProfile::PWM_Single ||
-                       fixture.profile == FixtureProfile::PWM_RGB ||
-                       fixture.profile == FixtureProfile::PWM_RGBW);
+        const auto hw = channel_hardware(ch);
+        const ChannelFrame& cf = frame.channels[ch];
 
-        const FixtureFrame& fx_frame = frame.fixtures[f];
-
-        if (!is_pwm) {
-            uint8_t p_idx = fixture.physical_output_index[0];
-            const PhysicalOutput& phys = device_cfg.physical_outputs[p_idx];
-            for (uint16_t px = 0; px < fixture.num_pixels; ++px) {
-                const LightValue& lv = fx_frame.pixels[px];
-                tx.pixels().set(phys.hardware_id, px, lv.r, lv.g, lv.b, lv.w);
+        if (hw.kind == ChannelKind::Addressable) {
+            const uint16_t pcount = std::min<uint16_t>(ccfg.pixel_count, MAX_PIXELS);
+            for (uint16_t px = 0; px < pcount; ++px) {
+                const LightValue& lv = cf.pixels[px];
+                tx.pixels().set(hw.hardware_id, px, lv.r, lv.g, lv.b, lv.w);
             }
         } else {
-            uint8_t pwm_chans = (fixture.profile == FixtureProfile::PWM_Single) ? 1 :
-                                (fixture.profile == FixtureProfile::PWM_RGB ? 3 : 4);
-            for (uint8_t ch = 0; ch < pwm_chans; ++ch) {
-                uint8_t p_idx = fixture.physical_output_index[ch];
-                const PhysicalOutput& phys = device_cfg.physical_outputs[p_idx];
-                tx.pwm().set(phys.hardware_id, fx_frame.pwm[ch]);
-            }
+            tx.pwm().set(hw.hardware_id, cf.pwm);
         }
     }
 

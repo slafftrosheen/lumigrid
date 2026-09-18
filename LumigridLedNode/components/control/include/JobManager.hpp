@@ -3,6 +3,7 @@
 #include "OperationJob.hpp"
 #include <atomic>
 #include <mutex>
+#include "esp_err.h"
 
 namespace lg {
 
@@ -12,7 +13,7 @@ public:
 
     JobManager() = default;
 
-    uint32_t start_job(JobType type);
+    esp_err_t start_job(JobType type, uint32_t* job_id);
     void update_progress(uint32_t job_id, JobState state, uint8_t progress, int32_t error = 0, const char* detail = nullptr);
     void complete_job(uint32_t job_id);
     void fail_job(uint32_t job_id, int32_t error, const char* detail = nullptr);

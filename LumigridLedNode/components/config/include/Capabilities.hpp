@@ -13,6 +13,10 @@ struct CapabilitiesManifest {
     static constexpr uint8_t kLayersPerZone = 3;
     static constexpr uint8_t kPresets = kMaxPresets;
     static constexpr uint8_t kTimelineSteps = 16;
+    static constexpr uint8_t kCueLists = kMaxCueLists;
+    static constexpr uint8_t kCuesPerList = kMaxCuesPerList;
+    static constexpr uint8_t kAutomationTracks = kAutomationTracksPerScene;
+    static constexpr uint8_t kAutomationPoints = kAutomationPointsPerTrack;
 
     // Feature flags
     static constexpr bool kFeatureAddressable = true;
@@ -25,6 +29,9 @@ struct CapabilitiesManifest {
     static constexpr bool kFeatureOta = true;
     static constexpr bool kFeatureSignedOta = true;
     static constexpr bool kFeatureBackup = true;
+    static constexpr bool kFeatureSceneMotion = true;
+    static constexpr bool kFeatureCueLists = true;
+    static constexpr bool kFeatureTransitionEngineV2 = true;
 
     // Protocol versions
     static constexpr uint8_t kProtocolHttpApi = 1;

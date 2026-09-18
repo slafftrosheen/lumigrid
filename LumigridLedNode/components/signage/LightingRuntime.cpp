@@ -1,10 +1,12 @@
 // components/signage/LightingRuntime.cpp
 #include "LightingRuntime.hpp"
+#include "ChannelHardware.hpp"
 #include "EffectRenderer.hpp"
 #include "Compositor.hpp"
 #include "FixtureMapper.hpp"
 #include "OutputScheduler.hpp"
 #include "ColorPipeline.hpp"
+#include "SceneTransition.hpp"
 #include "esp_timer.h"
 #include "esp_log.h"
 #include <algorithm>
@@ -187,9 +189,9 @@ void LightingRuntime::render_frame(uint32_t current_ms) {
     if (es == EstopState::Tripped) {
         controller_.blackout();
         if (preview_cb_) {
-            for (auto& fix : current_render_frame_.fixtures) {
-                fix.pixels.fill(LightValue{0, 0, 0, 0});
-                fix.pwm.fill(0);
+            for (auto& ch : current_render_frame_.channels) {
+                ch.pixels.fill(LightValue{0, 0, 0, 0});
+                ch.pwm = 0;
             }
             preview_cb_(current_render_frame_, current_local_cfg_);
         }
@@ -197,9 +199,9 @@ void LightingRuntime::render_frame(uint32_t current_ms) {
     } else if (es == EstopState::PendingReset) {
         controller_.blackout();
         if (preview_cb_) {
-            for (auto& fix : current_render_frame_.fixtures) {
-                fix.pixels.fill(LightValue{0, 0, 0, 0});
-                fix.pwm.fill(0);
+            for (auto& ch : current_render_frame_.channels) {
+                ch.pixels.fill(LightValue{0, 0, 0, 0});
+                ch.pwm = 0;
             }
             preview_cb_(current_render_frame_, current_local_cfg_);
         }
@@ -208,9 +210,9 @@ void LightingRuntime::render_frame(uint32_t current_ms) {
     } else if (es == EstopState::ReArmedBlackout) {
         controller_.clear_estop();
         if (preview_cb_) {
-            for (auto& fix : current_render_frame_.fixtures) {
-                fix.pixels.fill(LightValue{0, 0, 0, 0});
-                fix.pwm.fill(0);
+            for (auto& ch : current_render_frame_.channels) {
+                ch.pixels.fill(LightValue{0, 0, 0, 0});
+                ch.pwm = 0;
             }
             preview_cb_(current_render_frame_, current_local_cfg_);
         }
@@ -231,50 +233,102 @@ void LightingRuntime::render_frame(uint32_t current_ms) {
     const DeviceConfig& local_cfg = current_local_cfg_;
 
     ControlSnapshot ctrl_snapshot = source_manager_.get_snapshot(current_ms);
-    auto live_layer_is_valid = [current_ms](const LiveDmxLayer& layer) -> bool {
-        if (!layer.active || layer.opacity == 0) return false;
-        return current_ms - layer.timestamp_ms <= kLiveFrameFailsafeTimeoutMs;
-    };
-    auto live_fixture_is_valid = [current_ms](const LiveDmxFixture& fix) -> bool {
-        if (!fix.active || fix.opacity == 0) return false;
-        return current_ms - fix.timestamp_ms <= kLiveFrameFailsafeTimeoutMs;
+    auto live_channel_is_valid = [current_ms](const LiveDmxChannel& ch) -> bool {
+        if (!ch.active || ch.opacity == 0) return false;
+        return current_ms - ch.timestamp_ms <= kLiveFrameFailsafeTimeoutMs;
     };
     RenderFrame& render_frame = current_render_frame_;
-    for (auto& fixture : render_frame.fixtures) { fixture.pixels.fill(LightValue{0,0,0,0}); fixture.pwm.fill(0); }
-    for (uint8_t f = 0; f < 16; ++f) {
-        const FixtureConfig& fixture = local_cfg.fixtures[f];
-        bool is_pwm = (fixture.profile == FixtureProfile::PWM_Single || fixture.profile == FixtureProfile::PWM_RGB || fixture.profile == FixtureProfile::PWM_RGBW);
-        if (fixture.num_pixels == 0 && !is_pwm) continue;
-        const uint8_t target_zone = fixture.zone_id;
-        if (target_zone >= 8) continue;
-        ControlSource fx_owner = ctrl_snapshot.resolve_fixture(f, target_zone, current_ms);
-        if (fx_owner == ControlSource::LiveDmx && live_fixture_is_valid(live_active_.fixtures[f])) {
-            FixtureFrame& live_src = current_live_src_;
-            const uint16_t pcount = std::min<uint16_t>(live_active_.fixtures[f].pixel_count, fixture.num_pixels);
-            for (uint16_t p = 0; p < pcount; ++p) live_src.pixels[p] = live_active_.fixtures[f].pixels[p];
-            live_src.pwm = live_active_.fixtures[f].pwm;
-            FixtureMapper::map(render_frame.fixtures[f], live_src, fixture, render_scene.global_brightness);
+    for (auto& ch_frame : render_frame.channels) {
+        ch_frame.pixels.fill(LightValue{0, 0, 0, 0});
+        ch_frame.pwm = 0;
+    }
+
+    for (uint8_t ch = 0; ch < kChannelCount; ++ch) {
+        const ChannelConfig& channel_cfg = local_cfg.channels[ch];
+        if (!channel_cfg.enabled) continue;
+
+        const auto hw = channel_hardware(ch);
+        const bool is_addressable = (hw.kind == ChannelKind::Addressable);
+        const uint16_t num_pixels = is_addressable ? std::min<uint16_t>(channel_cfg.pixel_count, MAX_PIXELS) : 1;
+
+        ControlSource ch_owner = ctrl_snapshot.resolve_channel(ch, current_ms);
+        if (ch_owner == ControlSource::LiveDmx && live_channel_is_valid(live_active_.channels[ch])) {
+            ChannelFrame& live_src = current_live_src_;
+            const uint16_t pcount = std::min<uint16_t>(live_active_.channels[ch].pixel_count, num_pixels);
+            for (uint16_t p = 0; p < pcount; ++p) live_src.pixels[p] = live_active_.channels[ch].pixels[p];
+            live_src.pwm = live_active_.channels[ch].pwm;
+
+            if (is_addressable) {
+                for (uint16_t px = 0; px < num_pixels; ++px) {
+                    render_frame.channels[ch].pixels[px] = ColorPipeline::to_addressable(live_src.pixels[px], channel_cfg, render_scene.global_brightness);
+                }
+            } else {
+                render_frame.channels[ch].pwm = ColorPipeline::to_pwm(live_src.pixels[0], live_src.pwm, channel_cfg, render_scene.global_brightness);
+            }
         } else {
-            const ZoneContent& zone = render_scene.zones[target_zone];
-            FixtureFrame& composited_zone = current_composited_zone_;
-            composited_zone.pixels.fill(LightValue{0,0,0,0}); composited_zone.pwm.fill(0);
+            const ChannelContent& content = render_scene.channels[ch];
+            ChannelFrame& composited_channel = current_composited_zone_;
+            composited_channel.pixels.fill(LightValue{0, 0, 0, 0});
+            composited_channel.pwm = 0;
+
+            const bool is_trans = scene_manager_.is_transitioning();
+            const uint16_t t_q15 = scene_manager_.transition_progress_q15();
+            const auto& from_content = scene_manager_.source_scene().channels[ch];
+            const auto& to_content = scene_manager_.target_scene().channels[ch];
+
             for (uint8_t l = 0; l < 3; ++l) {
-                ControlSource owner = ctrl_snapshot.resolve(target_zone, l, current_ms);
-                FixtureFrame& layer_frame = current_layer_frame_;
-                layer_frame.pixels.fill(LightValue{0,0,0,0}); layer_frame.pwm.fill(0);
-                if (owner == ControlSource::LiveDmx && live_layer_is_valid(live_active_.layers[target_zone][l])) {
-                    const auto& live = live_active_.layers[target_zone][l];
-                    uint16_t pcount = std::min<uint16_t>(fixture.num_pixels, MAX_PIXELS);
-                    for (uint16_t px = 0; px < pcount; ++px) layer_frame.pixels[px] = LightValue{live.color.r, live.color.g, live.color.b, 0};
-                    layer_frame.pwm[0] = (static_cast<uint32_t>(live.color.r) * 4095) / 255;
-                    Compositor::blend(composited_zone, layer_frame, BlendMode::Normal, live.opacity, fixture.num_pixels);
+                ChannelFrame& layer_frame = current_layer_frame_;
+                layer_frame.pixels.fill(LightValue{0, 0, 0, 0});
+                layer_frame.pwm = 0;
+
+                if (is_trans) {
+                    const LayerConfig& from_l = from_content.layers[l];
+                    const LayerConfig& to_l = to_content.layers[l];
+
+                    if (can_parameter_morph(from_l, to_l)) {
+                        LayerConfig morph = sample_layer_morph(from_l, to_l, t_q15);
+                        if (morph.enabled && morph.opacity > 0) {
+                            EffectRenderer::render_layer(layer_frame, morph, num_pixels, current_ms);
+                            Compositor::blend(composited_channel, layer_frame, morph.blend_mode, morph.opacity, num_pixels);
+                        }
+                    } else {
+                        ChannelFrame& from_frame = layer_frame;
+                        ChannelFrame& to_frame = transition_layer_frame_;
+                        from_frame.pixels.fill(LightValue{0, 0, 0, 0}); from_frame.pwm = 0;
+                        to_frame.pixels.fill(LightValue{0, 0, 0, 0}); to_frame.pwm = 0;
+
+                        if (from_l.enabled && from_l.opacity > 0) {
+                            EffectRenderer::render_layer(from_frame, from_l, num_pixels, current_ms);
+                        }
+                        if (to_l.enabled && to_l.opacity > 0) {
+                            EffectRenderer::render_layer(to_frame, to_l, num_pixels, current_ms);
+                        }
+                        blend_frames(from_frame, to_frame, t_q15, num_pixels);
+
+                        BlendMode blend_m = (t_q15 < 16384) ? from_l.blend_mode : to_l.blend_mode;
+                        uint8_t op = lerp_q15_u8(from_l.opacity, to_l.opacity, t_q15);
+                        if (op > 0) {
+                            Compositor::blend(composited_channel, from_frame, blend_m, op, num_pixels);
+                        }
+                    }
                 } else {
-                    if (!zone.layers[l].enabled || zone.layers[l].opacity == 0) continue;
-                    EffectRenderer::render_layer(layer_frame, zone.layers[l], fixture.num_pixels, current_ms);
-                    Compositor::blend(composited_zone, layer_frame, zone.layers[l].blend_mode, zone.layers[l].opacity, fixture.num_pixels);
+                    if (!content.layers[l].enabled || content.layers[l].opacity == 0) continue;
+                    EffectRenderer::render_layer(layer_frame, content.layers[l], num_pixels, current_ms);
+                    Compositor::blend(composited_channel, layer_frame, content.layers[l].blend_mode, content.layers[l].opacity, num_pixels);
                 }
             }
-            FixtureMapper::map(render_frame.fixtures[f], composited_zone, fixture, render_scene.global_brightness);
+
+            if (is_addressable) {
+                for (uint16_t px = 0; px < num_pixels; ++px) {
+                    render_frame.channels[ch].pixels[px] = ColorPipeline::to_addressable(composited_channel.pixels[px], channel_cfg, render_scene.global_brightness);
+                }
+            } else {
+                uint16_t pwm_val = ColorPipeline::to_pwm(composited_channel.pixels[0], composited_channel.pwm, channel_cfg, render_scene.global_brightness);
+                render_frame.channels[ch].pwm = pwm_val;
+                if (ch >= 8 && ch < 16) {
+                    last_pwm_duty_[ch - 8] = pwm_val;
+                }
+            }
         }
     }
     power_budget_.enforce(render_frame, local_cfg, current_ms);
@@ -330,11 +384,11 @@ bool LightingRuntime::submit_live_frame(const LiveDmxFrame& frame) {
     const uint32_t now = now_ms();
     live_pending_ = frame; live_pending_.timestamp_ms = now; live_pending_dirty_ = true; last_live_stream_ms_ = now;
     if (!task_handle_) { live_active_ = live_pending_; live_pending_dirty_ = false; }
-    uint8_t live_zone_mask = 0, live_layer_mask = 0; uint16_t live_fixture_mask = 0;
+    uint8_t live_zone_mask = 0, live_layer_mask = 0; uint16_t live_channel_mask = 0;
     for (uint8_t z = 0; z < 8; ++z) for (uint8_t l = 0; l < 3; ++l) if (live_pending_.layers[z][l].active) { live_zone_mask |= (1 << z); live_layer_mask |= (1 << l); }
-    for (uint8_t f = 0; f < 16; ++f) if (live_pending_.fixtures[f].active) live_fixture_mask |= (1 << f);
-    if (live_zone_mask == 0 && live_fixture_mask == 0) source_manager_.release(ControlSource::LiveDmx);
-    else source_manager_.acquire(ControlSource::LiveDmx, 0, live_zone_mask, live_layer_mask, live_fixture_mask);
+    for (uint8_t ch = 0; ch < 16; ++ch) if (live_pending_.channels[ch].active) live_channel_mask |= (1 << ch);
+    if (live_zone_mask == 0 && live_channel_mask == 0) source_manager_.release(ControlSource::LiveDmx);
+    else source_manager_.acquire(ControlSource::LiveDmx, 0, live_zone_mask, live_layer_mask, live_channel_mask);
     xSemaphoreGive(mutex_); return true;
 }
 
@@ -368,13 +422,11 @@ void LightingRuntime::inject_live_data(uint8_t zone_idx, uint8_t layer_idx, cons
 
 void LightingRuntime::inject_live_fixture(uint8_t fixture_idx, const LightValue* pixels, uint16_t count, const uint16_t* pwm_duties, uint8_t opacity) {
     if (fixture_idx >= 16 || !mutex_) return;
-    xSemaphoreTake(mutex_, portMAX_DELAY); const uint32_t now = now_ms(); auto& lf = live_pending_.fixtures[fixture_idx];
+    xSemaphoreTake(mutex_, portMAX_DELAY); const uint32_t now = now_ms(); auto& lf = live_pending_.channels[fixture_idx];
     uint16_t pcount = std::min<uint16_t>(count, MAX_PIXELS); lf.pixel_count = pcount;
     if (pixels && pcount > 0) std::memcpy(lf.pixels.data(), pixels, pcount * sizeof(LightValue));
     if (pwm_duties) {
-        for (uint8_t ch = 0; ch < 4; ++ch) {
-            lf.pwm[ch] = pwm_duties[ch];
-        }
+        lf.pwm = pwm_duties[0];
     }
     lf.opacity = opacity; lf.timestamp_ms = now; lf.active = true; live_pending_dirty_ = true; last_live_stream_ms_ = now;
     source_manager_.acquire(ControlSource::LiveDmx, kLiveFrameFailsafeTimeoutMs, 0, 0, (1 << fixture_idx));
@@ -395,7 +447,7 @@ uint8_t LightingRuntime::active_live_objects() const {
     if (!mutex_ || xSemaphoreTake(mutex_, pdMS_TO_TICKS(5)) != pdTRUE) return 0;
     uint8_t count = 0; const uint32_t now = now_ms();
     for (uint8_t z = 0; z < 8; ++z) for (uint8_t l = 0; l < 3; ++l) { const auto& layer = live_active_.layers[z][l]; if (layer.active && layer.opacity > 0 && now - layer.timestamp_ms <= kLiveFrameFailsafeTimeoutMs) count++; }
-    for (uint8_t f = 0; f < 16; ++f) { const auto& fix = live_active_.fixtures[f]; if (fix.active && fix.opacity > 0 && now - fix.timestamp_ms <= kLiveFrameFailsafeTimeoutMs) count++; }
+    for (uint8_t ch = 0; ch < 16; ++ch) { const auto& ch_obj = live_active_.channels[ch]; if (ch_obj.active && ch_obj.opacity > 0 && now - ch_obj.timestamp_ms <= kLiveFrameFailsafeTimeoutMs) count++; }
     xSemaphoreGive(mutex_);
     return count;
 }
@@ -481,6 +533,18 @@ void LightingRuntime::report_output_fault(esp_err_t err) {
     OutputState prev = output_state_.exchange(OutputState::Faulted, std::memory_order_acq_rel);
     if (prev != OutputState::Faulted) { output_fault_count_.fetch_add(1, std::memory_order_relaxed); ESP_LOGE(TAG, "Hardware output transitioned to FAULTED (err=%s)", esp_err_to_name(err)); }
     controller_.blackout();
+}
+
+uint16_t LightingRuntime::transition_progress_q15() const {
+    return scene_manager_.transition_progress_q15();
+}
+
+TransitionCurve LightingRuntime::transition_curve() const {
+    return scene_manager_.transition_curve();
+}
+
+void LightingRuntime::set_transition_curve(TransitionCurve curve) {
+    scene_manager_.set_transition_curve(curve);
 }
 
 } // namespace lg

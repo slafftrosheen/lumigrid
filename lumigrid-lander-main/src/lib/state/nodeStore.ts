@@ -62,6 +62,26 @@ export interface NodeLiveStatus {
     startedMs: number;
     error: string | null;
   } | null;
+  timeline?: {
+    clockMs: number;
+    driftPpm: number;
+    synced: boolean;
+  };
+  automation?: {
+    activeTracks: number;
+    transitionCurve: string;
+  };
+  cue?: {
+    running: boolean;
+    state?: string;
+    listIndex?: number;
+    cueIndex?: number;
+    nextCueIndex?: number;
+    mode?: string;
+    elapsedMs?: number;
+    remainingMs?: number;
+    manualFade?: number;
+  } | null;
 }
 
 export interface DashboardNodeState {
@@ -377,6 +397,9 @@ export function connect(nodeIp = getSelectedNodeIp()): void {
         const s2Scene = s2State?.scene;
         const s2Protocol = s2State?.protocol;
         const s2Job = s2State?.job;
+        const s2Timeline = s2State?.timeline;
+        const s2Automation = s2State?.automation;
+        const s2Cue = s2State?.cue;
 
         const nodeIdStr = typeof json.nodeId === 'string' ? json.nodeId : undefined;
         if (nodeIdStr && latestState.nodeIp) {
@@ -431,6 +454,9 @@ export function connect(nodeIp = getSelectedNodeIp()): void {
             uptimeMs: typeof json.uptimeMs === 'number' ? json.uptimeMs : current.status?.uptimeMs,
             protocol: s2Protocol ?? current.status?.protocol,
             job: s2Job !== undefined ? s2Job : current.status?.job,
+            timeline: s2Timeline !== undefined ? s2Timeline : current.status?.timeline,
+            automation: s2Automation !== undefined ? s2Automation : current.status?.automation,
+            cue: s2Cue !== undefined ? s2Cue : current.status?.cue,
           },
           lastSeen: now,
           lastMessageAt: now,

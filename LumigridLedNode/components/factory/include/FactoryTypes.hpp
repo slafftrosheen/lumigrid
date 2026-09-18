@@ -23,7 +23,8 @@ enum class FactoryCommandType : uint8_t {
     PwmChannelLevel,
     StreamFrame,
     Abort,
-    SetAutoLoop
+    SetAutoLoop,
+    ChannelTest
 };
 
 struct StreamFramePayload {
@@ -31,6 +32,7 @@ struct StreamFramePayload {
 };
 
 struct FactoryCommand {
+    uint32_t command_id = 0;
     FactoryCommandType type = FactoryCommandType::Abort;
     FactoryEffect effect = FactoryEffect::SafeBlackout;
 

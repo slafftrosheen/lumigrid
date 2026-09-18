@@ -171,4 +171,71 @@ void ColorPipeline::to_pwm(
     }
 }
 
+LightValue ColorPipeline::to_addressable(
+    const LightValue& input,
+    const ChannelConfig& channel,
+    uint8_t global_brightness
+) {
+    if (!initialized_) {
+        init(22);
+    }
+
+    const uint8_t effective_brightness = scale8(global_brightness, channel.max_brightness);
+    LightValue c = input;
+
+    // 1. Effective Brightness
+    c.r = scale8(c.r, effective_brightness);
+    c.g = scale8(c.g, effective_brightness);
+    c.b = scale8(c.b, effective_brightness);
+    c.w = scale8(c.w, effective_brightness);
+
+    // 2. RGBW Conversion (for SK6812)
+    if (channel.addressable_type == AddressableType::SK6812) {
+        if (input.w == 0) {
+            uint8_t min_rgb = std::min({c.r, c.g, c.b});
+            c.r -= min_rgb;
+            c.g -= min_rgb;
+            c.b -= min_rgb;
+            c.w = min_rgb;
+        }
+    }
+
+    // 3. Perceptual Gamma Correction
+    if (channel.gamma_correction) {
+        c.r = gamma8_lut_[c.r];
+        c.g = gamma8_lut_[c.g];
+        c.b = gamma8_lut_[c.b];
+        c.w = gamma8_lut_[c.w];
+    }
+
+    return c;
+}
+
+uint16_t ColorPipeline::to_pwm(
+    const LightValue& input,
+    uint16_t single_pwm_in,
+    const ChannelConfig& channel,
+    uint8_t global_brightness
+) {
+    if (!initialized_) {
+        init(22);
+    }
+
+    const uint8_t effective_brightness = scale8(global_brightness, channel.max_brightness);
+    const uint32_t raw = (single_pwm_in > 0)
+        ? single_pwm_in
+        : static_cast<uint32_t>(std::max({input.r, input.g, input.b, input.w}));
+
+    uint32_t duty = (raw <= 4095u)
+        ? (raw * effective_brightness) / 255u
+        : (static_cast<uint32_t>(effective_brightness) * 4095u) / 255u;
+
+    if (channel.gamma_correction) {
+        const uint8_t b8 = static_cast<uint8_t>((duty * 255u) / 4095u);
+        duty = gamma12_lut_[b8];
+    }
+
+    return static_cast<uint16_t>(std::min<uint32_t>(duty, 4095u));
+}
+
 } // namespace lg

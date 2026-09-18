@@ -232,6 +232,21 @@ export function upsertNodeRecord(record: Partial<NodeRecord> & { id: string }): 
   return updated;
 }
 
+export function recordDiscoveredNode(
+  node: { id: string; address?: string; name?: string; family?: string; model?: string },
+  source: DiscoverySource = 'sync'
+): NodeRecord {
+  return upsertNodeRecord({
+    id: node.id,
+    address: node.address,
+    name: node.name,
+    family: node.family,
+    model: node.model,
+    discoverySource: source,
+    lastSeen: Date.now(),
+  });
+}
+
 function syncLegacyFromRegistry(registry: Record<string, NodeRecord>): void {
   const ips: string[] = [];
   const meta: Record<string, { name?: string; lastSeen?: number }> = {};

@@ -112,7 +112,8 @@ public:
                     LightingRuntime* signage = nullptr,
                     Scheduler* scheduler = nullptr,
                     NodeSync* node_sync = nullptr,
-                    DmxRouter* dmx_router = nullptr);
+                    DmxRouter* dmx_router = nullptr,
+                    class CueRunner* cue_runner = nullptr);
     void stop();
 
     void set_diagnostics_provider(std::function<StartupDiagnostics()> provider) {
@@ -128,6 +129,7 @@ public:
     Scheduler* scheduler() { return scheduler_; }
     NodeSync* node_sync() { return node_sync_; }
     DmxRouter* dmx_router() { return dmx_router_; }
+    class CueRunner* cue_runner() { return cue_runner_; }
 
     void notify_status_async();
 
@@ -147,6 +149,7 @@ public:
     Scheduler* scheduler_ = nullptr;
     NodeSync* node_sync_ = nullptr;
     DmxRouter* dmx_router_ = nullptr;
+    class CueRunner* cue_runner_ = nullptr;
     std::function<StartupDiagnostics()> diagnostics_provider_{};
     httpd_handle_t signage_server_ = nullptr;
     httpd_handle_t factory_server_ = nullptr;

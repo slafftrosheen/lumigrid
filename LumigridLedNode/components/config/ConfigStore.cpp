@@ -9,6 +9,7 @@
 #include <memory>
 #include "esp_rom_crc.h"
 #include "lg_board_pins.hpp"
+#include "ChannelHardware.hpp"
 
 static const char* TAG = "config";
 
@@ -33,12 +34,39 @@ uint32_t calc_device_crc(const DeviceConfig& dc) {
     return esp_rom_crc32_le(0, (const uint8_t*)&dc, sizeof(DeviceConfig) - sizeof(uint32_t));
 }
 
+uint32_t calc_device_crc(const DeviceConfigV2& dc) {
+    return esp_rom_crc32_le(0, (const uint8_t*)&dc, sizeof(DeviceConfigV2) - sizeof(uint32_t));
+}
+
 uint32_t calc_seq_crc(const Sequence& s) {
     return esp_rom_crc32_le(0, (const uint8_t*)&s, sizeof(Sequence) - sizeof(uint32_t));
 }
 
 uint32_t calc_calendar_crc(const CalendarSchedule& c) {
     return esp_rom_crc32_le(0, (const uint8_t*)&c, sizeof(CalendarSchedule) - sizeof(uint32_t));
+}
+
+uint32_t calc_motion_crc(const SceneMotionConfig& m) {
+    return esp_rom_crc32_le(0, (const uint8_t*)&m, sizeof(SceneMotionConfig) - sizeof(uint32_t));
+}
+
+uint32_t calc_cue_list_crc(const CueList& cl) {
+    return esp_rom_crc32_le(0, (const uint8_t*)&cl, sizeof(CueList) - sizeof(uint32_t));
+}
+
+void clear_scene_motion(SceneMotionConfig& m) {
+    auto* p = reinterpret_cast<uint8_t*>(&m);
+    for (size_t i = 0; i < sizeof(SceneMotionConfig); ++i) {
+        p[i] = 0;
+    }
+    m.schema_version = 1;
+}
+
+void clear_cue_list(CueList& cl) {
+    auto* p = reinterpret_cast<uint8_t*>(&cl);
+    for (size_t i = 0; i < sizeof(CueList); ++i) {
+        p[i] = 0;
+    }
 }
 
 } // namespace
@@ -111,6 +139,29 @@ esp_err_t ConfigStore::load_scene(uint8_t index, SceneConfig& scene) {
                     }
                     return ESP_OK;
                 }
+            } else if (len == sizeof(SceneConfigV1)) {
+                auto v1 = std::make_unique<SceneConfigV1>();
+                err = nvs_get_blob(handle_, k, v1.get(), &len);
+                if (err == ESP_OK) {
+                    uint32_t expected_crc = esp_rom_crc32_le(0, (const uint8_t*)v1.get(), sizeof(SceneConfigV1) - sizeof(uint32_t));
+                    if (v1->checksum != expected_crc) {
+                        ESP_LOGW(TAG, "SceneConfigV1 %s CRC mismatch", k);
+                        return ESP_ERR_NVS_INVALID_STATE;
+                    }
+                    out.reset();
+                    safe_strncpy(out.name, v1->name, sizeof(out.name));
+                    out.global_brightness = v1->global_brightness;
+                    out.transition_ms = v1->transition_ms;
+                    out.schema_version = 2;
+                    for (uint8_t ch = 0; ch < 16; ++ch) {
+                        for (uint8_t l = 0; l < 3; ++l) {
+                            out.channels[ch].layers[l] = v1->zones[ch % 8].layers[l];
+                        }
+                    }
+                    out.checksum = calc_scene_crc(out);
+                    ESP_LOGI(TAG, "Migrated SceneConfigV1 (8-zone) %s to v2 (16-channel)", k);
+                    return ESP_OK;
+                }
             } else if (len == 128) {
                 // Legacy v0 SceneConfig (128 bytes)
                 struct OldZoneContent {
@@ -141,22 +192,24 @@ esp_err_t ConfigStore::load_scene(uint8_t index, SceneConfig& scene) {
                         return ESP_ERR_NVS_INVALID_STATE;
                     }
                     
-                    out = SceneConfig{};
+                    out.reset();
                     std::memcpy(out.name, old.name, sizeof(out.name) - 1);
                     out.name[sizeof(out.name) - 1] = '\0';
                     out.global_brightness = old.global_brightness;
                     out.transition_ms = old.transition_ms;
+                    out.schema_version = 2;
                     
-                    for (int i = 0; i < 8; ++i) {
-                        out.zones[i].layers[0].effect = old.zones[i].effect;
-                        out.zones[i].layers[0].primary_color = old.zones[i].primary_color;
-                        out.zones[i].layers[0].secondary_color = old.zones[i].secondary_color;
-                        out.zones[i].layers[0].speed_ms = old.zones[i].speed_ms;
-                        out.zones[i].layers[0].fx_param = old.zones[i].fx_param;
-                        out.zones[i].layers[0].palette_id = old.zones[i].palette_id;
-                        out.zones[i].layers[0].opacity = 255;
-                        out.zones[i].layers[0].blend_mode = BlendMode::Normal;
-                        out.zones[i].layers[0].enabled = true;
+                    for (int ch = 0; ch < 16; ++ch) {
+                        int i = ch % 8;
+                        out.channels[ch].layers[0].effect = old.zones[i].effect;
+                        out.channels[ch].layers[0].primary_color = old.zones[i].primary_color;
+                        out.channels[ch].layers[0].secondary_color = old.zones[i].secondary_color;
+                        out.channels[ch].layers[0].speed_ms = old.zones[i].speed_ms;
+                        out.channels[ch].layers[0].fx_param = old.zones[i].fx_param;
+                        out.channels[ch].layers[0].palette_id = old.zones[i].palette_id;
+                        out.channels[ch].layers[0].opacity = 255;
+                        out.channels[ch].layers[0].blend_mode = BlendMode::Normal;
+                        out.channels[ch].layers[0].enabled = true;
                     }
                     
                     out.checksum = calc_scene_crc(out);
@@ -199,6 +252,11 @@ esp_err_t ConfigStore::delete_scene(uint8_t index) {
     char key[12];
     make_key(key, sizeof(key), "scene", index);
 
+    char bak_key[16];
+    snprintf(bak_key, sizeof(bak_key), "scene_b_%u", index);
+    (void)nvs_erase_key(handle_, bak_key);
+    (void)delete_scene_motion(index);
+
     esp_err_t err = nvs_erase_key(handle_, key);
     if (err == ESP_ERR_NVS_NOT_FOUND) return ESP_OK;
     ESP_RETURN_ON_ERROR(err, TAG, "delete scene");
@@ -210,6 +268,193 @@ uint8_t ConfigStore::scene_count() {
     SceneConfig tmp;
     for (uint8_t i = 0; i < kMaxPresets; ++i) {
         if (load_scene(i, tmp) == ESP_OK) ++count;
+    }
+    return count;
+}
+
+// ── Scene Motion ────────────────────────────────────────────────────
+
+esp_err_t ConfigStore::save_scene_motion(uint8_t index, const SceneMotionConfig& motion) {
+    if (index >= kMaxPresets) return ESP_ERR_INVALID_ARG;
+
+    SceneMotionConfig to_save = motion;
+    to_save.schema_version = 1;
+    to_save.checksum = calc_motion_crc(to_save);
+
+    char key[16];
+    make_key(key, sizeof(key), "smot", index);
+
+    ESP_RETURN_ON_ERROR(
+        nvs_set_blob(handle_, key, &to_save, sizeof(SceneMotionConfig)),
+        TAG, "save scene motion primary"
+    );
+    ESP_RETURN_ON_ERROR(nvs_commit(handle_), TAG, "commit scene motion primary");
+
+    char bak_key[16];
+    snprintf(bak_key, sizeof(bak_key), "smot_b_%u", index);
+    esp_err_t bak_err = nvs_set_blob(handle_, bak_key, &to_save, sizeof(SceneMotionConfig));
+    if (bak_err == ESP_OK) {
+        (void)nvs_commit(handle_);
+    }
+
+    return ESP_OK;
+}
+
+esp_err_t ConfigStore::load_scene_motion(uint8_t index, SceneMotionConfig& motion) {
+    if (index >= kMaxPresets) return ESP_ERR_INVALID_ARG;
+    clear_scene_motion(motion);
+
+    char key[16];
+    make_key(key, sizeof(key), "smot", index);
+
+    size_t len = 0;
+    esp_err_t err = nvs_get_blob(handle_, key, nullptr, &len);
+    if (err == ESP_OK && len == sizeof(SceneMotionConfig)) {
+        err = nvs_get_blob(handle_, key, &motion, &len);
+        if (err == ESP_OK) {
+            if (motion.checksum != calc_motion_crc(motion)) {
+                ESP_LOGW(TAG, "Scene motion %s CRC mismatch, trying backup", key);
+                char bak_key[16];
+                snprintf(bak_key, sizeof(bak_key), "smot_b_%u", index);
+                len = sizeof(SceneMotionConfig);
+                err = nvs_get_blob(handle_, bak_key, &motion, &len);
+                if (err == ESP_OK && len == sizeof(SceneMotionConfig) && motion.checksum == calc_motion_crc(motion)) {
+                    (void)nvs_set_blob(handle_, key, &motion, sizeof(SceneMotionConfig));
+                    (void)nvs_commit(handle_);
+                    return ESP_OK;
+                }
+                clear_scene_motion(motion);
+                return ESP_ERR_NVS_INVALID_STATE;
+            }
+            return ESP_OK;
+        }
+    }
+
+    // Check backup
+    char bak_key[16];
+    snprintf(bak_key, sizeof(bak_key), "smot_b_%u", index);
+    len = 0;
+    if (nvs_get_blob(handle_, bak_key, nullptr, &len) == ESP_OK && len == sizeof(SceneMotionConfig)) {
+        if (nvs_get_blob(handle_, bak_key, &motion, &len) == ESP_OK && motion.checksum == calc_motion_crc(motion)) {
+            (void)nvs_set_blob(handle_, key, &motion, sizeof(SceneMotionConfig));
+            (void)nvs_commit(handle_);
+            return ESP_OK;
+        }
+    }
+
+    clear_scene_motion(motion);
+    return (err == ESP_OK) ? ESP_ERR_NOT_FOUND : err;
+}
+
+esp_err_t ConfigStore::delete_scene_motion(uint8_t index) {
+    if (index >= kMaxPresets) return ESP_ERR_INVALID_ARG;
+
+    char key[16];
+    make_key(key, sizeof(key), "smot", index);
+
+    char bak_key[16];
+    snprintf(bak_key, sizeof(bak_key), "smot_b_%u", index);
+    (void)nvs_erase_key(handle_, bak_key);
+
+    esp_err_t err = nvs_erase_key(handle_, key);
+    if (err == ESP_ERR_NVS_NOT_FOUND) return ESP_OK;
+    ESP_RETURN_ON_ERROR(err, TAG, "delete scene motion");
+    return nvs_commit(handle_);
+}
+
+// ── Cue Lists ───────────────────────────────────────────────────────
+
+esp_err_t ConfigStore::save_cue_list(uint8_t index, const CueList& list) {
+    if (index >= kMaxCueLists) return ESP_ERR_INVALID_ARG;
+
+    CueList to_save = list;
+    to_save.checksum = calc_cue_list_crc(to_save);
+
+    char key[16];
+    make_key(key, sizeof(key), "cuel", index);
+
+    ESP_RETURN_ON_ERROR(
+        nvs_set_blob(handle_, key, &to_save, sizeof(CueList)),
+        TAG, "save cue list primary"
+    );
+    ESP_RETURN_ON_ERROR(nvs_commit(handle_), TAG, "commit cue list primary");
+
+    char bak_key[16];
+    snprintf(bak_key, sizeof(bak_key), "cuel_b_%u", index);
+    esp_err_t bak_err = nvs_set_blob(handle_, bak_key, &to_save, sizeof(CueList));
+    if (bak_err == ESP_OK) {
+        (void)nvs_commit(handle_);
+    }
+
+    return ESP_OK;
+}
+
+esp_err_t ConfigStore::load_cue_list(uint8_t index, CueList& list) {
+    if (index >= kMaxCueLists) return ESP_ERR_INVALID_ARG;
+    clear_cue_list(list);
+
+    char key[16];
+    make_key(key, sizeof(key), "cuel", index);
+
+    size_t len = 0;
+    esp_err_t err = nvs_get_blob(handle_, key, nullptr, &len);
+    if (err == ESP_OK && len == sizeof(CueList)) {
+        err = nvs_get_blob(handle_, key, &list, &len);
+        if (err == ESP_OK) {
+            if (list.checksum != calc_cue_list_crc(list)) {
+                ESP_LOGW(TAG, "Cue list %s CRC mismatch, trying backup", key);
+                char bak_key[16];
+                snprintf(bak_key, sizeof(bak_key), "cuel_b_%u", index);
+                len = sizeof(CueList);
+                err = nvs_get_blob(handle_, bak_key, &list, &len);
+                if (err == ESP_OK && len == sizeof(CueList) && list.checksum == calc_cue_list_crc(list)) {
+                    (void)nvs_set_blob(handle_, key, &list, sizeof(CueList));
+                    (void)nvs_commit(handle_);
+                    return ESP_OK;
+                }
+                clear_cue_list(list);
+                return ESP_ERR_NVS_INVALID_STATE;
+            }
+            return ESP_OK;
+        }
+    }
+
+    char bak_key[16];
+    snprintf(bak_key, sizeof(bak_key), "cuel_b_%u", index);
+    len = 0;
+    if (nvs_get_blob(handle_, bak_key, nullptr, &len) == ESP_OK && len == sizeof(CueList)) {
+        if (nvs_get_blob(handle_, bak_key, &list, &len) == ESP_OK && list.checksum == calc_cue_list_crc(list)) {
+            (void)nvs_set_blob(handle_, key, &list, sizeof(CueList));
+            (void)nvs_commit(handle_);
+            return ESP_OK;
+        }
+    }
+
+    clear_cue_list(list);
+    return (err == ESP_OK) ? ESP_ERR_NOT_FOUND : err;
+}
+
+esp_err_t ConfigStore::delete_cue_list(uint8_t index) {
+    if (index >= kMaxCueLists) return ESP_ERR_INVALID_ARG;
+
+    char key[16];
+    make_key(key, sizeof(key), "cuel", index);
+
+    char bak_key[16];
+    snprintf(bak_key, sizeof(bak_key), "cuel_b_%u", index);
+    (void)nvs_erase_key(handle_, bak_key);
+
+    esp_err_t err = nvs_erase_key(handle_, key);
+    if (err == ESP_ERR_NVS_NOT_FOUND) return ESP_OK;
+    ESP_RETURN_ON_ERROR(err, TAG, "delete cue list");
+    return nvs_commit(handle_);
+}
+
+uint8_t ConfigStore::cue_list_count() {
+    uint8_t count = 0;
+    CueList tmp;
+    for (uint8_t i = 0; i < kMaxCueLists; ++i) {
+        if (load_cue_list(i, tmp) == ESP_OK && tmp.count > 0) ++count;
     }
     return count;
 }
@@ -244,22 +489,16 @@ bool ConfigStore::calculate_dmx_span(const FixtureConfig& fixture, uint32_t& req
         // Direct pixel map mode
         bool is_addressable = (fixture.profile == FixtureProfile::WS2812 || fixture.profile == FixtureProfile::SK6812);
         if (is_addressable && fixture.num_pixels == 0) {
-            // Addressable fixture with 0 pixels is disabled/unconfigured
             required_channels = 0;
             return false;
         }
         uint32_t ch_per_pixel = (fixture.profile == FixtureProfile::SK6812 || fixture.profile == FixtureProfile::PWM_RGBW) ? 4 : 3;
         required_channels = static_cast<uint32_t>(fixture.num_pixels) * ch_per_pixel;
     } else {
-        // Reject unknown dmx_mode values
         required_channels = 0;
         return false;
     }
 
-    // Check using:
-    // start = dmx_start_channel - 1
-    // end_exclusive = start + required_channels
-    // valid iff: dmx_start_channel >= 1 && end_exclusive <= 512
     uint32_t start = static_cast<uint32_t>(fixture.dmx_start_channel) - 1;
     uint32_t end_exclusive = start + required_channels;
 
@@ -270,7 +509,46 @@ bool ConfigStore::calculate_dmx_span(const FixtureConfig& fixture, uint32_t& req
     return true;
 }
 
+bool ConfigStore::calculate_dmx_span(const ChannelConfig& channel, uint8_t channel_index, uint32_t& required_channels) {
+    if (channel.dmx_start_channel == 0) {
+        required_channels = 0;
+        return true;
+    }
+
+    const auto hw = channel_hardware(channel_index);
+    if (hw.kind == ChannelKind::Pwm) {
+        // PWM channels on the PCB are single dimmer outputs: 1 DMX slot
+        required_channels = 1;
+    } else {
+        if (channel.dmx_mode == 0) {
+            // Wash mode
+            required_channels = (channel.addressable_type == AddressableType::SK6812) ? 4 : 3;
+        } else if (channel.dmx_mode == 1) {
+            // Direct pixel map mode
+            if (channel.pixel_count == 0) {
+                required_channels = 0;
+                return false;
+            }
+            uint32_t ch_per_pixel = (channel.addressable_type == AddressableType::SK6812) ? 4 : 3;
+            required_channels = static_cast<uint32_t>(channel.pixel_count) * ch_per_pixel;
+        } else {
+            required_channels = 0;
+            return false;
+        }
+    }
+
+    uint32_t start = static_cast<uint32_t>(channel.dmx_start_channel) - 1;
+    uint32_t end_exclusive = start + required_channels;
+
+    if (channel.dmx_start_channel < 1 || end_exclusive > 512) {
+        return false;
+    }
+
+    return true;
+}
+
 bool ConfigStore::is_fixture_configured(const FixtureConfig& fix, const DeviceConfig& cfg) {
+    (void)cfg;
     const bool is_addressable = (fix.profile == FixtureProfile::WS2812 || fix.profile == FixtureProfile::SK6812);
     const bool is_pwm = (fix.profile == FixtureProfile::PWM_Single ||
                          fix.profile == FixtureProfile::PWM_RGB ||
@@ -279,28 +557,14 @@ bool ConfigStore::is_fixture_configured(const FixtureConfig& fix, const DeviceCo
         return false;
     }
     if (is_addressable) {
-        // Addressable fixture: num_pixels == 0 -> disabled/unconfigured (Batch 6 Item 10)
         return fix.num_pixels > 0;
     }
-    // PWM fixture: physical outputs determined by profile channel count. num_pixels is irrelevant.
-    // Configured if dmx_start_channel > 0 or at least one referenced physical output is valid & enabled.
-    if (fix.dmx_start_channel > 0) {
-        return true;
-    }
-    uint8_t channels = (fix.profile == FixtureProfile::PWM_Single) ? 1 :
-                       (fix.profile == FixtureProfile::PWM_RGB ? 3 : 4);
-    for (uint8_t ch = 0; ch < channels; ++ch) {
-        uint8_t p_idx = fix.physical_output_index[ch];
-        if (p_idx < 16 && cfg.physical_outputs[p_idx].enabled) {
-            return true;
-        }
-    }
-    return false;
+    return fix.dmx_start_channel > 0;
 }
 
 bool ConfigStore::has_configured_fixtures(const DeviceConfig& config) {
-    for (uint8_t i = 0; i < 16; ++i) {
-        if (is_fixture_configured(config.fixtures[i], config)) {
+    for (uint8_t i = 0; i < kChannelCount; ++i) {
+        if (config.channels[i].enabled) {
             return true;
         }
     }
@@ -340,115 +604,30 @@ esp_err_t ConfigStore::validate_config(const DeviceConfig& config, ConfigValidat
                   (unsigned)config.protocol.zone_start_channel);
     }
 
-    // 3. Physical Outputs validation (Batch 6 Items 1 & 2: Enabled/Unused semantics)
-    for (uint8_t p = 0; p < 16; ++p) {
-        const auto& phys = config.physical_outputs[p];
-        if (!phys.enabled) {
-            // Output slot is unused; hardware_id / type fields do not need to be valid
-            continue;
-        }
-        if (phys.type == OutputType::RMT) {
-            if (phys.hardware_id >= MAX_RMT_LANES) {
-                add_error("physical_output[%u] RMT hardware_id (%u) >= %u",
-                          p, (unsigned)phys.hardware_id, (unsigned)MAX_RMT_LANES);
-            }
-        } else if (phys.type == OutputType::PWM) {
-            if (phys.hardware_id >= MAX_PWM_CHANNELS) {
-                add_error("physical_output[%u] PWM hardware_id (%u) >= %u",
-                          p, (unsigned)phys.hardware_id, (unsigned)MAX_PWM_CHANNELS);
-            }
-        } else {
-            add_error("physical_output[%u] unsupported output type (%u)", p, (unsigned)phys.type);
-        }
-    }
-
-    // 4. Fixture configuration and Anti-Aliasing Topology Validation (Batch 7 Items 1, 2, 3)
-    uint16_t rmt_lanes_claimed = 0;
-    uint16_t pwm_channels_claimed = 0;
-
-    for (uint8_t f = 0; f < 16; ++f) {
-        const auto& fix = config.fixtures[f];
-
-        // An unused fixture with default/stale fields must not fail validation
-        if (!is_fixture_configured(fix, config)) {
+    // 3. Channels validation (LG-023 16-Channel Hardware Model)
+    for (uint8_t ch = 0; ch < kChannelCount; ++ch) {
+        const auto& c = config.channels[ch];
+        if (!c.enabled) {
             continue;
         }
 
-        if (fix.zone_id >= 8) {
-            add_error("fixture[%u].zone_id (%u) must be < 8", (unsigned)f, (unsigned)fix.zone_id);
+        const auto hw = channel_hardware(ch);
+        if (hw.kind == ChannelKind::Addressable) {
+            if (c.pixel_count > MAX_PIXELS) {
+                add_error("channel[%u].pixel_count (%u) exceeds MAX_PIXELS (%u)",
+                          (unsigned)ch, (unsigned)c.pixel_count, (unsigned)MAX_PIXELS);
+            }
         }
 
-        bool is_addressable = (fix.profile == FixtureProfile::WS2812 || fix.profile == FixtureProfile::SK6812);
-        bool is_pwm = (fix.profile == FixtureProfile::PWM_Single ||
-                       fix.profile == FixtureProfile::PWM_RGB ||
-                       fix.profile == FixtureProfile::PWM_RGBW);
-
-        if (is_addressable) {
-            if (fix.num_pixels > MAX_PIXELS) {
-                add_error("fixture[%u].num_pixels (%u) exceeds MAX_PIXELS (%u)",
-                          (unsigned)f, (unsigned)fix.num_pixels, (unsigned)MAX_PIXELS);
-            }
-            uint8_t p_idx = fix.physical_output_index[0];
-            if (p_idx >= 16) {
-                add_error("fixture[%u].physical_output_index[0] (%u) must be < 16", (unsigned)f, (unsigned)p_idx);
-            } else {
-                const auto& phys = config.physical_outputs[p_idx];
-                if (!phys.enabled) {
-                    add_error("fixture[%u] references disabled physical_output[%u]", (unsigned)f, (unsigned)p_idx);
-                }
-                if (phys.type != OutputType::RMT) {
-                    add_error("fixture[%u] addressable profile requires RMT physical output, got %u",
-                              (unsigned)f, (unsigned)phys.type);
-                } else if (phys.hardware_id >= MAX_RMT_LANES) {
-                    add_error("fixture[%u] RMT hardware_id (%u) >= %u", (unsigned)f, (unsigned)phys.hardware_id, (unsigned)MAX_RMT_LANES);
-                } else {
-                    if (rmt_lanes_claimed & (1U << phys.hardware_id)) {
-                        add_error("fixture[%u] RMT lane %u already claimed by another fixture",
-                                  (unsigned)f, (unsigned)phys.hardware_id);
-                    }
-                    rmt_lanes_claimed |= (1U << phys.hardware_id);
-                }
-            }
-        } else if (is_pwm) {
-            uint8_t channels_used = (fix.profile == FixtureProfile::PWM_Single) ? 1 :
-                                    (fix.profile == FixtureProfile::PWM_RGB ? 3 : 4);
-            for (uint8_t ch = 0; ch < channels_used; ++ch) {
-                uint8_t p_idx = fix.physical_output_index[ch];
-                if (p_idx >= 16) {
-                    add_error("fixture[%u].physical_output_index[%u] (%u) must be < 16", (unsigned)f, (unsigned)ch, (unsigned)p_idx);
-                } else {
-                    const auto& phys = config.physical_outputs[p_idx];
-                    if (!phys.enabled) {
-                        add_error("fixture[%u] references disabled physical_output[%u]", (unsigned)f, (unsigned)p_idx);
-                    }
-                    if (phys.type != OutputType::PWM) {
-                        add_error("fixture[%u] PWM profile requires PWM physical output, got %u",
-                                  (unsigned)f, (unsigned)phys.type);
-                    } else if (phys.hardware_id >= MAX_PWM_CHANNELS) {
-                        add_error("fixture[%u] PWM hardware_id (%u) >= %u", (unsigned)f, (unsigned)phys.hardware_id, (unsigned)MAX_PWM_CHANNELS);
-                    } else {
-                        if (pwm_channels_claimed & (1U << phys.hardware_id)) {
-                            add_error("fixture[%u] PWM channel %u already claimed by another fixture",
-                                      (unsigned)f, (unsigned)phys.hardware_id);
-                        }
-                        pwm_channels_claimed |= (1U << phys.hardware_id);
-                    }
-                }
-            }
-        } else {
-            add_error("fixture[%u] unsupported profile (%u)", (unsigned)f, (unsigned)fix.profile);
-        }
-
-        // DMX patching checks for configured fixture (Batch 5 Item 9 & Batch 6 Item 11)
-        if (fix.dmx_start_channel > 0) {
+        if (c.dmx_start_channel > 0) {
             uint32_t req_channels = 0;
-            if (!calculate_dmx_span(fix, req_channels)) {
-                add_error("fixture[%u] DMX patch invalid (start=%u, mode=%u)",
-                          (unsigned)f, (unsigned)fix.dmx_start_channel, (unsigned)fix.dmx_mode);
+            if (!calculate_dmx_span(c, ch, req_channels)) {
+                add_error("channel[%u] DMX patch invalid (start=%u, mode=%u)",
+                          (unsigned)ch, (unsigned)c.dmx_start_channel, (unsigned)c.dmx_mode);
             }
-            if (fix.dmx_universe > 63999) {
-                add_error("fixture[%u].dmx_universe (%u) exceeds valid range 63999",
-                          (unsigned)f, (unsigned)fix.dmx_universe);
+            if (c.dmx_universe > 63999) {
+                add_error("channel[%u].dmx_universe (%u) exceeds valid range 63999",
+                          (unsigned)ch, (unsigned)c.dmx_universe);
             }
         }
     }
@@ -526,9 +705,8 @@ esp_err_t ConfigStore::save_config(const DeviceConfig& config) {
     return ESP_OK;
 }
 
-bool ConfigStore::migrate_v1_to_v2(const DeviceConfigV1& v1, DeviceConfig& v2, uint32_t* out_warning_count) {
-    auto def = std::make_unique<DeviceConfig>();
-    v2 = *def;
+bool ConfigStore::migrate_v1_to_v2(const DeviceConfigV1& v1, DeviceConfigV2& v2, uint32_t* out_warning_count) {
+    v2 = DeviceConfigV2{};
     v2.schema_version = 2;
     safe_strncpy(v2.device_name, v1.device_name, sizeof(v2.device_name));
     v2.active_preset_index = v1.active_preset_index;
@@ -581,7 +759,7 @@ bool ConfigStore::migrate_v1_to_v2(const DeviceConfigV1& v1, DeviceConfig& v2, u
         v2.fixtures[f].gamma_correction = v1.fixtures[f].gamma_correction;
         v2.fixtures[f].max_milliwatts = v1.fixtures[f].max_milliwatts;
 
-        // Count matching zones from legacy v1 fixture_mask (Batch 3 Item 11)
+        // Count matching zones from legacy v1 fixture_mask
         uint8_t match_count = 0;
         uint8_t first_zone = 0;
         for (uint8_t z = 0; z < 8; ++z) {
@@ -595,22 +773,16 @@ bool ConfigStore::migrate_v1_to_v2(const DeviceConfigV1& v1, DeviceConfig& v2, u
 
         if (match_count == 0) {
             v2.fixtures[f].zone_id = 0;
-            ESP_LOGW(TAG, "Migration: Fixture %u has 0 zone memberships in legacy config, assigning to zone 0", (unsigned)f);
             if (out_warning_count) (*out_warning_count)++;
         } else if (match_count == 1) {
             v2.fixtures[f].zone_id = first_zone;
         } else {
             v2.fixtures[f].zone_id = first_zone;
-            ESP_LOGW(TAG, "Migration: Fixture %u belonged to %u legacy zones (collapsed to first matching zone %u)",
-                     (unsigned)f, (unsigned)match_count, (unsigned)first_zone);
             if (out_warning_count) (*out_warning_count)++;
         }
 
-        // Validate fixture pixel limits (Batch 3 Item 10)
         bool is_addressable = (v2.fixtures[f].profile == FixtureProfile::WS2812 || v2.fixtures[f].profile == FixtureProfile::SK6812);
         if (is_addressable && v2.fixtures[f].num_pixels > MAX_PIXELS) {
-            ESP_LOGE(TAG, "Migration Error: Fixture %u num_pixels (%u) exceeds MAX_PIXELS (%u). Marking invalid.",
-                     (unsigned)f, (unsigned)v2.fixtures[f].num_pixels, (unsigned)MAX_PIXELS);
             v2.fixtures[f].num_pixels = 0;
             if (out_warning_count) (*out_warning_count)++;
         }
@@ -632,6 +804,109 @@ bool ConfigStore::migrate_v1_to_v2(const DeviceConfigV1& v1, DeviceConfig& v2, u
     return true;
 }
 
+bool ConfigStore::migrate_v2_to_v3(const DeviceConfigV2& v2, DeviceConfig& v3, uint32_t* out_warning_count) {
+    v3.reset();
+    v3.schema_version = 3;
+    safe_strncpy(v3.device_name, v2.device_name, sizeof(v3.device_name));
+    v3.active_preset_index = v2.active_preset_index;
+    v3.fallback_preset_index = v2.fallback_preset_index;
+    v3.watchdog_timeout_s = v2.watchdog_timeout_s;
+    v3.max_power_mw = v2.max_power_mw;
+    v3.gamma_x10 = v2.gamma_x10;
+    v3.soft_start_enabled = v2.soft_start_enabled;
+    v3.soft_start_ms = v2.soft_start_ms;
+    v3.mqtt_enabled = v2.mqtt_enabled;
+    safe_strncpy(v3.mqtt_broker, v2.mqtt_broker, sizeof(v3.mqtt_broker));
+    v3.mqtt_port = v2.mqtt_port;
+    safe_strncpy(v3.timezone, v2.timezone, sizeof(v3.timezone));
+    v3.sync_enabled = v2.sync_enabled;
+    v3.sync_role = v2.sync_role;
+    v3.sync_token = v2.sync_token;
+
+    safe_strncpy(v3.admin_token, v2.admin_token, sizeof(v3.admin_token));
+    safe_strncpy(v3.installer_token, v2.installer_token, sizeof(v3.installer_token));
+    safe_strncpy(v3.operator_token, v2.operator_token, sizeof(v3.operator_token));
+
+    safe_strncpy(v3.serial_number, v2.serial_number, sizeof(v3.serial_number));
+    safe_strncpy(v3.hardware_revision, v2.hardware_revision, sizeof(v3.hardware_revision));
+    safe_strncpy(v3.site_label, v2.site_label, sizeof(v3.site_label));
+    safe_strncpy(v3.group_label, v2.group_label, sizeof(v3.group_label));
+
+    // Initialize all 16 channels with default port labels
+    for (uint8_t ch = 0; ch < 16; ++ch) {
+        channel_port_name(ch, v3.channels[ch].name, sizeof(v3.channels[ch].name));
+        v3.channels[ch].enabled = false;
+        v3.channels[ch].max_brightness = 255;
+        v3.channels[ch].gamma_correction = true;
+    }
+
+    // Migrate groups from legacy zones
+    for (uint8_t z = 0; z < 8; ++z) {
+        safe_strncpy(v3.groups[z].name, v2.zones[z].name, sizeof(v3.groups[z].name));
+        v3.groups[z].role = v2.zones[z].role;
+        v3.groups[z].channel_mask = 0;
+        v3.groups[z].enabled = (v3.groups[z].name[0] != '\0');
+    }
+
+    // Migrate fixtures to channels
+    for (uint8_t f = 0; f < 16; ++f) {
+        const auto& fix = v2.fixtures[f];
+        bool is_addressable = (fix.profile == FixtureProfile::WS2812 || fix.profile == FixtureProfile::SK6812);
+        bool is_pwm = (fix.profile == FixtureProfile::PWM_Single ||
+                       fix.profile == FixtureProfile::PWM_RGB ||
+                       fix.profile == FixtureProfile::PWM_RGBW);
+        if (!is_addressable && !is_pwm) continue;
+
+        if (is_addressable) {
+            uint8_t p_idx = fix.physical_output_index[0];
+            uint8_t hw_id = (p_idx < 16) ? v2.physical_outputs[p_idx].hardware_id : (f % 8);
+            if (hw_id >= 8) hw_id = f % 8;
+            uint8_t ch = hw_id; // Channels 0..7 are A1..A8
+
+            v3.channels[ch].enabled = (fix.num_pixels > 0);
+            v3.channels[ch].addressable_type = (fix.profile == FixtureProfile::SK6812) ? AddressableType::SK6812 : AddressableType::WS2812;
+            v3.channels[ch].pixel_order = fix.pixel_order;
+            v3.channels[ch].pixel_count = fix.num_pixels;
+            v3.channels[ch].max_brightness = fix.max_brightness;
+            v3.channels[ch].gamma_correction = fix.gamma_correction;
+            v3.channels[ch].max_milliwatts = fix.max_milliwatts;
+            v3.channels[ch].dmx_universe = fix.dmx_universe;
+            v3.channels[ch].dmx_start_channel = fix.dmx_start_channel;
+            v3.channels[ch].dmx_mode = fix.dmx_mode;
+
+            if (fix.zone_id < 8) {
+                v3.groups[fix.zone_id].channel_mask |= (1U << ch);
+            }
+        } else if (is_pwm) {
+            uint8_t p_idx = fix.physical_output_index[0];
+            uint8_t hw_id = (p_idx < 16) ? v2.physical_outputs[p_idx].hardware_id : (f % 8);
+            if (hw_id >= 8) hw_id = f % 8;
+            uint8_t ch = 8 + hw_id; // Channels 8..15 are P1..P8
+
+            v3.channels[ch].enabled = true;
+            v3.channels[ch].max_brightness = fix.max_brightness;
+            v3.channels[ch].gamma_correction = fix.gamma_correction;
+            v3.channels[ch].max_milliwatts = fix.max_milliwatts;
+            v3.channels[ch].dmx_universe = fix.dmx_universe;
+            v3.channels[ch].dmx_start_channel = fix.dmx_start_channel;
+            v3.channels[ch].dmx_mode = 0;
+
+            if (fix.zone_id < 8) {
+                v3.groups[fix.zone_id].channel_mask |= (1U << ch);
+            }
+
+            if (fix.profile == FixtureProfile::PWM_RGB || fix.profile == FixtureProfile::PWM_RGBW) {
+                ESP_LOGW(TAG, "Legacy compound PWM fixture %u mapped to primary channel P%u", f, hw_id + 1);
+                if (out_warning_count) (*out_warning_count)++;
+            }
+        }
+    }
+
+    v3.protocol = v2.protocol;
+    v3.checksum = calc_device_crc(v3);
+    return true;
+}
+
 esp_err_t ConfigStore::load_config(DeviceConfig& config) {
     bool needs_persist = false;
 
@@ -647,16 +922,29 @@ esp_err_t ConfigStore::load_config(DeviceConfig& config) {
                         ESP_LOGW(TAG, "DeviceConfig %s CRC mismatch", k);
                         return ESP_ERR_NVS_INVALID_STATE;
                     }
-                    if (out.schema_version < 2) {
-                        ESP_LOGI(TAG, "Migrating DeviceConfig %s from in-memory schema v%u to v2", k, out.schema_version);
-                        out.schema_version = 2;
+                    if (out.schema_version < 3) {
+                        ESP_LOGI(TAG, "Migrating DeviceConfig %s from in-memory schema v%u to v3", k, out.schema_version);
+                        out.schema_version = 3;
                         out.checksum = calc_device_crc(out);
                         needs_persist = true;
                     }
                     return ESP_OK;
                 }
+            } else if (len == sizeof(DeviceConfigV2)) {
+                auto v2 = std::make_unique<DeviceConfigV2>();
+                err = nvs_get_blob(handle_, k, v2.get(), &len);
+                if (err == ESP_OK) {
+                    uint32_t expected_crc = esp_rom_crc32_le(0, (const uint8_t*)v2.get(), sizeof(DeviceConfigV2) - sizeof(uint32_t));
+                    if (v2->checksum != expected_crc) {
+                        ESP_LOGW(TAG, "Legacy DeviceConfigV2 %s CRC mismatch", k);
+                        return ESP_ERR_NVS_INVALID_STATE;
+                    }
+                    ESP_LOGI(TAG, "Migrating legacy v2 blob %s to v3", k);
+                    migrate_v2_to_v3(*v2, out);
+                    needs_persist = true;
+                    return ESP_OK;
+                }
             } else if (len == sizeof(DeviceConfigV1)) {
-                // Real schema migration: decode legacy v1 structure (Item 16)
                 auto v1 = std::make_unique<DeviceConfigV1>();
                 err = nvs_get_blob(handle_, k, v1.get(), &len);
                 if (err == ESP_OK) {
@@ -665,19 +953,16 @@ esp_err_t ConfigStore::load_config(DeviceConfig& config) {
                         ESP_LOGW(TAG, "Legacy DeviceConfigV1 %s CRC mismatch", k);
                         return ESP_ERR_NVS_INVALID_STATE;
                     }
-                    ESP_LOGI(TAG, "Explicitly migrating legacy v1 blob %s to v2", k);
-                    migrate_v1_to_v2(*v1, out);
-                    ConfigValidationResult vres;
-                    if (validate_config(out, &vres) != ESP_OK) {
-                        ESP_LOGE(TAG, "Migration validation failed (%u errors): %s",
-                                 (unsigned)vres.error_count, vres.first_error);
-                        return ESP_ERR_NVS_INVALID_STATE;
-                    }
+                    ESP_LOGI(TAG, "Migrating legacy v1 blob %s through v2 to v3", k);
+                    DeviceConfigV2 v2;
+                    migrate_v1_to_v2(*v1, v2);
+                    migrate_v2_to_v3(v2, out);
                     needs_persist = true;
+                    return ESP_OK;
                 }
             } else {
-                ESP_LOGW(TAG, "DeviceConfig size mismatch (len=%u, expected=%u or %u)",
-                         (unsigned)len, (unsigned)sizeof(DeviceConfig), (unsigned)sizeof(DeviceConfigV1));
+                ESP_LOGW(TAG, "DeviceConfig size mismatch (len=%u, expected=%u)",
+                         (unsigned)len, (unsigned)sizeof(DeviceConfig));
                 err = ESP_ERR_NVS_INVALID_LENGTH;
             }
         }
@@ -715,14 +1000,10 @@ esp_err_t ConfigStore::load_config(DeviceConfig& config) {
     }
 
     if (err == ESP_ERR_NVS_NOT_FOUND || err == ESP_ERR_NVS_INVALID_STATE || err == ESP_ERR_NVS_INVALID_LENGTH) {
-        auto def = std::make_unique<DeviceConfig>();
-        config = *def;
-        
+        config.reset();
         ESP_LOGI(TAG, "Default credentials active: Admin: %s", config.admin_token);
-
         populate_default_topology(config);
-
-        config.schema_version = 2;
+        config.schema_version = 3;
         config.checksum = calc_device_crc(config);
         save_config(config);
         return ESP_OK;
@@ -735,7 +1016,6 @@ esp_err_t ConfigStore::load_config(DeviceConfig& config) {
                 return s_err;
             }
 
-            // Verify persisted data by reloading it before reporting migration success (Batch 3 Item 11)
             auto verify_cfg = std::make_unique<DeviceConfig>();
             size_t verify_len = sizeof(DeviceConfig);
             esp_err_t v_err = nvs_get_blob(handle_, "device_cfg", verify_cfg.get(), &verify_len);
@@ -748,45 +1028,11 @@ esp_err_t ConfigStore::load_config(DeviceConfig& config) {
     }
 
     if (err == ESP_OK && !has_configured_fixtures(config)) {
-        ESP_LOGW(TAG, "No configured fixtures found in loaded config, forcing default hardware topology");
+        ESP_LOGW(TAG, "No configured channels found in loaded config, forcing default hardware topology");
         populate_default_topology(config);
         config.checksum = calc_device_crc(config);
         save_config(config);
         needs_persist = true;
-    }
-
-    if (err == ESP_OK) {
-        // Sanitize unreferenced PWM physical outputs so stale NVS defaults don't claim absent hardware
-        bool sanitized_any = false;
-        for (uint8_t p = 0; p < 16; ++p) {
-            if (config.physical_outputs[p].type == OutputType::PWM && config.physical_outputs[p].enabled) {
-                bool in_use = false;
-                for (uint8_t f = 0; f < 16; ++f) {
-                    const auto& fix = config.fixtures[f];
-                    if (fix.profile == FixtureProfile::PWM_Single ||
-                        fix.profile == FixtureProfile::PWM_RGB ||
-                        fix.profile == FixtureProfile::PWM_RGBW) {
-                        uint8_t chans = (fix.profile == FixtureProfile::PWM_Single) ? 1 :
-                                        (fix.profile == FixtureProfile::PWM_RGB ? 3 : 4);
-                        for (uint8_t ch = 0; ch < chans; ++ch) {
-                            if (fix.physical_output_index[ch] == p) {
-                                in_use = true;
-                                break;
-                            }
-                        }
-                    }
-                    if (in_use) break;
-                }
-                if (!in_use) {
-                    config.physical_outputs[p].enabled = false;
-                    sanitized_any = true;
-                }
-            }
-        }
-        if (sanitized_any) {
-            config.checksum = calc_device_crc(config);
-            save_config(config);
-        }
     }
 
     if (err == ESP_OK) {
@@ -800,37 +1046,33 @@ esp_err_t ConfigStore::load_config(DeviceConfig& config) {
 }
 
 void ConfigStore::populate_default_topology(DeviceConfig& config) {
-    uint8_t out_idx = 0;
-    
-    // 1. Setup RMT Addressable Pins
-    for (uint8_t i = 0; i < lg::board::kAledCount && out_idx < 16; ++i) {
-        config.physical_outputs[out_idx].type = OutputType::RMT;
-        config.physical_outputs[out_idx].hardware_id = i;
-        config.physical_outputs[out_idx].gpio_pin = lg::board::kAledPins[i];
-        config.physical_outputs[out_idx].enabled = true;
-        
-        // Setup matching fixture mapping
-        config.fixtures[i].profile = FixtureProfile::WS2812;
-        config.fixtures[i].pixel_order = PixelOrder::GRB;
-        config.fixtures[i].physical_output_index[0] = out_idx;
-        config.fixtures[i].num_pixels = 144; // Give it a sane default so it tests out of the box
-        config.fixtures[i].max_brightness = 255;
-        config.fixtures[i].gamma_correction = true;
-        config.fixtures[i].zone_id = 0; 
-        
-        out_idx++;
+    // 1. Setup 8 Addressable Channels (A1..A8)
+    for (uint8_t i = 0; i < 8; ++i) {
+        channel_port_name(i, config.channels[i].name, sizeof(config.channels[i].name));
+        config.channels[i].enabled = true;
+        config.channels[i].addressable_type = AddressableType::WS2812;
+        config.channels[i].pixel_order = PixelOrder::GRB;
+        config.channels[i].pixel_count = 144;
+        config.channels[i].max_brightness = 255;
+        config.channels[i].gamma_correction = true;
     }
-    
-    // 2. Setup PWM Pins (e.g. 8 channels)
-    // Map them in pairs of RGB or single channels if we wanted to
-    // For now we just map the physical outputs and let the fixture mapping be unconfigured
-    for (uint8_t i = 0; i < lg::board::kPwmCount && out_idx < 16; ++i) {
-        config.physical_outputs[out_idx].type = OutputType::PWM;
-        config.physical_outputs[out_idx].hardware_id = i;
-        config.physical_outputs[out_idx].gpio_pin = 0; // PWM uses PCA so GPIO pin might not matter as much, or mapping to PCA pin
-        config.physical_outputs[out_idx].enabled = false;
-        out_idx++;
+
+    // 2. Setup 8 PWM Channels (P1..P8)
+    for (uint8_t i = 8; i < 16; ++i) {
+        channel_port_name(i, config.channels[i].name, sizeof(config.channels[i].name));
+        config.channels[i].enabled = true;
+        config.channels[i].max_brightness = 255;
+        config.channels[i].gamma_correction = true;
     }
+
+    // 3. Default Groups (channel masks)
+    safe_strncpy(config.groups[0].name, "All Addressable", sizeof(config.groups[0].name));
+    config.groups[0].channel_mask = 0x00FF; // Channels 0..7
+    config.groups[0].enabled = true;
+
+    safe_strncpy(config.groups[1].name, "All PWM", sizeof(config.groups[1].name));
+    config.groups[1].channel_mask = 0xFF00; // Channels 8..15
+    config.groups[1].enabled = true;
 }
 
 // ── Sequences ───────────────────────────────────────────────────────
@@ -1006,13 +1248,15 @@ void ConfigStore::ensure_defaults() {
 
     // ── Product-Grade Default Scenes ──
     auto s_open = std::make_unique<SceneConfig>();
+    s_open->reset();
     safe_strncpy(s_open->name, "Store Open", sizeof(s_open->name));
     s_open->global_brightness = 180;
-    for (uint8_t i = 0; i < 8; ++i) {
-        s_open->zones[i].layers[0].effect = static_cast<uint8_t>(SignageEffect::Solid);
-        s_open->zones[i].layers[0].primary_color = {255, 200, 150};
-        s_open->zones[i].layers[0].enabled = true;
-        s_open->zones[i].layers[0].opacity = 255;
+    s_open->schema_version = 2;
+    for (uint8_t i = 0; i < 16; ++i) {
+        s_open->channels[i].layers[0].effect = static_cast<uint8_t>(SignageEffect::Solid);
+        s_open->channels[i].layers[0].primary_color = {255, 200, 150};
+        s_open->channels[i].layers[0].enabled = true;
+        s_open->channels[i].layers[0].opacity = 255;
     }
     esp_err_t err = save_scene(0, *s_open);
     if (err != ESP_OK) {
@@ -1020,13 +1264,15 @@ void ConfigStore::ensure_defaults() {
     }
 
     auto s_night = std::make_unique<SceneConfig>();
+    s_night->reset();
     safe_strncpy(s_night->name, "Night Mode", sizeof(s_night->name));
     s_night->global_brightness = 40;
-    for (uint8_t i = 0; i < 8; ++i) {
-        s_night->zones[i].layers[0].effect = static_cast<uint8_t>(SignageEffect::Breathe);
-        s_night->zones[i].layers[0].primary_color = {20, 40, 120};
-        s_night->zones[i].layers[0].enabled = true;
-        s_night->zones[i].layers[0].opacity = 255;
+    s_night->schema_version = 2;
+    for (uint8_t i = 0; i < 16; ++i) {
+        s_night->channels[i].layers[0].effect = static_cast<uint8_t>(SignageEffect::Breathe);
+        s_night->channels[i].layers[0].primary_color = {20, 40, 120};
+        s_night->channels[i].layers[0].enabled = true;
+        s_night->channels[i].layers[0].opacity = 255;
     }
     err = save_scene(1, *s_night);
     if (err != ESP_OK) {

@@ -132,6 +132,7 @@
   const navLinks = [
     { href: '/dashboard',              icon: '⬡',  label: 'Fleet' },
     { href: '/dashboard/scenes',       icon: '◆',  label: 'Scenes' },
+    { href: '/dashboard/cues',         icon: '⏯',  label: 'Cues' },
     { href: '/dashboard/timeline',     icon: '▤',  label: 'Timeline' },
     { href: '/dashboard/schedule',     icon: '◷',  label: 'Schedule' },
     { href: '/dashboard/channels',     icon: '◈',  label: 'Channels' },

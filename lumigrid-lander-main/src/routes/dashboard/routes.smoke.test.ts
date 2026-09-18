@@ -16,10 +16,12 @@ import DiagnosticsPage from './diagnostics/+page.svelte';
 import FactoryPage from './factory/+page.svelte';
 import PreviewPage from './preview/+page.svelte';
 import FirmwarePage from './firmware/+page.svelte';
+import CuesPage from './cues/+page.svelte';
 
 const routes = [
   { path: '/dashboard', component: DashboardPage, name: 'Dashboard Overview' },
   { path: '/dashboard/scenes', component: ScenesPage, name: 'Scenes' },
+  { path: '/dashboard/cues', component: CuesPage, name: 'Cues' },
   { path: '/dashboard/timeline', component: TimelinePage, name: 'Timeline' },
   { path: '/dashboard/schedule', component: SchedulePage, name: 'Schedule' },
   { path: '/dashboard/channels', component: ChannelsPage, name: 'Channels' },

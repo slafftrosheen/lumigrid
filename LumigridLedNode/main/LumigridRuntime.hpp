@@ -11,6 +11,7 @@
 #include "ArtnetDiscovery.hpp"
 #include "SacnReceiver.hpp"
 #include "DmxRouter.hpp"
+#include "CueRunner.hpp"
 #include "MqttService.hpp"
 #include "FactoryRunner.hpp"
 #include "FactoryApi.hpp"
@@ -123,6 +124,7 @@ public:
 
     OutputController& output() { return output_; }
     LightingRuntime& lighting() { return lighting_; }
+    CueRunner& cue_runner() { return cue_runner_; }
     FactoryRunner& factory_runner() { return factory_runner_; }
     DmxRouter& dmx_router() { return dmx_router_; }
     ConfigStore& config() { return config_; }
@@ -141,6 +143,7 @@ private:
     ArtnetDiscovery artnet_;
     SacnReceiver sacn_;
     LightingRuntime lighting_;
+    CueRunner cue_runner_;
     DmxRouter dmx_router_;
     ClockDiscipline clock_;
     Scheduler scheduler_;

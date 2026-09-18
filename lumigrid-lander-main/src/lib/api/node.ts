@@ -77,6 +77,10 @@ export interface CapabilitiesLimits {
   layersPerZone: number;
   presets: number;
   timelineSteps: number;
+  cueLists?: number;
+  cuesPerList?: number;
+  automationTracks?: number;
+  automationPoints?: number;
 }
 
 export interface CapabilitiesFeatures {
@@ -90,6 +94,9 @@ export interface CapabilitiesFeatures {
   ota: boolean;
   signedOta: boolean;
   backup: boolean;
+  sceneMotion?: boolean;
+  cueLists?: boolean;
+  transitionEngineV2?: boolean;
 }
 
 export interface CapabilitiesProtocols {

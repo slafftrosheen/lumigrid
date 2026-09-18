@@ -6,6 +6,7 @@
 #include <functional>
 #include "ControlSourceManager.hpp"
 #include "OutputController.hpp"
+#include "CommandReceipt.hpp"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -61,6 +62,7 @@ public:
         cmd.enabled = enabled;
         return enqueue(cmd);
     }
+    bool test_channel(uint8_t channel, const char* mode = "identify", uint32_t duration_ms = 3000);
     void set_stream_frame(const StreamFramePayload& payload, uint8_t brightness, uint32_t duration_ms);
     FactoryStatus status() const;
 
@@ -70,6 +72,7 @@ public:
 
     using StatusCallback = std::function<void()>;
     void set_status_callback(StatusCallback cb) { status_callback_ = std::move(cb); }
+    void set_command_journal(CommandJournal* journal) { journal_ = journal; }
 
 private:
     static void task_entry(void* argument);
@@ -86,6 +89,8 @@ private:
 
     ControlSourceManager& source_manager_;
     OutputController& controller_;
+    CommandJournal* journal_ = nullptr;
+    uint32_t pending_command_id_ = 0;
 
     QueueHandle_t queue_ = nullptr;
     SemaphoreHandle_t status_mutex_ = nullptr;

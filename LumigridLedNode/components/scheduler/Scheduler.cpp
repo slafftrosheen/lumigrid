@@ -12,8 +12,9 @@ namespace lg {
 Scheduler::Scheduler(
     ConfigStore& config,
     LightingRuntime& engine,
-    ClockDiscipline& clock
-) : config_(config), engine_(engine), clock_(clock) {}
+    ClockDiscipline& clock,
+    CueRunner* cue_runner
+) : config_(config), engine_(engine), clock_(clock), cue_runner_(cue_runner) {}
 
 esp_err_t Scheduler::start(const char* timezone) {
     if (running_) {
@@ -117,6 +118,9 @@ void Scheduler::task() {
 
         const uint64_t clock_ms = clock_.now_ms();
         refresh_config(clock_ms);
+        if (cue_runner_) {
+            cue_runner_->update(static_cast<uint32_t>(clock_ms));
+        }
         evaluate_calendar(calendar_, clock_ms);
 
         if (sequence_.bpm == 0 ||
@@ -183,6 +187,14 @@ void Scheduler::evaluate_calendar(
                 step_index = 255;
             }
             ESP_LOGI(TAG, "Calendar started sequence");
+        } else if (entry.action == CalendarAction::CueList) {
+            calendar_sequence_active_ = false;
+            engine_.release_control(ControlSource::Scheduler);
+            engine_.release_control(ControlSource::ManualOverride);
+            if (cue_runner_) {
+                cue_runner_->start(entry.cue_list_index, 0, static_cast<uint32_t>(clock_ms));
+                ESP_LOGI(TAG, "Calendar triggered cue list %u", entry.cue_list_index);
+            }
         } else {
             calendar_sequence_active_ = false;
             engine_.release_control(ControlSource::Scheduler);
@@ -248,8 +260,8 @@ void Scheduler::evaluate(const Sequence& seq, uint64_t clock_ms) {
 
         uint8_t preset_idx = track.steps[current_step].preset_index;
         SceneConfig p;
-        if (config_.load_scene(preset_idx, p) == ESP_OK) {
-            active_composite.zones[track.channel_id] = p.zones[track.channel_id];
+        if (config_.load_scene(preset_idx, p) == ESP_OK && track.channel_id < 16) {
+            active_composite.channels[track.channel_id] = p.channels[track.channel_id];
             active_composite.global_brightness = std::min(
                 active_composite.global_brightness,
                 p.global_brightness
