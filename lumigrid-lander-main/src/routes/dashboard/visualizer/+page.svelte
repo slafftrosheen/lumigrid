@@ -227,10 +227,10 @@
       <span class="fps-badge">{wsFps} fps</span>
     </div>
     <div class="viz-views">
-      <button class="view-btn" class:active={viewMode === 'lanes'} onclick={() => setView('lanes')}>Lanes</button>
-      <button class="view-btn" class:active={viewMode === 'channels'} onclick={() => setView('channels')}>A1–A8</button>
-      <button class="view-btn" class:active={viewMode === 'composite'} onclick={() => setView('composite')}>Composite</button>
-      <button class="view-btn" class:active={viewMode === 'dmx'} onclick={() => setView('dmx')}>DMX</button>
+      <button class="view-btn" class:active={viewMode === 'lanes'} aria-pressed={viewMode === 'lanes'} onclick={() => setView('lanes')}>Lanes</button>
+      <button class="view-btn" class:active={viewMode === 'channels'} aria-pressed={viewMode === 'channels'} onclick={() => setView('channels')}>A1–A8</button>
+      <button class="view-btn" class:active={viewMode === 'composite'} aria-pressed={viewMode === 'composite'} onclick={() => setView('composite')}>Composite</button>
+      <button class="view-btn" class:active={viewMode === 'dmx'} aria-pressed={viewMode === 'dmx'} onclick={() => setView('dmx')}>DMX</button>
     </div>
     <div class="viz-right">
       {#if !connected}
