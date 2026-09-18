@@ -1,11 +1,26 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { NODE_LIST_KEY, getSelectedNodeIp, readString, readStringList } from '$lib/auth/storage';
+  import {
+    getSelectedNodeIp,
+    getSavedNodes,
+    readString,
+    NODE_REGISTRY_CHANGED_EVENT,
+  } from '$lib/auth/storage';
   import { nodeStore } from '$lib/state/nodeStore';
   type Event={ts:number;online:boolean}; type DayData={date:string;onlineSecs:number;totalSecs:number;events:number};
-  let nodeIp=$state(''); let nodeList=$state<string[]>([]); let selected=$state(''); let days=$state<DayData[]>([]); let stats=$state({uptimePct:0,reboots:0,longestStreak:0});
+  let nodeList=$state<string[]>([]); let selected=$state(''); let days=$state<DayData[]>([]); let stats=$state({uptimePct:0,reboots:0,longestStreak:0});
   onMount(()=>{
-    nodeList=readStringList(NODE_LIST_KEY);
+    const syncNodeList = () => {
+      nodeList = getSavedNodes().map(node => node.ip);
+      if (selected && !nodeList.includes(selected)) {
+        selected = getSelectedNodeIp();
+        if (selected) compute(selected);
+        else { days=[]; stats={uptimePct:0,reboots:0,longestStreak:0}; }
+      }
+    };
+
+    syncNodeList();
+
     const unsub = nodeStore.subscribe(val => {
       const ip = val.nodeIp || getSelectedNodeIp();
       if (ip && ip !== selected) {
@@ -13,7 +28,14 @@
         compute(ip);
       }
     });
-    return unsub;
+
+    const onRegistryChanged = () => syncNodeList();
+    window.addEventListener(NODE_REGISTRY_CHANGED_EVENT, onRegistryChanged);
+
+    return () => {
+      unsub();
+      window.removeEventListener(NODE_REGISTRY_CHANGED_EVENT, onRegistryChanged);
+    };
   });
   function compute(ip:string){selected=ip;const raw=readString(`lg_uptime_${ip}`);if(!raw){days=[];stats={uptimePct:0,reboots:0,longestStreak:0};return;}let events:Event[]=[];try{events=JSON.parse(raw)}catch{days=[];return;}const now=Date.now(),dayMap:Record<string,DayData>={};for(let i=0;i<91;i++){const d=new Date(now-i*86400000),key=d.toISOString().slice(0,10);dayMap[key]={date:key,onlineSecs:0,totalSecs:86400,events:0};}let reboots=0,prevOnline=true;for(let e=0;e<events.length;e++){const ev=events[e],next=events[e+1];if(!ev.online&&prevOnline)reboots++;prevOnline=ev.online;if(!ev.online)continue;let t=ev.ts;const end=next?next.ts:now;while(t<end){const d=new Date(t),key=d.toISOString().slice(0,10);if(dayMap[key]){const dayEnd=new Date(key+'T23:59:59.999Z').getTime();dayMap[key].onlineSecs+=(Math.min(end,dayEnd+1)-t)/1000;dayMap[key].events++;}t=new Date(d.toISOString().slice(0,10)+'T00:00:00Z').getTime()+86400000;}}const dayArr=Object.values(dayMap).sort((a,b)=>a.date.localeCompare(b.date));days=dayArr;const totalOn=dayArr.reduce((s,d)=>s+d.onlineSecs,0),total=dayArr.reduce((s,d)=>s+d.totalSecs,0);let maxStreak=0,cur=0;for(const d of dayArr){if(d.onlineSecs/86400>.5){cur++;maxStreak=Math.max(maxStreak,cur)}else cur=0}stats={uptimePct:total?totalOn/total*100:0,reboots,longestStreak:maxStreak};}
   const CELL=14,GAP=2,COLS=13,ROWS=7,W=COLS*(CELL+GAP),H=ROWS*(CELL+GAP); function cellColor(d:DayData){const pct=d.onlineSecs/86400;if(pct<.01)return'rgba(255,255,255,.05)';if(pct<.5)return'rgba(255,45,85,.25)';if(pct<.8)return'rgba(255,45,85,.55)';if(pct<.95)return'rgba(255,45,85,.80)';return'#ff2d55'} function cellTitle(d:DayData){return`${d.date}: ${((d.onlineSecs/86400)*100).toFixed(1)}% uptime (${d.events} events)`}
