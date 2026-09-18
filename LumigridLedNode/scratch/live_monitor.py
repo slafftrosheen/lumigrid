@@ -1,27 +1,38 @@
 import serial
+import serial.tools.list_ports
 import time
 import sys
 
-port = "COM7"
+port = 'COM7'
 baud = 115200
 
-print(f"Opening {port} at {baud} baud...", flush=True)
+print(f"Monitoring {port} (will auto-reconnect on USB unplug/replug)...", flush=True)
 
-while True:
+s = None
+t_start = time.time()
+while time.time() - t_start < 120:
+    if s is None:
+        try:
+            s = serial.Serial(port, baud, timeout=0.5)
+            print(f"Connected to {port} at {baud} baud.", flush=True)
+        except Exception:
+            time.sleep(0.5)
+            continue
+    
     try:
-        ser = serial.Serial(port, baud, timeout=0.1)
-        print(f"Connected to {port}! Waiting for ESP32 boot log...", flush=True)
-        print(">>> PLEASE PRESS THE 'EN' (OR 'RST') BUTTON ON THE ESP32 NOW <<<", flush=True)
-        
-        while True:
-            n = ser.in_waiting
-            if n > 0:
-                data = ser.read(n)
-                sys.stdout.write(data.decode('utf-8', errors='replace'))
-                sys.stdout.flush()
-            time.sleep(0.02)
-    except serial.SerialException as e:
-        print(f"Port notice: {e}. Retrying in 1s...", flush=True)
-        time.sleep(1.0)
-    except KeyboardInterrupt:
-        break
+        line = s.readline()
+        if line:
+            text = line.decode('utf-8', errors='replace').rstrip()
+            print(text, flush=True)
+    except Exception as e:
+        print(f"Port disconnected: {e}", flush=True)
+        try:
+            s.close()
+        except Exception:
+            pass
+        s = None
+        time.sleep(0.5)
+
+if s:
+    s.close()
+print("Monitor ended.", flush=True)
