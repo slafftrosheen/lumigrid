@@ -330,7 +330,7 @@ export function getSavedNodes(): SavedNodeInfo[] {
 }
 
 export function addSavedNode(ip: string, name?: string): void {
-  const cleanIp = ip.trim();
+  const cleanIp = normalizeNodeAddress(ip);
   if (!cleanIp) return;
 
   const id = `node-${cleanIp.replace(/\./g, '-')}`;
