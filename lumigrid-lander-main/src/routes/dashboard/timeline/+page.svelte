@@ -155,6 +155,8 @@
   });
 </script>
 
+<svelte:head><title>Timeline Studio — LumiGrid</title></svelte:head>
+
 {#if !nodeIp}
   <div class="tl-empty">
     <p>No node selected. Select an active node in the header or fleet list.</p>
