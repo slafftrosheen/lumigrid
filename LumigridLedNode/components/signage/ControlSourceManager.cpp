@@ -41,9 +41,9 @@ void ControlSourceManager::evaluate_priority(uint32_t current_ms) {
             if (states_[i].expires_ms != 0 && current_ms >= states_[i].expires_ms) {
                 states_[i].active = false; // Lease expired
             } else {
-                // Converged control model: source is dominant owner if it actively claims at least one zone or fixture
+                // Converged control model: source is dominant owner if it actively claims at least one legacy zone or physical channel
                 const bool claims_scope = ((states_[i].zone_mask != 0 && states_[i].layer_mask != 0) ||
-                                           states_[i].fixture_mask != 0);
+                                           states_[i].channel_mask != 0);
                 if (claims_scope) {
                     dominant = src;
                     break;
@@ -61,7 +61,7 @@ void ControlSourceManager::evaluate_priority(uint32_t current_ms) {
 
 bool ControlSourceManager::acquire(ControlSource source, uint32_t lease_ms,
                                     uint8_t zone_mask, uint8_t layer_mask,
-                                    uint16_t fixture_mask,
+                                    uint16_t channel_mask,
                                     bool takeover) {
     if (source == ControlSource::Idle) return true;
     if (!mutex_) return false;
@@ -76,7 +76,7 @@ bool ControlSourceManager::acquire(ControlSource source, uint32_t lease_ms,
     states_[index].expires_ms = (lease_ms == 0) ? 0 : (now + lease_ms);
     states_[index].zone_mask = zone_mask;
     states_[index].layer_mask = layer_mask;
-    states_[index].fixture_mask = fixture_mask;
+    states_[index].channel_mask = channel_mask;
     states_[index].takeover = takeover;
     
     evaluate_priority(now);
