@@ -509,9 +509,9 @@
   }
 
   .toast-pill {
-    background: rgba(0, 240, 255, 0.15);
-    border: 1px solid rgba(0, 240, 255, 0.4);
-    color: #00f0ff;
+    background: rgba(var(--dash-accent-rgb), 0.15);
+    border: 1px solid rgba(var(--dash-accent-rgb), 0.4);
+    color: var(--dash-accent);
     padding: 6px 14px;
     border-radius: 20px;
     font-size: 0.85rem;
@@ -528,8 +528,8 @@
 
   /* Monitor Card */
   .monitor-card {
-    background: linear-gradient(180deg, rgba(15, 23, 42, 0.85) 0%, rgba(10, 15, 30, 0.9) 100%);
-    border: 1px solid rgba(0, 240, 255, 0.2);
+    background: linear-gradient(180deg, rgba(29, 29, 31, 0.86) 0%, rgba(15, 15, 17, 0.92) 100%);
+    border: 1px solid var(--dash-border);
     box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
     display: flex;
     flex-direction: column;
@@ -562,13 +562,13 @@
   }
 
   .status-dot.holding {
-    background: #3b82f6;
-    box-shadow: 0 0 10px #3b82f6;
+    background: var(--dash-accent-hover);
+    box-shadow: 0 0 10px var(--dash-accent-hover);
   }
 
   .status-dot.fading {
-    background: #00f0ff;
-    box-shadow: 0 0 10px #00f0ff;
+    background: var(--dash-accent);
+    box-shadow: 0 0 10px var(--dash-accent);
   }
 
   .status-label {
@@ -582,9 +582,9 @@
   .active-list-badge {
     font-family: monospace;
     font-size: 0.75rem;
-    color: #00f0ff;
-    background: rgba(0, 240, 255, 0.1);
-    border: 1px solid rgba(0, 240, 255, 0.3);
+    color: var(--dash-accent);
+    background: rgba(var(--dash-accent-rgb), 0.1);
+    border: 1px solid rgba(var(--dash-accent-rgb), 0.3);
     padding: 2px 6px;
     border-radius: 4px;
   }
@@ -598,7 +598,7 @@
   }
 
   .cue-idx.current {
-    color: #00f0ff;
+    color: var(--dash-accent);
     font-size: 1.1rem;
   }
 
@@ -622,7 +622,7 @@
 
   .progress-bar {
     height: 100%;
-    background: linear-gradient(90deg, #00f0ff 0%, #3b82f6 100%);
+    background: linear-gradient(90deg, var(--dash-accent) 0%, var(--dash-accent-hover) 100%);
     transition: width 0.1s linear;
   }
 
@@ -674,9 +674,9 @@
   }
 
   .btn-transport:hover {
-    background: rgba(0, 240, 255, 0.15);
-    border-color: #00f0ff;
-    color: #00f0ff;
+    background: rgba(var(--dash-accent-rgb), 0.15);
+    border-color: var(--dash-accent);
+    color: var(--dash-accent);
   }
 
   .btn-divider {
@@ -701,7 +701,7 @@
   }
 
   .tbar-slider {
-    accent-color: #00f0ff;
+    accent-color: var(--dash-accent);
     cursor: pointer;
   }
 
@@ -739,9 +739,9 @@
   }
 
   .btn-icon {
-    background: rgba(0, 240, 255, 0.1);
-    border: 1px solid rgba(0, 240, 255, 0.3);
-    color: #00f0ff;
+    background: rgba(var(--dash-accent-rgb), 0.1);
+    border: 1px solid rgba(var(--dash-accent-rgb), 0.3);
+    color: var(--dash-accent);
     width: 26px;
     height: 26px;
     border-radius: 4px;
@@ -778,8 +778,8 @@
   }
 
   .list-nav-item.selected {
-    background: rgba(0, 240, 255, 0.1);
-    border-color: rgba(0, 240, 255, 0.4);
+    background: rgba(var(--dash-accent-rgb), 0.1);
+    border-color: rgba(var(--dash-accent-rgb), 0.4);
   }
 
   .list-nav-info {
@@ -852,8 +852,8 @@
   }
 
   .btn-save {
-    background: #00f0ff;
-    color: #000;
+    background: var(--dash-accent);
+    color: #fff;
     border: none;
     font-weight: 700;
     padding: 8px 18px;
@@ -901,7 +901,7 @@
   }
 
   .cue-row.active-row {
-    background: rgba(0, 240, 255, 0.08);
+    background: rgba(var(--dash-accent-rgb), 0.08);
   }
 
   .cue-num {
@@ -921,8 +921,8 @@
   }
 
   .jump-btn:hover {
-    border-color: #00f0ff;
-    color: #00f0ff;
+    border-color: var(--dash-accent);
+    color: var(--dash-accent);
   }
 
   .table-input, .table-select {
@@ -978,8 +978,8 @@
   }
 
   .icon-btn:hover:not(:disabled) {
-    border-color: #00f0ff;
-    color: #00f0ff;
+    border-color: var(--dash-accent);
+    color: var(--dash-accent);
   }
 
   .icon-btn.remove:hover {
@@ -1000,7 +1000,7 @@
   .btn-add-cue {
     background: rgba(255, 255, 255, 0.05);
     border: 1px dashed rgba(255, 255, 255, 0.2);
-    color: #00f0ff;
+    color: var(--dash-accent);
     padding: 8px 16px;
     border-radius: 6px;
     cursor: pointer;
@@ -1010,8 +1010,8 @@
   }
 
   .btn-add-cue:hover:not(:disabled) {
-    background: rgba(0, 240, 255, 0.1);
-    border-color: #00f0ff;
+    background: rgba(var(--dash-accent-rgb), 0.1);
+    border-color: var(--dash-accent);
   }
 
   .empty-state, .loading-state {
@@ -1028,8 +1028,8 @@
   .spinner {
     width: 32px;
     height: 32px;
-    border: 3px solid rgba(0, 240, 255, 0.2);
-    border-top-color: #00f0ff;
+    border: 3px solid rgba(var(--dash-accent-rgb), 0.2);
+    border-top-color: var(--dash-accent);
     border-radius: 50%;
     animation: spin 0.8s linear infinite;
     margin: 0 auto 12px auto;
