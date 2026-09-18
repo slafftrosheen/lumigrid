@@ -114,6 +114,13 @@ describe('dashboard routes smoke & contract tests', () => {
     }
   });
 
+  it('keeps destructive maintenance workspaces admin-only in navigation', () => {
+    const layout = sourceFor('./+layout.svelte');
+    expect(layout).toMatch(/href:\s*'\/dashboard\/factory'[\s\S]{0,120}adminOnly:\s*true/);
+    expect(layout).toMatch(/href:\s*'\/dashboard\/firmware'[\s\S]{0,120}adminOnly:\s*true/);
+    expect(layout).toContain('Admin access required');
+  });
+
   it('does not use native browser dialogs in operator routes', () => {
     const nativeDialogCall = /\b(?:confirm|prompt|alert)\s*\(/;
     for (const file of routeSourceFiles) {
