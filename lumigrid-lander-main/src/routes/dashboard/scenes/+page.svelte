@@ -1419,10 +1419,11 @@
   }
 
   .motion-tracks-card {
-    background: rgba(15, 23, 42, 0.5);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 8px;
-    padding: 12px;
+    background: var(--dash-surface);
+    border: 1px solid var(--dash-border);
+    border-radius: var(--dash-radius-lg);
+    padding: 1rem;
+    box-shadow: var(--dash-shadow);
   }
 
   .motion-header {
@@ -1452,8 +1453,8 @@
     background: rgba(var(--dash-accent-rgb), 0.1);
     border: 1px solid rgba(var(--dash-accent-rgb), 0.3);
     color: var(--dash-accent);
-    border-radius: 4px;
-    padding: 4px 10px;
+    border-radius: 8px;
+    padding: 6px 11px;
     font-size: 0.8rem;
     cursor: pointer;
     transition: all 0.15s ease;
