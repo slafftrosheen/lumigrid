@@ -9,6 +9,8 @@
     renameSavedNode,
     removeSavedNode,
     normalizeNodeAddress,
+    readString,
+    AUTH_ROLE_KEY,
     type SavedNodeInfo,
   } from '$lib/auth/storage';
   import {
@@ -41,6 +43,7 @@
   let actionToast = $state('');
   let actionLoading = $state(false);
   let localBri = $state(128);
+  let isAdmin = $state(false);
 
   // Fleet management states
   let activeTab = $state<'node' | 'fleet'>('node');
@@ -246,6 +249,7 @@
 
   onMount(() => {
     nodeIp = getSelectedNodeIp();
+    isAdmin = readString(AUTH_ROLE_KEY) === 'admin';
     refreshFleetList();
 
     if (!nodeIp && savedFleet.length > 0) {
@@ -617,13 +621,15 @@
           </span>
         </a>
 
-        <a href="/dashboard/factory" class="action-btn nav-action">
-          <span class="btn-icon">⚙</span>
-          <span class="btn-text">
-            <strong>Factory Console</strong>
-            <small>Burn-in & bench tests</small>
-          </span>
-        </a>
+        {#if isAdmin}
+          <a href="/dashboard/factory" class="action-btn nav-action">
+            <span class="btn-icon">⚙</span>
+            <span class="btn-text">
+              <strong>Factory Console</strong>
+              <small>Burn-in & bench tests</small>
+            </span>
+          </a>
+        {/if}
 
         <a href="/dashboard/diagnostics" class="action-btn nav-action">
           <span class="btn-icon">⚕</span>
