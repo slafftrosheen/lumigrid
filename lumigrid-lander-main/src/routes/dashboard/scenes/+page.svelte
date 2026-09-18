@@ -142,14 +142,14 @@
     editScene = dup;
     savedSnapshot = null;
     selectedIdx = slot;
-    toastMsg(`Duplicated to slot ${slot}`);
+    toastMsg(`Duplicated to scene slot ${slot + 1}`);
   }
 
   function revertEdits() {
     if (!editScene) return;
     if (savedSnapshot) {
       editScene = clonePreset(savedSnapshot);
-      toastMsg('Reverted edits to saved preset');
+      toastMsg('Reverted edits to saved scene');
     } else if (selectedIdx !== null) {
       editScene = createDefaultPreset(selectedIdx);
       toastMsg('Reset to default scene');
@@ -223,7 +223,7 @@
       activationGeneration = 0;
       activationPreset = -1;
       sceneApplyPending = false;
-      toastMsg(`Scene ${committedPreset} committed to hardware`);
+      toastMsg(`Scene ${committedPreset + 1} committed to hardware`);
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
       activating = false;
@@ -361,7 +361,7 @@
             onclick={() => selectPreset(i)}
             type="button"
           >
-            <span class="lib-idx">{i.toString().padStart(2, '0')}</span>
+            <span class="lib-idx">{(i + 1).toString().padStart(2, '0')}</span>
             <span class="lib-name">{preset ? preset.name : '— empty slot —'}</span>
             {#if preset}
               <span class="lib-bri" title="Global brightness">{preset.globalBrightness}</span>
@@ -387,13 +387,13 @@
                 maxlength={23}
                 placeholder="Scene name"
               />
-              <span class="ed-slot">Slot {editScene.index}</span>
+              <span class="ed-slot">Slot {editScene.index + 1}</span>
             </div>
 
             <!-- State Badges: EDITED / SAVED / ACTIVE -->
             <div class="status-badges">
               {#if isActive}
-                <span class="badge badge-active" title="Preset is currently live on the physical node">
+                <span class="badge badge-active" title="Scene is currently live on the physical node">
                   <span class="pulse-dot"></span> ACTIVE
                 </span>
               {/if}
@@ -402,7 +402,7 @@
                   EDITED
                 </span>
               {:else if savedSnapshot}
-                <span class="badge badge-saved" title="Preset matches persisted node storage">
+                <span class="badge badge-saved" title="Scene matches persisted node storage">
                   SAVED
                 </span>
               {:else}
