@@ -624,17 +624,30 @@
 
       <!-- Confirmation Modal -->
       {#if restoreConfirmOpen}
-        <div class="modal-backdrop">
-          <div class="modal-card">
-            <h3>⚠️ Confirm Destructive Restore</h3>
+        <div
+          class="modal-backdrop"
+          onclick={() => (restoreConfirmOpen = false)}
+          role="presentation"
+        >
+          <div
+            class="modal-card"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="restore-dialog-title"
+            tabindex="-1"
+            onclick={(e) => e.stopPropagation()}
+            onkeydown={(e) => { if (e.key === 'Escape') restoreConfirmOpen = false; }}
+          >
+            <h3 id="restore-dialog-title">⚠️ Confirm Destructive Restore</h3>
             <p>
-              Restoring this backup will replace current configuration and presets on node <strong>{selectedNodeIp}</strong>. Any unsaved edits will be overwritten.
+              Restoring this backup will replace current configuration and scenes on node <strong>{selectedNodeIp}</strong>. Any unsaved edits will be overwritten.
             </p>
             <div class="modal-actions">
               <button
                 class="btn-secondary"
                 onclick={() => (restoreConfirmOpen = false)}
                 type="button"
+                autofocus
               >
                 Cancel
               </button>
