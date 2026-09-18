@@ -258,6 +258,7 @@
       <button
         class="mode-btn"
         class:active={activeTab === 'node'}
+        aria-pressed={activeTab === 'node'}
         onclick={() => (activeTab = 'node')}
         type="button"
       >
@@ -270,6 +271,7 @@
       <button
         class="mode-btn"
         class:active={activeTab === 'fleet'}
+        aria-pressed={activeTab === 'fleet'}
         onclick={() => (activeTab = 'fleet')}
         type="button"
       >
