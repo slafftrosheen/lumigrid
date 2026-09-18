@@ -184,8 +184,8 @@
       maxBrightness: ch.maxBrightness ?? 255,
       gammaCorrection: ch.gammaCorrection ?? true,
       powerLimitW: ch.maxMilliwatts ? Math.round(ch.maxMilliwatts / 1000) : 0,
-      dmxUniverse: ch.dmxUniverse || 1,
-      dmxStartChannel: ch.dmxStartChannel || (ch.index + 1),
+      dmxUniverse: ch.dmxUniverse ?? 0,
+      dmxStartChannel: ch.dmxStartChannel ?? 0,
       dmxMode: ch.dmxMode || 0,
       groupBits: gBits,
       pwmLevel: pwmLevels[ch.index] ?? 0,
@@ -619,7 +619,7 @@
               <span class="field-label">DMX Universe</span>
               <input
                 type="number"
-                min="1"
+                min="0"
                 max="63999"
                 bind:value={editForm.dmxUniverse}
                 class="text-input"
@@ -630,11 +630,12 @@
               <span class="field-label">{selectedChannel.kind === 'pwm' ? 'DMX Channel' : 'DMX Start Channel'}</span>
               <input
                 type="number"
-                min="1"
+                min="0"
                 max="512"
                 bind:value={editForm.dmxStartChannel}
                 class="text-input"
               />
+              <span class="input-hint">0 = unpatched</span>
             </label>
 
             {#if selectedChannel.kind === 'addressable'}
