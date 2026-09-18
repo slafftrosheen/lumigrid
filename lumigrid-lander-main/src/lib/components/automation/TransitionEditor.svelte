@@ -121,7 +121,11 @@
     font-size: 0.85rem;
     width: 65px;
     padding: 6px 0;
-    outline: none;
+  }
+
+  .input-number:focus-visible {
+    outline: 2px solid var(--dash-accent);
+    outline-offset: 2px;
   }
 
   .unit {
@@ -137,7 +141,12 @@
     color: #fff;
     padding: 6px 8px;
     font-size: 0.85rem;
-    outline: none;
+  }
+
+  .select-curve:focus-visible {
+    outline: 2px solid var(--dash-accent);
+    outline-offset: 2px;
+    border-color: var(--dash-accent);
   }
 
   .field-preview {
