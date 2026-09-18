@@ -298,11 +298,11 @@
     <div>
       <div class="title-row">
         <h1>Hardware Outputs</h1>
-        <span class="board-badge">16-Channel Hardware Truth</span>
+        <span class="board-badge">8 Addressable · 8 PWM</span>
       </div>
       <p class="sub">
         {nodeIp ? `Node: ${nodeIp}` : 'No node selected'}
-        · Permanent PCB layout: 8 Addressable lanes + 8 PWM dimmers
+        · Physical controller outputs · configure exactly what is connected
       </p>
     </div>
     <div class="header-actions">
@@ -328,16 +328,16 @@
       <div class="bank-header">
         <div class="bank-title-group">
           <span class="bank-dot addr"></span>
-          <h2>ADDRESSABLE</h2>
+          <h2>ADDRESSABLE OUTPUTS</h2>
           <span class="bank-count">{addressableActiveCount} / 8 active</span>
         </div>
-        <span class="bank-hint">RMT hardware lanes · WS2812 / SK6812</span>
+        <span class="bank-hint">Digital LED strips · WS2812 / SK6812</span>
       </div>
 
       <div class="connector-grid">
         {#each addressableChannels as ch (ch.index)}
           {@const isTesting = testingChannel === ch.index}
-          {@const statusText = !ch.configured ? 'UNUSED' : ch.enabled ? 'ONLINE' : 'DISABLED'}
+          {@const statusText = !ch.configured ? 'UNUSED' : ch.enabled ? 'ACTIVE' : 'DISABLED'}
           {@const statusClass = !ch.configured ? 'unused' : ch.enabled ? 'online' : 'disabled'}
           <div
             class="connector-card addr"
@@ -355,7 +355,7 @@
 
             <div class="card-body">
               <div class="ch-name" title={ch.name || 'Unassigned'}>
-                {ch.name || '—'}
+                {ch.name || 'Unassigned'}
               </div>
               <div class="ch-meta">
                 {#if ch.configured && ch.addressable}
@@ -392,7 +392,7 @@
           <h2>PWM CHANNELS</h2>
           <span class="bank-count">{pwmActiveCount} / 8 active</span>
         </div>
-        <span class="bank-hint">PCA9685 12-bit independent dimmer channels</span>
+        <span class="bank-hint">Independent 12-bit dimmer outputs</span>
       </div>
 
       <div class="connector-grid">
@@ -725,6 +725,72 @@
 </div>
 
 <style>
+  .bank-section {
+    position: relative;
+    overflow: hidden;
+    background: linear-gradient(180deg, rgba(29,29,31,.72), rgba(18,18,20,.74));
+    border: 1px solid var(--dash-border);
+    border-radius: var(--dash-radius-xl);
+    padding: 1rem;
+    box-shadow: var(--dash-shadow);
+  }
+  .bank-section::before {
+    content: "";
+    position: absolute;
+    inset: 0 0 auto;
+    height: 1px;
+    background: linear-gradient(90deg, rgba(var(--dash-accent-rgb),.55), transparent 42%);
+    pointer-events: none;
+  }
+  .bank-section + .bank-section::before {
+    background: linear-gradient(90deg, color-mix(in oklab, var(--dash-warm) 60%, transparent), transparent 42%);
+  }
+  .connector-card {
+    isolation: isolate;
+    min-height: 172px;
+    background: linear-gradient(180deg, rgba(255,255,255,.038), rgba(255,255,255,.018));
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.035);
+    transition: transform .18s var(--ease-out), border-color .18s ease, background .18s ease, box-shadow .18s ease;
+  }
+  .connector-card::before {
+    content: "";
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: 3px;
+    border-radius: inherit;
+    opacity: .35;
+    background: var(--dash-accent);
+    pointer-events: none;
+  }
+  .connector-card.pwm::before { background: var(--dash-warm); }
+  @media (hover:hover) {
+    .connector-card:hover {
+      transform: translateY(-2px);
+      box-shadow: var(--dash-shadow-hover), inset 0 1px 0 rgba(255,255,255,.05);
+      background: linear-gradient(180deg, rgba(255,255,255,.055), rgba(255,255,255,.024));
+    }
+    .connector-card.addr:hover { border-color: rgba(var(--dash-accent-rgb),.32); }
+    .connector-card.pwm:hover { border-color: color-mix(in oklab, var(--dash-warm) 38%, transparent); }
+  }
+  .connector-card:focus-visible {
+    outline: 2px solid var(--dash-accent);
+    outline-offset: 3px;
+  }
+  .connector-card.pwm:focus-visible { outline-color: var(--dash-warm); }
+  .ch-name {
+    min-height: 1.35rem;
+    color: var(--dash-text);
+  }
+  .connector-card:not(.is-active) .ch-name { color: #8e8e93; }
+  .setup-hint {
+    display: inline-flex;
+    align-items: center;
+    gap: .35rem;
+  }
+  .setup-hint::before { content: "+"; font-weight: 800; color: currentColor; }
+  .hw-spec { opacity: .7; }
+  .card-footer { border-top: 1px solid rgba(255,255,255,.055); padding-top: .7rem; }
+
   .page {
     max-width: 1180px;
     margin: 0 auto;
