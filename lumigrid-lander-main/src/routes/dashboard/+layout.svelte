@@ -298,7 +298,7 @@
   }
   .pin-logo {
     font-size: 3rem;
-    background: linear-gradient(135deg, #ff2d55, #00d4ff);
+    background: linear-gradient(135deg, var(--dash-accent), var(--dash-warm));
     -webkit-background-clip: text;
     background-clip: text;
     color: transparent;
@@ -490,7 +490,12 @@
     transition: background .18s, color .18s;
   }
   .nav-link:hover { background: rgba(255,255,255,.06); color: #f5f5f7; }
-  .nav-link.active { background: rgba(255,45,85,.18); color: #f5f5f7; border-left: 2px solid #ff2d55; }
+  .nav-link.active {
+    background: linear-gradient(90deg, rgba(var(--dash-accent-rgb),.19), rgba(var(--dash-accent-rgb),.08));
+    color: #fff;
+    box-shadow: inset 0 0 0 1px rgba(var(--dash-accent-rgb),.16), 0 8px 22px rgba(0,0,0,.16);
+  }
+  .nav-link.active .nav-icon { color: var(--dash-accent); filter: drop-shadow(0 0 7px rgba(var(--dash-accent-rgb),.35)); }
   .nav-icon { font-size: 1rem; width: 1.2rem; text-align: center; }
   .role-badge {
     margin-top: auto;
@@ -697,7 +702,7 @@
     }
     .nav-link.active {
       border-left: 0;
-      background: rgba(var(--dash-accent-rgb), .18);
+      background: linear-gradient(180deg, rgba(var(--dash-accent-rgb),.20), rgba(var(--dash-accent-rgb),.10));
       box-shadow: inset 0 0 0 1px rgba(var(--dash-accent-rgb), .22);
     }
     .nav-icon {
