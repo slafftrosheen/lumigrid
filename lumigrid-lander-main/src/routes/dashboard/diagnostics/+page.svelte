@@ -650,13 +650,16 @@
 
   /* Header */
   .diag-header {
+    position: sticky;
+    top: 0;
+    z-index: 18;
     display: flex;
     justify-content: space-between;
     align-items: center;
     gap: 1rem;
     flex-wrap: wrap;
-    background: var(--dash-surface);
-    backdrop-filter: blur(18px);
+    background: rgba(22,22,24,.90);
+    backdrop-filter: blur(22px);
     -webkit-backdrop-filter: blur(18px);
     border: 1px solid var(--dash-border);
     border-radius: var(--dash-radius-lg);
@@ -710,10 +713,17 @@
 
   /* Tab Bar */
   .tab-bar {
+    position: sticky;
+    top: 76px;
+    z-index: 17;
     display: flex;
+    background: rgba(12,12,14,.76);
+    backdrop-filter: blur(18px);
+    -webkit-backdrop-filter: blur(18px);
+    border-radius: 10px;
+    padding: .3rem;
     gap: 0.5rem;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-    padding-bottom: 0.25rem;
+    border: 1px solid rgba(255,255,255,.06);
   }
   .tab {
     display: flex;
@@ -758,7 +768,7 @@
 
   /* Confidence Card */
   .confidence-card {
-    background: var(--dash-surface);
+    background: linear-gradient(180deg, rgba(29,29,31,.74), rgba(18,18,20,.74));
     border: 1px solid var(--dash-border);
     border-radius: var(--dash-radius-lg);
     padding: 1rem 1.25rem;
@@ -817,7 +827,7 @@
     gap: 1rem;
   }
   .stat-card {
-    background: rgba(255, 255, 255, 0.02);
+    background: linear-gradient(180deg, rgba(255,255,255,.035), rgba(255,255,255,.018));
     border: 1px solid rgba(255, 255, 255, 0.07);
     border-radius: 12px;
     padding: 1rem 1.25rem;
@@ -895,7 +905,7 @@
 
   /* Events View */
   .events-container {
-    background: var(--dash-surface);
+    background: linear-gradient(180deg, rgba(29,29,31,.74), rgba(18,18,20,.74));
     border: 1px solid var(--dash-border);
     border-radius: var(--dash-radius-lg);
     padding: 1rem;
@@ -955,6 +965,8 @@
 
   .log-stream {
     max-height: 60vh;
+    scrollbar-color: rgba(255,255,255,.16) transparent;
+    scrollbar-width: thin;
     overflow-y: auto;
     display: flex;
     flex-direction: column;
@@ -995,7 +1007,8 @@
 
   /* Audit View */
   .audit-container {
-    background: rgba(255, 255, 255, 0.02);
+    background: linear-gradient(180deg, rgba(29,29,31,.74), rgba(18,18,20,.74));
+    box-shadow: var(--dash-shadow);
     border: 1px solid rgba(255, 255, 255, 0.08);
     border-radius: 14px;
     padding: 1.25rem;
@@ -1066,7 +1079,8 @@
   }
 
   @media (max-width: 760px) {
-    .diag-header { align-items: flex-start; }
+    .diag-header { position: static; align-items: flex-start; }
+    .tab-bar { position: static; }
     .header-actions { width: 100%; justify-content: space-between; }
     .tab-bar { overflow-x: auto; padding-bottom: .35rem; }
     .tab { white-space: nowrap; }
