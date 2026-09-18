@@ -36,6 +36,13 @@
   --dash-border: var(--glass-border);
   --dash-text: var(--ink);
   --dash-muted: var(--muted);
+  --dash-radius-sm: 10px;
+  --dash-radius-md: 14px;
+  --dash-radius-lg: 18px;
+  --dash-radius-xl: 22px;
+  --dash-control-h: 40px;
+  --dash-shadow: 0 12px 36px rgba(0,0,0,.28);
+  --dash-shadow-hover: 0 18px 44px rgba(0,0,0,.38);
   
   /* Extended brand hues - vibrant LED colors */
   --rf-magenta:#ff2d55; 
@@ -751,6 +758,56 @@ h3 { font-size: var(--fs-h3); }
   height: 1px;
   background: linear-gradient(90deg, rgba(255,255,255,.18), rgba(255,255,255,.02), rgba(255,255,255,.18));
   opacity: .5;
+}
+
+/* Dashboard operator surface overrides */
+.dash-root h1,
+.dash-root h2,
+.dash-root h3 {
+  background: none;
+  background-size: auto;
+  -webkit-background-clip: border-box;
+  background-clip: border-box;
+  -webkit-text-fill-color: currentColor;
+  color: var(--dash-text);
+  animation: none;
+  text-shadow: none;
+}
+
+.dash-root button,
+.dash-root input,
+.dash-root select,
+.dash-root textarea {
+  font-family: inherit;
+}
+
+.dash-root input,
+.dash-root select,
+.dash-root textarea {
+  color-scheme: dark;
+}
+
+.dash-root ::selection {
+  background: rgba(var(--dash-accent-rgb), .28);
+  color: #fff;
+}
+
+.dash-root * {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255,255,255,.16) transparent;
+}
+
+.dash-root *::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.dash-root *::-webkit-scrollbar-track { background: transparent; }
+.dash-root *::-webkit-scrollbar-thumb {
+  background: rgba(255,255,255,.14);
+  border-radius: 999px;
+}
+.dash-root *::-webkit-scrollbar-thumb:hover {
+  background: rgba(255,255,255,.24);
 }
 
 /* Reduced motion support */
