@@ -1505,6 +1505,7 @@
       position: static;
       padding: .85rem;
     }
+    .ed-toolbar { position: static; }
     .lib-list {
       flex-direction: row;
       flex-wrap: nowrap;
