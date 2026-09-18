@@ -3,7 +3,7 @@ import { render } from 'svelte/server';
 import { setSelectedNodeIp, getSelectedNodeIp } from '$lib/auth/storage';
 import { disconnect, _resetForTesting } from '$lib/state/nodeStore';
 
-// Import all 12 dashboard route components
+// Import all 13 dashboard route components
 import DashboardPage from './+page.svelte';
 import ScenesPage from './scenes/+page.svelte';
 import TimelinePage from './timeline/+page.svelte';
@@ -47,6 +47,26 @@ class MockStorage implements Storage {
 describe('dashboard routes smoke & contract tests', () => {
   let mockStorage: MockStorage;
 
+  it('keeps the dashboard route registry complete and unique', () => {
+    expect(routes).toHaveLength(13);
+    expect(new Set(routes.map(r => r.path)).size).toBe(routes.length);
+    expect(routes.map(r => r.path)).toEqual(expect.arrayContaining([
+      '/dashboard',
+      '/dashboard/scenes',
+      '/dashboard/cues',
+      '/dashboard/timeline',
+      '/dashboard/schedule',
+      '/dashboard/channels',
+      '/dashboard/visualizer',
+      '/dashboard/preview',
+      '/dashboard/thermal',
+      '/dashboard/uptime',
+      '/dashboard/diagnostics',
+      '/dashboard/factory',
+      '/dashboard/firmware',
+    ]));
+  });
+
   beforeEach(() => {
     mockStorage = new MockStorage();
     vi.stubGlobal('localStorage', mockStorage);
@@ -59,7 +79,7 @@ describe('dashboard routes smoke & contract tests', () => {
     vi.restoreAllMocks();
   });
 
-  describe('renders all 12 routes with no selected node', () => {
+  describe('renders all 13 routes with no selected node', () => {
     for (const r of routes) {
       it(`renders ${r.path} (${r.name}) cleanly without a selected node`, () => {
         setSelectedNodeIp('');
@@ -73,7 +93,7 @@ describe('dashboard routes smoke & contract tests', () => {
     }
   });
 
-  describe('renders all 12 routes when a node is selected', () => {
+  describe('renders all 13 routes when a node is selected', () => {
     for (const r of routes) {
       it(`renders ${r.path} (${r.name}) with selected node`, () => {
         setSelectedNodeIp('192.168.1.50');
