@@ -45,6 +45,7 @@
   // Fleet management states
   let activeTab = $state<'node' | 'fleet'>('node');
   let savedFleet = $state<SavedNodeInfo[]>([]);
+  let activeFleetNode = $derived(savedFleet.find(node => node.ip === nodeIp));
   let newIpInput = $state('');
   let newNameInput = $state('');
   let fleetInputError = $state('');
@@ -483,7 +484,12 @@
     <header class="node-header">
       <div class="node-header-main">
         <div class="node-title-row">
-          <h2 class="node-ip-heading">{nodeIp}</h2>
+          <div class="node-heading-copy">
+            <h2 class="node-ip-heading">{activeFleetNode?.name || nodeIp}</h2>
+            {#if activeFleetNode?.name && activeFleetNode.name !== nodeIp}
+              <span class="node-address">{nodeIp}</span>
+            {/if}
+          </div>
           <span class="status-badge {liveState.connection}">
             <span class="dot"></span>
             {liveState.connection.toUpperCase()}
@@ -495,11 +501,7 @@
         <div class="node-sub-meta">
           <span>Uptime: <strong>{formatUptime(liveState.health?.system.uptime_s)}</strong></span>
           <span>·</span>
-          <span>Firmware: <strong>{nodeInfo?.ver || 'v1.0.0-dev'}</strong></span>
-          {#if liveState.health}
-            <span>·</span>
-            <span>Health Schema: <strong>v{liveState.health.schema_version}</strong></span>
-          {/if}
+          <span>Firmware: <strong>{nodeInfo?.ver || '—'}</strong></span>
           <span>·</span>
           <span>Outputs: <strong>{liveState.status?.outputsEnabled ? 'ENABLED' : 'DISABLED'}</strong></span>
           {#if liveState.health}
@@ -979,6 +981,16 @@
     gap: 0.75rem;
     margin-bottom: 0.35rem;
     flex-wrap: wrap;
+  }
+  .node-heading-copy {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: .08rem;
+  }
+  .node-address {
+    color: #737378;
+    font: .72rem ui-monospace, SFMono-Regular, Menlo, monospace;
   }
   .node-ip-heading {
     font-size: 1.5rem;
