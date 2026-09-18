@@ -45,6 +45,7 @@
   let backupLoading = $state(false);
   let restoreLoading = $state(false);
   let restoreFile = $state<File | null>(null);
+  let restorePayload = $state<unknown | null>(null);
   let restoreConfirmOpen = $state(false);
 
   // OTA states
@@ -147,21 +148,47 @@
     }
   }
 
-  function onRestoreFileSelected(e: Event) {
+  async function onRestoreFileSelected(e: Event) {
     const f = (e.target as HTMLInputElement).files?.[0];
+    restoreFile = null;
+    restorePayload = null;
+    restoreConfirmOpen = false;
     if (!f) return;
-    restoreFile = f;
+
+    if (!f.name.toLowerCase().endsWith('.json')) {
+      configError = 'Choose a LumiGrid backup JSON file.';
+      return;
+    }
+    if (f.size <= 0) {
+      configError = 'The selected backup file is empty.';
+      return;
+    }
+    if (f.size > 4 * 1024 * 1024) {
+      configError = 'Backup file is unexpectedly large. Refusing files over 4 MB.';
+      return;
+    }
+
+    try {
+      const parsed = JSON.parse(await f.text());
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new Error('backup root must be a JSON object');
+      }
+      restoreFile = f;
+      restorePayload = parsed;
+      configError = '';
+    } catch (e) {
+      configError = `Invalid backup JSON: ${e}`;
+    }
   }
 
   async function executeRestore() {
-    if (!selectedNodeIp || !restoreFile || restoreLoading) return;
+    if (!selectedNodeIp || !restoreFile || restorePayload === null || restoreLoading) return;
     restoreLoading = true;
     try {
-      const text = await restoreFile.text();
-      const payload = JSON.parse(text);
-      await restoreBackup(selectedNodeIp, payload);
+      await restoreBackup(selectedNodeIp, restorePayload);
       restoreConfirmOpen = false;
       restoreFile = null;
+      restorePayload = null;
       configToastMsg('Backup restored successfully on node');
       await loadConfigForNode();
     } catch (e) {
@@ -190,19 +217,35 @@
     });
   }
 
-  function onFile(e: Event) {
-    const f = (e.target as HTMLInputElement).files?.[0];
+  function selectFirmwareFile(f: File | undefined) {
+    otaConfirmOpen = false;
     if (!f) return;
+
+    if (!f.name.toLowerCase().endsWith('.bin')) {
+      binFile = null;
+      binName = '';
+      configError = 'Choose a firmware .bin file.';
+      return;
+    }
+    if (f.size <= 0) {
+      binFile = null;
+      binName = '';
+      configError = 'The selected firmware binary is empty.';
+      return;
+    }
+
     binFile = f;
     binName = f.name;
+    configError = '';
+  }
+
+  function onFile(e: Event) {
+    selectFirmwareFile((e.target as HTMLInputElement).files?.[0]);
   }
 
   function onDrop(e: DragEvent) {
     e.preventDefault();
-    const f = e.dataTransfer?.files[0];
-    if (!f || !f.name.endsWith('.bin')) return;
-    binFile = f;
-    binName = f.name;
+    selectFirmwareFile(e.dataTransfer?.files[0]);
   }
 
   function toggleNode(ip: string) {
@@ -369,6 +412,9 @@
       if (targetIp !== selectedNodeIp) {
         selectedNodeIp = targetIp;
         loadGen++;
+        restoreConfirmOpen = false;
+        restoreFile = null;
+        restorePayload = null;
         if (selectedNodeIp) {
           currentConfig = null;
           savedConfigSnapshot = null;
