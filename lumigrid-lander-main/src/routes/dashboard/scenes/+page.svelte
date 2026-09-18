@@ -952,10 +952,9 @@
     padding: 0.4rem 0.7rem;
     width: 220px;
   }
-  .ed-name:focus {
-    outline: none;
+  .ed-name:focus-visible {
     border-color: var(--dash-accent);
-    box-shadow: 0 0 0 2px rgba(var(--dash-accent-rgb), 0.28);
+    box-shadow: 0 0 0 3px rgba(var(--dash-accent-rgb), 0.16);
   }
   .ed-slot {
     font-size: 0.75rem;
