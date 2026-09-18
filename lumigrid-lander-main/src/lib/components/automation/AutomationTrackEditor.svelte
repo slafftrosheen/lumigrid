@@ -115,7 +115,7 @@
   <div class="curve-wrapper">
     <AutomationCurve
       track={runtimeTrack}
-      color={trackIndex === 0 ? '#00f0ff' : trackIndex === 1 ? '#a855f7' : trackIndex === 2 ? '#10b981' : '#f59e0b'}
+      color={trackIndex === 0 ? '#ff2d55' : trackIndex === 1 ? '#ff3b30' : trackIndex === 2 ? '#ff9500' : '#00d4ff'}
     />
   </div>
 </div>
@@ -148,9 +148,9 @@
     font-family: monospace;
     font-size: 0.75rem;
     font-weight: 700;
-    color: #00f0ff;
-    background: rgba(0, 240, 255, 0.1);
-    border: 1px solid rgba(0, 240, 255, 0.3);
+    color: var(--dash-accent);
+    background: rgba(var(--dash-accent-rgb), 0.1);
+    border: 1px solid rgba(var(--dash-accent-rgb), 0.3);
     padding: 2px 8px;
     border-radius: 4px;
     letter-spacing: 0.05em;
@@ -220,7 +220,7 @@
   }
 
   .select-input:focus, .number-input:focus {
-    border-color: #00f0ff;
+    border-color: var(--dash-accent);
   }
 
   .curve-wrapper {
