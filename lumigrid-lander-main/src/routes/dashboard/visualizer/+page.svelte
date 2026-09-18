@@ -217,6 +217,8 @@
   }
 </script>
 
+<svelte:head><title>Live Visualizer — LumiGrid</title></svelte:head>
+
 <div class="viz-root">
   <div class="viz-toolbar">
     <div class="viz-left">
