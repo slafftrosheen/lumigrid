@@ -999,7 +999,7 @@
     font-size: 0.85rem;
   }
 
-  @media (max-width: 720px) {
+  @media (max-width: 768px) {
     .factory-header { position: static; align-items: flex-start; }
     .header-right { width: 100%; }
     .header-right button { flex: 1; }
