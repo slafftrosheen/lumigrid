@@ -69,6 +69,10 @@
   let pwmLevels = $state<Record<number, number>>({
     8: 0, 9: 0, 10: 0, 11: 0, 12: 0, 13: 0, 14: 0, 15: 0
   });
+  const pwmLastSentAt: Record<number, number> = {};
+  const pwmSendTimers: Record<number, ReturnType<typeof setTimeout> | undefined> = {};
+  const PWM_SEND_INTERVAL_MS = 50; // 20 Hz max while dragging
+
 
   function toastMsg(msg: string) {
     toast = msg;
@@ -116,15 +120,47 @@
     }
   }
 
-  async function handlePwmSliderChange(ch: HardwareChannel, percent: number) {
-    pwmLevels[ch.index] = percent;
+  async function sendPwmLevel(ch: HardwareChannel, percent: number) {
     if (!nodeIp) return;
-    const duty12 = Math.round((percent / 100) * 4095);
+    const clamped = Math.max(0, Math.min(100, percent));
+    const duty12 = Math.round((clamped / 100) * 4095);
+    pwmLastSentAt[ch.index] = Date.now();
     try {
       await postFactoryPwm(nodeIp, ch.hardwareId, duty12, 10000);
     } catch (err) {
       console.error('Failed to set PWM duty:', err);
     }
+  }
+
+  function handlePwmSliderInput(ch: HardwareChannel, percent: number) {
+    pwmLevels[ch.index] = percent;
+    if (!nodeIp) return;
+
+    const elapsed = Date.now() - (pwmLastSentAt[ch.index] ?? 0);
+    if (elapsed >= PWM_SEND_INTERVAL_MS) {
+      if (pwmSendTimers[ch.index]) {
+        clearTimeout(pwmSendTimers[ch.index]);
+        pwmSendTimers[ch.index] = undefined;
+      }
+      void sendPwmLevel(ch, percent);
+      return;
+    }
+
+    if (pwmSendTimers[ch.index]) clearTimeout(pwmSendTimers[ch.index]);
+    pwmSendTimers[ch.index] = setTimeout(() => {
+      pwmSendTimers[ch.index] = undefined;
+      void sendPwmLevel(ch, pwmLevels[ch.index] ?? percent);
+    }, PWM_SEND_INTERVAL_MS - elapsed);
+  }
+
+  function handlePwmSliderCommit(ch: HardwareChannel, percent: number) {
+    pwmLevels[ch.index] = percent;
+    if (pwmSendTimers[ch.index]) {
+      clearTimeout(pwmSendTimers[ch.index]);
+      pwmSendTimers[ch.index] = undefined;
+    }
+    // Always send the final released value, even when the drag was throttled.
+    void sendPwmLevel(ch, percent);
   }
 
   function openConfigModal(ch: HardwareChannel) {
@@ -171,12 +207,12 @@
           enabled: false,
           addressableType: 0,
           pixelOrder: 1,
-          pixelCount: i < 8 ? 60 : 0,
+          pixelCount: 0,
           maxBrightness: 255,
           gammaCorrection: true,
           maxMilliwatts: 0,
-          dmxUniverse: 1,
-          dmxStartChannel: i + 1,
+          dmxUniverse: 0,
+          dmxStartChannel: 0,
           dmxMode: 0,
         }));
       }
@@ -395,7 +431,8 @@
                     min="0"
                     max="100"
                     value={level}
-                    oninput={(e) => handlePwmSliderChange(ch, Number((e.target as HTMLInputElement).value))}
+                    oninput={(e) => handlePwmSliderInput(ch, Number((e.target as HTMLInputElement).value))}
+                    onchange={(e) => handlePwmSliderCommit(ch, Number((e.target as HTMLInputElement).value))}
                     class="pwm-slider"
                   />
                   <div class="pwm-bar-track">
