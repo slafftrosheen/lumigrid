@@ -8,6 +8,7 @@
     addSavedNode,
     renameSavedNode,
     removeSavedNode,
+    normalizeNodeAddress,
     type SavedNodeInfo,
   } from '$lib/auth/storage';
   import {
@@ -131,22 +132,6 @@
     getInfo(ip).then(info => { nodeInfo = info; }).catch(() => {});
     activeTab = 'node';
     toast(`Connected to node ${ip}`);
-  }
-
-  function normalizeNodeAddress(raw: string): string | null {
-    const stripped = raw.trim()
-      .replace(/^https?:\/\//i, '')
-      .replace(/\/+$/, '');
-
-    if (!stripped || /[/?#\s]/.test(stripped)) return null;
-
-    try {
-      const parsed = new URL(`http://${stripped}`);
-      if (!parsed.hostname || parsed.username || parsed.password) return null;
-      return parsed.host;
-    } catch {
-      return null;
-    }
   }
 
   function handleAddFleetNode() {
