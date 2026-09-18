@@ -49,8 +49,8 @@ struct ControlState {
     uint8_t  zone_mask = 0xFF;  // Bitmask of controlled zones (0-7)
     uint8_t  layer_mask = 0x07; // Bitmask of controlled layers (0-2)
     union {
-        uint16_t fixture_mask = 0;  // Bitmask of controlled fixtures/channels (0-15)
-        uint16_t channel_mask;
+        uint16_t channel_mask = 0;  // Canonical bitmask of controlled physical channels (0-15)
+        uint16_t fixture_mask;      // Legacy compatibility alias
     };
     bool     takeover = false;
     bool     active = false;
