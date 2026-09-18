@@ -309,7 +309,7 @@
     align-items: center;
     justify-content: center;
     background: radial-gradient(ellipse at 20% 0%, rgba(255,45,85,.12) 0%, transparent 55%),
-                radial-gradient(ellipse at 80% 100%, rgba(0,212,255,.07) 0%, transparent 55%),
+                radial-gradient(ellipse at 80% 100%, rgba(255,149,0,.06) 0%, transparent 55%),
                 #050505;
   }
   .pin-card {
@@ -376,7 +376,7 @@
     display: flex;
     min-height: 100dvh;
     background: radial-gradient(ellipse at 15% 0%, rgba(255,45,85,.09) 0%, transparent 50%),
-                radial-gradient(ellipse at 85% 100%, rgba(0,212,255,.06) 0%, transparent 50%),
+                radial-gradient(ellipse at 85% 100%, rgba(255,149,0,.045) 0%, transparent 50%),
                 #050505;
     color: #f5f5f7;
     font-family: -apple-system, BlinkMacSystemFont, Inter, system-ui, sans-serif;
@@ -410,7 +410,7 @@
   }
   .brand-hex {
     font-size: 1.4rem;
-    background: linear-gradient(135deg, #ff2d55, #00d4ff);
+    background: linear-gradient(135deg, var(--dash-accent), var(--dash-warm));
     -webkit-background-clip: text;
     background-clip: text;
     color: transparent;
@@ -574,8 +574,8 @@
   }
   .status-indicator.connected .status-dot { background: #30d158; box-shadow: 0 0 6px rgba(48,209,88,.6); }
   .status-indicator.connected .status-text { color: #30d158; }
-  .status-indicator.connecting .status-dot { background: #00d4ff; }
-  .status-indicator.connecting .status-text { color: #00d4ff; }
+  .status-indicator.connecting .status-dot { background: var(--dash-warm); }
+  .status-indicator.connecting .status-text { color: var(--dash-warm); }
   .status-indicator.disconnected .status-dot { background: #8e8e93; }
   .status-indicator.disconnected .status-text { color: #8e8e93; }
   .status-indicator.error .status-dot { background: #ff453a; }
