@@ -33,8 +33,9 @@ Errors use this shape:
 { "error": "invalid_json" }
 ```
 
-`400` denotes invalid input, `401` authentication failure, `409` a full command
-queue, and `503` a subsystem that has not completed initialization.
+`400` denotes invalid input, `401` authentication failure, `409` a request
+rejected by the current runtime state or command queue, and `503` a subsystem
+that has not completed initialization.
 
 ## Operator endpoints
 
@@ -61,13 +62,54 @@ queue, and `503` a subsystem that has not completed initialization.
 
 ### Activate a preset
 
-```json
+```http
 POST /api/v1/activate
-{ "preset": 2 }
+Content-Type: application/json
 ```
 
-The preset index must be between 0 and 31. A successful request returns
-`202 {"activated":true}`.
+```json
+{
+  "preset": 2
+}
+```
+
+The preset index must be between 0 and 31.
+
+When the running lighting runtime accepts and loads the requested preset, the
+endpoint returns:
+
+```http
+202 Accepted
+```
+
+```json
+{
+  "accepted": true,
+  "preset": 2
+}
+```
+
+`accepted` means the request was accepted by the lighting runtime. It does not
+claim that a physical output frame has already been committed to the hardware,
+and a higher-priority live control source may still temporarily own the output.
+
+If the scene cannot be activated — for example because the preset cannot be
+loaded or the lighting runtime is not in an accepting state — the endpoint
+returns:
+
+```http
+409 Conflict
+```
+
+```json
+{
+  "error": "scene_activation_rejected"
+}
+```
+
+Clients must use node telemetry such as `/api/v1/status` to determine the
+observed runtime/output state rather than treating the `202` response itself as
+hardware acknowledgement.
 
 ### Scenes and effects
 

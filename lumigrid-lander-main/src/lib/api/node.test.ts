@@ -61,19 +61,59 @@ describe('canonical dashboard API contracts (/api/v1/*)', () => {
     );
   });
 
-  it('activates a preset via POST /api/v1/activate', async () => {
-    vi.mocked(fetch).mockResolvedValue(new Response(JSON.stringify({ activated: true }), { status: 200 }));
+  it('requests preset activation via POST /api/v1/activate', async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          accepted: true,
+          preset: 2,
+        }),
+        {
+          status: 202,
+          headers: {
+            'Content-Type': 'application/json',
+          },
+        },
+      ),
+    );
 
     const res = await activatePreset('192.168.1.50', 2);
-    expect(res).toEqual({ activated: true });
+
+    expect(res).toEqual({
+      accepted: true,
+      preset: 2,
+    });
 
     expect(vi.mocked(fetch)).toHaveBeenCalledWith(
       'http://192.168.1.50/api/v1/activate',
       expect.objectContaining({
         method: 'POST',
-        body: JSON.stringify({ preset: 2, durationMs: 30000 }),
+        body: JSON.stringify({
+          preset: 2,
+        }),
       }),
     );
+  });
+
+  it('propagates rejected preset activation', async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          error: 'scene_activation_rejected',
+        }),
+        {
+          status: 409,
+          statusText: 'Conflict',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+        },
+      ),
+    );
+
+    await expect(
+      activatePreset('192.168.1.50', 7),
+    ).rejects.toThrow(/scene_activation_rejected/);
   });
 
   it('loads effects catalog from /api/v1/effects', async () => {

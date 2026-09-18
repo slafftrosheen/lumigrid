@@ -2510,6 +2510,71 @@ bool test_batch9_burnin_blockers() {
     return true;
 }
 
+// ============================================================================
+// Batch 9: Checked scene activation lifecycle contract
+// ============================================================================
+bool test_batch9_checked_scene_activation_lifecycle_guard() {
+    ESP_LOGI(
+        TAG,
+        "Batch 9: Checked scene activation lifecycle guard..."
+    );
+
+    ControlSourceManager source_manager;
+    source_manager.init();
+
+    OutputController controller;
+    ConfigStore config_store;
+
+    LightingRuntime runtime(
+        source_manager,
+        controller,
+        config_store
+    );
+
+    /*
+     * Constructed runtime is not allowed to claim that a scene request
+     * was accepted.
+     */
+    assert(
+        runtime.lifecycle_state() ==
+        LightingRuntime::LifecycleState::Constructed
+    );
+
+    assert(runtime.activate_scene_checked(0) == false);
+
+    /*
+     * Exercise a real lifecycle transition. We intentionally don't assert
+     * that preset 0 activates while Running because the test suite must not
+     * depend on an existing persisted scene slot.
+     */
+    assert(runtime.start() == ESP_OK);
+
+    assert(
+        runtime.lifecycle_state() ==
+        LightingRuntime::LifecycleState::Running
+    );
+
+    runtime.stop();
+
+    assert(
+        runtime.lifecycle_state() ==
+        LightingRuntime::LifecycleState::Stopped
+    );
+
+    /*
+     * Stopped runtime must also reject activation rather than silently
+     * claiming success.
+     */
+    assert(runtime.activate_scene_checked(0) == false);
+
+    ESP_LOGI(
+        TAG,
+        "[PASS] Batch 9 checked activation lifecycle guard passed."
+    );
+
+    return true;
+}
+
 } // namespace
 
 bool run_runtime_hardening_tests() {
@@ -2576,6 +2641,7 @@ bool run_runtime_hardening_tests() {
 
     // Batch 9 Tests
     all_ok &= test_batch9_burnin_blockers();
+    all_ok &= test_batch9_checked_scene_activation_lifecycle_guard();
 
     if (all_ok) {
         ESP_LOGI(TAG, "==================================================");

@@ -871,28 +871,104 @@ esp_err_t post_activate(httpd_req_t* request) {
     if (!api::authorize(request, api::ApiRole::Operator)) return ESP_OK;
 
     FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
-    if (!api_ptr->signage()) return send_error(request, "503 Service Unavailable", "signage_not_ready");
+    if (!api_ptr->signage()) {
+        return send_error(
+            request,
+            "503 Service Unavailable",
+            "signage_not_ready"
+        );
+    }
 
     cJSON* root = nullptr;
     if (read_json(request, &root) != ESP_OK) {
-        return send_error(request, "400 Bad Request", "invalid_json");
+        return send_error(
+            request,
+            "400 Bad Request",
+            "invalid_json"
+        );
     }
 
     uint8_t index = 0;
     if (!json_u8(root, "preset", 0, kMaxPresets - 1, index)) {
         cJSON_Delete(root);
-        return send_error(request, "400 Bad Request", "missing_preset_index");
+        return send_error(
+            request,
+            "400 Bad Request",
+            "missing_preset_index"
+        );
     }
 
+    cJSON_Delete(root);
+
+    /*
+     * Validate/load the requested scene before changing control ownership
+     * or clearing E-stop state.
+     *
+     * A rejected scene must not mutate the current control state.
+     */
+    if (!api_ptr->signage()->activate_scene_checked(index)) {
+        char detail[64];
+        snprintf(
+            detail,
+            sizeof(detail),
+            "Preset %u activation rejected",
+            index
+        );
+
+        api::AuditLog::instance().log(
+            api::ApiRole::Operator,
+            "preset_activate_rejected",
+            detail
+        );
+
+        return send_error(
+            request,
+            "409 Conflict",
+            "scene_activation_rejected"
+        );
+    }
+
+    /*
+     * Scene activation has been accepted by the runtime.
+     *
+     * This does NOT mean a physical output frame has already committed.
+     * Higher-priority control sources may also still temporarily dominate
+     * output arbitration.
+     */
     api_ptr->signage()->feed_watchdog();
     api_ptr->signage()->release_control(ControlSource::EStop);
-    api_ptr->signage()->acquire_control(ControlSource::ManualOverride, 0);
-    cJSON_Delete(root);
-    api_ptr->signage()->activate_scene(index);
+    api_ptr->signage()->acquire_control(
+        ControlSource::ManualOverride,
+        0
+    );
 
-    char resp[64];
-    snprintf(resp, sizeof(resp), R"({"activated":true,"preset":%u})", index);
-    return send_json(request, resp, "202 Accepted");
+    char detail[64];
+    snprintf(
+        detail,
+        sizeof(detail),
+        "Preset %u activation accepted",
+        index
+    );
+
+    api::AuditLog::instance().log(
+        api::ApiRole::Operator,
+        "preset_activate",
+        detail
+    );
+
+    char response[64];
+    snprintf(
+        response,
+        sizeof(response),
+        R"({"accepted":true,"preset":%u})",
+        index
+    );
+
+    return send_json(
+        request,
+        response,
+        "202 Accepted"
+    );
 }
 
 esp_err_t get_device_config(httpd_req_t* request) {

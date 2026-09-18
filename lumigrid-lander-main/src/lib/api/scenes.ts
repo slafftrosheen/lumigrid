@@ -54,8 +54,16 @@ export function savePreset(ip: string, preset: Partial<ScenePreset> & { index: n
   });
 }
 
-export function activatePreset(ip: string, index: number): Promise<{ activated: true }> {
-  return apiJson<{ activated: true }>(ip, '/api/v1/activate', {
+export interface ActivatePresetResult {
+  accepted: true;
+  preset: number;
+}
+
+export function activatePreset(
+  ip: string,
+  index: number,
+): Promise<ActivatePresetResult> {
+  return apiJson<ActivatePresetResult>(ip, '/api/v1/activate', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ preset: index }),

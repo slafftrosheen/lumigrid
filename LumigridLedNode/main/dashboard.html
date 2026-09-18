@@ -1367,14 +1367,29 @@ window.lg = (() => {
         }
     }
 
+    function sceneName(idx) {
+        return state.presets.find(p => Number(p.index) === Number(idx))?.name || `Scene ${Number(idx) + 1}`;
+    }
+
     async function playScene(idx) {
         try {
-            await api('/api/v1/activate', 'POST', { preset: idx });
-            state.status = { ...(state.status || {}), activePreset: idx, transitioning: true };
-            updateTelemetryUI();
-            renderDashboard();
-            toast(`Playing Scene ${idx + 1}`);
-        } catch (e) { toast(e.message, true); }
+            await api(
+                '/api/v1/activate',
+                'POST',
+                { preset: idx }
+            );
+
+            /*
+             * HTTP 202 means the runtime accepted the request.
+             * Do not fake activePreset locally.
+             * Status/WebSocket telemetry remains authoritative.
+             */
+            toast(
+                `${sceneName(idx)} accepted. Waiting for node state.`
+            );
+        } catch (error) {
+            toast(error.message, true);
+        }
     }
 
     async function blackout() {
@@ -1681,7 +1696,7 @@ window.lg = (() => {
         try {
             await api('/api/v1/presets', 'PUT', state.editing);
             await api('/api/v1/activate', 'POST', { preset: state.editing.index });
-            toast('Testing scene live on hardware.');
+            toast('Scene update accepted. Waiting for node state.');
         } catch (e) { toast(e.message, true); }
     }
 
