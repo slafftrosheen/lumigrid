@@ -397,6 +397,7 @@
       <button
         class="tab"
         class:active={activeTab === 'config'}
+        aria-pressed={activeTab === 'config'}
         onclick={() => (activeTab = 'config')}
         type="button"
       >
@@ -405,6 +406,7 @@
       <button
         class="tab"
         class:active={activeTab === 'recovery'}
+        aria-pressed={activeTab === 'recovery'}
         onclick={() => (activeTab = 'recovery')}
         type="button"
       >
@@ -413,6 +415,7 @@
       <button
         class="tab"
         class:active={activeTab === 'ota'}
+        aria-pressed={activeTab === 'ota'}
         onclick={() => (activeTab = 'ota')}
         type="button"
       >
@@ -433,7 +436,7 @@
     {#if loadingConfig}
       <div class="loading-box">
         <div class="spinner"></div>
-        <p>Reading device configuration store from {selectedNodeIp}...</p>
+        <p>Loading device configuration from {selectedNodeIp}…</p>
       </div>
     {:else if !selectedNodeIp}
       <div class="empty-box">
