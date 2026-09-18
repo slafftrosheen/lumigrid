@@ -969,7 +969,10 @@ esp_err_t get_scene_motion(httpd_req_t* request) {
             const auto& tr = sm.tracks[t];
             cJSON* tobj = cJSON_CreateObject();
             cJSON_AddStringToObject(tobj, "target", automation_target_name(tr.target));
-            cJSON_AddNumberToObject(tobj, "zone", tr.zone);
+            cJSON_AddNumberToObject(tobj, "channel", tr.channel);
+            // Deprecated compatibility alias for clients/backups created before
+            // the 16-channel UI model. New clients must use "channel".
+            cJSON_AddNumberToObject(tobj, "zone", tr.channel);
             cJSON_AddNumberToObject(tobj, "layer", tr.layer);
             cJSON_AddStringToObject(tobj, "curve", automation_curve_name(tr.curve));
             cJSON_AddBoolToObject(tobj, "loop", tr.loop);
@@ -1071,8 +1074,14 @@ esp_err_t put_scene_motion(httpd_req_t* request) {
             const cJSON* tgt_j = cJSON_GetObjectItemCaseSensitive(t_item, "target");
             if (tgt_j && cJSON_IsString(tgt_j)) parse_automation_target(tgt_j->valuestring, tr.target);
 
+            const cJSON* ch_j = cJSON_GetObjectItemCaseSensitive(t_item, "channel");
             const cJSON* z_j = cJSON_GetObjectItemCaseSensitive(t_item, "zone");
-            if (z_j && cJSON_IsNumber(z_j)) tr.zone = std::min<uint8_t>(7, std::max<int>(0, z_j->valueint));
+            if (ch_j && cJSON_IsNumber(ch_j)) {
+                tr.channel = std::min<uint8_t>(15, std::max<int>(0, ch_j->valueint));
+            } else if (z_j && cJSON_IsNumber(z_j)) {
+                // Legacy 8-zone payload fallback.
+                tr.channel = std::min<uint8_t>(7, std::max<int>(0, z_j->valueint));
+            }
 
             const cJSON* l_j = cJSON_GetObjectItemCaseSensitive(t_item, "layer");
             if (l_j && cJSON_IsNumber(l_j)) tr.layer = std::min<uint8_t>(2, std::max<int>(0, l_j->valueint));
@@ -3278,8 +3287,13 @@ esp_err_t post_restore(httpd_req_t* request) {
                         auto& tr = sm.tracks[t_idx];
                         cJSON* target_j = cJSON_GetObjectItem(t_item, "target");
                         if (target_j && cJSON_IsString(target_j)) parse_automation_target(target_j->valuestring, tr.target);
+                        cJSON* ch_j = cJSON_GetObjectItem(t_item, "channel");
                         cJSON* z_j = cJSON_GetObjectItem(t_item, "zone");
-                        if (z_j && cJSON_IsNumber(z_j)) tr.zone = z_j->valueint;
+                        if (ch_j && cJSON_IsNumber(ch_j)) {
+                            tr.channel = std::min<uint8_t>(15, std::max<int>(0, ch_j->valueint));
+                        } else if (z_j && cJSON_IsNumber(z_j)) {
+                            tr.channel = std::min<uint8_t>(7, std::max<int>(0, z_j->valueint));
+                        }
                         cJSON* l_j = cJSON_GetObjectItem(t_item, "layer");
                         if (l_j && cJSON_IsNumber(l_j)) tr.layer = l_j->valueint;
                         cJSON* c_j = cJSON_GetObjectItem(t_item, "curve");
