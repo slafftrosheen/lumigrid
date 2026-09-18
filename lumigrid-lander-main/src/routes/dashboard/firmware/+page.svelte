@@ -11,7 +11,11 @@
     type NodeInfo,
     type DeviceConfig,
   } from '$lib/api/node';
-  import { getSelectedNodeIp, NODE_LIST_KEY, readStringList } from '$lib/auth/storage';
+  import {
+    getSelectedNodeIp,
+    getSavedNodes,
+    NODE_REGISTRY_CHANGED_EVENT,
+  } from '$lib/auth/storage';
   import { nodeStore } from '$lib/state/nodeStore';
   import { executeStagedDeployment, type DeploymentPlan } from '$lib/api/deployment';
 
@@ -390,9 +394,20 @@
   }
 
   onMount(() => {
-    nodeList = readStringList(NODE_LIST_KEY);
-    selected = new Set(nodeList);
-    refreshVersions().catch(() => {});
+    const syncFleetTargets = (selectAll = false) => {
+      const next = getSavedNodes().map(node => node.ip);
+      nodeList = next;
+
+      if (selectAll) {
+        selected = new Set(next);
+      } else {
+        selected = new Set([...selected].filter(ip => next.includes(ip)));
+      }
+
+      refreshVersions().catch(() => {});
+    };
+
+    syncFleetTargets(true);
 
     const unsub = nodeStore.subscribe(state => {
       if (state.status?.job && selectedNodeIp) {
@@ -428,7 +443,14 @@
         }
       }
     });
-    return unsub;
+
+    const onRegistryChanged = () => syncFleetTargets(false);
+    window.addEventListener(NODE_REGISTRY_CHANGED_EVENT, onRegistryChanged);
+
+    return () => {
+      unsub();
+      window.removeEventListener(NODE_REGISTRY_CHANGED_EVENT, onRegistryChanged);
+    };
   });
 </script>
 
