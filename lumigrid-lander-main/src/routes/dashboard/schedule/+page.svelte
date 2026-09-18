@@ -101,7 +101,7 @@
 
   function presetName(idx: number): string {
     const p = presets.find(pr => pr.index === idx);
-    return p ? p.name : `Preset ${idx}`;
+    return p ? p.name : `Scene ${idx + 1}`;
   }
 
   function daySummary(entry: CalendarEntry): string {
@@ -181,7 +181,7 @@
             {#if entry.action === 'sequence'}
               <span class="action-badge seq">SEQ</span>
             {:else}
-              <span class="action-badge preset">P{entry.presetIndex}</span>
+              <span class="action-badge preset">{presetName(entry.presetIndex)}</span>
             {/if}
           </span>
         </button>
@@ -208,14 +208,14 @@
           <label class="field">
             <span>Action</span>
             <select bind:value={editEntry.action}>
-              <option value="preset">Activate Preset</option>
+              <option value="preset">Activate Scene</option>
               <option value="sequence">Start Sequence</option>
             </select>
           </label>
 
           {#if editEntry.action === 'preset'}
             <label class="field">
-              <span>Preset</span>
+              <span>Scene</span>
               <select bind:value={editEntry.presetIndex}>
                 {#each Array(32) as _, i}
                   <option value={i}>{presetName(i)}</option>
@@ -274,9 +274,19 @@
   .loading { color: #a1a1a6; padding: 2rem; }
 
   .sched-header {
+    position: sticky;
+    top: 0;
+    z-index: 18;
     display: flex;
     align-items: center;
     justify-content: space-between;
+    padding: .85rem 1rem;
+    background: rgba(22,22,24,.90);
+    backdrop-filter: blur(22px);
+    -webkit-backdrop-filter: blur(22px);
+    border: 1px solid var(--dash-border);
+    border-radius: var(--dash-radius-lg);
+    box-shadow: var(--dash-shadow);
   }
   .sched-header h2 { margin: 0; font-size: 1.15rem; font-weight: 700; }
   .sched-sub { margin: .2rem 0 0; font-size: .82rem; color: #a1a1a6; }
@@ -290,7 +300,8 @@
   .btn-save:disabled { opacity: .5; cursor: default; }
 
   .week-grid {
-    background: var(--dash-surface);
+    background: linear-gradient(180deg, rgba(29,29,31,.74), rgba(18,18,20,.74));
+    box-shadow: var(--dash-shadow);
     border: 1px solid rgba(255,255,255,.08);
     border-radius: var(--dash-radius-lg);
     overflow: hidden;
@@ -327,7 +338,10 @@
   }
   .week-row:last-child { border-bottom: none; }
   .week-row:hover { background: rgba(255,255,255,.03); }
-  .week-row.selected { background: rgba(255,45,85,.08); }
+  .week-row.selected {
+    background: linear-gradient(90deg, rgba(var(--dash-accent-rgb),.14), rgba(var(--dash-accent-rgb),.05));
+    box-shadow: inset 3px 0 0 var(--dash-accent);
+  }
   .week-row.disabled { opacity: .35; }
 
   .week-time {
@@ -354,11 +368,24 @@
     border-radius: 6px;
     white-space: nowrap;
   }
-  .action-badge.preset { background: rgba(255,149,0,.12); color: #ff9500; }
-  .action-badge.seq { background: rgba(0,212,255,.12); color: #00d4ff; }
+  .action-badge.preset {
+    display: inline-block;
+    max-width: 90px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    background: rgba(var(--dash-accent-rgb),.12);
+    color: var(--dash-accent);
+    border: 1px solid rgba(var(--dash-accent-rgb),.22);
+  }
+  .action-badge.seq {
+    background: color-mix(in oklab, var(--dash-warm) 13%, transparent);
+    color: var(--dash-warm);
+    border: 1px solid color-mix(in oklab, var(--dash-warm) 28%, transparent);
+  }
 
   .entry-editor {
-    background: rgba(29,29,31,.88);
+    background: linear-gradient(180deg, rgba(29,29,31,.82), rgba(18,18,20,.78));
+    box-shadow: var(--dash-shadow);
     border: 1px solid rgba(255,255,255,.08);
     border-radius: var(--dash-radius-lg);
     padding: 1.25rem;
@@ -375,7 +402,7 @@
     display: flex; align-items: center; gap: .35rem;
     font-size: .82rem; color: #a1a1a6; cursor: pointer;
   }
-  .inline-toggle input[type="checkbox"] { accent-color: #ff2d55; width: 15px; height: 15px; }
+  .inline-toggle input[type="checkbox"] { accent-color: var(--dash-accent); width: 15px; height: 15px; }
 
   .editor-grid {
     display: flex;
@@ -398,7 +425,7 @@
     min-width: 130px;
     font-family: monospace;
   }
-  .field select:focus, .field input:focus { outline: none; border-color: #ff2d55; }
+  .field select:focus, .field input:focus { outline: none; border-color: var(--dash-accent); }
 
   .days-section { margin-bottom: .75rem; }
   .field-label { display: block; margin-bottom: .5rem; }
@@ -471,7 +498,7 @@
   }
 
   @media (max-width: 760px) {
-    .sched-header { align-items: flex-start; gap: .8rem; flex-wrap: wrap; }
+    .sched-header { position: static; align-items: flex-start; gap: .8rem; flex-wrap: wrap; }
     .sched-header .btn-save { width: 100%; }
     .week-grid { overflow-x: auto; }
     .week-header-row, .week-row { min-width: 720px; }
