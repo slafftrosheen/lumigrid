@@ -46,6 +46,7 @@
   let savedFleet = $state<SavedNodeInfo[]>([]);
   let newIpInput = $state('');
   let newNameInput = $state('');
+  let fleetInputError = $state('');
   let fleetDialog = $state<{ kind: 'rename' | 'remove'; ip: string; currentName: string } | null>(null);
   let fleetDialogValue = $state('');
 
@@ -132,14 +133,50 @@
     toast(`Connected to node ${ip}`);
   }
 
+  function normalizeNodeAddress(raw: string): string | null {
+    const stripped = raw.trim()
+      .replace(/^https?:\/\//i, '')
+      .replace(/\/+$/, '');
+
+    if (!stripped || /[/?#\s]/.test(stripped)) return null;
+
+    try {
+      const parsed = new URL(`http://${stripped}`);
+      if (!parsed.hostname || parsed.username || parsed.password) return null;
+      return parsed.host;
+    } catch {
+      return null;
+    }
+  }
+
   function handleAddFleetNode() {
-    const ip = newIpInput.trim();
-    if (!ip) return;
-    addSavedNode(ip, newNameInput.trim() || undefined);
+    const address = normalizeNodeAddress(newIpInput);
+    if (!address) {
+      fleetInputError = 'Enter a node address such as 192.168.1.50 or lumigrid.local.';
+      return;
+    }
+
+    fleetInputError = '';
+    const label = newNameInput.trim();
+    const existing = savedFleet.find(node => node.ip === address);
+    if (existing) {
+      if (label && label !== existing.name) {
+        renameSavedNode(address, label);
+        refreshFleetList();
+        toast(`Updated node ${address}`);
+      } else {
+        toast(`Node ${address} is already registered`);
+      }
+      newIpInput = '';
+      newNameInput = '';
+      return;
+    }
+
+    addSavedNode(address, label || undefined);
     newIpInput = '';
     newNameInput = '';
     refreshFleetList();
-    toast(`Added node ${ip} to fleet`);
+    toast(`Added node ${address} to fleet`);
   }
 
   function handleRenameNode(ip: string, currentName: string) {
@@ -326,8 +363,11 @@
         <div class="add-node-form">
           <input
             type="text"
-            placeholder="Node IP address (e.g. 192.168.1.50)"
+            placeholder="Node address (192.168.1.50 or lumigrid.local)"
             bind:value={newIpInput}
+            aria-invalid={fleetInputError ? 'true' : undefined}
+            aria-describedby={fleetInputError ? 'fleet-address-error' : undefined}
+            oninput={() => { if (fleetInputError) fleetInputError = ''; }}
             class="input-ip"
           />
           <input
@@ -345,6 +385,9 @@
             + Add to Fleet
           </button>
         </div>
+        {#if fleetInputError}
+          <p id="fleet-address-error" class="field-error" role="alert">{fleetInputError}</p>
+        {/if}
       </section>
 
       <!-- Fleet Nodes Table / Cards -->
@@ -816,6 +859,16 @@
   .btn-add-fleet:disabled {
     opacity: 0.5;
     cursor: not-allowed;
+  }
+  .field-error {
+    margin: .55rem 0 0;
+    color: #ff6961;
+    font-size: .76rem;
+    line-height: 1.4;
+  }
+  .input-ip[aria-invalid="true"] {
+    border-color: rgba(255,69,58,.55);
+    box-shadow: 0 0 0 3px rgba(255,69,58,.10);
   }
 
   .fleet-count-tag {
