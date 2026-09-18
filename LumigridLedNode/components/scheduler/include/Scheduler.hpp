@@ -51,7 +51,10 @@ private:
     CueRunner* cue_runner_ = nullptr;
 
     bool time_synced_ = false;
-    uint8_t last_step_index_[8] = {255, 255, 255, 255, 255, 255, 255, 255};
+    uint8_t last_step_index_[16] = {
+        255, 255, 255, 255, 255, 255, 255, 255,
+        255, 255, 255, 255, 255, 255, 255, 255
+    };
     Sequence sequence_{};
     CalendarSchedule calendar_{};
     uint64_t last_config_refresh_ms_ = 0;
