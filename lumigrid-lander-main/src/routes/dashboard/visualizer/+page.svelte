@@ -11,7 +11,7 @@
     reconnect as reconnectNode,
   } from '$lib/state/nodeStore';
 
-  type ViewMode = 'lanes' | 'zones' | 'composite' | 'dmx';
+  type ViewMode = 'lanes' | 'channels' | 'composite' | 'dmx';
 
   let nodeIp = $state('');
   let connected = $state(false);
@@ -59,7 +59,7 @@
 
     switch (viewMode) {
       case 'lanes': drawLanes(ctx, w, h); break;
-      case 'zones': drawZones(ctx, w, h); break;
+      case 'channels': drawChannels(ctx, w, h); break;
       case 'composite': drawComposite(ctx, w, h); break;
       case 'dmx': drawDmx(ctx, w, h); break;
     }
@@ -85,23 +85,57 @@
     }
   }
 
-  function drawZones(ctx: CanvasRenderingContext2D, w: number, h: number) {
-    const zoneCount = 8;
-    const zoneW = Math.floor(w / zoneCount);
-    const pixelsPerZone = Math.floor(PIXELS_PER_LANE / zoneCount);
+  function drawChannels(ctx: CanvasRenderingContext2D, w: number, h: number) {
+    // The pixel preview stream contains the eight physical addressable outputs.
+    // Render them as A1..A8 tiles rather than inventing logical "zones".
+    const cols = 4;
+    const rows = 2;
+    const gap = 10;
+    const tileW = Math.floor((w - gap * (cols + 1)) / cols);
+    const tileH = Math.floor((h - gap * (rows + 1)) / rows);
 
-    for (let z = 0; z < zoneCount; z++) {
-      const x = z * zoneW + 1;
-      for (let px = 0; px < pixelsPerZone; px++) {
-        const off = (z * PIXELS_PER_LANE + px) * 3;
+    ctx.font = '600 18px ui-monospace, SFMono-Regular, Menlo, monospace';
+    ctx.textBaseline = 'top';
+
+    for (let channel = 0; channel < LANES; channel++) {
+      let sumR = 0;
+      let sumG = 0;
+      let sumB = 0;
+      let lit = 0;
+
+      for (let px = 0; px < PIXELS_PER_LANE; px++) {
+        const off = (channel * PIXELS_PER_LANE + px) * 3;
         const r = pixelBuf[off] ?? 0;
         const g = pixelBuf[off + 1] ?? 0;
         const b = pixelBuf[off + 2] ?? 0;
-        if (r === 0 && g === 0 && b === 0) continue;
-        ctx.fillStyle = `rgb(${r},${g},${b})`;
-        const py = px * Math.floor(h / pixelsPerZone);
-        ctx.fillRect(x, py, zoneW - 2, Math.floor(h / pixelsPerZone) - 1);
+        sumR += r;
+        sumG += g;
+        sumB += b;
+        if (r || g || b) lit++;
       }
+
+      const avgR = Math.round(sumR / PIXELS_PER_LANE);
+      const avgG = Math.round(sumG / PIXELS_PER_LANE);
+      const avgB = Math.round(sumB / PIXELS_PER_LANE);
+      const col = channel % cols;
+      const row = Math.floor(channel / cols);
+      const x = gap + col * (tileW + gap);
+      const y = gap + row * (tileH + gap);
+
+      ctx.fillStyle = 'rgba(255,255,255,0.045)';
+      ctx.fillRect(x, y, tileW, tileH);
+
+      const previewH = Math.max(8, Math.floor(tileH * 0.56));
+      ctx.fillStyle = `rgb(${avgR},${avgG},${avgB})`;
+      ctx.fillRect(x + 8, y + 8, Math.max(1, tileW - 16), previewH);
+
+      ctx.fillStyle = '#f5f5f7';
+      ctx.fillText(`A${channel + 1}`, x + 10, y + previewH + 17);
+
+      ctx.font = '12px ui-monospace, SFMono-Regular, Menlo, monospace';
+      ctx.fillStyle = '#8e8e93';
+      ctx.fillText(`${lit}/${PIXELS_PER_LANE} px active`, x + 48, y + previewH + 20);
+      ctx.font = '600 18px ui-monospace, SFMono-Regular, Menlo, monospace';
     }
   }
 
@@ -192,7 +226,7 @@
     </div>
     <div class="viz-views">
       <button class="view-btn" class:active={viewMode === 'lanes'} onclick={() => setView('lanes')}>Lanes</button>
-      <button class="view-btn" class:active={viewMode === 'zones'} onclick={() => setView('zones')}>Zones</button>
+      <button class="view-btn" class:active={viewMode === 'channels'} onclick={() => setView('channels')}>A1–A8</button>
       <button class="view-btn" class:active={viewMode === 'composite'} onclick={() => setView('composite')}>Composite</button>
       <button class="view-btn" class:active={viewMode === 'dmx'} onclick={() => setView('dmx')}>DMX</button>
     </div>
