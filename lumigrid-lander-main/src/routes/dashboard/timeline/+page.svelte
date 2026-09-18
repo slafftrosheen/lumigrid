@@ -173,7 +173,7 @@
           <h2>Timeline Studio</h2>
           <div class="status-badges">
             {#if isPlaying}
-              <span class="badge badge-active" title="Timeline loop is actively running on the fixture">
+              <span class="badge badge-active" title="Timeline loop is actively running on the selected node">
                 <span class="pulse-dot"></span> PLAYING
               </span>
             {:else}
@@ -267,7 +267,7 @@
               class:disabled={!track.enabled}
               class:selected={selectedTrack === t}
             >
-              <!-- Zone / Track label -->
+              <!-- Track label -->
               <td class="cell-track">
                 <div class="track-header-cell">
                   <button
@@ -449,11 +449,14 @@
 
 <style>
   .tl-root {
+    width: 100%;
+    max-width: 1440px;
+    margin: 0 auto;
     display: flex;
     flex-direction: column;
     gap: 1.25rem;
     position: relative;
-    color: #f5f5f7;
+    color: var(--dash-text);
   }
 
   .tl-loading, .tl-empty {
@@ -482,9 +485,11 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    background: rgba(255, 255, 255, 0.03);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 14px;
+    background: var(--dash-surface);
+    backdrop-filter: blur(18px);
+    -webkit-backdrop-filter: blur(18px);
+    border: 1px solid var(--dash-border);
+    border-radius: var(--dash-radius-lg);
     padding: 0.75rem 1.25rem;
     gap: 1rem;
     flex-wrap: wrap;
@@ -662,15 +667,21 @@
 
   /* Grid Wrap */
   .tl-grid-wrap {
-    overflow-x: auto;
-    background: rgba(255, 255, 255, 0.02);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 14px;
-    padding: 0.75rem;
+    overflow: auto;
+    background: rgba(20, 20, 22, .74);
+    backdrop-filter: blur(18px);
+    -webkit-backdrop-filter: blur(18px);
+    border: 1px solid var(--dash-border);
+    border-radius: var(--dash-radius-lg);
+    padding: 0.65rem;
+    box-shadow: var(--dash-shadow);
+    max-height: min(58dvh, 720px);
   }
   .tl-grid {
     width: 100%;
-    border-collapse: collapse;
+    min-width: 1080px;
+    border-collapse: separate;
+    border-spacing: 0;
     table-layout: fixed;
   }
   .tl-grid th {
@@ -683,12 +694,21 @@
     font-family: monospace;
   }
   .col-track {
-    width: 110px;
+    width: 140px;
     text-align: left !important;
     padding-left: 0.5rem !important;
+    position: sticky;
+    left: 0;
+    z-index: 7;
+    background: rgba(18,18,20,.98);
   }
   .col-ch {
-    width: 70px;
+    width: 74px;
+    position: sticky;
+    left: 140px;
+    z-index: 7;
+    background: rgba(18,18,20,.98);
+    box-shadow: 8px 0 18px rgba(0,0,0,.18);
   }
   .col-step {
     width: 50px;
@@ -709,6 +729,21 @@
 
   .cell-track {
     padding: 0.3rem 0.4rem;
+    position: sticky;
+    left: 0;
+    z-index: 5;
+    background: rgba(18,18,20,.97);
+  }
+  .cell-ch {
+    position: sticky;
+    left: 140px;
+    z-index: 5;
+    background: rgba(18,18,20,.97);
+    box-shadow: 8px 0 18px rgba(0,0,0,.14);
+  }
+  .track-row.selected .cell-track,
+  .track-row.selected .cell-ch {
+    background: color-mix(in oklab, rgba(18,18,20,.97) 86%, var(--dash-accent) 14%);
   }
   .track-header-cell {
     display: flex;
@@ -812,10 +847,13 @@
     gap: 1.25rem;
   }
   .panel {
-    background: rgba(255, 255, 255, 0.02);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 14px;
+    background: var(--dash-surface);
+    backdrop-filter: blur(18px);
+    -webkit-backdrop-filter: blur(18px);
+    border: 1px solid var(--dash-border);
+    border-radius: var(--dash-radius-lg);
     padding: 1rem 1.25rem;
+    box-shadow: var(--dash-shadow);
   }
   .panel-header {
     display: flex;
@@ -967,8 +1005,35 @@
   }
 
   @media (max-width: 900px) {
-    .inspector-grid {
-      grid-template-columns: 1fr;
+    .inspector-grid { grid-template-columns: 1fr; }
+    .tl-transport { align-items: stretch; }
+    .transport-left { flex: 1 1 100%; }
+    .transport-center { flex: 1 1 auto; flex-wrap: wrap; }
+    .transport-right { margin-left: auto; }
+  }
+
+  @media (max-width: 620px) {
+    .tl-transport { padding: .85rem; }
+    .tl-title-row {
+      align-items: flex-start;
+      flex-direction: column;
+      gap: .45rem;
     }
+    .transport-center,
+    .transport-right {
+      width: 100%;
+      justify-content: space-between;
+    }
+    .btn-playback { flex: 1; }
+    .transport-right button { flex: 1; min-height: 40px; }
+    .tl-grid-wrap { margin-inline: -1rem; border-radius: 0; border-inline: 0; }
+    .panel { padding: 1rem; }
+    .panel-header {
+      align-items: flex-start;
+      flex-direction: column;
+      gap: .65rem;
+    }
+    .editor-fields, .track-fields { align-items: stretch; flex-direction: column; }
+    .field select, .field input[type='number'] { width: 100%; min-width: 0; }
   }
 </style>
