@@ -179,7 +179,7 @@
           {/each}
           <span class="week-action-label">
             {#if entry.action === 'sequence'}
-              <span class="action-badge seq">SEQ</span>
+              <span class="action-badge seq">TIMELINE</span>
             {:else}
               <span class="action-badge preset">{presetName(entry.presetIndex)}</span>
             {/if}
@@ -209,7 +209,7 @@
             <span>Action</span>
             <select bind:value={editEntry.action}>
               <option value="preset">Activate Scene</option>
-              <option value="sequence">Start Sequence</option>
+              <option value="sequence">Start Timeline</option>
             </select>
           </label>
 
