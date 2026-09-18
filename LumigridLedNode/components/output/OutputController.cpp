@@ -41,13 +41,26 @@ esp_err_t OutputController::reconfigure(const DeviceConfig& cfg) {
     const bool pwm_ok = pwm_available_.load(std::memory_order_acquire);
 
     // 0. Physical Output PWM Availability Validation
-    for (uint8_t p = 0; p < 16; ++p) {
-        const PhysicalOutput& phys = cfg.physical_outputs[p];
-        if (phys.enabled && phys.type == OutputType::PWM) {
-            if (!pwm_ok) {
-                ESP_LOGE("output", "Reconfigure validation: physical_output[%u] is enabled PWM, but PCA9685 driver is unavailable", p);
-                unlock();
-                return ESP_ERR_NOT_FOUND;
+    // Only reject if an enabled PWM physical output is actually referenced by a configured fixture.
+    // Unmapped physical output definitions (e.g. from board templates) must not block
+    // addressable LED operation when the optional PCA9685 driver is unavailable.
+    if (!pwm_ok) {
+        for (uint8_t f = 0; f < 16; ++f) {
+            const FixtureConfig& fix = cfg.fixtures[f];
+            const bool is_pwm = (fix.profile == FixtureProfile::PWM_Single ||
+                                 fix.profile == FixtureProfile::PWM_RGB ||
+                                 fix.profile == FixtureProfile::PWM_RGBW);
+            if (is_pwm) {
+                uint8_t pwm_chans = (fix.profile == FixtureProfile::PWM_Single) ? 1 :
+                                    (fix.profile == FixtureProfile::PWM_RGB ? 3 : 4);
+                for (uint8_t ch = 0; ch < pwm_chans; ++ch) {
+                    uint8_t p_idx = fix.physical_output_index[ch];
+                    if (p_idx < 16 && cfg.physical_outputs[p_idx].enabled && cfg.physical_outputs[p_idx].type == OutputType::PWM) {
+                        ESP_LOGE("output", "Reconfigure validation: fixture[%u] references physical_output[%u] (PWM), but PCA9685 driver is unavailable", f, p_idx);
+                        unlock();
+                        return ESP_ERR_NOT_FOUND;
+                    }
+                }
             }
         }
     }

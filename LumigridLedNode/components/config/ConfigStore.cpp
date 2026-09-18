@@ -756,6 +756,40 @@ esp_err_t ConfigStore::load_config(DeviceConfig& config) {
     }
 
     if (err == ESP_OK) {
+        // Sanitize unreferenced PWM physical outputs so stale NVS defaults don't claim absent hardware
+        bool sanitized_any = false;
+        for (uint8_t p = 0; p < 16; ++p) {
+            if (config.physical_outputs[p].type == OutputType::PWM && config.physical_outputs[p].enabled) {
+                bool in_use = false;
+                for (uint8_t f = 0; f < 16; ++f) {
+                    const auto& fix = config.fixtures[f];
+                    if (fix.profile == FixtureProfile::PWM_Single ||
+                        fix.profile == FixtureProfile::PWM_RGB ||
+                        fix.profile == FixtureProfile::PWM_RGBW) {
+                        uint8_t chans = (fix.profile == FixtureProfile::PWM_Single) ? 1 :
+                                        (fix.profile == FixtureProfile::PWM_RGB ? 3 : 4);
+                        for (uint8_t ch = 0; ch < chans; ++ch) {
+                            if (fix.physical_output_index[ch] == p) {
+                                in_use = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (in_use) break;
+                }
+                if (!in_use) {
+                    config.physical_outputs[p].enabled = false;
+                    sanitized_any = true;
+                }
+            }
+        }
+        if (sanitized_any) {
+            config.checksum = calc_device_crc(config);
+            save_config(config);
+        }
+    }
+
+    if (err == ESP_OK) {
         validate_config(config, &cached_val_res_);
     } else {
         cached_val_res_.valid = false;
@@ -790,12 +824,11 @@ void ConfigStore::populate_default_topology(DeviceConfig& config) {
     // 2. Setup PWM Pins (e.g. 8 channels)
     // Map them in pairs of RGB or single channels if we wanted to
     // For now we just map the physical outputs and let the fixture mapping be unconfigured
-    uint8_t fixture_idx = lg::board::kAledCount;
     for (uint8_t i = 0; i < lg::board::kPwmCount && out_idx < 16; ++i) {
         config.physical_outputs[out_idx].type = OutputType::PWM;
         config.physical_outputs[out_idx].hardware_id = i;
         config.physical_outputs[out_idx].gpio_pin = 0; // PWM uses PCA so GPIO pin might not matter as much, or mapping to PCA pin
-        config.physical_outputs[out_idx].enabled = true;
+        config.physical_outputs[out_idx].enabled = false;
         out_idx++;
     }
 }
