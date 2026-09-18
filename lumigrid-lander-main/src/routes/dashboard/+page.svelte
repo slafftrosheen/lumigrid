@@ -642,7 +642,7 @@
     top: 1.5rem;
     right: 2rem;
     background: rgba(29, 29, 31, 0.95);
-    border: 1px solid rgba(0, 113, 227, 0.4);
+    border: 1px solid rgba(var(--dash-accent-rgb), 0.4);
     color: #f5f5f7;
     padding: 0.75rem 1.25rem;
     border-radius: 12px;
@@ -686,8 +686,8 @@
     background: rgba(255, 255, 255, 0.04);
   }
   .mode-btn.active {
-    color: #0071e3;
-    background: rgba(0, 113, 227, 0.12);
+    color: var(--dash-accent);
+    background: rgba(var(--dash-accent-rgb), 0.12);
   }
   .mode-pill {
     font-size: 0.7rem;
@@ -696,8 +696,8 @@
   }
   .mode-pill.mono {
     font-family: monospace;
-    background: rgba(0, 113, 227, 0.18);
-    color: #64d2ff;
+    background: rgba(var(--dash-accent-rgb), 0.18);
+    color: var(--dash-accent);
   }
   .mode-pill.count {
     background: rgba(255, 255, 255, 0.1);
@@ -749,7 +749,7 @@
     padding: 0.5rem 0.75rem;
   }
   .btn-add-fleet {
-    background: #0071e3;
+    background: var(--dash-accent);
     color: #fff;
     border: none;
     border-radius: 8px;
@@ -759,7 +759,7 @@
     cursor: pointer;
   }
   .btn-add-fleet:hover:not(:disabled) {
-    background: #0077ed;
+    background: var(--dash-accent-hover);
   }
   .btn-add-fleet:disabled {
     opacity: 0.5;
@@ -789,7 +789,7 @@
     border-bottom: 1px solid rgba(255, 255, 255, 0.04);
   }
   .selected-row {
-    background: rgba(0, 113, 227, 0.08);
+    background: rgba(var(--dash-accent-rgb), 0.08);
   }
   .fn-name {
     font-weight: 600;
@@ -823,16 +823,16 @@
     gap: 0.35rem;
   }
   .btn-action-select {
-    background: rgba(0, 113, 227, 0.15);
-    border: 1px solid rgba(0, 113, 227, 0.35);
+    background: rgba(var(--dash-accent-rgb), 0.15);
+    border: 1px solid rgba(var(--dash-accent-rgb), 0.35);
     border-radius: 6px;
-    color: #64d2ff;
+    color: var(--dash-accent);
     padding: 0.25rem 0.55rem;
     font-size: 0.75rem;
     cursor: pointer;
   }
   .btn-action-select:disabled {
-    background: rgba(0, 113, 227, 0.4);
+    background: rgba(var(--dash-accent-rgb), 0.4);
     color: #fff;
     cursor: default;
   }
@@ -865,7 +865,7 @@
   }
   .no-node-card .card-icon {
     font-size: 3rem;
-    color: #0071e3;
+    color: var(--dash-accent);
     margin-bottom: 1rem;
   }
 
@@ -1057,7 +1057,7 @@
     align-items: center;
   }
   .bri-slider {
-    accent-color: #0071e3;
+    accent-color: var(--dash-accent);
     width: 100%;
     margin-top: 0.25rem;
   }
@@ -1148,7 +1148,7 @@
   .text-ok { color: #30d158; }
   .text-fault { color: #ff453a; }
   .btn-primary {
-    background: #0071e3;
+    background: var(--dash-accent);
     color: #fff;
     border: none;
     border-radius: 8px;
