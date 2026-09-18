@@ -117,7 +117,7 @@
     <AutomationCurve
       track={runtimeTrack}
       onChange={(points) => (track.points = points)}
-      color={trackIndex === 0 ? '#ff2d55' : trackIndex === 1 ? '#ff3b30' : trackIndex === 2 ? '#ff9500' : '#00d4ff'}
+      color={trackIndex === 0 ? '#ff2d55' : trackIndex === 1 ? '#ff3b30' : trackIndex === 2 ? '#ff9500' : '#ffd60a'}
     />
   </div>
 </div>
@@ -182,7 +182,7 @@
     cursor: pointer;
     font-size: 0.8rem;
     line-height: 1;
-    transition: all 0.15s ease;
+    transition: background .15s ease, border-color .15s ease, color .15s ease;
   }
 
   .btn-delete:hover {
@@ -218,12 +218,12 @@
     padding: 6px 8px;
     font-size: 0.85rem;
     font-family: inherit;
-    outline: none;
-    transition: border-color 0.15s ease;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
   }
 
-  .select-input:focus, .number-input:focus {
+  .select-input:focus-visible, .number-input:focus-visible {
     border-color: var(--dash-accent);
+    box-shadow: 0 0 0 3px rgba(var(--dash-accent-rgb),.12);
   }
 
   .curve-wrapper {
