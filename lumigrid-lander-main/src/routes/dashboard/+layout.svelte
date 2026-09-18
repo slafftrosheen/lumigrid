@@ -297,6 +297,13 @@
 
   :global(.dash-root),
   :global(.pin-wall) {
+    /* Operator Console is deliberately dark. Do not inherit the public
+       Lander's prefers-color-scheme: light token overrides. */
+    --dash-text: #f5f5f7;
+    --dash-muted: #a1a1a6;
+    --dash-surface: rgba(29,29,31,.72);
+    --dash-surface-strong: rgba(29,29,31,.92);
+    --dash-border: rgba(255,255,255,.10);
     color-scheme: dark;
     text-rendering: optimizeLegibility;
     -webkit-font-smoothing: antialiased;
