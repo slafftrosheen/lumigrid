@@ -192,9 +192,12 @@ function notifyNodeRegistryChanged(): void {
   }
 }
 
-export function writeNodeRegistry(registry: Record<string, NodeRecord>): void {
+export function writeNodeRegistry(
+  registry: Record<string, NodeRecord>,
+  notify = true,
+): void {
   writeString(NODE_REGISTRY_KEY, JSON.stringify(registry));
-  notifyNodeRegistryChanged();
+  if (notify) notifyNodeRegistryChanged();
 }
 
 export function upsertNodeRecord(record: Partial<NodeRecord> & { id: string }): NodeRecord {
@@ -389,6 +392,8 @@ export function updateNodeLastSeen(ip: string): void {
     }
   }
   if (found) {
-    writeNodeRegistry(registry);
+    // Presence telemetry is high-frequency metadata, not a structural fleet
+    // change. Persist it without causing shell selectors to rerender.
+    writeNodeRegistry(registry, false);
   }
 }
