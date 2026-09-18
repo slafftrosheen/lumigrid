@@ -47,9 +47,6 @@
     points: track.points,
   });
 
-  function updatePoints(newTrack: AutomationTrack) {
-    track.points = newTrack.points;
-  }
 </script>
 
 <div class="track-editor-card">
@@ -119,6 +116,7 @@
   <div class="curve-wrapper">
     <AutomationCurve
       track={runtimeTrack}
+      onChange={(points) => (track.points = points)}
       color={trackIndex === 0 ? '#ff2d55' : trackIndex === 1 ? '#ff3b30' : trackIndex === 2 ? '#ff9500' : '#00d4ff'}
     />
   </div>
