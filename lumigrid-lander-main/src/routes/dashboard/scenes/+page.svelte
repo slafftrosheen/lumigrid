@@ -348,7 +348,7 @@
           <h2>Scene Library</h2>
           <span class="lib-count">{presets.length}/{MAX_PRESETS}</span>
         </div>
-        <button class="btn-primary btn-sm" onclick={createScene} title="Create new preset">+ New</button>
+        <button class="btn-primary btn-sm" onclick={createScene} title="Create new scene">+ New</button>
       </div>
 
       <div class="lib-list">
@@ -749,7 +749,7 @@
     {#if error}
       <div class="error-bar">
         <span>{error}</span>
-        <button class="err-close" onclick={() => (error = '')} type="button">✕</button>
+        <button class="err-close" onclick={() => (error = '')} type="button" title="Dismiss error" aria-label="Dismiss error">✕</button>
       </div>
     {/if}
   </div>
