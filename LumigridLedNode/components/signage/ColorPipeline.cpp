@@ -222,9 +222,20 @@ uint16_t ColorPipeline::to_pwm(
     }
 
     const uint8_t effective_brightness = scale8(global_brightness, channel.max_brightness);
-    const uint32_t raw = (single_pwm_in > 0)
-        ? single_pwm_in
-        : static_cast<uint32_t>(std::max({input.r, input.g, input.b, input.w}));
+
+    uint32_t derived = 0;
+    switch (channel.dmx_mode) {
+        // Legacy compound-PWM compatibility only. New channel configs use mode 0.
+        case 2: derived = input.r; break;
+        case 3: derived = input.g; break;
+        case 4: derived = input.b; break;
+        case 5: derived = input.w; break;
+        default:
+            derived = static_cast<uint32_t>(std::max({input.r, input.g, input.b, input.w}));
+            break;
+    }
+
+    const uint32_t raw = (single_pwm_in > 0) ? single_pwm_in : derived;
 
     uint32_t duty = (raw <= 4095u)
         ? (raw * effective_brightness) / 255u
