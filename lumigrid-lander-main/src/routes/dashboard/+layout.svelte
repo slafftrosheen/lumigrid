@@ -4,21 +4,18 @@
   import {
     AUTH_ROLE_KEY,
     AUTH_TIMESTAMP_KEY,
-    NODE_IP_KEY,
-    NODE_LIST_KEY,
     getSelectedNodeIp,
-    setSelectedNodeIp,
+    getSavedNodes,
     readString,
-    readStringList,
-    removeValue,
     writeString,
-    writeStringList,
     unlockDashboardSession,
     lockDashboardSession,
+    NODE_REGISTRY_CHANGED_EVENT,
+    type SavedNodeInfo,
   } from '$lib/auth/storage';
   import {
     connect,
-    reconnect as reconnectNode,
+    selectNode as selectLiveNode,
     getNodeLiveState,
     getNodeLiveSnapshot,
   } from '$lib/state/nodeStore';
@@ -37,8 +34,7 @@
 
   // Node management — browser persistence is isolated in auth/storage.
   let nodeIp   = $state('');
-  let nodeList = $state<string[]>([]);
-  let addIpVal = $state('');
+  let nodeList = $state<SavedNodeInfo[]>([]);
   let liveState = $state(getNodeLiveSnapshot());
   let navListEl: HTMLUListElement | null = null;
   let mobileMoreOpen = $state(false);
@@ -87,30 +83,31 @@
     lockDashboardSession();
   }
 
-  function addNode() {
-    const ip = addIpVal.trim();
-    if (!ip || nodeList.includes(ip)) return;
-    nodeList = [...nodeList, ip];
-    writeStringList(NODE_LIST_KEY, nodeList);
-    if (!nodeIp) selectNode(ip);
-    addIpVal = '';
-  }
+  function refreshNodeList() {
+    nodeList = getSavedNodes();
+    const stored = getSelectedNodeIp();
 
-  function removeNode(ip: string) {
-    nodeList = nodeList.filter(n => n !== ip);
-    writeStringList(NODE_LIST_KEY, nodeList);
-    if (nodeIp === ip) selectNode(nodeList[0] ?? '');
+    if (stored !== nodeIp) {
+      nodeIp = stored;
+      selectLiveNode(stored);
+      return;
+    }
+
+    if (nodeIp && !nodeList.some(node => node.ip === nodeIp)) {
+      const fallback = nodeList[0]?.ip ?? '';
+      nodeIp = fallback;
+      selectLiveNode(fallback);
+    }
   }
 
   function selectNode(ip: string) {
     nodeIp = ip;
-    setSelectedNodeIp(ip);
-    reconnectNode();
+    selectLiveNode(ip);
   }
 
   onMount(() => {
     nodeIp = getSelectedNodeIp();
-    nodeList = readStringList(NODE_LIST_KEY);
+    nodeList = getSavedNodes();
     initHashes();
 
     // Re-check auth on mount (session persists for 8 h via timestamp).
@@ -128,7 +125,14 @@
     const unsub = getNodeLiveState().subscribe(val => {
       liveState = val;
     });
-    return unsub;
+
+    const onRegistryChanged = () => refreshNodeList();
+    window.addEventListener(NODE_REGISTRY_CHANGED_EVENT, onRegistryChanged);
+
+    return () => {
+      unsub();
+      window.removeEventListener(NODE_REGISTRY_CHANGED_EVENT, onRegistryChanged);
+    };
   });
 
   const navLinks = [
@@ -214,9 +218,11 @@
         {/if}
       </div>
       <select class="node-select" value={nodeIp} onchange={(e) => selectNode((e.target as HTMLSelectElement).value)}>
-        {#if !nodeList.length}<option value="">— no nodes —</option>{/if}
-        {#each nodeList as ip}
-          <option value={ip}>{ip}</option>
+        <option value="">{nodeList.length ? '— select node —' : '— no nodes —'}</option>
+        {#each nodeList as node}
+          <option value={node.ip}>
+            {node.name === node.ip ? node.ip : `${node.name} — ${node.ip}`}
+          </option>
         {/each}
       </select>
       {#if nodeIp && liveState.connection === 'connected'}
@@ -233,21 +239,7 @@
           {/if}
         </div>
       {/if}
-      <div class="node-add-row">
-        <input
-          class="node-add-input"
-          placeholder="192.168.x.x"
-          bind:value={addIpVal}
-          onkeydown={(e) => e.key === 'Enter' && addNode()}
-        />
-        <button class="icon-btn" onclick={addNode} title="Add node" aria-label="Add node">+</button>
-      </div>
-      {#each nodeList as ip}
-        <div class="node-chip">
-          <button class="node-chip-select" class:active={nodeIp === ip} onclick={() => selectNode(ip)}>{ip}</button>
-          <button class="node-chip-del" onclick={() => removeNode(ip)} title="Remove node" aria-label={`Remove node ${ip}`}>×</button>
-        </div>
-      {/each}
+      <a class="manage-fleet-link" href="/dashboard">Manage Fleet</a>
     </div>
 
     <ul class="nav-links" role="list" bind:this={navListEl}>
@@ -285,9 +277,11 @@
       value={nodeIp}
       onchange={(e) => selectNode((e.target as HTMLSelectElement).value)}
     >
-      {#if !nodeList.length}<option value="">No nodes</option>{/if}
-      {#each nodeList as ip}
-        <option value={ip}>{ip}</option>
+      <option value="">{nodeList.length ? 'Select node' : 'No nodes'}</option>
+      {#each nodeList as node}
+        <option value={node.ip}>
+          {node.name === node.ip ? node.ip : `${node.name} — ${node.ip}`}
+        </option>
       {/each}
     </select>
     <span class="mobile-status {liveState.connection}" title={liveState.connection}>
@@ -633,60 +627,27 @@
     padding: .35rem .5rem;
     font-family: monospace;
   }
-  .node-add-row { display: flex; gap: .4rem; }
-  .node-add-input {
-    flex: 1;
-    background: rgba(255,255,255,.05);
-    border: 1px solid rgba(255,255,255,.10);
-    border-radius: 8px;
-    color: #f5f5f7;
-    font-size: .78rem;
-    padding: .3rem .45rem;
-    font-family: monospace;
-  }
-  .node-add-input:focus-visible { border-color: var(--dash-accent); }
-  .icon-btn {
-    background: rgba(255,45,85,.75);
-    color: #fff;
-    border: none;
-    border-radius: 8px;
-    width: 28px;
-    height: 28px;
-    cursor: pointer;
-    font-size: 1rem;
-    line-height: 1;
-    transition: background .2s;
-  }
-  .icon-btn:hover { background: #ff3b30; }
-  .node-chip { display: flex; align-items: center; gap: .25rem; }
-  .node-chip-select {
-    flex: 1;
-    background: rgba(255,255,255,.04);
+  .manage-fleet-link {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 30px;
+    padding: .35rem .55rem;
     border: 1px solid rgba(255,255,255,.08);
-    border-radius: 6px;
-    color: #a1a1a6;
+    border-radius: 8px;
+    background: rgba(255,255,255,.035);
+    color: #8e8e93;
+    text-decoration: none;
     font-size: .72rem;
-    padding: .2rem .4rem;
-    text-align: left;
-    cursor: pointer;
-    font-family: monospace;
-    transition: background .2s, color .2s;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    font-weight: 650;
+    transition: background .18s ease, border-color .18s ease, color .18s ease;
   }
-  .node-chip-select.active { background: rgba(255,45,85,.18); border-color: rgba(255,45,85,.4); color: #f5f5f7; }
-  .node-chip-del {
-    background: transparent;
-    border: none;
-    color: #a1a1a6;
-    cursor: pointer;
-    font-size: .9rem;
-    padding: .1rem .3rem;
-    border-radius: 4px;
-    transition: color .2s;
+  .manage-fleet-link:hover {
+    background: rgba(255,255,255,.065);
+    border-color: rgba(255,255,255,.14);
+    color: #f5f5f7;
   }
-  .node-chip-del:hover { color: #ff453a; }
+
   .nav-links {
     list-style: none;
     margin: .5rem 0 0;
