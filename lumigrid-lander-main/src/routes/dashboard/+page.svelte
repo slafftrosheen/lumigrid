@@ -631,10 +631,12 @@
 
 <style>
   .overview-page {
-    max-width: 1100px;
+    width: 100%;
+    max-width: 1180px;
+    margin: 0 auto;
     display: flex;
     flex-direction: column;
-    gap: 1.5rem;
+    gap: 1.25rem;
   }
 
   .toast-bar {
@@ -656,9 +658,12 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
-    background: rgba(255, 255, 255, 0.03);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 14px;
+    background: var(--dash-surface);
+    backdrop-filter: blur(18px);
+    -webkit-backdrop-filter: blur(18px);
+    border: 1px solid var(--dash-border);
+    border-radius: var(--dash-radius-lg);
+    box-shadow: var(--dash-shadow);
     padding: 0.6rem 1rem;
     flex-wrap: wrap;
     gap: 0.75rem;
@@ -859,9 +864,10 @@
   .no-node-card {
     text-align: center;
     padding: 4rem 2rem;
-    background: rgba(29, 29, 31, 0.6);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 20px;
+    background: var(--dash-surface);
+    border: 1px solid var(--dash-border);
+    border-radius: var(--dash-radius-xl);
+    box-shadow: var(--dash-shadow);
   }
   .no-node-card .card-icon {
     font-size: 3rem;
@@ -874,10 +880,11 @@
     align-items: center;
     justify-content: space-between;
     padding: 1.25rem 1.5rem;
-    background: rgba(29, 29, 31, 0.75);
+    background: var(--dash-surface);
     backdrop-filter: blur(20px);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 18px;
+    border: 1px solid var(--dash-border);
+    border-radius: var(--dash-radius-lg);
+    box-shadow: var(--dash-shadow);
     flex-wrap: wrap;
     gap: 1rem;
   }
@@ -951,10 +958,11 @@
 
   /* Section Card */
   .section-card {
-    background: rgba(29, 29, 31, 0.7);
-    backdrop-filter: blur(16px);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 18px;
+    background: var(--dash-surface);
+    backdrop-filter: blur(18px);
+    border: 1px solid var(--dash-border);
+    border-radius: var(--dash-radius-lg);
+    box-shadow: var(--dash-shadow);
     padding: 1.5rem;
   }
   .section-card h3 {
@@ -1157,4 +1165,19 @@
     font-weight: 600;
     cursor: pointer;
   }
+
+  @media (max-width: 720px) {
+    .mode-bar { align-items: stretch; }
+    .mode-selector { width: 100%; overflow-x: auto; }
+    .mode-btn { flex: 1; justify-content: center; white-space: nowrap; }
+    .icon-refresh-btn { width: 100%; }
+    .add-node-form { flex-direction: column; }
+    .input-ip, .input-name { min-width: 0; width: 100%; }
+    .btn-add-fleet { min-height: 42px; }
+    .fleet-table { min-width: 720px; }
+    .node-header { padding: 1rem; }
+    .section-card { padding: 1rem; }
+    .actions-grid, .health-grid { grid-template-columns: 1fr; }
+  }
+
 </style>
