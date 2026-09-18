@@ -11,8 +11,8 @@
 
   let {
     track = $bindable<AutomationTrackConfig>({
-      target: 'brightness',
-      zone: 0,
+      target: 'globalBrightness',
+      channel: 0,
       layer: 0,
       curve: 'easeInOut',
       loop: true,
@@ -28,12 +28,16 @@
   } = $props();
 
   const TARGETS: { id: AutomationTarget; label: string }[] = [
-    { id: 'brightness', label: 'Scene Brightness' },
-    { id: 'speed', label: 'Layer Speed' },
-    { id: 'fx_param', label: 'Layer FX Param' },
-    { id: 'layer0_opacity', label: 'Layer 0 Opacity' },
-    { id: 'layer1_opacity', label: 'Layer 1 Opacity' },
+    { id: 'globalBrightness', label: 'Scene Brightness' },
+    { id: 'layerOpacity', label: 'Layer Opacity' },
+    { id: 'layerSpeed', label: 'Layer Speed' },
+    { id: 'layerParameter', label: 'Layer FX Parameter' },
   ];
+
+  const CHANNEL_PORTS = [
+    'A1', 'A2', 'A3', 'A4', 'A5', 'A6', 'A7', 'A8',
+    'P1', 'P2', 'P3', 'P4', 'P5', 'P6', 'P7', 'P8',
+  ] as const;
 
   let runtimeTrack = $derived<AutomationTrack>({
     target: 0,
@@ -91,12 +95,12 @@
       />
     </div>
 
-    {#if track.target === 'speed' || track.target === 'fx_param'}
+    {#if track.target !== 'globalBrightness'}
       <div class="param-field">
-        <label for="track-zone-{trackIndex}">Zone</label>
-        <select id="track-zone-{trackIndex}" bind:value={track.zone} class="select-input">
-          {#each Array.from({ length: 8 }, (_, i) => i) as z}
-            <option value={z}>Zone {z + 1}</option>
+        <label for="track-channel-{trackIndex}">Channel</label>
+        <select id="track-channel-{trackIndex}" bind:value={track.channel} class="select-input">
+          {#each CHANNEL_PORTS as port, channel}
+            <option value={channel}>{port} · {channel < 8 ? 'Addressable' : 'PWM'}</option>
           {/each}
         </select>
       </div>
@@ -175,8 +179,8 @@
     background: transparent;
     border: 1px solid rgba(255, 69, 58, 0.4);
     color: var(--dash-danger);
-    border-radius: 4px;
-    padding: 3px 8px;
+    border-radius: 8px;
+    padding: 5px 9px;
     cursor: pointer;
     font-size: 0.8rem;
     line-height: 1;
