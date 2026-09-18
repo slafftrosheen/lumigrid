@@ -332,7 +332,7 @@
 
         {#if savedFleet.length === 0}
           <div class="empty-fleet">
-            <p>No nodes registered in fleet yet. Add a node IP above to begin controlling physical fixtures.</p>
+            <p>No nodes registered in fleet yet. Add a node IP above to begin controlling physical outputs.</p>
           </div>
         {:else}
           <div class="fleet-table-wrap">
@@ -463,7 +463,7 @@
       <div class="card-header">
         <div class="title-with-fps">
           <h3>Live LED Output</h3>
-          <span class="frames-indicator">8 Lanes × 144 Pixels (WS2812)</span>
+          <span class="frames-indicator">8 addressable outputs · live pixel preview</span>
         </div>
         <div class="status-flags">
           <span class="flag-pill" class:active={liveState.status?.outputsEnabled}>
@@ -551,7 +551,7 @@
           <span class="btn-icon">◆</span>
           <span class="btn-text">
             <strong>Scene Studio</strong>
-            <small>16 Channels & Layer composer</small>
+            <small>16 outputs · layered scenes</small>
           </span>
         </a>
 
@@ -559,7 +559,7 @@
           <span class="btn-icon">▤</span>
           <span class="btn-text">
             <strong>Timeline Studio</strong>
-            <small>16-Step beat sequencer</small>
+            <small>16 tracks · 16-step sequencer</small>
           </span>
         </a>
 
