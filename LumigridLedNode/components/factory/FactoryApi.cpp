@@ -1556,9 +1556,9 @@ esp_err_t get_device_config(httpd_req_t* request) {
         char port[8];
         channel_port_name(i, port, sizeof(port));
 
-        bool is_configured = (hw.kind == ChannelKind::Addressable)
-            ? (c.pixel_count > 0 || c.enabled || c.name[0] != '\0')
-            : (c.enabled || c.name[0] != '\0');
+        const bool is_configured = (hw.kind == ChannelKind::Addressable)
+            ? (c.pixel_count > 0 || c.enabled || c.dmx_start_channel > 0 || c.max_milliwatts > 0)
+            : (c.enabled || c.dmx_start_channel > 0 || c.max_milliwatts > 0);
 
         cJSON* ch = cJSON_CreateObject();
         cJSON_AddNumberToObject(ch, "index", i);
