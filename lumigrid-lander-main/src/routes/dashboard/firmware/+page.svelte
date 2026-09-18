@@ -482,11 +482,11 @@
               <input type="text" maxlength={31} bind:value={currentConfig.deviceName} />
             </label>
             <label class="field">
-              <span>Active Scene Slot</span>
+              <span>Active Scene Index (0–31)</span>
               <input type="number" min="0" max="31" bind:value={currentConfig.activePresetIndex} />
             </label>
             <label class="field">
-              <span>Fallback Scene Slot</span>
+              <span>Fallback Scene Index (0–31)</span>
               <input type="number" min="0" max="31" bind:value={currentConfig.fallbackPresetIndex} />
             </label>
           </div>
