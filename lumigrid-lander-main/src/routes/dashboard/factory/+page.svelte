@@ -358,14 +358,14 @@
     <!-- SECTION 4: PIXEL TEST (Lanes 0–7) -->
     <section class="panel">
       <div class="panel-head">
-        <h2>Pixel Test (Lanes 0–7)</h2>
-        <span class="head-hint">Inspect discrete WS2812 output lanes and color channels</span>
+        <h2>Addressable Test (A1–A8)</h2>
+        <span class="head-hint">Inspect physical addressable outputs and color channels</span>
       </div>
 
       <div class="lanes-list">
         {#each LANES as lane}
           <div class="lane-row">
-            <span class="lane-tag">Lane {lane}</span>
+            <span class="lane-tag">A{lane + 1}</span>
             <input
               type="color"
               value={laneHex(lane)}
@@ -380,7 +380,7 @@
               onclick={() => sendLane(lane)}
               type="button"
             >
-              Test Lane {lane}
+              Test A{lane + 1}
             </button>
           </div>
         {/each}
@@ -390,7 +390,7 @@
     <!-- SECTION 5: PWM TEST (Channels 0–7) -->
     <section class="panel">
       <div class="panel-head">
-        <h2>PWM Test (Channels 0–7)</h2>
+        <h2>PWM Test (P1–P8)</h2>
         <div class="pwm-quick-actions">
           <button
             class="ghost-sm"
@@ -412,7 +412,7 @@
       <div class="pwm-list">
         {#each PWM_CHANNELS as ch}
           <div class="pwm-row">
-            <span class="pwm-tag">CH {ch}</span>
+            <span class="pwm-tag">P{ch + 1}</span>
             <input
               type="range"
               min="0"
@@ -426,7 +426,7 @@
               onclick={() => sendPwm(ch)}
               type="button"
             >
-              Set CH{ch}
+              Set P{ch + 1}
             </button>
           </div>
         {/each}
@@ -442,7 +442,7 @@
 
       <div class="burnin-content">
         <p class="burnin-text">
-          Continuous endurance test exercising all 8 LED lanes and PWM channels at dynamic high load. Ensure device has proper heatsinking and ventilation during extended burn-in runs.
+          Continuous endurance test exercising all addressable and PWM outputs at dynamic high load. Ensure device has proper heatsinking and ventilation during extended burn-in runs.
         </p>
 
         <div class="burnin-actions">
@@ -482,12 +482,17 @@
   }
 
   .factory-header {
+    position: sticky;
+    top: 0;
+    z-index: 18;
     display: flex;
     justify-content: space-between;
     align-items: center;
     gap: 1rem;
     flex-wrap: wrap;
-    background: var(--dash-surface);
+    background: rgba(22,22,24,.90);
+    backdrop-filter: blur(22px);
+    -webkit-backdrop-filter: blur(22px);
     border: 1px solid var(--dash-border);
     border-radius: var(--dash-radius-lg);
     box-shadow: var(--dash-shadow);
@@ -617,7 +622,8 @@
 
   /* Panels */
   .panel {
-    background: var(--dash-surface);
+    background: linear-gradient(180deg, rgba(29,29,31,.74), rgba(18,18,20,.74));
+    box-shadow: var(--dash-shadow);
     border: 1px solid var(--dash-border);
     border-radius: var(--dash-radius-lg);
     padding: 1.25rem;
@@ -649,7 +655,7 @@
     gap: 0.75rem;
   }
   .stat-card {
-    background: rgba(255, 255, 255, 0.02);
+    background: linear-gradient(180deg, rgba(255,255,255,.035), rgba(255,255,255,.018));
     border: 1px solid rgba(255, 255, 255, 0.06);
     border-radius: 10px;
     padding: 0.75rem 1rem;
@@ -844,8 +850,8 @@
   }
   .lane-tag {
     font-size: 0.8rem;
-    font-weight: 700;
-    color: #86868b;
+    font-weight: 800;
+    color: var(--dash-accent);
     min-width: 60px;
   }
   .lane-row input[type='color'] {
@@ -863,19 +869,25 @@
     flex: 1;
   }
   .btn-send-lane, .btn-send-pwm {
-    background: rgba(var(--dash-accent-rgb), 0.15);
-    border: 1px solid rgba(var(--dash-accent-rgb), 0.35);
-    border-radius: 6px;
-    color: var(--dash-led);
+    border-radius: 7px;
+    font-weight: 700;
     font-size: 0.75rem;
-    font-weight: 600;
     padding: 0.3rem 0.7rem;
     cursor: pointer;
-    transition: background 0.12s ease;
+    transition: background .12s ease, border-color .12s ease, color .12s ease;
   }
-  .btn-send-lane:hover, .btn-send-pwm:hover {
-    background: rgba(var(--dash-accent-rgb), 0.3);
+  .btn-send-lane {
+    background: rgba(var(--dash-accent-rgb),.14);
+    border: 1px solid rgba(var(--dash-accent-rgb),.32);
+    color: var(--dash-accent);
   }
+  .btn-send-pwm {
+    background: color-mix(in oklab, var(--dash-warm) 14%, transparent);
+    border: 1px solid color-mix(in oklab, var(--dash-warm) 32%, transparent);
+    color: var(--dash-warm);
+  }
+  .btn-send-lane:hover { background: rgba(var(--dash-accent-rgb),.24); }
+  .btn-send-pwm:hover { background: color-mix(in oklab, var(--dash-warm) 24%, transparent); }
 
   /* PWM Channels */
   .pwm-quick-actions {
@@ -907,8 +919,8 @@
   }
   .pwm-tag {
     font-size: 0.8rem;
-    font-weight: 700;
-    color: #86868b;
+    font-weight: 800;
+    color: var(--dash-warm);
     min-width: 50px;
   }
   .pwm-row input[type='range'] {
@@ -988,7 +1000,7 @@
   }
 
   @media (max-width: 720px) {
-    .factory-header { align-items: flex-start; }
+    .factory-header { position: static; align-items: flex-start; }
     .header-right { width: 100%; }
     .header-right button { flex: 1; }
     .abort-banner { align-items: stretch; }
