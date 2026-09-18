@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { render } from 'svelte/server';
 import { setSelectedNodeIp, getSelectedNodeIp } from '$lib/auth/storage';
 import { disconnect, _resetForTesting } from '$lib/state/nodeStore';
@@ -33,6 +34,33 @@ const routes = [
   { path: '/dashboard/preview', component: PreviewPage, name: 'Preview' },
   { path: '/dashboard/firmware', component: FirmwarePage, name: 'Firmware' },
 ];
+const routeSourceFiles = [
+  './+layout.svelte',
+  './+page.svelte',
+  './scenes/+page.svelte',
+  './cues/+page.svelte',
+  './timeline/+page.svelte',
+  './schedule/+page.svelte',
+  './channels/+page.svelte',
+  './visualizer/+page.svelte',
+  './preview/+page.svelte',
+  './thermal/+page.svelte',
+  './uptime/+page.svelte',
+  './diagnostics/+page.svelte',
+  './factory/+page.svelte',
+  './firmware/+page.svelte',
+];
+
+const landerUtilityClassNames = new Set([
+  'card', 'pill', 'grid', 'btn', 'chip', 'strip', 'timeline', 'controls',
+  'demo', 'big', 'center', 'section', 'container', 'switch', 'faq',
+  'infocard', 'readable',
+]);
+
+function sourceFor(relativePath: string): string {
+  return readFileSync(new URL(relativePath, import.meta.url), 'utf8');
+}
+
 
 class MockStorage implements Storage {
   private store: Record<string, string> = {};
@@ -65,6 +93,32 @@ describe('dashboard routes smoke & contract tests', () => {
       '/dashboard/factory',
       '/dashboard/firmware',
     ]));
+  });
+
+  it('keeps the operator palette free of the retired blue accent family', () => {
+    const retiredBlue = /#0071e3|#0077ed|#2997ff|#64d2ff|#00f0ff|#3b82f6|#0a84ff/i;
+    for (const file of routeSourceFiles) {
+      expect(sourceFor(file), file).not.toMatch(retiredBlue);
+    }
+  });
+
+  it('does not reuse public Lander utility class names inside dashboard routes', () => {
+    for (const file of routeSourceFiles) {
+      const source = sourceFor(file);
+      for (const match of source.matchAll(/class="([^"]+)"/g)) {
+        const tokens = match[1].split(/\s+/).filter(Boolean);
+        for (const token of tokens) {
+          expect(landerUtilityClassNames.has(token), `${file} reuses public class "${token}"`).toBe(false);
+        }
+      }
+    }
+  });
+
+  it('keeps removed implementation and legacy operator copy out of the dashboard', () => {
+    const retiredCopy = /Hardware Truth|WLED playlists|QLC\+ cue|xLights value|ESP32 RMT Lane|PCA9685 Driver|>\s*Active Preset\s*<|>\s*Preset Scene\s*<|>\s*Sequence Drops\s*</i;
+    for (const file of routeSourceFiles) {
+      expect(sourceFor(file), file).not.toMatch(retiredCopy);
+    }
   });
 
   beforeEach(() => {
