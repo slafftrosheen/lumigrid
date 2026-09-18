@@ -41,6 +41,7 @@
   let addIpVal = $state('');
   let liveState = $state(getNodeLiveSnapshot());
   let navListEl: HTMLUListElement | null = null;
+  let mobileMoreOpen = $state(false);
 
   async function sha256(s: string): Promise<string> {
     const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));
@@ -146,14 +147,24 @@
     { group: 'System',   href: '/dashboard/firmware',     icon: '⟳',  label: 'Firmware' },
   ];
 
+  const mobilePrimaryHrefs = new Set([
+    '/dashboard',
+    '/dashboard/scenes',
+    '/dashboard/timeline',
+    '/dashboard/channels',
+  ]);
+  const mobilePrimaryLinks = navLinks.filter(link => mobilePrimaryHrefs.has(link.href));
+  const mobileMoreLinks = navLinks.filter(link => !mobilePrimaryHrefs.has(link.href));
+
   $effect(() => {
-    // Keep the current destination visible in the horizontally scrolling mobile
-    // nav. On desktop scrollIntoView is effectively a no-op because the list is vertical.
+    // Route changes close the mobile utility sheet and keep the active desktop
+    // sidebar destination in view when the list is taller than the viewport.
     $page.url.pathname;
+    mobileMoreOpen = false;
     requestAnimationFrame(() => {
       navListEl?.querySelector<HTMLElement>('.nav-link.active')?.scrollIntoView({
         block: 'nearest',
-        inline: 'center',
+        inline: 'nearest',
       });
     });
   });
@@ -285,6 +296,80 @@
     </span>
     <button class="mobile-lock" onclick={lockDashboard} title="Lock dashboard" aria-label="Lock dashboard">⌁</button>
   </div>
+
+  <nav class="mobile-bottom-nav" aria-label="Primary dashboard navigation">
+    {#each mobilePrimaryLinks as { href, icon, label }}
+      <a
+        {href}
+        class="mobile-nav-link"
+        class:active={$page.url.pathname === href}
+        aria-current={$page.url.pathname === href ? 'page' : undefined}
+      >
+        <span class="mobile-nav-icon">{icon}</span>
+        <span>{label}</span>
+      </a>
+    {/each}
+    <button
+      class="mobile-nav-link mobile-more-button"
+      class:active={mobileMoreLinks.some(link => $page.url.pathname === link.href) || mobileMoreOpen}
+      aria-expanded={mobileMoreOpen}
+      aria-controls="mobile-more-sheet"
+      onclick={() => (mobileMoreOpen = !mobileMoreOpen)}
+      type="button"
+    >
+      <span class="mobile-nav-icon">•••</span>
+      <span>More</span>
+    </button>
+  </nav>
+
+  {#if mobileMoreOpen}
+    <div
+      class="mobile-more-backdrop"
+      role="presentation"
+      onclick={(e) => {
+        if (e.target === e.currentTarget) mobileMoreOpen = false;
+      }}
+    >
+      <section
+        id="mobile-more-sheet"
+        class="mobile-more-sheet"
+        role="dialog"
+        aria-modal="true"
+        aria-label="More dashboard tools"
+        tabindex="-1"
+        onkeydown={(e) => { if (e.key === 'Escape') mobileMoreOpen = false; }}
+      >
+        <div class="mobile-more-header">
+          <div>
+            <strong>More tools</strong>
+            <span>Creation, monitoring and system utilities</span>
+          </div>
+          <button
+            class="mobile-more-close"
+            onclick={() => (mobileMoreOpen = false)}
+            type="button"
+            aria-label="Close more tools"
+          >✕</button>
+        </div>
+        <div class="mobile-more-grid">
+          {#each mobileMoreLinks as { group, href, icon, label }}
+            <a
+              {href}
+              class="mobile-more-link"
+              class:active={$page.url.pathname === href}
+              aria-current={$page.url.pathname === href ? 'page' : undefined}
+            >
+              <span class="mobile-more-icon">{icon}</span>
+              <span class="mobile-more-copy">
+                <strong>{label}</strong>
+                <small>{group}</small>
+              </span>
+            </a>
+          {/each}
+        </div>
+      </section>
+    </div>
+  {/if}
 
   <main class="dash-main">
     {@render children()}
@@ -622,7 +707,9 @@
     letter-spacing: .1em;
     text-transform: uppercase;
   }
-  .mobile-topbar { display: none; }
+  .mobile-topbar,
+  .mobile-bottom-nav,
+  .mobile-more-backdrop { display: none; }
   .nav-link {
     display: flex;
     align-items: center;
@@ -752,31 +839,9 @@
     .dash-root {
       display: block;
       min-height: 100dvh;
-      padding-bottom: 76px;
+      padding-bottom: calc(78px + env(safe-area-inset-bottom));
     }
-    .dash-nav {
-      position: fixed;
-      inset: auto 0 0 0;
-      width: 100%;
-      height: 72px;
-      min-height: 0;
-      z-index: 1200;
-      flex-direction: row;
-      align-items: stretch;
-      padding: 7px 8px calc(7px + env(safe-area-inset-bottom));
-      gap: 0;
-      border-right: 0;
-      border-top: 1px solid rgba(255,255,255,.1);
-      background: rgba(15,15,17,.94);
-      box-shadow: 0 -14px 40px rgba(0,0,0,.38);
-      overflow: hidden;
-    }
-    .dash-brand,
-    .node-section,
-    .role-badge,
-    .logout-btn,
-    .nav-group-label { display: none; }
-
+    .dash-nav { display: none; }
     .mobile-topbar {
       position: fixed;
       inset: env(safe-area-inset-top) 0 auto 0;
@@ -834,55 +899,169 @@
       cursor: pointer;
     }
 
-    .nav-links {
-      flex: 1;
-      min-width: 0;
-      margin: 0;
-      padding: 0 2px;
-      flex-direction: row;
-      align-items: stretch;
+    .mobile-bottom-nav {
+      position: fixed;
+      inset: auto 0 0 0;
+      z-index: 1200;
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
       gap: 4px;
-      overflow-x: auto;
-      overflow-y: hidden;
-      scroll-snap-type: x proximity;
-      overscroll-behavior-x: contain;
-      scrollbar-width: none;
-      -webkit-overflow-scrolling: touch;
+      padding: 7px 8px calc(7px + env(safe-area-inset-bottom));
+      border-top: 1px solid rgba(255,255,255,.1);
+      background: rgba(15,15,17,.95);
+      backdrop-filter: blur(22px);
+      -webkit-backdrop-filter: blur(22px);
+      box-shadow: 0 -14px 40px rgba(0,0,0,.38);
     }
-    .nav-links::-webkit-scrollbar { display: none; }
-    .nav-links > li:not(.nav-group-label) {
-      flex: 0 0 62px;
-      scroll-snap-align: center;
-    }
-    .nav-link {
-      height: 100%;
-      min-height: 54px;
-      padding: 5px 4px;
-      border-radius: 11px;
+    .mobile-nav-link {
+      min-width: 0;
+      min-height: 56px !important;
+      display: flex;
       flex-direction: column;
+      align-items: center;
       justify-content: center;
-      gap: 2px;
-      font-size: .62rem;
-      line-height: 1.05;
-      text-align: center;
-      white-space: nowrap;
-      border-left: 0;
+      gap: 3px;
+      padding: 5px 3px;
+      border: 1px solid transparent;
+      border-radius: 12px;
+      background: transparent;
+      color: #8e8e93;
+      text-decoration: none;
+      font: 700 .62rem/1.05 -apple-system, BlinkMacSystemFont, Inter, system-ui, sans-serif;
+      cursor: pointer;
     }
-    .nav-link.active {
-      border-left: 0;
-      background: linear-gradient(180deg, rgba(var(--dash-accent-rgb),.20), rgba(var(--dash-accent-rgb),.10));
-      box-shadow: inset 0 0 0 1px rgba(var(--dash-accent-rgb), .22);
+    .mobile-nav-link.active {
+      color: #fff;
+      background: linear-gradient(180deg, rgba(var(--dash-accent-rgb),.21), rgba(var(--dash-accent-rgb),.09));
+      border-color: rgba(var(--dash-accent-rgb),.22);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.035);
     }
-    .nav-icon {
-      width: auto;
-      font-size: 1.05rem;
+    .mobile-nav-icon {
+      min-height: 18px;
+      display: grid;
+      place-items: center;
+      color: currentColor;
+      font-size: 1.08rem;
       line-height: 1;
     }
-    .nav-link span:last-child { display: block; }
+    .mobile-more-button { width: 100%; }
+    .mobile-more-button .mobile-nav-icon {
+      letter-spacing: .08em;
+      font-size: .85rem;
+    }
+
+    .mobile-more-backdrop {
+      position: fixed;
+      inset: 0;
+      z-index: 1195;
+      display: flex;
+      align-items: flex-end;
+      padding: 70px .7rem calc(78px + env(safe-area-inset-bottom));
+      background: rgba(0,0,0,.52);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+    }
+    .mobile-more-sheet {
+      width: min(100%, 560px);
+      max-height: min(68dvh, 560px);
+      margin: 0 auto;
+      overflow: auto;
+      background: rgba(22,22,24,.97);
+      border: 1px solid rgba(255,255,255,.12);
+      border-radius: 22px;
+      padding: .85rem;
+      box-shadow: 0 24px 70px rgba(0,0,0,.58);
+      scrollbar-width: thin;
+      scrollbar-color: rgba(255,255,255,.16) transparent;
+    }
+    .mobile-more-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      padding: .25rem .25rem .8rem;
+    }
+    .mobile-more-header > div {
+      display: flex;
+      flex-direction: column;
+      gap: .1rem;
+    }
+    .mobile-more-header strong {
+      font-size: .98rem;
+      color: #f5f5f7;
+    }
+    .mobile-more-header span {
+      color: #8e8e93;
+      font-size: .72rem;
+    }
+    .mobile-more-close {
+      width: 34px;
+      height: 34px;
+      display: grid;
+      place-items: center;
+      border: 1px solid rgba(255,255,255,.10);
+      border-radius: 10px;
+      background: rgba(255,255,255,.045);
+      color: #a1a1a6;
+      cursor: pointer;
+    }
+    .mobile-more-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: .55rem;
+    }
+    .mobile-more-link {
+      min-width: 0;
+      min-height: 76px;
+      display: flex;
+      align-items: center;
+      gap: .65rem;
+      padding: .7rem;
+      border: 1px solid rgba(255,255,255,.075);
+      border-radius: 14px;
+      background: rgba(255,255,255,.035);
+      color: #d1d1d6;
+      text-decoration: none;
+    }
+    .mobile-more-link.active {
+      border-color: rgba(var(--dash-accent-rgb),.28);
+      background: linear-gradient(135deg, rgba(var(--dash-accent-rgb),.17), rgba(var(--dash-accent-rgb),.065));
+      color: #fff;
+    }
+    .mobile-more-icon {
+      flex: 0 0 28px;
+      display: grid;
+      place-items: center;
+      color: var(--dash-accent);
+      font-size: 1.05rem;
+    }
+    .mobile-more-copy {
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: .12rem;
+    }
+    .mobile-more-copy strong {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      font-size: .78rem;
+      white-space: nowrap;
+    }
+    .mobile-more-copy small {
+      color: #737378;
+      font-size: .62rem;
+      text-transform: uppercase;
+      letter-spacing: .05em;
+    }
+
     .dash-main {
       padding: calc(1rem + 54px + env(safe-area-inset-top)) 1rem 1rem;
       max-height: none;
       overflow: visible;
     }
+  }
+
+  @media (max-width: 430px) {
+    .mobile-more-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   }
 </style>
