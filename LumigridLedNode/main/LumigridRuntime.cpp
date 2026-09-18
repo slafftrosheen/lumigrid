@@ -9,6 +9,7 @@
 #include "nvs.h"
 #include "DiagnosticLog.hpp"
 #include "ApiAuth.hpp"
+#include "NodeIdentity.hpp"
 #include <cstring>
 
 namespace lg {
@@ -541,10 +542,11 @@ esp_err_t LumigridRuntime::start() {
         ESP_LOGI("lumigrid", "Step 11: mqtt.start()...");
         char broker_uri[128];
         snprintf(broker_uri, sizeof(broker_uri), "mqtt://%s:%d", current_cfg.mqtt_broker, current_cfg.mqtt_port);
+        NodeIdentity id = get_node_identity(current_cfg.device_name);
         char prefix[64];
-        snprintf(prefix, sizeof(prefix), "lumigrid/%s", current_cfg.device_name);
+        snprintf(prefix, sizeof(prefix), "lumigrid/%s", id.id);
 
-        if (mqtt_.init(broker_uri, current_cfg.device_name, prefix, &lighting_) == ESP_OK) {
+        if (mqtt_.init(broker_uri, id.id, prefix, &lighting_) == ESP_OK) {
             mqtt_.start();
             started_subsystems_.mqtt = true;
             

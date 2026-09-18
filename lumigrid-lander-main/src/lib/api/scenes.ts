@@ -58,6 +58,7 @@ export interface ActivatePresetResult {
   accepted: true;
   preset: number;
   generation: number;
+  commandId?: number;
 }
 
 export interface SignageStatus {

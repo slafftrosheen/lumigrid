@@ -14,14 +14,18 @@ import {
   setSelectedNodeIp,
   readString,
   updateNodeLastSeen,
+  recordDiscoveredNode,
 } from '../auth/storage';
 import { getHealth, type HealthSnapshot } from '../api/node';
+import { commandTracker, type NodeStatusSnapshot } from './commandTracker';
+
+export { commandTracker };
 
 export const LANES = 8;
 export const PIXELS_PER_LANE = 144;
 export const BUF_SIZE = LANES * PIXELS_PER_LANE * 3;
 
-export type NodeConnection = 'idle' | 'connecting' | 'connected' | 'disconnected' | 'error';
+export type NodeConnection = 'idle' | 'connecting' | 'connected' | 'disconnected' | 'error' | 'degraded';
 export type NodeRole = 'admin' | 'installer' | 'operator' | 'unknown';
 
 export interface NodeLiveStatus {
@@ -34,11 +38,36 @@ export interface NodeLiveStatus {
   durationMs?: number;
   commandRejections?: number;
   activePreset?: number;
+  appliedGeneration?: number;
+  requestedGeneration?: number;
+  sceneApplyPending?: boolean;
+  transitioning?: boolean;
+  controlOwner?: string;
+  powerMw?: number;
+  fault?: boolean;
+  faultCount?: number;
+  seq?: number;
+  nodeId?: string;
+  uptimeMs?: number;
+  protocol?: {
+    artnet?: { enabled: boolean; sources: number; packetsPerSecond: number; lastPacketAgeMs: number };
+    sacn?: { enabled: boolean; sources: number; packetsPerSecond: number };
+    owner?: string;
+  };
+  job?: {
+    jobId: number;
+    type: string;
+    state: string;
+    progress: number;
+    startedMs: number;
+    error: string | null;
+  } | null;
 }
 
 export interface DashboardNodeState {
   nodeIp: string;
   ip: string;
+  nodeId?: string;
   connection: NodeConnection;
   /** True if local dashboard PIN wall is unlocked. Firmware remains authoritative. */
   dashboardUnlocked: boolean;
@@ -106,6 +135,7 @@ let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let healthPollTimer: ReturnType<typeof setInterval> | null = null;
 let reconnectAttempt = 0;
 let manualClose = false;
+let lastSeq = 0;
 
 function getStoredRole(): NodeRole {
   const r = readString(AUTH_ROLE_KEY);
@@ -310,28 +340,97 @@ export function connect(nodeIp = getSelectedNodeIp()): void {
     if (typeof event.data === 'string') {
       try {
         const json = JSON.parse(event.data) as Record<string, unknown>;
+        const isSchema2 = json.schema === 2 && typeof json.seq === 'number';
         const hasStatusFields =
+          isSchema2 ||
           json.type === 'status' ||
           'effect' in json ||
           'brightness' in json ||
           'outputsEnabled' in json ||
           'testActive' in json ||
           'autoLoop' in json ||
-          'activePreset' in json;
+          'activePreset' in json ||
+          'appliedGeneration' in json;
         if (!hasStatusFields) return;
+
+        const connectionPatch: Partial<NodeLiveState> = {};
+        if (isSchema2) {
+          const currentSeq = json.seq as number;
+          if (lastSeq > 0 && currentSeq !== lastSeq + 1) {
+            connectionPatch.connection = 'degraded';
+            // Sequence gap detected: refresh health asynchronously for deterministic recovery
+            refreshHealth(latestState.nodeIp).catch(() => {});
+          } else if (latestState.connection === 'degraded') {
+            connectionPatch.connection = 'connected';
+          }
+          lastSeq = currentSeq;
+        }
+
+        // Inform CommandTracker for event-driven acknowledgement
+        commandTracker.observe(json as unknown as NodeStatusSnapshot);
+
+        const s2State = isSchema2 && json.state && typeof json.state === 'object'
+          ? (json.state as Record<string, any>)
+          : null;
+        const s2Runtime = s2State?.runtime;
+        const s2Output = s2State?.output;
+        const s2Scene = s2State?.scene;
+        const s2Protocol = s2State?.protocol;
+        const s2Job = s2State?.job;
+
+        const nodeIdStr = typeof json.nodeId === 'string' ? json.nodeId : undefined;
+        if (nodeIdStr && latestState.nodeIp) {
+          try {
+            recordDiscoveredNode(
+              { id: nodeIdStr, address: latestState.nodeIp, name: nodeIdStr },
+              'sync'
+            );
+          } catch {}
+        }
 
         state.update(current => ({
           ...current,
+          ...connectionPatch,
+          ...(nodeIdStr ? { nodeId: nodeIdStr } : {}),
           status: {
-            effect: typeof json.effect === 'string' ? json.effect : (current.status?.effect ?? ''),
-            brightness: typeof json.brightness === 'number' ? json.brightness : (current.status?.brightness ?? 0),
-            outputsEnabled: typeof json.outputsEnabled === 'boolean' ? json.outputsEnabled : (current.status?.outputsEnabled ?? false),
-            testActive: typeof json.testActive === 'boolean' ? json.testActive : (current.status?.testActive ?? false),
-            autoLoop: typeof json.autoLoop === 'boolean' ? json.autoLoop : (current.status?.autoLoop ?? false),
+            effect: typeof s2Runtime?.effect === 'string'
+              ? s2Runtime.effect
+              : (typeof json.effect === 'string' ? json.effect : (current.status?.effect ?? '')),
+            brightness: typeof s2Runtime?.brightness === 'number'
+              ? s2Runtime.brightness
+              : (typeof json.brightness === 'number' ? json.brightness : (current.status?.brightness ?? 0)),
+            outputsEnabled: typeof s2Output?.outputsEnabled === 'boolean'
+              ? s2Output.outputsEnabled
+              : (typeof json.outputsEnabled === 'boolean' ? json.outputsEnabled : (current.status?.outputsEnabled ?? false)),
+            testActive: typeof s2Runtime?.testActive === 'boolean'
+              ? s2Runtime.testActive
+              : (typeof json.testActive === 'boolean' ? json.testActive : (current.status?.testActive ?? false)),
+            autoLoop: typeof s2Runtime?.autoLoop === 'boolean'
+              ? s2Runtime.autoLoop
+              : (typeof json.autoLoop === 'boolean' ? json.autoLoop : (current.status?.autoLoop ?? false)),
             effectStartedMs: typeof json.effectStartedMs === 'number' ? json.effectStartedMs : current.status?.effectStartedMs,
             durationMs: typeof json.durationMs === 'number' ? json.durationMs : current.status?.durationMs,
             commandRejections: typeof json.commandRejections === 'number' ? json.commandRejections : current.status?.commandRejections,
-            activePreset: typeof json.activePreset === 'number' ? json.activePreset : current.status?.activePreset,
+            activePreset: typeof s2Scene?.activePreset === 'number'
+              ? s2Scene.activePreset
+              : (typeof json.activePreset === 'number' ? json.activePreset : current.status?.activePreset),
+            appliedGeneration: typeof s2Scene?.appliedGeneration === 'number'
+              ? s2Scene.appliedGeneration
+              : (typeof json.appliedGeneration === 'number' ? json.appliedGeneration : current.status?.appliedGeneration),
+            requestedGeneration: typeof s2Scene?.requestedGeneration === 'number'
+              ? s2Scene.requestedGeneration
+              : (typeof json.requestedGeneration === 'number' ? json.requestedGeneration : current.status?.requestedGeneration),
+            sceneApplyPending: typeof s2Scene?.sceneApplyPending === 'boolean' ? s2Scene.sceneApplyPending : current.status?.sceneApplyPending,
+            transitioning: typeof s2Scene?.transitioning === 'boolean' ? s2Scene.transitioning : current.status?.transitioning,
+            controlOwner: typeof s2Runtime?.controlOwner === 'string' ? s2Runtime.controlOwner : current.status?.controlOwner,
+            powerMw: typeof s2Output?.powerMw === 'number' ? s2Output.powerMw : current.status?.powerMw,
+            fault: typeof s2Output?.fault === 'boolean' ? s2Output.fault : current.status?.fault,
+            faultCount: typeof s2Output?.faultCount === 'number' ? s2Output.faultCount : current.status?.faultCount,
+            seq: typeof json.seq === 'number' ? json.seq : current.status?.seq,
+            nodeId: nodeIdStr ?? current.status?.nodeId,
+            uptimeMs: typeof json.uptimeMs === 'number' ? json.uptimeMs : current.status?.uptimeMs,
+            protocol: s2Protocol ?? current.status?.protocol,
+            job: s2Job !== undefined ? s2Job : current.status?.job,
           },
           lastSeen: now,
           lastMessageAt: now,
@@ -346,6 +445,7 @@ export function connect(nodeIp = getSelectedNodeIp()): void {
 
 export function disconnect(): void {
   manualClose = true;
+  lastSeq = 0;
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
@@ -398,6 +498,8 @@ export function _resetForTesting(): void {
   disconnect();
   manualClose = false;
   reconnectAttempt = 0;
+  lastSeq = 0;
+  commandTracker.clear();
   state.set({ ...initial, status: { ...EMPTY_STATUS }, pixels: new Uint8Array(BUF_SIZE) });
   nodePixelStore.set(new Uint8Array(BUF_SIZE));
   nodeFrameCount.set(0);

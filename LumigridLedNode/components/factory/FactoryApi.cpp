@@ -17,6 +17,8 @@
 #include "NodeSync.hpp"
 #include "DmxRouter.hpp"
 #include "esp_check.h"
+#include "NodeIdentity.hpp"
+#include "Capabilities.hpp"
 #include <inttypes.h>
 
 #include "cJSON.h"
@@ -273,11 +275,17 @@ esp_err_t post_effect(httpd_req_t* request) {
     };
 
     FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+    uint32_t cmd_id = api_ptr->command_journal().accept(CommandDomain::Factory);
     if (!api_ptr->runner().enqueue(command)) {
+        api_ptr->command_journal().failed(cmd_id, ESP_ERR_INVALID_STATE);
         return send_error(request, "409 Conflict", "command_queue_full");
     }
 
-    return send_json(request, R"({"accepted":true})", "202 Accepted");
+    api_ptr->command_journal().applied(cmd_id);
+    api_ptr->notify_status_async();
+    char resp[64];
+    snprintf(resp, sizeof(resp), "{\"accepted\":true,\"commandId\":%" PRIu32 "}", cmd_id);
+    return send_json(request, resp, "202 Accepted");
 }
 
 esp_err_t post_lane(httpd_req_t* request) {
@@ -322,11 +330,17 @@ esp_err_t post_lane(httpd_req_t* request) {
     };
 
     FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+    uint32_t cmd_id = api_ptr->command_journal().accept(CommandDomain::Factory);
     if (!api_ptr->runner().enqueue(command)) {
+        api_ptr->command_journal().failed(cmd_id, ESP_ERR_INVALID_STATE);
         return send_error(request, "409 Conflict", "command_queue_full");
     }
 
-    return send_json(request, R"({"accepted":true})", "202 Accepted");
+    api_ptr->command_journal().applied(cmd_id);
+    api_ptr->notify_status_async();
+    char resp[64];
+    snprintf(resp, sizeof(resp), "{\"accepted\":true,\"commandId\":%" PRIu32 "}", cmd_id);
+    return send_json(request, resp, "202 Accepted");
 }
 
 esp_err_t post_pwm(httpd_req_t* request) {
@@ -361,24 +375,36 @@ esp_err_t post_pwm(httpd_req_t* request) {
     };
 
     FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+    uint32_t cmd_id = api_ptr->command_journal().accept(CommandDomain::Factory);
     if (!api_ptr->runner().enqueue(command)) {
+        api_ptr->command_journal().failed(cmd_id, ESP_ERR_INVALID_STATE);
         return send_error(request, "409 Conflict", "command_queue_full");
     }
 
-    return send_json(request, R"({"accepted":true})", "202 Accepted");
+    api_ptr->command_journal().applied(cmd_id);
+    api_ptr->notify_status_async();
+    char resp[64];
+    snprintf(resp, sizeof(resp), "{\"accepted\":true,\"commandId\":%" PRIu32 "}", cmd_id);
+    return send_json(request, resp, "202 Accepted");
 }
 
 esp_err_t post_abort(httpd_req_t* request) {
     if (!api::authorize(request, api::ApiRole::Installer)) return ESP_OK;
 
     FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+    uint32_t cmd_id = api_ptr->command_journal().accept(CommandDomain::Factory);
     if (!api_ptr->runner().enqueue({
             .type = FactoryCommandType::Abort
         })) {
+        api_ptr->command_journal().failed(cmd_id, ESP_ERR_INVALID_STATE);
         return send_error(request, "409 Conflict", "command_queue_full");
     }
 
-    return send_json(request, R"({"accepted":true,"action":"blackout"})");
+    api_ptr->command_journal().applied(cmd_id);
+    api_ptr->notify_status_async();
+    char resp[96];
+    snprintf(resp, sizeof(resp), "{\"accepted\":true,\"commandId\":%" PRIu32 ",\"action\":\"blackout\"}", cmd_id);
+    return send_json(request, resp);
 }
 
 esp_err_t post_auto_loop(httpd_req_t* request) {
@@ -400,14 +426,20 @@ esp_err_t post_auto_loop(httpd_req_t* request) {
     }
 
     FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+    uint32_t cmd_id = api_ptr->command_journal().accept(CommandDomain::Factory);
     if (!api_ptr->runner().enqueue({
             .type = FactoryCommandType::SetAutoLoop,
             .enabled = value
         })) {
+        api_ptr->command_journal().failed(cmd_id, ESP_ERR_INVALID_STATE);
         return send_error(request, "409 Conflict", "command_queue_full");
     }
 
-    return send_json(request, R"({"accepted":true})", "202 Accepted");
+    api_ptr->command_journal().applied(cmd_id);
+    api_ptr->notify_status_async();
+    char resp[64];
+    snprintf(resp, sizeof(resp), "{\"accepted\":true,\"commandId\":%" PRIu32 "}", cmd_id);
+    return send_json(request, resp, "202 Accepted");
 }
 
 esp_err_t ws_handler(httpd_req_t* request) {
@@ -908,6 +940,9 @@ esp_err_t post_activate(httpd_req_t* request) {
      */
     uint32_t generation = 0;
     if (!api_ptr->signage()->activate_scene_checked(index, &generation)) {
+        const uint32_t command_id = api_ptr->command_journal().accept(CommandDomain::Scene, 0);
+        api_ptr->command_journal().failed(command_id, ESP_ERR_INVALID_STATE);
+
         char detail[64];
         snprintf(
             detail,
@@ -928,6 +963,8 @@ esp_err_t post_activate(httpd_req_t* request) {
             "scene_activation_rejected"
         );
     }
+
+    const uint32_t command_id = api_ptr->command_journal().accept(CommandDomain::Scene, generation);
 
     /*
      * Scene activation has been accepted by the runtime.
@@ -957,11 +994,14 @@ esp_err_t post_activate(httpd_req_t* request) {
         detail
     );
 
-    char response[96];
+    api_ptr->notify_status_async();
+
+    char response[128];
     snprintf(
         response,
         sizeof(response),
-        "{\"accepted\":true,\"preset\":%u,\"generation\":%" PRIu32 "}",
+        "{\"accepted\":true,\"commandId\":%" PRIu32 ",\"preset\":%u,\"generation\":%" PRIu32 "}",
+        command_id,
         index,
         generation
     );
@@ -1316,7 +1356,9 @@ esp_err_t put_device_config(httpd_req_t* request) {
 
     cJSON_Delete(root);
 
+    uint32_t cmd_id = api_ptr->command_journal().accept(CommandDomain::Config);
     if (api_ptr->config()->save_config(cfg) != ESP_OK) {
+        api_ptr->command_journal().failed(cmd_id, ESP_ERR_NVS_NOT_FOUND);
         return send_error(request, "500 Internal Server Error", "nvs_write_failed");
     }
 
@@ -1324,8 +1366,13 @@ esp_err_t put_device_config(httpd_req_t* request) {
         api_ptr->signage()->reload_device_config();
     }
     
+    api_ptr->command_journal().applied(cmd_id);
+    api_ptr->notify_status_async();
+
     api::AuditLog::instance().log(api::ApiRole::Admin, "device_config", "Config updated");
-    return send_json(request, R"({"saved":true})");
+    char resp[96];
+    snprintf(resp, sizeof(resp), "{\"saved\":true,\"accepted\":true,\"commandId\":%" PRIu32 "}", cmd_id);
+    return send_json(request, resp);
 }
 
 esp_err_t get_signage_status(httpd_req_t* request) {
@@ -1453,6 +1500,197 @@ esp_err_t get_signage_status(httpd_req_t* request) {
     return result;
 }
 
+esp_err_t get_identity(httpd_req_t* request) {
+    if (!api::authorize(request, api::ApiRole::Operator)) return ESP_OK;
+
+    FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+    DeviceConfig cfg;
+    const char* dev_name = nullptr;
+    if (api_ptr->config() && api_ptr->config()->load_config(cfg)) {
+        dev_name = cfg.device_name;
+    }
+    NodeIdentity id = get_node_identity(dev_name);
+    char body[256];
+    snprintf(body, sizeof(body),
+        "{\"id\":\"%s\",\"name\":\"%s\",\"family\":\"%s\",\"model\":\"%s\",\"hardwareRevision\":\"%s\",\"firmwareVersion\":\"%s\"}",
+        id.id, id.name, id.family, id.model, id.hw_revision, id.fw_version);
+    return send_json(request, body);
+}
+
+esp_err_t get_capabilities(httpd_req_t* request) {
+    if (!api::authorize(request, api::ApiRole::Operator)) return ESP_OK;
+
+    FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+    DeviceConfig cfg;
+    const char* dev_name = nullptr;
+    if (api_ptr->config() && api_ptr->config()->load_config(cfg)) {
+        dev_name = cfg.device_name;
+    }
+    NodeIdentity id = get_node_identity(dev_name);
+    char body[640];
+    snprintf(body, sizeof(body),
+        "{\"schema\":%u,"
+        "\"node\":{\"family\":\"%s\",\"model\":\"%s\",\"firmware\":\"%s\",\"hardwareRevision\":\"%s\"},"
+        "\"limits\":{\"pixelLanes\":%u,\"pwmChannels\":%u,\"zones\":%u,\"layersPerZone\":%u,\"presets\":%u,\"timelineSteps\":%u},"
+        "\"features\":{\"addressable\":%s,\"pwm\":%s,\"artnet\":%s,\"sacn\":%s,\"sync\":%s,\"mqtt\":%s,\"factory\":%s,\"ota\":%s,\"signedOta\":%s,\"backup\":%s},"
+        "\"protocols\":{\"httpApi\":%u,\"websocket\":%u,\"sync\":%u}}",
+        CapabilitiesManifest::kSchema,
+        id.family, id.model, id.fw_version, id.hw_revision,
+        CapabilitiesManifest::kPixelLanes, CapabilitiesManifest::kPwmChannels,
+        CapabilitiesManifest::kZones, CapabilitiesManifest::kLayersPerZone,
+        CapabilitiesManifest::kPresets, CapabilitiesManifest::kTimelineSteps,
+        CapabilitiesManifest::kFeatureAddressable ? "true" : "false",
+        CapabilitiesManifest::kFeaturePwm ? "true" : "false",
+        CapabilitiesManifest::kFeatureArtnet ? "true" : "false",
+        CapabilitiesManifest::kFeatureSacn ? "true" : "false",
+        CapabilitiesManifest::kFeatureSync ? "true" : "false",
+        CapabilitiesManifest::kFeatureMqtt ? "true" : "false",
+        CapabilitiesManifest::kFeatureFactory ? "true" : "false",
+        CapabilitiesManifest::kFeatureOta ? "true" : "false",
+        CapabilitiesManifest::kFeatureSignedOta ? "true" : "false",
+        CapabilitiesManifest::kFeatureBackup ? "true" : "false",
+        CapabilitiesManifest::kProtocolHttpApi,
+        CapabilitiesManifest::kProtocolWebsocket,
+        CapabilitiesManifest::kProtocolSync
+    );
+    return send_json(request, body);
+}
+
+esp_err_t get_current_job(httpd_req_t* request) {
+    if (!api::authorize(request, api::ApiRole::Operator)) return ESP_OK;
+    FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+    OperationJob job;
+    if (api_ptr->job_manager().get_current(job)) {
+        char body[256];
+        snprintf(body, sizeof(body),
+            "{\"jobId\":%" PRIu32 ",\"type\":\"%s\",\"state\":\"%s\",\"progress\":%u,\"startedMs\":%" PRIu32 ",\"error\":%s}",
+            job.job_id, job_type_name(job.type), job_state_name(job.state), job.progress, job.started_ms,
+            job.error_code != 0 ? "\"failed\"" : "null");
+        return send_json(request, body);
+    }
+    return send_json(request, "{\"job\":null}");
+}
+
+void build_schema2_status_json(FactoryApi* api, char* response, size_t max_len) {
+    const NodeIdentity& identity = api->identity();
+
+    uint32_t seq = api->next_ws_seq();
+    uint32_t now = esp_log_timestamp();
+
+    CommandReceipt sc_receipt;
+    if (api->command_journal().get_latest(CommandDomain::Scene, sc_receipt)) {
+        if (sc_receipt.state == CommandState::Accepted && api->signage()) {
+            if (api->signage()->applied_scene_generation() >= sc_receipt.generation) {
+                api->command_journal().applied(sc_receipt.id);
+            }
+        }
+    }
+
+    const char* owner = "Unknown";
+    uint32_t frame_count = 0;
+    uint8_t brightness = 0;
+    uint16_t active_preset = 0;
+    uint16_t requested_preset = 0;
+    uint32_t req_gen = 0;
+    uint32_t app_gen = 0;
+    bool scene_pending = false;
+    bool transitioning = false;
+    bool outputs_enabled = false;
+    uint32_t power_mw = 0;
+    bool fault = false;
+    uint32_t fault_count = 0;
+
+    if (api->signage()) {
+        switch (api->signage()->current_control_source()) {
+            case ControlSource::ScenePlayback: owner = "ScenePlayback"; break;
+            case ControlSource::Factory: owner = "Factory"; break;
+            case ControlSource::LiveDmx: owner = "LiveDmx"; break;
+            case ControlSource::ManualOverride: owner = "ManualOverride"; break;
+            case ControlSource::EStop: owner = "EStop"; break;
+            default: break;
+        }
+        frame_count = api->signage()->frame_count();
+        brightness = api->signage()->current_brightness();
+        active_preset = api->signage()->active_scene_index();
+        requested_preset = api->signage()->requested_scene_index();
+        req_gen = api->signage()->requested_scene_generation();
+        app_gen = api->signage()->applied_scene_generation();
+        scene_pending = api->signage()->scene_apply_pending();
+        transitioning = api->signage()->is_transitioning();
+        outputs_enabled = api->signage()->controller().output_enabled();
+        power_mw = api->signage()->power_budget().current_power_mw();
+        fault = api->signage()->output_fault();
+        fault_count = api->signage()->output_fault_count();
+    } else {
+        brightness = api->runner().status().brightness;
+        outputs_enabled = api->runner().status().outputs_enabled;
+    }
+
+    uint32_t artnet_sources = 0;
+    uint32_t artnet_pps = 0;
+    uint32_t artnet_age_ms = 0;
+    uint32_t sacn_sources = 0;
+    uint32_t sacn_pps = 0;
+    if (api->dmx_router()) {
+        const auto stats = api->dmx_router()->get_stats();
+        artnet_sources = stats.active_sources;
+        artnet_pps = stats.packets_accepted;
+    }
+
+    OperationJob current_job;
+    char job_str[160] = "null";
+    if (api->job_manager().get_current(current_job)) {
+        snprintf(job_str, sizeof(job_str),
+            "{\"jobId\":%" PRIu32 ",\"type\":\"%s\",\"state\":\"%s\",\"progress\":%u,\"startedMs\":%" PRIu32 ",\"error\":%s}",
+            current_job.job_id, job_type_name(current_job.type), job_state_name(current_job.state),
+            current_job.progress, current_job.started_ms,
+            current_job.error_code != 0 ? "\"failed\"" : "null");
+    }
+
+    int rssi = 0;
+    wifi_ap_record_t ap_info;
+    if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) {
+        rssi = ap_info.rssi;
+    }
+    const char* sync_role = api->node_sync() ? node_role_name(api->node_sync()->role()) : "auto";
+    bool in_sync = api->node_sync() ? api->node_sync()->status().clock_locked : false;
+
+    snprintf(response, max_len,
+        "{\"schema\":2,\"seq\":%" PRIu32 ",\"nodeId\":\"%s\",\"uptimeMs\":%" PRIu32 ","
+        "\"state\":{"
+          "\"runtime\":{\"effect\":\"%s\",\"brightness\":%u,\"testActive\":%s,\"autoLoop\":%s,\"controlOwner\":\"%s\",\"frameCount\":%" PRIu32 "},"
+          "\"output\":{\"outputsEnabled\":%s,\"powerMw\":%" PRIu32 ",\"fault\":%s,\"faultCount\":%" PRIu32 "},"
+          "\"scene\":{\"activePreset\":%u,\"requestedPreset\":%u,\"requestedGeneration\":%" PRIu32 ",\"appliedGeneration\":%" PRIu32 ",\"sceneApplyPending\":%s,\"transitioning\":%s},"
+          "\"sync\":{\"role\":\"%s\",\"inSync\":%s},"
+          "\"network\":{\"rssi\":%d},"
+          "\"protocol\":{\"artnet\":{\"enabled\":true,\"sources\":%" PRIu32 ",\"packetsPerSecond\":%" PRIu32 ",\"lastPacketAgeMs\":%" PRIu32 "},"
+                        "\"sacn\":{\"enabled\":true,\"sources\":%" PRIu32 ",\"packetsPerSecond\":%" PRIu32 "},"
+                        "\"owner\":\"%s\"},"
+          "\"job\":%s"
+        "},"
+        "\"effect\":\"%s\",\"brightness\":%u,\"outputsEnabled\":%s,\"testActive\":%s,\"autoLoop\":%s,\"activePreset\":%u,\"appliedGeneration\":%" PRIu32 "}",
+        seq, identity.id, now,
+        effect_name(api->runner().status().active_effect), brightness,
+        api->runner().status().test_active ? "true" : "false",
+        api->runner().status().auto_loop ? "true" : "false",
+        owner, frame_count,
+        outputs_enabled ? "true" : "false", power_mw, fault ? "true" : "false", fault_count,
+        active_preset, requested_preset, req_gen, app_gen,
+        scene_pending ? "true" : "false", transitioning ? "true" : "false",
+        sync_role, in_sync ? "true" : "false",
+        rssi,
+        artnet_sources, artnet_pps, artnet_age_ms,
+        sacn_sources, sacn_pps,
+        owner,
+        job_str,
+        effect_name(api->runner().status().active_effect), brightness,
+        outputs_enabled ? "true" : "false",
+        api->runner().status().test_active ? "true" : "false",
+        api->runner().status().auto_loop ? "true" : "false",
+        active_preset, app_gen
+    );
+}
+
 esp_err_t get_sequence(httpd_req_t* request) {
     if (!api::authorize(request, api::ApiRole::Operator)) return ESP_OK;
 
@@ -1541,13 +1779,20 @@ esp_err_t put_sequence(httpd_req_t* request) {
 
     cJSON_Delete(root);
 
+    uint32_t cmd_id = api_ptr->command_journal().accept(CommandDomain::Timeline);
     if (api_ptr->config()->save_sequence(seq) != ESP_OK) {
+        api_ptr->command_journal().failed(cmd_id, ESP_ERR_NVS_NOT_FOUND);
         return send_error(request, "500 Internal Server Error", "nvs_write_failed");
     }
 
+    api_ptr->command_journal().applied(cmd_id);
+    api_ptr->notify_status_async();
+
     api::AuditLog::instance().log(api::ApiRole::Operator, "sequence_update", "Sequence updated");
 
-    return send_json(request, R"({"saved":true})");
+    char resp[96];
+    snprintf(resp, sizeof(resp), "{\"saved\":true,\"accepted\":true,\"commandId\":%" PRIu32 "}", cmd_id);
+    return send_json(request, resp);
 }
 
 esp_err_t get_effects(httpd_req_t* request) {
@@ -1655,13 +1900,20 @@ esp_err_t put_calendar_schedule(httpd_req_t* request) {
     }
     cJSON_Delete(root);
 
+    uint32_t cmd_id = api_ptr->command_journal().accept(CommandDomain::Schedule);
     if (api_ptr->config()->save_calendar_schedule(schedule) != ESP_OK) {
+        api_ptr->command_journal().failed(cmd_id, ESP_ERR_NVS_NOT_FOUND);
         return send_error(request, "500 Internal Server Error", "nvs_write_failed");
     }
+
+    api_ptr->command_journal().applied(cmd_id);
+    api_ptr->notify_status_async();
     
     api::AuditLog::instance().log(api::ApiRole::Operator, "schedule_update", "Calendar schedule updated");
 
-    return send_json(request, R"({"saved":true})");
+    char resp[96];
+    snprintf(resp, sizeof(resp), "{\"saved\":true,\"accepted\":true,\"commandId\":%" PRIu32 "}", cmd_id);
+    return send_json(request, resp);
 }
 
 esp_err_t get_sync_status(httpd_req_t* request) {
@@ -1741,7 +1993,7 @@ esp_err_t get_audit_log(httpd_req_t* request) {
     return result;
 }
 
-#include "dashboard.hpp"
+#include "dashboard_assets.hpp"
 
 esp_err_t FactoryApi::serve_dashboard(httpd_req_t* request) {
     httpd_resp_set_type(request, "text/html");
@@ -1768,8 +2020,15 @@ FactoryApi::FactoryApi(FactoryRunner& runner) : runner_(runner) {}
 esp_err_t post_ota(httpd_req_t* request) {
     if (!api::authorize(request, api::ApiRole::Admin)) return ESP_OK;
 
+    FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+    uint32_t cmd_id = api_ptr->command_journal().accept(CommandDomain::Ota);
+    uint32_t job_id = api_ptr->job_manager().start_job(JobType::Ota);
+    api_ptr->job_manager().update_progress(job_id, JobState::Preparing, 5);
+
     const esp_partition_t* update_partition = esp_ota_get_next_update_partition(nullptr);
     if (!update_partition) {
+        api_ptr->job_manager().fail_job(job_id, ESP_ERR_NOT_FOUND, "No OTA partition found");
+        api_ptr->command_journal().failed(cmd_id, ESP_ERR_NOT_FOUND);
         return send_error(request, "500 Internal Server Error", "No OTA partition found");
     }
 
@@ -1777,12 +2036,15 @@ esp_err_t post_ota(httpd_req_t* request) {
     esp_err_t err = esp_ota_begin(update_partition, OTA_WITH_SEQUENTIAL_WRITES, &update_handle);
     if (err != ESP_OK) {
         ESP_LOGE("ota", "esp_ota_begin failed (%s)", esp_err_to_name(err));
+        api_ptr->job_manager().fail_job(job_id, err, "OTA begin failed");
+        api_ptr->command_journal().failed(cmd_id, err);
         return send_error(request, "500 Internal Server Error", "OTA begin failed");
     }
 
     char buf[1024];
     int received = 0;
     int remaining = request->content_len;
+    int total = (remaining > 0) ? remaining : 1;
 
     while (remaining > 0) {
         if ((received = httpd_req_recv(request, buf, std::min(remaining, (int)sizeof(buf)))) <= 0) {
@@ -1790,27 +2052,47 @@ esp_err_t post_ota(httpd_req_t* request) {
                 continue;
             }
             esp_ota_abort(update_handle);
+            api_ptr->job_manager().fail_job(job_id, ESP_FAIL, "OTA receive failed");
+            api_ptr->command_journal().failed(cmd_id, ESP_FAIL);
             return send_error(request, "500 Internal Server Error", "OTA receive failed");
         }
         err = esp_ota_write(update_handle, buf, received);
         if (err != ESP_OK) {
             esp_ota_abort(update_handle);
+            api_ptr->job_manager().fail_job(job_id, err, "OTA write failed");
+            api_ptr->command_journal().failed(cmd_id, err);
             return send_error(request, "500 Internal Server Error", "OTA write failed");
         }
         remaining -= received;
+        uint8_t pct = static_cast<uint8_t>(std::min(90, 5 + (int)(((float)(total - remaining) / total) * 85)));
+        api_ptr->job_manager().update_progress(job_id, JobState::Running, pct);
     }
+
+    api_ptr->job_manager().update_progress(job_id, JobState::Verifying, 95);
 
     err = esp_ota_end(update_handle);
     if (err != ESP_OK) {
+        api_ptr->job_manager().fail_job(job_id, err, "OTA end failed");
+        api_ptr->command_journal().failed(cmd_id, err);
         return send_error(request, "500 Internal Server Error", "OTA end failed");
     }
 
     err = esp_ota_set_boot_partition(update_partition);
     if (err != ESP_OK) {
+        api_ptr->job_manager().fail_job(job_id, err, "OTA set boot failed");
+        api_ptr->command_journal().failed(cmd_id, err);
         return send_error(request, "500 Internal Server Error", "OTA set boot failed");
     }
 
-    send_json(request, "{\"status\":\"success\",\"message\":\"OTA update successful, rebooting...\"}");
+    api_ptr->job_manager().complete_job(job_id);
+    api_ptr->command_journal().applied(cmd_id);
+    api_ptr->notify_status_async();
+
+    char resp[160];
+    snprintf(resp, sizeof(resp),
+        "{\"status\":\"success\",\"accepted\":true,\"commandId\":%" PRIu32 ",\"jobId\":%" PRIu32 ",\"message\":\"OTA update successful, rebooting...\"}",
+        cmd_id, job_id);
+    send_json(request, resp);
     vTaskDelay(pdMS_TO_TICKS(1000));
     esp_restart();
     return ESP_OK;
@@ -2084,9 +2366,20 @@ esp_err_t post_restore(httpd_req_t* request) {
     
     cJSON_Delete(root);
 
+    uint32_t cmd_id = api_ptr->command_journal().accept(CommandDomain::Restore);
+    uint32_t job_id = api_ptr->job_manager().start_job(JobType::Restore);
+    api_ptr->job_manager().update_progress(job_id, JobState::Running, 50);
+    api_ptr->job_manager().complete_job(job_id);
+    api_ptr->command_journal().applied(cmd_id);
+    api_ptr->notify_status_async();
+
     api::AuditLog::instance().log(api::ApiRole::Admin, "RESTORE", "Configuration restored via API");
 
-    send_json(request, "{\"status\":\"success\",\"message\":\"Restore successful, rebooting...\"}");
+    char resp[160];
+    snprintf(resp, sizeof(resp),
+        "{\"status\":\"success\",\"accepted\":true,\"commandId\":%" PRIu32 ",\"jobId\":%" PRIu32 ",\"message\":\"Restore successful, rebooting...\"}",
+        cmd_id, job_id);
+    send_json(request, resp);
     vTaskDelay(pdMS_TO_TICKS(1000));
     esp_restart();
     return ESP_OK;
@@ -2094,7 +2387,7 @@ esp_err_t post_restore(httpd_req_t* request) {
 
 struct WsBroadcastArg {
     FactoryApi* api;
-    char payload[384];
+    char payload[1536];
 };
 
 struct WsPreviewArg {
@@ -2122,8 +2415,15 @@ esp_err_t FactoryApi::start(
     node_sync_ = node_sync;
     dmx_router_ = dmx_router;
 
+    const char* dev_name = nullptr;
+    DeviceConfig cfg;
+    if (config_ && config_->load_config(cfg)) {
+        dev_name = cfg.device_name;
+    }
+    identity_ = get_node_identity(dev_name);
+
     httpd_config_t http_config = HTTPD_DEFAULT_CONFIG();
-    http_config.max_uri_handlers = 40;
+    http_config.max_uri_handlers = 48;
     http_config.stack_size = 8192;
     http_config.lru_purge_enable = true;
     http_config.recv_wait_timeout = 10;
@@ -2152,6 +2452,9 @@ esp_err_t FactoryApi::start(
         { .uri = "/favicon.ico", .method = HTTP_GET, .handler = get_favicon, .user_ctx = this },
         
         // ── Signage endpoints ──
+        { .uri = "/api/v1/identity",          .method = HTTP_GET,  .handler = get_identity,       .user_ctx = this },
+        { .uri = "/api/v1/capabilities",      .method = HTTP_GET,  .handler = get_capabilities,   .user_ctx = this },
+        { .uri = "/api/v1/jobs/current",      .method = HTTP_GET,  .handler = get_current_job,    .user_ctx = this },
         { .uri = "/api/v1/presets",           .method = HTTP_GET,  .handler = get_presets,      .user_ctx = this },
         { .uri = "/api/v1/presets",           .method = HTTP_PUT,  .handler = put_preset,       .user_ctx = this },
         { .uri = "/api/v1/auth/update",       .method = HTTP_POST, .handler = post_auth_update, .user_ctx = this },
@@ -2205,6 +2508,13 @@ esp_err_t FactoryApi::start(
                 return; // Already pending
             }
             last_preview_ms = now;
+
+            // Periodically broadcast live status snapshot (~5 fps = 200ms) over WebSocket
+            static uint32_t last_status_broadcast_ms = 0;
+            if (now - last_status_broadcast_ms >= 200) {
+                last_status_broadcast_ms = now;
+                this->notify_status_async();
+            }
 
             // Only generate preview frames if there are active WebSocket clients connected
             size_t client_count = 4;
@@ -2263,9 +2573,19 @@ void FactoryApi::ws_broadcast_work(void* arg) {
     std::vector<int> client_fds(msg->api->max_open_sockets_);
     size_t clients = client_fds.size();
 
-    if (httpd_get_client_list(msg->api->factory_server_, &clients, client_fds.data()) != ESP_OK) {
+    if (httpd_get_client_list(msg->api->factory_server_, &clients, client_fds.data()) != ESP_OK || clients == 0) {
         return;
     }
+
+    size_t ws_clients = 0;
+    for (size_t i = 0; i < clients; ++i) {
+        if (httpd_ws_get_fd_info(msg->api->factory_server_, client_fds[i]) == HTTPD_WS_CLIENT_WEBSOCKET) {
+            ws_clients++;
+        }
+    }
+    if (ws_clients == 0) return;
+
+    build_schema2_status_json(msg->api, msg->payload, sizeof(msg->payload));
 
     httpd_ws_frame_t frame = {};
     frame.type = HTTPD_WS_TYPE_TEXT;
@@ -2305,9 +2625,10 @@ void FactoryApi::ws_broadcast_preview_work(void* arg) {
 void FactoryApi::notify_status_async() {
     if (factory_server_ == nullptr) return;
 
-    auto* arg = new WsBroadcastArg{};
+    auto* arg = new (std::nothrow) WsBroadcastArg{};
+    if (!arg) return;
     arg->api = this;
-    build_status_json(runner_.status(), arg->payload, sizeof(arg->payload));
+    arg->payload[0] = '\0';
 
     if (httpd_queue_work(factory_server_, ws_broadcast_work, arg) != ESP_OK) {
         delete arg;

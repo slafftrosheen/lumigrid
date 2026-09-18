@@ -16,7 +16,7 @@
     MAX_PRESETS,
   } from '$lib/api/scenes';
   import { getSelectedNodeIp } from '$lib/auth/storage';
-  import { nodeStore } from '$lib/state/nodeStore';
+  import { nodeStore, commandTracker } from '$lib/state/nodeStore';
 
   let nodeIp = $state('');
   let presets = $state<ScenePreset[]>([]);
@@ -133,59 +133,6 @@
     if (typeof status.sceneApplyPending === 'boolean') {
       sceneApplyPending = status.sceneApplyPending;
     }
-
-    if (!activating || activationGeneration === 0) return;
-
-    if (status.outputFault) {
-      activating = false;
-      activationGeneration = 0;
-      activationPreset = -1;
-      error = 'Scene was accepted, but the node reported a hardware output fault.';
-      return;
-    }
-
-    if (
-      typeof status.appliedGeneration === 'number' &&
-      status.appliedGeneration >= activationGeneration
-    ) {
-      const committedPreset = activationPreset;
-      activating = false;
-      activationGeneration = 0;
-      activationPreset = -1;
-      sceneApplyPending = false;
-      toastMsg(`Scene ${committedPreset} committed to hardware`);
-    }
-  }
-
-  async function waitForAppliedGeneration(targetGeneration: number) {
-    const deadline = Date.now() + 5000;
-    let lastPollError = '';
-
-    while (
-      activating &&
-      activationGeneration === targetGeneration &&
-      Date.now() < deadline
-    ) {
-      try {
-        const status = await getSignageStatus(nodeIp);
-        lastPollError = '';
-        observeSignageStatus(status);
-        if (!activating) return;
-      } catch (e) {
-        lastPollError = String(e);
-      }
-
-      await new Promise(resolve => setTimeout(resolve, 150));
-    }
-
-    if (activating && activationGeneration === targetGeneration) {
-      activating = false;
-      activationGeneration = 0;
-      activationPreset = -1;
-      error = lastPollError
-        ? `Activation accepted, but output confirmation failed: ${lastPollError}`
-        : 'Activation accepted, but no hardware commit was confirmed within 5 seconds.';
-    }
   }
 
   async function doActivate(idx: number) {
@@ -197,9 +144,26 @@
       activationGeneration = result.generation;
       activationPreset = result.preset;
       sceneApplyPending = true;
-      await waitForAppliedGeneration(result.generation);
+
+      // Event-driven state acknowledgement via CommandTracker & WebSocket state path
+      const cmdId = result.commandId ?? Date.now();
+      commandTracker.register({
+        id: cmdId,
+        domain: 'scene',
+        nodeIp,
+        generation: result.generation,
+      });
+
+      await commandTracker.waitFor(cmdId, 5000);
+
+      const committedPreset = activationPreset;
+      activating = false;
+      activationGeneration = 0;
+      activationPreset = -1;
+      sceneApplyPending = false;
+      toastMsg(`Scene ${committedPreset} committed to hardware`);
     } catch (e) {
-      error = String(e);
+      error = e instanceof Error ? e.message : String(e);
       activating = false;
       activationGeneration = 0;
       activationPreset = -1;
@@ -262,6 +226,16 @@
     const unsub = nodeStore.subscribe(state => {
       if (state.status?.activePreset !== undefined) {
         activePreset = state.status.activePreset;
+      }
+      if (typeof state.status?.sceneApplyPending === 'boolean') {
+        sceneApplyPending = state.status.sceneApplyPending;
+      }
+      if (activating && state.status?.fault) {
+        activating = false;
+        activationGeneration = 0;
+        activationPreset = -1;
+        sceneApplyPending = false;
+        error = 'Scene was accepted, but the node reported a hardware output fault.';
       }
 
       const targetIp = state.nodeIp || getSelectedNodeIp();

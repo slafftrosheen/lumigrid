@@ -12,6 +12,7 @@
   } from '$lib/api/node';
   import { getSelectedNodeIp, NODE_LIST_KEY, readStringList } from '$lib/auth/storage';
   import { nodeStore } from '$lib/state/nodeStore';
+  import { executeStagedDeployment, type DeploymentPlan } from '$lib/api/deployment';
 
   type NodeOtaState = {
     ip: string;
@@ -211,12 +212,68 @@
 
   async function startOta() {
     if (!binFile || !selected.size) return;
-    if (!confirm(`Flash firmware binary "${binName}" to ${selected.size} selected node(s)? Do not power off devices.`)) return;
+    if (!confirm(`Launch staged OTA deployment for binary "${binName}" across ${selected.size} selected node(s)? (Preflight -> Canary -> Remaining fleet 2 at a time)`)) return;
 
     runningOta = true;
     prevBin = binFile;
-    await Promise.allSettled(nodes.filter(n => selected.has(n.ip)).map(flashNode));
-    runningOta = false;
+    const selectedNodes = nodes.filter(n => selected.has(n.ip));
+    const nodeMap = new Map<string, string>();
+    const nodeIds: string[] = [];
+    selectedNodes.forEach(n => {
+      const id = n.name || n.ip;
+      nodeIds.push(id);
+      nodeMap.set(id, n.ip);
+    });
+
+    const plan: DeploymentPlan = {
+      id: `dep-${Date.now()}`,
+      targetVersion: '',
+      nodeIds,
+      canaryCount: 1,
+      concurrency: 2,
+      state: 'preflight',
+    };
+
+    configToastMsg(`Starting staged deployment: Preflight -> Canary -> Fleet rollout`);
+
+    try {
+      await executeStagedDeployment(plan, nodeMap, binFile, (prog) => {
+        if (prog.canaryNodeId) {
+          const cIp = nodeMap.get(prog.canaryNodeId);
+          const cIdx = nodes.findIndex(n => n.ip === cIp);
+          if (cIdx >= 0) {
+            setNodeStatus(cIdx, prog.state === 'verifying' ? 'verifying' : 'uploading', 50, '');
+          }
+        }
+        prog.activeNodeIds.forEach(id => {
+          const aIp = nodeMap.get(id);
+          const aIdx = nodes.findIndex(n => n.ip === aIp);
+          if (aIdx >= 0) {
+            setNodeStatus(aIdx, 'uploading', 50, '');
+          }
+        });
+        prog.completedNodeIds.forEach(id => {
+          const compIp = nodeMap.get(id);
+          const compIdx = nodes.findIndex(n => n.ip === compIp);
+          if (compIdx >= 0) {
+            setNodeStatus(compIdx, 'done', 100, '');
+          }
+        });
+        prog.failedNodeIds.forEach(id => {
+          const fIp = nodeMap.get(id);
+          const fIdx = nodes.findIndex(n => n.ip === fIp);
+          if (fIdx >= 0) {
+            setNodeStatus(fIdx, 'failed', 0, prog.error || 'Failed');
+          }
+        });
+      });
+      configToastMsg(`Staged deployment complete`);
+    } catch (e) {
+      configToastMsg(`Deployment error: ${e}`);
+    } finally {
+      runningOta = false;
+      refreshVersions().catch(() => {});
+    }
   }
 
   async function flashNode(node: NodeOtaState) {
@@ -289,6 +346,19 @@
     refreshVersions().catch(() => {});
 
     const unsub = nodeStore.subscribe(state => {
+      if (state.status?.job && selectedNodeIp) {
+        const job = state.status.job;
+        const idx = nodes.findIndex(n => n.ip === selectedNodeIp);
+        if (idx >= 0) {
+          let s: NodeOtaState['status'] = 'idle';
+          if (job.state === 'running' || job.state === 'preparing') s = 'uploading';
+          else if (job.state === 'verifying') s = 'verifying';
+          else if (job.state === 'completed') s = 'done';
+          else if (job.state === 'failed') s = 'failed';
+          setNodeStatus(idx, s, job.progress, job.error || '');
+        }
+      }
+
       const targetIp = state.nodeIp || getSelectedNodeIp();
       if (targetIp !== selectedNodeIp) {
         selectedNodeIp = targetIp;

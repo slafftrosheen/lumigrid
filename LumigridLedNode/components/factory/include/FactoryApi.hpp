@@ -3,6 +3,9 @@
 #include "esp_err.h"
 #include "esp_http_server.h"
 #include "FactoryRunner.hpp"
+#include "CommandReceipt.hpp"
+#include "JobManager.hpp"
+#include "NodeIdentity.hpp"
 #include <atomic>
 
 struct cJSON;
@@ -132,6 +135,12 @@ public:
     static void ws_broadcast_preview_work(void* arg);
     static esp_err_t serve_dashboard(httpd_req_t* request);
 
+    CommandJournal& command_journal() { return command_journal_; }
+    JobManager& job_manager() { return job_manager_; }
+    uint32_t next_ws_seq() { return ws_seq_.fetch_add(1, std::memory_order_relaxed); }
+    const NodeIdentity& identity() const { return identity_; }
+    void set_identity(const NodeIdentity& id) { identity_ = id; }
+
     FactoryRunner& runner_;
     ConfigStore* config_ = nullptr;
     LightingRuntime* signage_ = nullptr;
@@ -143,6 +152,10 @@ public:
     httpd_handle_t factory_server_ = nullptr;
     size_t max_open_sockets_ = 0;
     std::atomic<bool> preview_pending_{false};
+    CommandJournal command_journal_{};
+    JobManager job_manager_{};
+    std::atomic<uint32_t> ws_seq_{1};
+    NodeIdentity identity_{};
 };
 
 } // namespace lg

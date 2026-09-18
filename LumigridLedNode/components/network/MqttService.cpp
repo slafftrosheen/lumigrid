@@ -32,8 +32,8 @@ esp_err_t MqttService::init(const char* broker_uri, const char* client_id, const
     signage_ = signage;
 
     topic_prefix_ = topic_prefix;
-    telemetry_topic_ = topic_prefix_ + "/telemetry";
-    log_topic_ = topic_prefix_ + "/logs";
+    telemetry_topic_ = topic_prefix_ + "/state";
+    log_topic_ = topic_prefix_ + "/event";
     command_topic_ = topic_prefix_ + "/command";
     availability_topic_ = topic_prefix_ + "/availability";
 

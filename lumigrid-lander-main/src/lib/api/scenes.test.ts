@@ -26,7 +26,7 @@ describe('scenes model & serialization', () => {
 
     const zone = createDefaultZone();
     expect(zone.layers).toHaveLength(3);
-    expect(zone.layers[0].enabled).toBe(false);
+    expect(zone.layers[0].enabled).toBe(true);
   });
 
   it('creates a default preset with 8 zones and clamped values', () => {
@@ -41,12 +41,12 @@ describe('scenes model & serialization', () => {
     const original = createDefaultPreset(0, 'Original');
     const clone = clonePreset(original);
     clone.name = 'Modified';
-    clone.zones[0].layers[0].enabled = true;
+    clone.zones[0].layers[0].enabled = false;
 
     expect(original.name).toBe('Original');
-    expect(original.zones[0].layers[0].enabled).toBe(false);
+    expect(original.zones[0].layers[0].enabled).toBe(true);
     expect(clone.name).toBe('Modified');
-    expect(clone.zones[0].layers[0].enabled).toBe(true);
+    expect(clone.zones[0].layers[0].enabled).toBe(false);
   });
 
   it('serializes preset deterministically and detects dirty status', () => {
@@ -124,6 +124,7 @@ describe('scenes model & serialization', () => {
 
   it('computes zone preview colors with layer blending and global brightness', () => {
     const zone = createDefaultZone();
+    zone.layers[0].enabled = false;
     // With all layers disabled, preview is black
     const c0 = computeZonePreviewColor(zone, 255);
     expect(c0).toEqual({ r: 0, g: 0, b: 0 });

@@ -326,4 +326,113 @@ describe('unified dashboard node live state and lifecycle', () => {
       expect(snap.healthUpdatedAt).toBeGreaterThan(0);
     });
   });
+
+  describe('WebSocket Schema 2 ingestion and sequence tracking', () => {
+    it('parses Schema 2 snapshot and populates extended state', () => {
+      connect('192.168.1.50');
+      const ws = MockWebSocket.instances[0];
+      ws.triggerOpen();
+
+      const schema2Msg = {
+        schema: 2,
+        seq: 100,
+        nodeId: 'lg-84f703c29110',
+        uptimeMs: 123456,
+        state: {
+          runtime: {
+            effect: 'rainbow',
+            brightness: 80,
+            testActive: false,
+            autoLoop: true,
+            controlOwner: 'ScenePlayback',
+            frameCount: 5400,
+          },
+          output: {
+            outputsEnabled: true,
+            powerMw: 1250,
+            fault: false,
+            faultCount: 0,
+          },
+          scene: {
+            activePreset: 3,
+            requestedPreset: 3,
+            requestedGeneration: 42,
+            appliedGeneration: 42,
+            sceneApplyPending: false,
+            transitioning: false,
+          },
+          sync: {
+            role: 'master',
+            inSync: true,
+          },
+          network: {
+            rssi: -58,
+          },
+          protocol: {
+            artnet: { enabled: true, sources: 1, packetsPerSecond: 44, lastPacketAgeMs: 12 },
+            sacn: { enabled: true, sources: 0, packetsPerSecond: 0 },
+            owner: 'ScenePlayback',
+          },
+          job: {
+            jobId: 10,
+            type: 'ota',
+            state: 'writing',
+            progress: 55,
+            startedMs: 120000,
+            error: null,
+          },
+        },
+      };
+
+      ws.triggerMessage(JSON.stringify(schema2Msg));
+
+      const snap = getNodeLiveSnapshot();
+      expect(snap.nodeId).toBe('lg-84f703c29110');
+      expect(snap.status?.effect).toBe('rainbow');
+      expect(snap.status?.brightness).toBe(80);
+      expect(snap.status?.activePreset).toBe(3);
+      expect(snap.status?.appliedGeneration).toBe(42);
+      expect(snap.status?.requestedGeneration).toBe(42);
+      expect(snap.status?.controlOwner).toBe('ScenePlayback');
+      expect(snap.status?.powerMw).toBe(1250);
+      expect(snap.status?.seq).toBe(100);
+      expect(snap.status?.protocol?.artnet?.packetsPerSecond).toBe(44);
+      expect(snap.status?.job?.progress).toBe(55);
+    });
+
+    it('detects dropped sequence numbers and transitions connection to degraded', () => {
+      connect('192.168.1.50');
+      const ws = MockWebSocket.instances[0];
+      ws.triggerOpen();
+
+      ws.triggerMessage(JSON.stringify({
+        schema: 2,
+        seq: 1,
+        nodeId: 'lg-test',
+        uptimeMs: 1000,
+        state: { runtime: {}, output: {}, scene: { appliedGeneration: 1 } },
+      }));
+      expect(getNodeLiveSnapshot().connection).toBe('connected');
+
+      // Sequence gap: jumps from 1 to 5
+      ws.triggerMessage(JSON.stringify({
+        schema: 2,
+        seq: 5,
+        nodeId: 'lg-test',
+        uptimeMs: 2000,
+        state: { runtime: {}, output: {}, scene: { appliedGeneration: 2 } },
+      }));
+      expect(getNodeLiveSnapshot().connection).toBe('degraded');
+
+      // Subsequent consecutive sequence (6 after 5) heals to connected
+      ws.triggerMessage(JSON.stringify({
+        schema: 2,
+        seq: 6,
+        nodeId: 'lg-test',
+        uptimeMs: 3000,
+        state: { runtime: {}, output: {}, scene: { appliedGeneration: 3 } },
+      }));
+      expect(getNodeLiveSnapshot().connection).toBe('connected');
+    });
+  });
 });

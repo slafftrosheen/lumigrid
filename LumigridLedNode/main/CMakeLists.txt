@@ -22,6 +22,7 @@ idf_component_register(
         network
         protocols
         mqtt
+        control
         app_update
 )
 

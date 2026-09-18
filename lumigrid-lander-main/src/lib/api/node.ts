@@ -59,6 +59,66 @@ export interface NodeStatus {
   latency: number;
 }
 
+// ── Control Plane v3 Authoritative Identity & Capabilities ──────────────────────
+
+export interface NodeIdentity {
+  id: string;
+  name: string;
+  family: string;
+  model: string;
+  hardwareRevision: string;
+  firmwareVersion: string;
+}
+
+export interface CapabilitiesLimits {
+  pixelLanes: number;
+  pwmChannels: number;
+  zones: number;
+  layersPerZone: number;
+  presets: number;
+  timelineSteps: number;
+}
+
+export interface CapabilitiesFeatures {
+  addressable: boolean;
+  pwm: boolean;
+  artnet: boolean;
+  sacn: boolean;
+  sync: boolean;
+  mqtt: boolean;
+  factory: boolean;
+  ota: boolean;
+  signedOta: boolean;
+  backup: boolean;
+}
+
+export interface CapabilitiesProtocols {
+  httpApi: number;
+  websocket: number;
+  sync: number;
+}
+
+export interface CapabilitiesManifest {
+  schema: number;
+  node: {
+    family: string;
+    model: string;
+    firmware: string;
+    hardwareRevision: string;
+  };
+  limits: CapabilitiesLimits;
+  features: CapabilitiesFeatures;
+  protocols: CapabilitiesProtocols;
+}
+
+export function getIdentity(ip: string): Promise<NodeIdentity> {
+  return apiJson<NodeIdentity>(ip, '/api/v1/identity');
+}
+
+export function getCapabilities(ip: string): Promise<CapabilitiesManifest> {
+  return apiJson<CapabilitiesManifest>(ip, '/api/v1/capabilities');
+}
+
 // ── Shared transport ─────────────────────────────────────────────────────────
 
 import {
@@ -159,4 +219,7 @@ export * from './config';
 
 // ── Domain module re-export: Firmware ──────────────────────────────────────────
 export * from './firmware';
+
+// ── Domain module re-export: Scenes ────────────────────────────────────────────
+export * from './scenes';
 
