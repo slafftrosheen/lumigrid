@@ -224,7 +224,7 @@ void Scheduler::evaluate(const Sequence& seq, uint64_t clock_ms) {
     bool any_track_enabled = false;
     bool state_changed = false;
 
-    for (uint8_t i = 0; i < 8; ++i) {
+    for (uint8_t i = 0; i < 16; ++i) {
         const auto& track = seq.tracks[i];
         if (!track.enabled || track.num_steps == 0) {
             if (last_step_index_[i] != 255) {
