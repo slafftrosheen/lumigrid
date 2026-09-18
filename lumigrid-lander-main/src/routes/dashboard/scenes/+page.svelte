@@ -43,7 +43,7 @@
   let sceneApplyPending = $state(false);
   let activationGeneration = $state(0);
   let activationPreset = $state(-1);
-  let expandedZone = $state<number | null>(0);
+  let expandedChannel = $state<number | null>(0);
   let currentMotion = $state<SceneMotionConfig | null>(null);
   let transitionCurve = $state<TransitionCurve>('easeInOut');
   let showMotion = $state(false);
@@ -427,7 +427,7 @@
               class:is-active-btn={isActive}
               onclick={() => doActivate(editScene!.index)}
               disabled={activating}
-              title="Activate scene on hardware fixture"
+              title="Activate scene on the selected node"
               type="button"
             >
               {activating ? 'Activating...' : isActive ? 'Re-Activate' : 'Activate'}
@@ -480,8 +480,8 @@
               {@const activeLayers = channel.layers.filter(l => l.enabled).length}
               <button
                 class="zone-preview-box"
-                class:selected={expandedZone === zi}
-                onclick={() => (expandedZone = zi)}
+                class:selected={expandedChannel === zi}
+                onclick={() => (expandedChannel = zi)}
                 style="background: rgb({preview.r}, {preview.g}, {preview.b});"
                 type="button"
                 title="{port} (RGB {preview.r},{preview.g},{preview.b}) - Click to edit"
@@ -504,8 +504,8 @@
                 {@const activeLayers = channel.layers.filter(l => l.enabled).length}
                 <button
                   class="zone-preview-box pwm-box"
-                  class:selected={expandedZone === ci}
-                  onclick={() => (expandedZone = ci)}
+                  class:selected={expandedChannel === ci}
+                  onclick={() => (expandedChannel = ci)}
                   style="background: rgb({preview.r}, {preview.g}, {preview.b});"
                   type="button"
                   title="{port} (RGB {preview.r},{preview.g},{preview.b}) - Click to edit"
@@ -601,17 +601,17 @@
             {@const label = getChannelLabel(ci)}
             {@const preview = computeZonePreviewColor(channel, editScene.globalBrightness)}
             {@const enabledCount = channel.layers.filter(l => l.enabled).length}
-            <div class="zone-card" class:active-zone={expandedZone === ci}>
+            <div class="zone-card" class:active-zone={expandedChannel === ci}>
               <button
                 class="zone-header"
-                onclick={() => (expandedZone = expandedZone === ci ? null : ci)}
+                onclick={() => (expandedChannel = expandedChannel === ci ? null : ci)}
                 type="button"
               >
                 <div
                   class="zone-swatch"
                   style="background: rgb({preview.r}, {preview.g}, {preview.b});"
                 ></div>
-                <span class="zone-chevron">{expandedZone === ci ? '▾' : '▸'}</span>
+                <span class="zone-chevron">{expandedChannel === ci ? '▾' : '▸'}</span>
                 <span class="port-tag" class:pwm-tag={ci >= 8}>{port}</span>
                 <span class="zone-title">{label}</span>
                 <span class="zone-layer-count">
@@ -619,7 +619,7 @@
                 </span>
               </button>
 
-              {#if expandedZone === ci}
+              {#if expandedChannel === ci}
                 <div class="zone-body">
                   {#each channel.layers as layer, li}
                     <div class="layer-card" class:disabled={!layer.enabled}>
@@ -755,8 +755,11 @@
 
 <style>
   .scene-root {
+    width: 100%;
+    max-width: 1440px;
+    margin: 0 auto;
     display: flex;
-    gap: 1.5rem;
+    gap: 1.25rem;
     min-height: calc(100dvh - 4rem);
     position: relative;
   }
@@ -785,11 +788,21 @@
 
   /* Library Sidebar */
   .library {
-    width: 270px;
+    width: 278px;
     flex-shrink: 0;
+    align-self: flex-start;
+    position: sticky;
+    top: 0;
     display: flex;
     flex-direction: column;
-    gap: 0.5rem;
+    gap: 0.65rem;
+    padding: 1rem;
+    background: var(--dash-surface);
+    backdrop-filter: blur(18px);
+    -webkit-backdrop-filter: blur(18px);
+    border: 1px solid var(--dash-border);
+    border-radius: var(--dash-radius-lg);
+    box-shadow: var(--dash-shadow);
   }
   .lib-header {
     display: flex;
@@ -819,7 +832,7 @@
     flex-direction: column;
     gap: 3px;
     overflow-y: auto;
-    max-height: calc(100dvh - 8.5rem);
+    max-height: calc(100dvh - 10.5rem);
     padding-right: 0.2rem;
   }
   .lib-item {
@@ -906,10 +919,13 @@
     justify-content: space-between;
     gap: 1rem;
     flex-wrap: wrap;
-    background: rgba(255, 255, 255, 0.03);
-    border: 1px solid rgba(255, 255, 255, 0.07);
-    padding: 0.75rem 1rem;
-    border-radius: 12px;
+    background: var(--dash-surface);
+    backdrop-filter: blur(18px);
+    -webkit-backdrop-filter: blur(18px);
+    border: 1px solid var(--dash-border);
+    padding: .85rem 1rem;
+    border-radius: var(--dash-radius-lg);
+    box-shadow: var(--dash-shadow);
   }
   .ed-title-group {
     display: flex;
@@ -1467,10 +1483,38 @@
   }
 
   @media (max-width: 900px) {
-    .scene-root { flex-direction: column; }
-    .library { width: 100%; }
-    .lib-list { flex-direction: row; flex-wrap: wrap; max-height: 180px; }
-    .lib-item { flex: 0 0 auto; }
+    .scene-root { flex-direction: column; min-height: 0; }
+    .library {
+      width: 100%;
+      position: static;
+      padding: .85rem;
+    }
+    .lib-list {
+      flex-direction: row;
+      flex-wrap: nowrap;
+      max-height: none;
+      overflow-x: auto;
+      overflow-y: hidden;
+      scroll-snap-type: x proximity;
+      padding-bottom: .15rem;
+    }
+    .lib-item {
+      flex: 0 0 min(245px, 76vw);
+      scroll-snap-align: start;
+    }
     .preview-strip { grid-template-columns: repeat(4, 1fr); }
+  }
+
+  @media (max-width: 620px) {
+    .scene-root { gap: 1rem; }
+    .ed-toolbar { align-items: stretch; }
+    .ed-title-group, .ed-title-row { width: 100%; }
+    .ed-title-row { align-items: stretch; flex-direction: column; }
+    .ed-name { width: 100%; }
+    .status-badges { flex-wrap: wrap; }
+    .ed-actions { width: 100%; }
+    .ed-actions button { flex: 1; min-height: 40px; }
+    .preview-strip { grid-template-columns: repeat(2, 1fr); }
+    .zone-card { border-radius: var(--dash-radius-md); }
   }
 </style>
