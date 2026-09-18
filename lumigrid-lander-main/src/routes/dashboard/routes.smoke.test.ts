@@ -114,6 +114,20 @@ describe('dashboard routes smoke & contract tests', () => {
     }
   });
 
+  it('does not use native browser dialogs in operator routes', () => {
+    const nativeDialogCall = /\b(?:confirm|prompt|alert)\s*\(/;
+    for (const file of routeSourceFiles) {
+      expect(sourceFor(file), file).not.toMatch(nativeDialogCall);
+    }
+  });
+
+  it('keeps dashboard routes off the legacy raw node-list storage key', () => {
+    const legacyFleetStorage = /\bNODE_LIST_KEY\b|readStringList\s*\(\s*NODE_LIST_KEY|writeStringList\s*\(\s*NODE_LIST_KEY/;
+    for (const file of routeSourceFiles) {
+      expect(sourceFor(file), file).not.toMatch(legacyFleetStorage);
+    }
+  });
+
   it('keeps removed implementation and legacy operator copy out of the dashboard', () => {
     const retiredCopy = /Hardware Truth|WLED playlists|QLC\+ cue|xLights value|ESP32 RMT Lane|PCA9685 Driver|>\s*Active Preset\s*<|>\s*Preset Scene\s*<|>\s*Sequence Drops\s*</i;
     for (const file of routeSourceFiles) {
