@@ -216,7 +216,7 @@
           bind:value={addIpVal}
           onkeydown={(e) => e.key === 'Enter' && addNode()}
         />
-        <button class="icon-btn" onclick={addNode} title="Add node">+</button>
+        <button class="icon-btn" onclick={addNode} title="Add node" aria-label="Add node">+</button>
       </div>
       {#each nodeList as ip}
         <div class="node-chip">
