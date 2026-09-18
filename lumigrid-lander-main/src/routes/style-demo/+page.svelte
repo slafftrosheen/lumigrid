@@ -340,7 +340,7 @@
           ESP-IDF C (Embedded)
         </summary>
         <pre style="background: #0a0a0a; padding: 1rem; border-radius: 0.5rem; overflow-x: auto; margin-top: 0.5rem;"><code>const char* css = 
-":root&#123;--accent-primary:#0071e3;&#125;"
+":root&#123;--accent-primary:#ff2d55;&#125;"
 ".btn&#123;background:var(--accent-primary);&#125;";</code></pre>
       </details>
     </div>
