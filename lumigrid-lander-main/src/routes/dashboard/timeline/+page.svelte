@@ -38,7 +38,7 @@
 
   function presetName(idx: number): string {
     const p = presets.find(pr => pr.index === idx);
-    return p ? p.name : `Preset ${idx}`;
+    return p ? p.name : `Scene ${idx + 1}`;
   }
 
   function selectStep(t: number, s: number) {
@@ -314,7 +314,7 @@
                     title="Track {t + 1} ({CHANNEL_PORTS[track.channelId] ?? track.channelId}), Step {s + 1}: {presetName(step.presetIndex)} ({step.lengthBeats} beats)"
                   >
                     {#if s < track.numSteps}
-                      <span class="step-preset">P{step.presetIndex}</span>
+                      <span class="step-preset">S{step.presetIndex + 1}</span>
                       <span class="step-beats">{step.lengthBeats}b</span>
                     {:else}
                       <span class="step-empty">·</span>
@@ -356,7 +356,7 @@
           {#if selectedStep < editTrack.numSteps}
             <div class="editor-fields">
               <label class="field">
-                <span>Preset</span>
+                <span>Scene</span>
                 <select bind:value={editStep.presetIndex}>
                   {#if presets.length > 0}
                     {#each presets as p}
@@ -364,7 +364,7 @@
                     {/each}
                   {:else}
                     {#each Array(32) as _, i}
-                      <option value={i}>Preset {i}</option>
+                      <option value={i}>Scene {i + 1}</option>
                     {/each}
                   {/if}
                 </select>
@@ -419,7 +419,7 @@
 
           <!-- Quick Step Selector Strip -->
           <div class="mini-steps-wrap">
-            <span class="mini-label">Active Step Sequence:</span>
+            <span class="mini-label">Active Timeline Steps:</span>
             <div class="mini-steps-list">
               {#each editTrack.steps.slice(0, editTrack.numSteps) as st, s}
                 <button
@@ -429,7 +429,7 @@
                   type="button"
                 >
                   <span class="mini-idx">{s + 1}</span>
-                  <span class="mini-preset">P{st.presetIndex}</span>
+                  <span class="mini-preset">S{st.presetIndex + 1}</span>
                   <span class="mini-beats">{st.lengthBeats}b</span>
                 </button>
               {/each}
