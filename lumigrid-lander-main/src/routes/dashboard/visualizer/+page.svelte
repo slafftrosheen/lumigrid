@@ -329,7 +329,7 @@
   .stat-val { font-size: .82rem; color: var(--dash-text); font-family: monospace; }
   .stat-val.on { color: var(--dash-ok); }
 
-  @media (max-width: 680px) {
+  @media (max-width: 768px) {
     .viz-toolbar { position: static; align-items: stretch; }
     .viz-left, .viz-right { width: 100%; justify-content: space-between; }
     .viz-views { flex: 1; }
