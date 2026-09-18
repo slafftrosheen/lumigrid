@@ -425,7 +425,7 @@
     min-width: 130px;
     font-family: monospace;
   }
-  .field select:focus, .field input:focus { outline: none; border-color: var(--dash-accent); }
+  .field select:focus-visible, .field input:focus-visible { border-color: var(--dash-accent); box-shadow: 0 0 0 3px rgba(var(--dash-accent-rgb),.12); }
 
   .days-section { margin-bottom: .75rem; }
   .field-label { display: block; margin-bottom: .5rem; }
