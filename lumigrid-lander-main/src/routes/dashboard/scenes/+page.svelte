@@ -775,7 +775,7 @@
     width: 32px;
     height: 32px;
     border: 3px solid rgba(255, 255, 255, 0.1);
-    border-top-color: #0071e3;
+    border-top-color: var(--dash-accent);
     border-radius: 50%;
     animation: spin 0.8s linear infinite;
   }
@@ -842,8 +842,8 @@
     border-color: rgba(255, 255, 255, 0.12);
   }
   .lib-item.active {
-    background: rgba(0, 113, 227, 0.15);
-    border-color: rgba(0, 113, 227, 0.4);
+    background: rgba(var(--dash-accent-rgb), 0.14);
+    border-color: rgba(var(--dash-accent-rgb), 0.38);
     color: #f5f5f7;
   }
   .lib-item.empty {
@@ -934,8 +934,8 @@
   }
   .ed-name:focus {
     outline: none;
-    border-color: #0071e3;
-    box-shadow: 0 0 0 2px rgba(0, 113, 227, 0.3);
+    border-color: var(--dash-accent);
+    box-shadow: 0 0 0 2px rgba(var(--dash-accent-rgb), 0.28);
   }
   .ed-slot {
     font-size: 0.75rem;
@@ -974,9 +974,9 @@
     color: #ff9f0a;
   }
   .badge-saved {
-    background: rgba(10, 132, 255, 0.15);
-    border: 1px solid rgba(10, 132, 255, 0.4);
-    color: #64d2ff;
+    background: rgba(48, 209, 88, 0.12);
+    border: 1px solid rgba(48, 209, 88, 0.3);
+    color: var(--dash-ok);
   }
   .badge-new {
     background: rgba(191, 90, 242, 0.15);
@@ -1030,7 +1030,7 @@
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    color: #2997ff;
+    color: var(--dash-accent);
     margin: 0.5rem 0 0.25rem;
   }
   .preview-bank-title.pwm-title {
@@ -1066,9 +1066,9 @@
     font-family: monospace;
     font-size: 0.72rem;
     font-weight: 700;
-    color: #2997ff;
-    background: rgba(41, 151, 255, 0.12);
-    border: 1px solid rgba(41, 151, 255, 0.25);
+    color: var(--dash-accent);
+    background: rgba(var(--dash-accent-rgb), 0.12);
+    border: 1px solid rgba(var(--dash-accent-rgb), 0.25);
     padding: 0.1rem 0.4rem;
     border-radius: 4px;
   }
@@ -1083,8 +1083,8 @@
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
   }
   .zone-preview-box.selected {
-    border: 2px solid #0071e3;
-    box-shadow: 0 0 10px rgba(0, 113, 227, 0.5);
+    border: 2px solid var(--dash-accent);
+    box-shadow: 0 0 10px rgba(var(--dash-accent-rgb), 0.42);
   }
   .zone-preview-overlay {
     position: absolute;
@@ -1131,7 +1131,7 @@
     transition: border-color 0.15s ease;
   }
   .zone-card.active-zone {
-    border-color: rgba(0, 113, 227, 0.35);
+    border-color: rgba(var(--dash-accent-rgb), 0.35);
   }
   .zone-header {
     display: flex;
@@ -1202,7 +1202,7 @@
     color: #f5f5f7;
   }
   .toggle input[type='checkbox'] {
-    accent-color: #0071e3;
+    accent-color: var(--dash-accent);
     width: 15px;
     height: 15px;
   }
@@ -1231,7 +1231,7 @@
   .field input[type='range'] {
     flex: 1;
     min-width: 90px;
-    accent-color: #0071e3;
+    accent-color: var(--dash-accent);
   }
   .field-val {
     font-family: monospace;
@@ -1265,7 +1265,7 @@
   }
   .field-compact input[type='range'] {
     width: 65px;
-    accent-color: #0071e3;
+    accent-color: var(--dash-accent);
   }
   .field-val-sm {
     font-family: monospace;
@@ -1289,7 +1289,7 @@
     font-size: 0.75rem;
   }
   .btn-primary {
-    background: #0071e3;
+    background: var(--dash-accent);
     color: #fff;
     border: none;
     border-radius: 8px;
@@ -1300,7 +1300,7 @@
     transition: background 0.15s ease;
   }
   .btn-primary:hover:not(:disabled) {
-    background: #0077ed;
+    background: var(--dash-accent-hover);
   }
   .btn-primary:disabled {
     opacity: 0.5;
@@ -1429,13 +1429,13 @@
   }
 
   .motion-title {
-    color: #00f0ff;
+    color: var(--dash-accent);
   }
 
   .btn-add-track {
-    background: rgba(0, 240, 255, 0.1);
-    border: 1px solid rgba(0, 240, 255, 0.3);
-    color: #00f0ff;
+    background: rgba(var(--dash-accent-rgb), 0.1);
+    border: 1px solid rgba(var(--dash-accent-rgb), 0.3);
+    color: var(--dash-accent);
     border-radius: 4px;
     padding: 4px 10px;
     font-size: 0.8rem;
@@ -1444,7 +1444,7 @@
   }
 
   .btn-add-track:hover:not(:disabled) {
-    background: rgba(0, 240, 255, 0.2);
+    background: rgba(var(--dash-accent-rgb), 0.18);
   }
 
   .btn-add-track:disabled {
