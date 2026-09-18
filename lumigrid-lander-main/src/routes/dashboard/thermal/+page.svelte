@@ -180,7 +180,7 @@
         </div>
       </div>
 
-      <div class="card spark-card">
+      <div class="thermal-card spark-card">
         <h2>Temperature History ({history.length} readings)</h2>
         {#if history.length > 1}
           <svg viewBox="0 0 400 64" class="spark-svg" preserveAspectRatio="none">
