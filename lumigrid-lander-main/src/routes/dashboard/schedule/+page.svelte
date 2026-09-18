@@ -135,6 +135,8 @@
   });
 </script>
 
+<svelte:head><title>Schedule — LumiGrid</title></svelte:head>
+
 {#if !nodeIp}
   <p class="loading">No node selected. Add a node IP in the sidebar.</p>
 {:else if loading}
