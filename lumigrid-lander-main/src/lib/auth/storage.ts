@@ -278,6 +278,22 @@ export function writeNodeMetadataMap(map: Record<string, { name?: string; lastSe
   writeString(NODE_META_KEY, JSON.stringify(map));
 }
 
+export function normalizeNodeAddress(raw: string): string | null {
+  const stripped = raw.trim()
+    .replace(/^https?:\/\//i, '')
+    .replace(/\/+$/, '');
+
+  if (!stripped || /[/?#\s]/.test(stripped)) return null;
+
+  try {
+    const parsed = new URL(`http://${stripped}`);
+    if (!parsed.hostname || parsed.username || parsed.password) return null;
+    return parsed.host;
+  } catch {
+    return null;
+  }
+}
+
 export function getSavedNodes(): SavedNodeInfo[] {
   const registry = readNodeRegistry();
   const records = Object.values(registry);
