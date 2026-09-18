@@ -262,11 +262,14 @@
 
 <style>
   .sched-root {
+    width: 100%;
+    max-width: 1120px;
+    margin: 0 auto;
     display: flex;
     flex-direction: column;
     gap: 1.25rem;
     position: relative;
-    color: #f5f5f7;
+    color: var(--dash-text);
   }
   .loading { color: #a1a1a6; padding: 2rem; }
 
@@ -287,9 +290,9 @@
   .btn-save:disabled { opacity: .5; cursor: default; }
 
   .week-grid {
-    background: rgba(29,29,31,.88);
+    background: var(--dash-surface);
     border: 1px solid rgba(255,255,255,.08);
-    border-radius: 14px;
+    border-radius: var(--dash-radius-lg);
     overflow: hidden;
   }
   .week-header-row {
@@ -357,7 +360,7 @@
   .entry-editor {
     background: rgba(29,29,31,.88);
     border: 1px solid rgba(255,255,255,.08);
-    border-radius: 14px;
+    border-radius: var(--dash-radius-lg);
     padding: 1.25rem;
   }
   .editor-top {
@@ -466,4 +469,14 @@
     from { opacity: 0; transform: translateY(8px); }
     to { opacity: 1; transform: translateY(0); }
   }
+
+  @media (max-width: 760px) {
+    .sched-header { align-items: flex-start; gap: .8rem; flex-wrap: wrap; }
+    .sched-header .btn-save { width: 100%; }
+    .week-grid { overflow-x: auto; }
+    .week-header-row, .week-row { min-width: 720px; }
+    .editor-grid { flex-direction: column; gap: .85rem; }
+    .field select, .field input[type="time"] { width: 100%; min-width: 0; }
+  }
+
 </style>
