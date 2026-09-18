@@ -152,7 +152,7 @@
       toastMsg('Reverted edits to saved preset');
     } else if (selectedIdx !== null) {
       editScene = createDefaultPreset(selectedIdx);
-      toastMsg('Reset to default preset');
+      toastMsg('Reset to default scene');
     }
   }
 
