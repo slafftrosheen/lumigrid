@@ -1083,7 +1083,7 @@
     .stat-grid-2col { grid-template-columns: 1fr; }
   }
 
-  @media (max-width: 760px) {
+  @media (max-width: 768px) {
     .diag-header { position: static; align-items: flex-start; }
     .tab-bar { position: static; }
     .header-actions { width: 100%; justify-content: space-between; }
