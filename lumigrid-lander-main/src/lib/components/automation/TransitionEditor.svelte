@@ -79,10 +79,10 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
-    background: rgba(17, 24, 39, 0.6);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 6px;
-    padding: 10px 12px;
+    background: rgba(255,255,255,.035);
+    border: 1px solid rgba(255,255,255,.09);
+    border-radius: var(--dash-radius-md);
+    padding: 12px;
   }
 
   .transition-fields {
@@ -108,9 +108,9 @@
   .input-with-unit {
     display: flex;
     align-items: center;
-    background: rgba(10, 14, 23, 0.9);
+    background: rgba(255,255,255,.05);
     border: 1px solid rgba(255, 255, 255, 0.15);
-    border-radius: 4px;
+    border-radius: 8px;
     padding: 0 8px;
   }
 
@@ -131,9 +131,9 @@
   }
 
   .select-curve {
-    background: rgba(10, 14, 23, 0.9);
+    background: rgba(255,255,255,.05);
     border: 1px solid rgba(255, 255, 255, 0.15);
-    border-radius: 4px;
+    border-radius: 8px;
     color: #fff;
     padding: 6px 8px;
     font-size: 0.85rem;
@@ -150,7 +150,7 @@
     height: 34px;
     display: block;
     border: 1px solid rgba(255, 255, 255, 0.1);
-    border-radius: 4px;
+    border-radius: 8px;
   }
 
   .morph-badge {
@@ -158,7 +158,7 @@
     align-items: center;
     gap: 6px;
     font-size: 0.75rem;
-    color: #10b981;
+    color: var(--dash-ok);
     font-family: monospace;
   }
 
