@@ -469,7 +469,7 @@
     width: 32px;
     height: 32px;
     border: 3px solid rgba(255, 255, 255, 0.1);
-    border-top-color: #0071e3;
+    border-top-color: var(--dash-accent);
     border-radius: 50%;
     animation: spin 0.8s linear infinite;
   }
@@ -535,9 +535,9 @@
     color: #ff9f0a;
   }
   .badge-saved {
-    background: rgba(10, 132, 255, 0.15);
-    border: 1px solid rgba(10, 132, 255, 0.4);
-    color: #64d2ff;
+    background: rgba(48, 209, 88, 0.12);
+    border: 1px solid rgba(48, 209, 88, 0.3);
+    color: var(--dash-ok);
   }
   .pulse-dot {
     width: 6px;
@@ -602,7 +602,7 @@
   }
   .bpm-control input:focus {
     outline: none;
-    border-color: #0071e3;
+    border-color: var(--dash-accent);
   }
 
   .beat-dots {
@@ -629,7 +629,7 @@
     gap: 0.5rem;
   }
   .btn-save {
-    background: #0071e3;
+    background: var(--dash-accent);
     color: #fff;
     border: none;
     border-radius: 8px;
@@ -640,7 +640,7 @@
     transition: background 0.15s ease;
   }
   .btn-save:hover:not(:disabled) {
-    background: #0077ed;
+    background: var(--dash-accent-hover);
   }
   .btn-save:disabled {
     opacity: 0.5;
@@ -704,7 +704,7 @@
     opacity: 0.4;
   }
   .track-row.selected {
-    background: rgba(0, 113, 227, 0.08);
+    background: rgba(var(--dash-accent-rgb), 0.08);
   }
 
   .cell-track {
@@ -781,13 +781,13 @@
     border-color: rgba(255, 255, 255, 0.15);
   }
   .step-btn.active {
-    background: rgba(0, 113, 227, 0.12);
-    border-color: rgba(0, 113, 227, 0.3);
+    background: rgba(var(--dash-accent-rgb), 0.12);
+    border-color: rgba(var(--dash-accent-rgb), 0.3);
   }
   .step-btn.selected {
-    border-color: #0071e3;
-    background: rgba(0, 113, 227, 0.25);
-    box-shadow: 0 0 8px rgba(0, 113, 227, 0.4);
+    border-color: var(--dash-accent);
+    background: rgba(var(--dash-accent-rgb), 0.22);
+    box-shadow: 0 0 8px rgba(var(--dash-accent-rgb), 0.35);
   }
   .step-preset {
     font-size: 0.75rem;
@@ -839,7 +839,7 @@
     cursor: pointer;
   }
   .inline-toggle input {
-    accent-color: #0071e3;
+    accent-color: var(--dash-accent);
     width: 14px;
     height: 14px;
   }
@@ -870,8 +870,8 @@
     min-width: 140px;
   }
   .field-duration-preview {
-    background: rgba(0, 113, 227, 0.08);
-    border: 1px solid rgba(0, 113, 227, 0.2);
+    background: rgba(var(--dash-accent-rgb), 0.08);
+    border: 1px solid rgba(var(--dash-accent-rgb), 0.2);
     border-radius: 6px;
     padding: 0.4rem 0.75rem;
   }
@@ -879,7 +879,7 @@
     font-family: monospace;
     font-size: 0.9rem;
     font-weight: 700;
-    color: #64d2ff;
+    color: var(--dash-accent);
   }
   .editor-inactive {
     color: #86868b;
@@ -919,8 +919,8 @@
     background: rgba(255, 255, 255, 0.08);
   }
   .mini-step-btn.selected {
-    border-color: #0071e3;
-    background: rgba(0, 113, 227, 0.2);
+    border-color: var(--dash-accent);
+    background: rgba(var(--dash-accent-rgb), 0.18);
   }
   .mini-idx {
     font-size: 0.6rem;
