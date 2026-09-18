@@ -929,9 +929,9 @@
     padding: 0.4rem 0.75rem;
     width: 260px;
   }
-  .search-input:focus {
-    outline: none;
+  .search-input:focus-visible {
     border-color: var(--dash-accent);
+    box-shadow: 0 0 0 3px rgba(var(--dash-accent-rgb),.12);
   }
   .level-filters {
     display: flex;
