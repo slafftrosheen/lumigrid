@@ -795,8 +795,8 @@
   }
 
   .primary-btn {
-    background: #0071e3;
-    border: 1px solid #0077ed;
+    background: var(--dash-accent);
+    border: 1px solid var(--dash-accent-hover);
     border-radius: 999px;
     color: #ffffff;
     padding: 0.5rem 1.4rem;
@@ -807,7 +807,7 @@
   }
 
   .primary-btn:hover {
-    background: #0077ed;
+    background: var(--dash-accent-hover);
   }
 
   .primary-btn:disabled {
@@ -821,7 +821,7 @@
     right: 2rem;
     background: rgba(29, 29, 31, 0.95);
     backdrop-filter: blur(20px);
-    border: 1px solid rgba(0, 113, 227, 0.4);
+    border: 1px solid rgba(var(--dash-accent-rgb), 0.4);
     box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
     color: #f5f5f7;
     padding: 0.75rem 1.25rem;
@@ -845,7 +845,7 @@
     width: 20px;
     height: 20px;
     border: 2px solid rgba(255, 255, 255, 0.1);
-    border-top-color: #2997ff;
+    border-top-color: var(--dash-accent);
     border-radius: 50%;
     animation: spin 0.8s linear infinite;
   }
@@ -904,8 +904,8 @@
   }
 
   .bank-dot.addr {
-    background: #2997ff;
-    box-shadow: 0 0 10px rgba(41, 151, 255, 0.6);
+    background: var(--dash-accent);
+    box-shadow: 0 0 10px rgba(var(--dash-accent-rgb), 0.6);
   }
 
   .bank-dot.pwm {
@@ -964,8 +964,8 @@
   }
 
   .connector-card.is-active.addr {
-    border-color: rgba(41, 151, 255, 0.35);
-    background: rgba(41, 151, 255, 0.04);
+    border-color: rgba(var(--dash-accent-rgb), 0.35);
+    background: rgba(var(--dash-accent-rgb), 0.04);
   }
 
   .connector-card.is-active.pwm {
@@ -979,7 +979,7 @@
 
   @keyframes cardPulse {
     from { border-color: rgba(255, 255, 255, 0.2); }
-    to { border-color: #2997ff; box-shadow: 0 0 16px rgba(41, 151, 255, 0.4); }
+    to { border-color: var(--dash-accent); box-shadow: 0 0 16px rgba(var(--dash-accent-rgb), 0.4); }
   }
 
   .card-top {
@@ -992,7 +992,7 @@
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
     font-size: 1.1rem;
     font-weight: 800;
-    color: #2997ff;
+    color: var(--dash-accent);
     letter-spacing: -0.02em;
   }
 
@@ -1213,9 +1213,9 @@
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
     font-size: 0.95rem;
     font-weight: 800;
-    color: #2997ff;
-    background: rgba(41, 151, 255, 0.12);
-    border: 1px solid rgba(41, 151, 255, 0.3);
+    color: var(--dash-accent);
+    background: rgba(var(--dash-accent-rgb), 0.12);
+    border: 1px solid rgba(var(--dash-accent-rgb), 0.3);
     padding: 0.15rem 0.55rem;
     border-radius: 6px;
   }
@@ -1313,7 +1313,7 @@
   }
 
   .text-input:focus, .select-input:focus {
-    border-color: #2997ff;
+    border-color: var(--dash-accent);
   }
 
   .select-input option {
@@ -1338,7 +1338,7 @@
   }
 
   .range-slider {
-    accent-color: #2997ff;
+    accent-color: var(--dash-accent);
     cursor: pointer;
   }
 
@@ -1369,13 +1369,13 @@
   }
 
   .group-checkbox-card.checked {
-    background: rgba(41, 151, 255, 0.1);
-    border-color: rgba(41, 151, 255, 0.35);
+    background: rgba(var(--dash-accent-rgb), 0.1);
+    border-color: rgba(var(--dash-accent-rgb), 0.35);
     color: #f5f5f7;
   }
 
   .group-checkbox-card input[type="checkbox"] {
-    accent-color: #2997ff;
+    accent-color: var(--dash-accent);
   }
 
   .grp-label {
