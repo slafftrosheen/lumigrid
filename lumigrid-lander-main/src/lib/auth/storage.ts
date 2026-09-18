@@ -184,8 +184,17 @@ export function readNodeRegistry(): Record<string, NodeRecord> {
   return migrated;
 }
 
+export const NODE_REGISTRY_CHANGED_EVENT = 'lumigrid:nodes-changed';
+
+function notifyNodeRegistryChanged(): void {
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new Event(NODE_REGISTRY_CHANGED_EVENT));
+  }
+}
+
 export function writeNodeRegistry(registry: Record<string, NodeRecord>): void {
   writeString(NODE_REGISTRY_KEY, JSON.stringify(registry));
+  notifyNodeRegistryChanged();
 }
 
 export function upsertNodeRecord(record: Partial<NodeRecord> & { id: string }): NodeRecord {
