@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import OperatorDialog from '$lib/components/dashboard/OperatorDialog.svelte';
   import { getPresets, savePreset, activatePreset, getSignageStatus, getEffects } from '$lib/api/node';
   import type { ScenePreset, EffectMeta, SignageStatus } from '$lib/api/node';
   import {
@@ -39,6 +40,7 @@
   let activating = $state(false);
   let error = $state('');
   let toast = $state('');
+  let clearSceneIdx = $state<number | null>(null);
   let activePreset = $state(-1);
   let sceneApplyPending = $state(false);
   let activationGeneration = $state(0);
@@ -233,8 +235,13 @@
     }
   }
 
-  async function removeScene(idx: number) {
-    if (!confirm(`Clear scene slot ${idx + 1}? This will reset that scene on the node.`)) return;
+  function removeScene(idx: number) {
+    clearSceneIdx = idx;
+  }
+
+  async function confirmRemoveScene() {
+    if (clearSceneIdx === null) return;
+    const idx = clearSceneIdx;
     try {
       if (nodeIp) {
         await deletePreset(nodeIp, idx);
@@ -246,6 +253,7 @@
         selectedIdx = null;
       }
       toastMsg(`Cleared scene slot ${idx + 1}`);
+      clearSceneIdx = null;
     } catch (e) {
       error = String(e);
     }
@@ -757,6 +765,18 @@
     {/if}
   </div>
 {/if}
+
+<OperatorDialog
+  open={clearSceneIdx !== null}
+  title="Clear scene slot?"
+  description={clearSceneIdx !== null
+    ? `Scene slot ${clearSceneIdx + 1} will be reset on the selected node. This cannot be undone unless you have the scene saved elsewhere.`
+    : ''}
+  confirmLabel="Clear Scene"
+  tone="danger"
+  onconfirm={confirmRemoveScene}
+  oncancel={() => (clearSceneIdx = null)}
+/>
 
 <style>
   .scene-root {
