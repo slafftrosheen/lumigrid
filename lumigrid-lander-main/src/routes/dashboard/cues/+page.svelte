@@ -414,15 +414,15 @@
               <tbody>
                 {#each currentList.cues as cue, idx}
                   <tr class="cue-row" class:active-row={isRunning && currentCueIdx === idx}>
-                    <td class="cue-num">
+                    <td class="cue-num" data-label="Cue">
                       <button class="jump-btn" onclick={() => jumpToCue(idx)} title="Jump directly to this cue">
                         {idx + 1}
                       </button>
                     </td>
-                    <td>
+                    <td data-label="Label">
                       <input type="text" bind:value={cue.label} class="table-input" />
                     </td>
-                    <td>
+                    <td data-label="Scene">
                       <select bind:value={cue.sceneIndex} class="table-select">
                         {#each presets as p}
                           <option value={p.index}>{p.name} (#{p.index + 1})</option>
@@ -432,7 +432,7 @@
                         {/if}
                       </select>
                     </td>
-                    <td>
+                    <td data-label="Hold">
                       <div class="time-input-group">
                         <input
                           type="number"
@@ -445,7 +445,7 @@
                         <span class="unit">ms</span>
                       </div>
                     </td>
-                    <td>
+                    <td data-label="Fade">
                       <div class="time-input-group">
                         <input
                           type="number"
@@ -458,14 +458,14 @@
                         <span class="unit">ms</span>
                       </div>
                     </td>
-                    <td>
+                    <td data-label="Curve">
                       <select bind:value={cue.curve} class="table-select">
                         {#each TRANSITION_CURVES as c}
                           <option value={c}>{c}</option>
                         {/each}
                       </select>
                     </td>
-                    <td class="cue-actions">
+                    <td class="cue-actions" data-label="Actions">
                       <button class="icon-btn" onclick={() => moveCue(idx, 'up')} disabled={idx === 0} title="Move cue up" aria-label="Move cue up">▲</button>
                       <button class="icon-btn" onclick={() => moveCue(idx, 'down')} disabled={idx === currentList.cues.length - 1} title="Move cue down" aria-label="Move cue down">▼</button>
                       <button class="icon-btn remove" onclick={() => removeCue(idx)} title="Remove cue" aria-label="Remove cue">✕</button>
@@ -1124,9 +1124,9 @@
     .fader-box { flex: 1 1 260px; }
   }
 
-  @media (max-width: 680px) {
+  @media (max-width: 768px) {
     .page-title { font-size: 1.45rem; }
-    .monitor-card, .card { padding: 1rem; }
+    .monitor-card { padding: 1rem; }
     .monitor-header {
       align-items: flex-start;
       gap: .75rem;
@@ -1143,7 +1143,67 @@
     .title-input, .select-mode { width: 100%; }
     .editor-actions { width: 100%; }
     .editor-actions button { flex: 1; min-height: 42px; }
-    .cues-table { min-width: 840px; }
+    .cues-table-wrapper { overflow: visible; }
+    .cues-table,
+    .cues-table tbody,
+    .cues-table tr,
+    .cues-table td {
+      display: block;
+      width: 100%;
+    }
+    .cues-table thead { display: none; }
+    .cues-table {
+      min-width: 0;
+      border-collapse: separate;
+      border-spacing: 0 10px;
+    }
+    .cues-table tr {
+      padding: .75rem;
+      border: 1px solid rgba(255,255,255,.075);
+      border-radius: 14px;
+      background: linear-gradient(180deg, rgba(255,255,255,.035), rgba(255,255,255,.018));
+    }
+    .cues-table tr.active-row {
+      border-color: rgba(var(--dash-accent-rgb),.28);
+      background: linear-gradient(135deg, rgba(var(--dash-accent-rgb),.11), rgba(255,255,255,.018));
+    }
+    .cues-table td {
+      display: grid;
+      grid-template-columns: 72px minmax(0, 1fr);
+      align-items: center;
+      gap: .6rem;
+      padding: .42rem .15rem;
+      border-bottom: 1px solid rgba(255,255,255,.04);
+    }
+    .cues-table td:last-child { border-bottom: 0; }
+    .cues-table td::before {
+      content: attr(data-label);
+      color: #737378;
+      font-size: .61rem;
+      font-weight: 800;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+    }
+    .cue-actions {
+      display: grid;
+      grid-template-columns: 72px repeat(3, 38px);
+      justify-content: start;
+      gap: .45rem;
+    }
+    .cue-actions::before {
+      content: attr(data-label);
+      align-self: center;
+      color: #737378;
+      font-size: .61rem;
+      font-weight: 800;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+    }
+    .cue-actions .icon-btn {
+      width: 38px;
+      height: 36px;
+    }
+    .table-number { width: 100%; }
     .toast-pill { width: 100%; text-align: center; }
   }
 
