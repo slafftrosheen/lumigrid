@@ -205,7 +205,7 @@
 </div>
 
 <style>
-  .page { max-width: 1000px; }
+  .page { width:100%; max-width: 1080px; margin:0 auto; }
   .page-header { margin-bottom: 1.5rem; }
   h1 { margin: 0; font-size: 1.6rem; font-weight: 700; color: #f5f5f7; }
   .sub { margin: .25rem 0 0; color: #a1a1a6; font-size: .85rem; }
@@ -215,10 +215,11 @@
   @media (max-width: 700px) { .layout { grid-template-columns: 1fr; } }
 
   .controls-card, .preview-card {
-    background: rgba(29,29,31,.72);
-    backdrop-filter: blur(16px);
-    border: 1px solid rgba(255,255,255,.08);
-    border-radius: 18px;
+    background: var(--dash-surface);
+    backdrop-filter: blur(18px);
+    border: 1px solid var(--dash-border);
+    border-radius: var(--dash-radius-lg);
+    box-shadow: var(--dash-shadow);
     padding: 1.25rem;
     display: flex;
     flex-direction: column;
@@ -229,7 +230,7 @@
   .field { display: flex; flex-direction: column; gap: .25rem; }
   .field span { font-size: .72rem; font-weight: 600; color: #a1a1a6; text-transform: uppercase; letter-spacing: .05em; }
   .field input { background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.12); border-radius: 8px; color: #f5f5f7; font-size: .9rem; padding: .4rem .65rem; width: 80px; }
-  .field input:focus { outline: none; border-color: #ff2d55; }
+  .field input:focus { outline: none; border-color: var(--dash-accent); }
 
   .drop-zone {
     border: 2px dashed rgba(255,255,255,.15);
@@ -247,7 +248,7 @@
 
   .playback-btns { display: flex; gap: .5rem; }
   .play-btn { flex: 1; background: rgba(255,45,85,.85); border: none; border-radius: 8px; color: #fff; font-weight: 600; font-size: .85rem; padding: .55rem; cursor: pointer; transition: background .2s; }
-  .play-btn:hover:not(:disabled) { background: #ff3b30; }
+  .play-btn:hover:not(:disabled) { background: var(--dash-accent-hover); }
   .play-btn:disabled { opacity: .4; cursor: default; }
   .stop-btn { flex: 1; background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.12); border-radius: 8px; color: #f5f5f7; font-size: .85rem; padding: .55rem; cursor: pointer; }
   .stop-btn:disabled { opacity: .4; cursor: default; }
