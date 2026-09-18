@@ -330,6 +330,8 @@
   }
 </script>
 
+<svelte:head><title>Scene Studio — LumiGrid</title></svelte:head>
+
 {#if loading}
   <div class="scene-root">
     <div class="loading-box">
