@@ -61,7 +61,7 @@
     <div class="field-preview">
       <svg viewBox="0 0 120 40" class="mini-curve-svg">
         <rect x="0" y="0" width="120" height="40" fill="rgba(0,0,0,0.3)" rx="4" />
-        <path d={previewPath} fill="none" stroke="#00f0ff" stroke-width="2" />
+        <path d={previewPath} fill="none" stroke="#ff2d55" stroke-width="2" />
       </svg>
     </div>
   </div>
