@@ -140,7 +140,7 @@
           nodeIp,
         });
       }
-      toastMsg(`Saved Cue List: ${currentList.name}`);
+      toastMsg(`Saved cue list: ${currentList.name}`);
       const lists = await getCueLists(nodeIp);
       cueLists = lists;
     } catch (e: any) {
@@ -244,8 +244,8 @@
 <div class="cues-container">
   <div class="header-row">
     <div>
-      <h1 class="page-title">Cue Studio & Show Engine</h1>
-      <p class="page-subtitle">WLED playlists + QLC+ cue timing + xLights value curves for professional show authoring.</p>
+      <h1 class="page-title">Cue Studio</h1>
+      <p class="page-subtitle">Build timed shows, transitions and repeatable playback across your saved scenes.</p>
     </div>
 
     {#if toast}
@@ -261,7 +261,7 @@
   {:else if loading}
     <div class="loading-state">
       <div class="spinner"></div>
-      <p>Connecting to show engine...</p>
+      <p>Loading cue workspace…</p>
     </div>
   {:else}
     <!-- LIVE SHOW MONITOR -->
@@ -271,7 +271,7 @@
           <span class="status-dot" class:running={isRunning} class:holding={cueState === 'holding'} class:fading={cueState === 'fading'}></span>
           <span class="status-label">{cueState.toUpperCase()}</span>
           {#if isRunning}
-            <span class="active-list-badge">List #{liveCue?.listIndex ?? 0 + 1}</span>
+            <span class="active-list-badge">List #{(liveCue?.listIndex ?? 0) + 1}</span>
           {/if}
         </div>
 
