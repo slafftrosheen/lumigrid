@@ -233,6 +233,7 @@
       <button
         class="tab"
         class:active={activeTab === 'health'}
+        aria-pressed={activeTab === 'health'}
         onclick={() => (activeTab = 'health')}
         type="button"
       >
@@ -247,6 +248,7 @@
       <button
         class="tab"
         class:active={activeTab === 'events'}
+        aria-pressed={activeTab === 'events'}
         onclick={() => (activeTab = 'events')}
         type="button"
       >
@@ -259,6 +261,7 @@
       <button
         class="tab"
         class:active={activeTab === 'audit'}
+        aria-pressed={activeTab === 'audit'}
         onclick={() => (activeTab = 'audit')}
         type="button"
       >
