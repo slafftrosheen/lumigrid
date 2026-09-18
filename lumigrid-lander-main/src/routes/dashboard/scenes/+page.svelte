@@ -41,6 +41,7 @@
   let error = $state('');
   let toast = $state('');
   let clearSceneIdx = $state<number | null>(null);
+  let clearingScene = $state(false);
   let activePreset = $state(-1);
   let sceneApplyPending = $state(false);
   let activationGeneration = $state(0);
@@ -182,7 +183,7 @@
       } else {
         presets = [...presets, saved].sort((a, b) => a.index - b.index);
       }
-      toastMsg(`Saved "${name}" to slot ${idx}`);
+      toastMsg(`Saved “${name}” to scene slot ${idx + 1}`);
     } catch (e) {
       error = String(e);
     } finally {
@@ -240,8 +241,9 @@
   }
 
   async function confirmRemoveScene() {
-    if (clearSceneIdx === null) return;
+    if (clearSceneIdx === null || clearingScene) return;
     const idx = clearSceneIdx;
+    clearingScene = true;
     try {
       if (nodeIp) {
         await deletePreset(nodeIp, idx);
@@ -256,6 +258,8 @@
       clearSceneIdx = null;
     } catch (e) {
       error = String(e);
+    } finally {
+      clearingScene = false;
     }
   }
 
@@ -344,7 +348,7 @@
   <div class="scene-root">
     <div class="loading-box">
       <div class="spinner"></div>
-      <p>Loading presets and effect metadata from node...</p>
+      <p>Loading scene workspace…</p>
     </div>
   </div>
 {:else}
@@ -774,6 +778,7 @@
     : ''}
   confirmLabel="Clear Scene"
   tone="danger"
+  busy={clearingScene}
   onconfirm={confirmRemoveScene}
   oncancel={() => (clearSceneIdx = null)}
 />
