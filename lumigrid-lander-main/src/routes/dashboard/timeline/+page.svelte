@@ -266,6 +266,7 @@
               class="track-row"
               class:disabled={!track.enabled}
               class:selected={selectedTrack === t}
+              class:pwm-track={track.channelId >= 8}
             >
               <!-- Track label -->
               <td class="cell-track">
@@ -668,6 +669,8 @@
   /* Grid Wrap */
   .tl-grid-wrap {
     overflow: auto;
+    scrollbar-color: rgba(255,255,255,.16) transparent;
+    scrollbar-width: thin;
     background: rgba(20, 20, 22, .74);
     backdrop-filter: blur(18px);
     -webkit-backdrop-filter: blur(18px);
@@ -685,6 +688,10 @@
     table-layout: fixed;
   }
   .tl-grid th {
+    position: sticky;
+    top: 0;
+    z-index: 6;
+    background: rgba(18,18,20,.985);
     padding: 0.4rem 0.2rem;
     font-size: 0.7rem;
     font-weight: 600;
@@ -699,15 +706,17 @@
     padding-left: 0.5rem !important;
     position: sticky;
     left: 0;
-    z-index: 7;
-    background: rgba(18,18,20,.98);
+    top: 0;
+    z-index: 9;
+    background: rgba(18,18,20,.99);
   }
   .col-ch {
     width: 74px;
     position: sticky;
     left: 140px;
-    z-index: 7;
-    background: rgba(18,18,20,.98);
+    top: 0;
+    z-index: 9;
+    background: rgba(18,18,20,.99);
     box-shadow: 8px 0 18px rgba(0,0,0,.18);
   }
   .col-step {
@@ -725,6 +734,9 @@
   }
   .track-row.selected {
     background: rgba(var(--dash-accent-rgb), 0.08);
+  }
+  .track-row.pwm-track.selected {
+    background: color-mix(in oklab, var(--dash-warm) 10%, transparent);
   }
 
   .cell-track {
@@ -744,6 +756,10 @@
   .track-row.selected .cell-track,
   .track-row.selected .cell-ch {
     background: color-mix(in oklab, rgba(18,18,20,.97) 86%, var(--dash-accent) 14%);
+  }
+  .track-row.pwm-track.selected .cell-track,
+  .track-row.pwm-track.selected .cell-ch {
+    background: color-mix(in oklab, rgba(18,18,20,.97) 86%, var(--dash-warm) 14%);
   }
   .track-header-cell {
     display: flex;
@@ -823,6 +839,15 @@
     border-color: var(--dash-accent);
     background: rgba(var(--dash-accent-rgb), 0.22);
     box-shadow: 0 0 8px rgba(var(--dash-accent-rgb), 0.35);
+  }
+  .pwm-track .step-btn.active {
+    background: color-mix(in oklab, var(--dash-warm) 12%, transparent);
+    border-color: color-mix(in oklab, var(--dash-warm) 32%, transparent);
+  }
+  .pwm-track .step-btn.selected {
+    border-color: var(--dash-warm);
+    background: color-mix(in oklab, var(--dash-warm) 22%, transparent);
+    box-shadow: 0 0 8px color-mix(in oklab, var(--dash-warm) 38%, transparent);
   }
   .step-preset {
     font-size: 0.75rem;
