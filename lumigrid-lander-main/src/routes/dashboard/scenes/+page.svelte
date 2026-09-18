@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { getPresets, savePreset, activatePreset, getEffects } from '$lib/api/node';
-  import type { ScenePreset, EffectMeta } from '$lib/api/node';
+  import { getPresets, savePreset, activatePreset, getSignageStatus, getEffects } from '$lib/api/node';
+  import type { ScenePreset, EffectMeta, SignageStatus } from '$lib/api/node';
   import {
     createDefaultPreset,
     clonePreset,
@@ -28,13 +28,19 @@
   let error = $state('');
   let toast = $state('');
   let activePreset = $state(-1);
+  let sceneApplyPending = $state(false);
+  let activationGeneration = $state(0);
   let expandedZone = $state<number | null>(0);
 
   let editScene = $state<ScenePreset | null>(null);
   let savedSnapshot = $state<ScenePreset | null>(null);
 
   const isDirty = $derived(isPresetDirty(editScene, savedSnapshot));
-  const isActive = $derived(editScene !== null && activePreset === editScene.index);
+  const isActive = $derived(
+    editScene !== null &&
+    activePreset === editScene.index &&
+    !sceneApplyPending
+  );
 
   function selectPreset(idx: number) {
     const found = presets.find(p => p.index === idx);
@@ -119,16 +125,82 @@
     }
   }
 
+  function observeSignageStatus(status: SignageStatus) {
+    if (typeof status.activePreset === 'number') {
+      activePreset = status.activePreset;
+    }
+    if (typeof status.sceneApplyPending === 'boolean') {
+      sceneApplyPending = status.sceneApplyPending;
+    }
+
+    if (!activating || activationGeneration === 0) return;
+
+    if (status.outputFault) {
+      activating = false;
+      activationGeneration = 0;
+      error = 'Scene was accepted, but the node reported a hardware output fault.';
+      return;
+    }
+
+    if (
+      typeof status.appliedGeneration === 'number' &&
+      status.appliedGeneration >= activationGeneration
+    ) {
+      activating = false;
+      activationGeneration = 0;
+      sceneApplyPending = false;
+      toastMsg(`Scene ${idxForActiveMessage()} committed to hardware`);
+    }
+  }
+
+  function idxForActiveMessage(): number {
+    return editScene?.index ?? activePreset;
+  }
+
+  async function waitForAppliedGeneration(targetGeneration: number) {
+    const deadline = Date.now() + 5000;
+    let lastPollError = '';
+
+    while (
+      activating &&
+      activationGeneration === targetGeneration &&
+      Date.now() < deadline
+    ) {
+      try {
+        const status = await getSignageStatus(nodeIp);
+        lastPollError = '';
+        observeSignageStatus(status);
+        if (!activating) return;
+      } catch (e) {
+        lastPollError = String(e);
+      }
+
+      await new Promise(resolve => setTimeout(resolve, 150));
+    }
+
+    if (activating && activationGeneration === targetGeneration) {
+      activating = false;
+      activationGeneration = 0;
+      error = lastPollError
+        ? `Activation accepted, but output confirmation failed: ${lastPollError}`
+        : 'Activation accepted, but no hardware commit was confirmed within 5 seconds.';
+    }
+  }
+
   async function doActivate(idx: number) {
     if (activating) return;
     activating = true;
     error = '';
     try {
-      await activatePreset(nodeIp, idx);
-      // Activating state will be cleared when telemetry confirms activePreset === idx
+      const result = await activatePreset(nodeIp, idx);
+      activationGeneration = result.generation;
+      sceneApplyPending = true;
+      await waitForAppliedGeneration(result.generation);
     } catch (e) {
       error = String(e);
       activating = false;
+      activationGeneration = 0;
+      sceneApplyPending = false;
     }
   }
 
@@ -161,10 +233,15 @@
     editScene = null;
     savedSnapshot = null;
     try {
-      const [p, e] = await Promise.all([getPresets(targetIp), getEffects(targetIp)]);
+      const [p, e, status] = await Promise.all([
+        getPresets(targetIp),
+        getEffects(targetIp),
+        getSignageStatus(targetIp),
+      ]);
       if (gen !== loadGen) return;
       presets = p;
       effects = e;
+      observeSignageStatus(status);
       if (presets.length > 0 && selectedIdx === null) {
         selectPreset(presets[0].index);
       }
@@ -181,10 +258,6 @@
   onMount(() => {
     const unsub = nodeStore.subscribe(state => {
       if (state.status?.activePreset !== undefined) {
-        if (activating && state.status.activePreset === editScene?.index) {
-          activating = false;
-          toastMsg(`Activated Scene ${editScene.index} on node`);
-        }
         activePreset = state.status.activePreset;
       }
 

@@ -3,6 +3,7 @@ import {
   getPresets,
   savePreset,
   activatePreset,
+  getSignageStatus,
   getEffects,
   getSequence,
   saveSequence,
@@ -67,6 +68,7 @@ describe('canonical dashboard API contracts (/api/v1/*)', () => {
         JSON.stringify({
           accepted: true,
           preset: 2,
+          generation: 41,
         }),
         {
           status: 202,
@@ -82,6 +84,7 @@ describe('canonical dashboard API contracts (/api/v1/*)', () => {
     expect(res).toEqual({
       accepted: true,
       preset: 2,
+      generation: 41,
     });
 
     expect(vi.mocked(fetch)).toHaveBeenCalledWith(
@@ -114,6 +117,33 @@ describe('canonical dashboard API contracts (/api/v1/*)', () => {
     await expect(
       activatePreset('192.168.1.50', 7),
     ).rejects.toThrow(/scene_activation_rejected/);
+  });
+
+  it('reads scene request/application telemetry from /api/v1/status', async () => {
+    const mockStatus = {
+      activePreset: 2,
+      requestedPreset: 2,
+      requestedGeneration: 41,
+      appliedGeneration: 41,
+      sceneApplyPending: false,
+      transitioning: false,
+      outputFault: false,
+    };
+
+    vi.mocked(fetch).mockResolvedValue(
+      new Response(JSON.stringify(mockStatus), { status: 200 }),
+    );
+
+    const status = await getSignageStatus('192.168.1.50');
+    expect(status).toEqual(mockStatus);
+
+    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+      'http://192.168.1.50/api/v1/status',
+      expect.objectContaining({
+        headers: expect.any(Headers),
+        signal: expect.any(AbortSignal),
+      }),
+    );
   });
 
   it('loads effects catalog from /api/v1/effects', async () => {

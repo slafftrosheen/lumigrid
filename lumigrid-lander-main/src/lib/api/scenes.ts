@@ -57,6 +57,19 @@ export function savePreset(ip: string, preset: Partial<ScenePreset> & { index: n
 export interface ActivatePresetResult {
   accepted: true;
   preset: number;
+  generation: number;
+}
+
+export interface SignageStatus {
+  activePreset?: number;
+  requestedPreset?: number;
+  requestedGeneration?: number;
+  appliedGeneration?: number;
+  sceneApplyPending?: boolean;
+  transitioning?: boolean;
+  outputFault?: boolean;
+  outputFaultCount?: number;
+  controlOwner?: string;
 }
 
 export function activatePreset(
@@ -68,6 +81,10 @@ export function activatePreset(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ preset: index }),
   });
+}
+
+export function getSignageStatus(ip: string): Promise<SignageStatus> {
+  return apiJson<SignageStatus>(ip, '/api/v1/status');
 }
 
 export function getEffects(ip: string): Promise<EffectMeta[]> {

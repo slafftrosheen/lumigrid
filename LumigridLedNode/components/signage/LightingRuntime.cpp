@@ -219,10 +219,12 @@ void LightingRuntime::render_frame(uint32_t current_ms) {
         return;
     }
 
+    uint32_t render_scene_generation = 0;
     if (!mutex_ || xSemaphoreTake(mutex_, pdMS_TO_TICKS(5)) != pdTRUE) return;
     if (live_pending_dirty_) { live_active_ = live_pending_; live_pending_dirty_ = false; }
     current_render_scene_ = scene_manager_.process_frame(current_ms);
     current_local_cfg_ = device_cfg_;
+    render_scene_generation = requested_scene_generation_.load(std::memory_order_acquire);
     xSemaphoreGive(mutex_);
 
     const SceneConfig& render_scene = current_render_scene_;
@@ -281,14 +283,30 @@ void LightingRuntime::render_frame(uint32_t current_ms) {
         output_fault_frame_count_.fetch_add(1, std::memory_order_relaxed);
         controller_.blackout();
     } else {
+        bool frame_committed = false;
         ControlSource dominant = source_manager_.current_owner();
         if (dominant != ControlSource::Factory && dominant != ControlSource::EStop) {
             const esp_err_t sched_err = OutputScheduler::schedule(render_frame, local_cfg, controller_);
             if (sched_err != ESP_OK) { report_output_fault(sched_err); return; }
+            frame_committed = true;
         }
         if (state == OutputState::Armed) {
             output_state_.store(OutputState::Healthy, std::memory_order_release);
             ESP_LOGI(TAG, "Armed commit succeeded: output state restored to HEALTHY");
+        }
+
+        // Do not acknowledge merely loading a scene. Only advance the applied
+        // generation after OutputScheduler has completed a successful hardware
+        // transaction for a frame that observed that request generation.
+        if (frame_committed && render_scene_generation != 0) {
+            const uint32_t applied =
+                applied_scene_generation_.load(std::memory_order_acquire);
+            if (render_scene_generation > applied) {
+                applied_scene_generation_.store(
+                    render_scene_generation,
+                    std::memory_order_release
+                );
+            }
         }
     }
 

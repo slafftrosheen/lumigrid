@@ -85,7 +85,8 @@ endpoint returns:
 ```json
 {
   "accepted": true,
-  "preset": 2
+  "preset": 2,
+  "generation": 41
 }
 ```
 
@@ -107,9 +108,18 @@ returns:
 }
 ```
 
-Clients must use node telemetry such as `/api/v1/status` to determine the
-observed runtime/output state rather than treating the `202` response itself as
-hardware acknowledgement.
+The `generation` value identifies this accepted scene request. Clients can
+compare it with `appliedGeneration` from `/api/v1/status`. The request is
+physically acknowledged only when `appliedGeneration >= generation`.
+
+`/api/v1/status` also exposes `requestedPreset`, `requestedGeneration`,
+`appliedGeneration`, and `sceneApplyPending`. A generation advances to
+applied only after the render path successfully commits a frame through the
+hardware output transaction. If output faults, the generation remains pending
+and `outputFault` reports the failure.
+
+Clients must therefore use node telemetry rather than treating the `202`
+response itself as hardware acknowledgement.
 
 ### Scenes and effects
 

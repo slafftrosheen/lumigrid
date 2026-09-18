@@ -906,7 +906,8 @@ esp_err_t post_activate(httpd_req_t* request) {
      *
      * A rejected scene must not mutate the current control state.
      */
-    if (!api_ptr->signage()->activate_scene_checked(index)) {
+    uint32_t generation = 0;
+    if (!api_ptr->signage()->activate_scene_checked(index, &generation)) {
         char detail[64];
         snprintf(
             detail,
@@ -956,12 +957,13 @@ esp_err_t post_activate(httpd_req_t* request) {
         detail
     );
 
-    char response[64];
+    char response[96];
     snprintf(
         response,
         sizeof(response),
-        R"({"accepted":true,"preset":%u})",
-        index
+        R"({"accepted":true,"preset":%u,"generation":%" PRIu32 "})",
+        index,
+        generation
     );
 
     return send_json(
@@ -1337,6 +1339,26 @@ esp_err_t get_signage_status(httpd_req_t* request) {
             response,
             "activePreset",
             api_ptr->signage()->active_scene_index()
+        );
+        cJSON_AddNumberToObject(
+            response,
+            "requestedPreset",
+            api_ptr->signage()->requested_scene_index()
+        );
+        cJSON_AddNumberToObject(
+            response,
+            "requestedGeneration",
+            api_ptr->signage()->requested_scene_generation()
+        );
+        cJSON_AddNumberToObject(
+            response,
+            "appliedGeneration",
+            api_ptr->signage()->applied_scene_generation()
+        );
+        cJSON_AddBoolToObject(
+            response,
+            "sceneApplyPending",
+            api_ptr->signage()->scene_apply_pending()
         );
         cJSON_AddBoolToObject(
             response,

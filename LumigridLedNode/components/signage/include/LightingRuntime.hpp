@@ -39,17 +39,28 @@ public:
     // Truthful control-plane activation boundary. Unlike the legacy void method,
     // this reports load/rejection failures and only accepts activation while the
     // runtime is atomically observed in the Running lifecycle state.
-    bool activate_scene_checked(uint8_t index) {
+    bool activate_scene_checked(uint8_t index, uint32_t* generation = nullptr) {
         if (!mutex_ ||
             lifecycle_state_.load(std::memory_order_acquire) != LifecycleState::Running ||
             shutting_down_.load(std::memory_order_acquire)) {
             return false;
         }
+
         xSemaphoreTake(mutex_, portMAX_DELAY);
         const bool accepted = scene_manager_.activate_scene(
             index,
             static_cast<uint32_t>(esp_timer_get_time() / 1000ULL)
         );
+
+        if (accepted) {
+            const uint32_t next_generation =
+                requested_scene_generation_.fetch_add(1, std::memory_order_acq_rel) + 1;
+            requested_scene_index_.store(index, std::memory_order_release);
+            if (generation) {
+                *generation = next_generation;
+            }
+        }
+
         xSemaphoreGive(mutex_);
         return accepted;
     }
@@ -71,6 +82,19 @@ public:
     uint8_t active_scene_index() const;
     bool is_fallback_active() const;
     bool is_transitioning() const;
+
+    uint8_t requested_scene_index() const {
+        return requested_scene_index_.load(std::memory_order_acquire);
+    }
+    uint32_t requested_scene_generation() const {
+        return requested_scene_generation_.load(std::memory_order_acquire);
+    }
+    uint32_t applied_scene_generation() const {
+        return applied_scene_generation_.load(std::memory_order_acquire);
+    }
+    bool scene_apply_pending() const {
+        return requested_scene_generation() > applied_scene_generation();
+    }
 
     PowerBudget& power_budget() { return power_budget_; }
     const PowerBudget& power_budget() const { return power_budget_; }
@@ -181,6 +205,13 @@ private:
     std::atomic<uint32_t> output_fault_count_{0};
     std::atomic<uint32_t> output_commit_failure_count_{0};
     std::atomic<uint32_t> output_fault_frame_count_{0};
+
+    // Scene request/application handshake. A generation becomes "applied" only
+    // after a frame rendered from that request successfully commits to output.
+    std::atomic<uint8_t> requested_scene_index_{0};
+    std::atomic<uint32_t> requested_scene_generation_{0};
+    std::atomic<uint32_t> applied_scene_generation_{0};
+
     std::atomic<bool> shutting_down_{false};
     SemaphoreHandle_t shutdown_sem_ = nullptr;
 
