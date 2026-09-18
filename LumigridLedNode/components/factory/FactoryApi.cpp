@@ -2986,7 +2986,8 @@ esp_err_t get_backup(httpd_req_t* request) {
                 const auto& tr = sm.tracks[t];
                 cJSON* tobj = cJSON_CreateObject();
                 cJSON_AddStringToObject(tobj, "target", automation_target_name(tr.target));
-                cJSON_AddNumberToObject(tobj, "zone", tr.zone);
+                cJSON_AddNumberToObject(tobj, "channel", tr.channel);
+                cJSON_AddNumberToObject(tobj, "zone", tr.channel); // deprecated compatibility alias
                 cJSON_AddNumberToObject(tobj, "layer", tr.layer);
                 cJSON_AddStringToObject(tobj, "curve", automation_curve_name(tr.curve));
                 cJSON_AddBoolToObject(tobj, "loop", tr.loop);
@@ -3295,7 +3296,9 @@ esp_err_t post_restore(httpd_req_t* request) {
                             tr.channel = std::min<uint8_t>(7, std::max<int>(0, z_j->valueint));
                         }
                         cJSON* l_j = cJSON_GetObjectItem(t_item, "layer");
-                        if (l_j && cJSON_IsNumber(l_j)) tr.layer = l_j->valueint;
+                        if (l_j && cJSON_IsNumber(l_j)) {
+                            tr.layer = std::min<uint8_t>(2, std::max<int>(0, l_j->valueint));
+                        }
                         cJSON* c_j = cJSON_GetObjectItem(t_item, "curve");
                         if (c_j && cJSON_IsString(c_j)) parse_automation_curve(c_j->valuestring, tr.curve);
                         cJSON* loop_j = cJSON_GetObjectItem(t_item, "loop");
