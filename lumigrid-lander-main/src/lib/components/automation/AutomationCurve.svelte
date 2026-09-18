@@ -23,6 +23,7 @@
     elapsedMs = 0,
     readOnly = false,
     color = '#ff2d55',
+    onChange = (_points: AutomationPoint[]) => {},
   } = $props();
 
   let svgElement: SVGSVGElement | null = $state(null);
@@ -102,6 +103,7 @@
     // Keep sorted by position
     newPoints.sort((a, b) => a.position - b.position);
     track.points = newPoints;
+    onChange(newPoints);
     draggingIdx = newPoints.findIndex(p => p.position === pos && p.value === val);
   }
 
@@ -128,6 +130,7 @@
     const newPoints = [...track.points, { position: pos, value: val }];
     newPoints.sort((a, b) => a.position - b.position);
     track.points = newPoints;
+    onChange(newPoints);
   }
 
   function removePoint(idx: number, e: MouseEvent) {
@@ -135,6 +138,7 @@
     if (readOnly || track.points.length <= 2) return;
     const newPoints = track.points.filter((_, i) => i !== idx);
     track.points = newPoints;
+    onChange(newPoints);
   }
 </script>
 
