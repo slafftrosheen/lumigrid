@@ -362,7 +362,7 @@
                 <select bind:value={editStep.presetIndex}>
                   {#if presets.length > 0}
                     {#each presets as p}
-                      <option value={p.index}>{p.index}: {p.name}</option>
+                      <option value={p.index}>{p.index + 1}. {p.name}</option>
                     {/each}
                   {:else}
                     {#each Array(32) as _, i}
