@@ -259,9 +259,9 @@
     display: flex;
     flex-direction: column;
     width: 100%;
-    background: rgba(10, 14, 23, 0.85);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 8px;
+    background: rgba(0,0,0,.18);
+    border: 1px solid rgba(255,255,255,.08);
+    border-radius: 12px;
     padding: 10px;
     box-sizing: border-box;
   }
