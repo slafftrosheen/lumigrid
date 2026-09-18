@@ -120,7 +120,7 @@ describe('timeline model & serialization', () => {
 
   it('preserves non-sequential channel IDs and does not confuse them with lane index', () => {
     const seq = createDefaultSequence();
-    const nonSequential = [7, 5, 3, 1, 6, 4, 2, 0];
+    const nonSequential = [15, 13, 11, 9, 7, 5, 3, 1, 14, 12, 10, 8, 6, 4, 2, 0];
     seq.tracks.forEach((t, i) => {
       t.channelId = nonSequential[i];
     });
