@@ -349,6 +349,7 @@
             onclick={() => (mobileMoreOpen = false)}
             type="button"
             aria-label="Close more tools"
+            autofocus
           >✕</button>
         </div>
         <div class="mobile-more-grid">
@@ -929,6 +930,7 @@
       text-decoration: none;
       font: 700 .62rem/1.05 -apple-system, BlinkMacSystemFont, Inter, system-ui, sans-serif;
       cursor: pointer;
+      touch-action: manipulation;
     }
     .mobile-nav-link.active {
       color: #fff;
@@ -966,6 +968,7 @@
       max-height: min(68dvh, 560px);
       margin: 0 auto;
       overflow: auto;
+      overscroll-behavior: contain;
       background: rgba(22,22,24,.97);
       border: 1px solid rgba(255,255,255,.12);
       border-radius: 22px;
