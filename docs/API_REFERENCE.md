@@ -42,11 +42,13 @@ that has not completed initialization.
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/api/v1/status` | Read signage playback state. |
+| `GET` | `/api/v1/channels` | Read all 16 physical output channels (A1–A8 and P1–P8). |
+| `POST` | `/api/v1/channel/test` | Test or identify a specific physical channel connector. |
 | `GET` | `/api/v1/presets` | List stored scene presets. |
 | `PUT` | `/api/v1/presets` | Save a scene preset in slot 0–31. |
 | `POST` | `/api/v1/activate` | Activate a preset. |
 | `GET` | `/api/v1/effects` | Read display names, descriptions, and controls for each effect. |
-| `GET` | `/api/v1/sequence` | Read the eight-zone, 16-step timeline. |
+| `GET` | `/api/v1/sequence` | Read the 16-channel, 16-step timeline. |
 | `PUT` | `/api/v1/sequence` | Save the timeline. |
 | `GET` | `/api/v1/config` | Read persisted node settings. |
 | `PUT` | `/api/v1/config` | Update persisted node settings. |

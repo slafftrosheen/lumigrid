@@ -85,7 +85,7 @@ describe('timeline model & serialization', () => {
       enabled: 1 as any,
       tracks: [
         {
-          channelId: 99, // clamped to 7
+          channelId: 99, // clamped to 15
           numSteps: 0, // clamped to 1
           enabled: false,
           steps: [
@@ -106,7 +106,7 @@ describe('timeline model & serialization', () => {
     expect(norm.bpm).toBe(MIN_BPM);
     expect(norm.enabled).toBe(true);
     expect(norm.tracks).toHaveLength(TRACK_COUNT);
-    expect(norm.tracks[0].channelId).toBe(7);
+    expect(norm.tracks[0].channelId).toBe(15);
     expect(norm.tracks[0].numSteps).toBe(1);
     expect(norm.tracks[0].enabled).toBe(false);
     expect(norm.tracks[0].steps).toHaveLength(STEP_COUNT);

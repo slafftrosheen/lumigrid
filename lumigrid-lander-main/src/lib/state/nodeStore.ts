@@ -82,6 +82,17 @@ export interface NodeLiveStatus {
     remainingMs?: number;
     manualFade?: number;
   } | null;
+  channels?: Array<{
+    index: number;
+    port: string;
+    configured: boolean;
+    enabled: boolean;
+    owner: string;
+    fault: boolean;
+    brightness?: number;
+    pixels?: number;
+    level?: number;
+  }>;
 }
 
 export interface DashboardNodeState {
@@ -457,6 +468,7 @@ export function connect(nodeIp = getSelectedNodeIp()): void {
             timeline: s2Timeline !== undefined ? s2Timeline : current.status?.timeline,
             automation: s2Automation !== undefined ? s2Automation : current.status?.automation,
             cue: s2Cue !== undefined ? s2Cue : current.status?.cue,
+            channels: Array.isArray(json.channels) ? json.channels : current.status?.channels,
           },
           lastSeen: now,
           lastMessageAt: now,

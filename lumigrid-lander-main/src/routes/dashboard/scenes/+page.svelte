@@ -15,6 +15,7 @@
     LAYER_COUNT,
     MAX_PRESETS,
   } from '$lib/api/scenes';
+  import { getChannels, type HardwareChannel } from '$lib/api/channels';
   import { getSelectedNodeIp } from '$lib/auth/storage';
   import { nodeStore, commandTracker } from '$lib/state/nodeStore';
   import {
@@ -31,6 +32,7 @@
   let nodeIp = $state('');
   let presets = $state<ScenePreset[]>([]);
   let effects = $state<EffectMeta[]>([]);
+  let hwChannels = $state<HardwareChannel[]>([]);
   let selectedIdx = $state<number | null>(null);
   let loading = $state(true);
   let saving = $state(false);
@@ -48,6 +50,19 @@
 
   let editScene = $state<ScenePreset | null>(null);
   let savedSnapshot = $state<ScenePreset | null>(null);
+
+  const activeChannels = $derived(editScene?.channels ?? editScene?.zones ?? []);
+
+  function getChannelPort(idx: number): string {
+    return idx < 8 ? `A${idx + 1}` : `P${idx - 7}`;
+  }
+
+  function getChannelLabel(idx: number): string {
+    const port = getChannelPort(idx);
+    const ch = hwChannels.find(c => c.index === idx);
+    if (ch && ch.name) return `${port} · ${ch.name}`;
+    return `${port} · ${idx < 8 ? 'Addressable Lane' : 'PWM Dimmer'}`;
+  }
 
   const isDirty = $derived(isPresetDirty(editScene, savedSnapshot));
   const isActive = $derived(
@@ -146,6 +161,9 @@
     saving = true;
     error = '';
     try {
+      if (editScene.channels && editScene.channels.length >= 8) {
+        editScene.zones = editScene.channels.slice(0, 8);
+      }
       await savePreset(nodeIp, editScene);
       if (currentMotion && nodeIp) {
         currentMotion.transitionCurve = transitionCurve;
@@ -244,14 +262,16 @@
     editScene = null;
     savedSnapshot = null;
     try {
-      const [p, e, status] = await Promise.all([
+      const [p, e, status, chList] = await Promise.all([
         getPresets(targetIp),
         getEffects(targetIp),
         getSignageStatus(targetIp),
+        getChannels(targetIp).catch(() => [] as HardwareChannel[]),
       ]);
       if (gen !== loadGen) return;
       presets = p;
       effects = e;
+      hwChannels = chList;
       observeSignageStatus(status);
       if (presets.length > 0 && selectedIdx === null) {
         selectPreset(presets[0].index);
@@ -445,32 +465,59 @@
           </div>
         </div>
 
-        <!-- Visual Software Preview (8 Zones Strip) -->
+        <!-- Visual Physical Preview (16 Channels) -->
         <div class="preview-panel">
           <div class="preview-header">
-            <span class="preview-title">Software Fixture Preview</span>
-            <span class="preview-subtitle">Zone Color Synthesis (8 Zones)</span>
+            <span class="preview-title">Physical Hardware Preview</span>
+            <span class="preview-subtitle">16-Channel Hardware Synthesis (A1–A8 Addressable, P1–P8 PWM)</span>
           </div>
 
+          <div class="preview-bank-title">Addressable Lanes (A1–A8)</div>
           <div class="preview-strip">
-            {#each editScene.zones as zone, zi}
-              {@const preview = computeZonePreviewColor(zone, editScene.globalBrightness)}
-              {@const activeLayers = zone.layers.filter(l => l.enabled).length}
+            {#each activeChannels.slice(0, 8) as channel, zi}
+              {@const port = getChannelPort(zi)}
+              {@const preview = computeZonePreviewColor(channel, editScene.globalBrightness)}
+              {@const activeLayers = channel.layers.filter(l => l.enabled).length}
               <button
                 class="zone-preview-box"
                 class:selected={expandedZone === zi}
                 onclick={() => (expandedZone = zi)}
                 style="background: rgb({preview.r}, {preview.g}, {preview.b});"
                 type="button"
-                title="Zone {zi} (RGB {preview.r},{preview.g},{preview.b}) - Click to edit"
+                title="{port} (RGB {preview.r},{preview.g},{preview.b}) - Click to edit"
               >
                 <div class="zone-preview-overlay">
-                  <span class="zp-num">Z{zi}</span>
+                  <span class="zp-num">{port}</span>
                   <span class="zp-layers">{activeLayers}/3</span>
                 </div>
               </button>
             {/each}
           </div>
+
+          {#if activeChannels.length > 8}
+            <div class="preview-bank-title pwm-title">PWM Dimmers (P1–P8)</div>
+            <div class="preview-strip">
+              {#each activeChannels.slice(8, 16) as channel, pi}
+                {@const ci = pi + 8}
+                {@const port = getChannelPort(ci)}
+                {@const preview = computeZonePreviewColor(channel, editScene.globalBrightness)}
+                {@const activeLayers = channel.layers.filter(l => l.enabled).length}
+                <button
+                  class="zone-preview-box pwm-box"
+                  class:selected={expandedZone === ci}
+                  onclick={() => (expandedZone = ci)}
+                  style="background: rgb({preview.r}, {preview.g}, {preview.b});"
+                  type="button"
+                  title="{port} (RGB {preview.r},{preview.g},{preview.b}) - Click to edit"
+                >
+                  <div class="zone-preview-overlay">
+                    <span class="zp-num pwm-text">{port}</span>
+                    <span class="zp-layers">{activeLayers}/3</span>
+                  </div>
+                </button>
+              {/each}
+            </div>
+          {/if}
         </div>
 
         <!-- Global Properties -->
@@ -547,31 +594,34 @@
           {/if}
         </div>
 
-        <!-- Zones and Layers Editor -->
+        <!-- Channels and Layers Editor -->
         <div class="zones">
-          {#each editScene.zones as zone, zi}
-            {@const preview = computeZonePreviewColor(zone, editScene.globalBrightness)}
-            {@const enabledCount = zone.layers.filter(l => l.enabled).length}
-            <div class="zone-card" class:active-zone={expandedZone === zi}>
+          {#each activeChannels as channel, ci}
+            {@const port = getChannelPort(ci)}
+            {@const label = getChannelLabel(ci)}
+            {@const preview = computeZonePreviewColor(channel, editScene.globalBrightness)}
+            {@const enabledCount = channel.layers.filter(l => l.enabled).length}
+            <div class="zone-card" class:active-zone={expandedZone === ci}>
               <button
                 class="zone-header"
-                onclick={() => (expandedZone = expandedZone === zi ? null : zi)}
+                onclick={() => (expandedZone = expandedZone === ci ? null : ci)}
                 type="button"
               >
                 <div
                   class="zone-swatch"
                   style="background: rgb({preview.r}, {preview.g}, {preview.b});"
                 ></div>
-                <span class="zone-chevron">{expandedZone === zi ? '▾' : '▸'}</span>
-                <span class="zone-title">Zone {zi}</span>
+                <span class="zone-chevron">{expandedZone === ci ? '▾' : '▸'}</span>
+                <span class="port-tag" class:pwm-tag={ci >= 8}>{port}</span>
+                <span class="zone-title">{label}</span>
                 <span class="zone-layer-count">
                   {enabledCount}/{LAYER_COUNT} layers enabled
                 </span>
               </button>
 
-              {#if expandedZone === zi}
+              {#if expandedZone === ci}
                 <div class="zone-body">
-                  {#each zone.layers as layer, li}
+                  {#each channel.layers as layer, li}
                     <div class="layer-card" class:disabled={!layer.enabled}>
                       <div class="layer-header">
                         <label class="toggle">
@@ -975,6 +1025,18 @@
     font-size: 0.7rem;
     color: #86868b;
   }
+  .preview-bank-title {
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: #2997ff;
+    margin: 0.5rem 0 0.25rem;
+  }
+  .preview-bank-title.pwm-title {
+    color: #ff9f0a;
+    margin-top: 0.75rem;
+  }
   .preview-strip {
     display: grid;
     grid-template-columns: repeat(8, 1fr);
@@ -989,6 +1051,31 @@
     overflow: hidden;
     padding: 0;
     transition: transform 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+  }
+  .zone-preview-box.pwm-box {
+    border-color: rgba(255, 159, 10, 0.25);
+  }
+  .zone-preview-box.pwm-box.selected {
+    border: 2px solid #ff9f0a;
+    box-shadow: 0 0 10px rgba(255, 159, 10, 0.5);
+  }
+  .zp-num.pwm-text {
+    color: #ff9f0a;
+  }
+  .port-tag {
+    font-family: monospace;
+    font-size: 0.72rem;
+    font-weight: 700;
+    color: #2997ff;
+    background: rgba(41, 151, 255, 0.12);
+    border: 1px solid rgba(41, 151, 255, 0.25);
+    padding: 0.1rem 0.4rem;
+    border-radius: 4px;
+  }
+  .port-tag.pwm-tag {
+    color: #ff9f0a;
+    background: rgba(255, 159, 10, 0.12);
+    border-color: rgba(255, 159, 10, 0.25);
   }
   .zone-preview-box:hover {
     transform: translateY(-2px);

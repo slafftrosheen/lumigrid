@@ -50,6 +50,27 @@ export interface FixtureConfig {
   dmxMode: number;
 }
 
+export interface ChannelConfig {
+  name: string;
+  enabled: boolean;
+  addressableType: number;
+  pixelOrder: number;
+  pixelCount: number;
+  maxBrightness: number;
+  gammaCorrection: boolean;
+  maxMilliwatts: number;
+  dmxUniverse: number;
+  dmxStartChannel: number;
+  dmxMode: number;
+}
+
+export interface ChannelGroup {
+  name: string;
+  channelMask: number;
+  role: number;
+  enabled: boolean;
+}
+
 export interface DeviceConfig {
   deviceName: string;
   activePresetIndex: number;
@@ -66,6 +87,8 @@ export interface DeviceConfig {
   syncRole: number;
   protocol: DeviceProtocolConfig;
   auth?: DeviceAuthConfig;
+  channels?: ChannelConfig[];
+  groups?: ChannelGroup[];
   zones?: DeviceZoneConfig[];
   /** Hardware output pin/channel definitions (must be preserved on every save). */
   physicalOutputs?: PhysicalOutput[];

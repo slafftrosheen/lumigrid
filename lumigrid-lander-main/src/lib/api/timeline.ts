@@ -34,6 +34,10 @@ export const TRACK_COUNT = 8;
 export const STEP_COUNT = 16;
 export const MIN_BPM = 10;
 export const MAX_BPM = 500;
+export const CHANNEL_PORTS = [
+  'A1', 'A2', 'A3', 'A4', 'A5', 'A6', 'A7', 'A8',
+  'P1', 'P2', 'P3', 'P4', 'P5', 'P6', 'P7', 'P8',
+] as const;
 
 export function createDefaultStep(): SequenceStep {
   return {
@@ -78,7 +82,7 @@ export function normalizeTimelineStep(step?: Partial<SequenceStep> | null): Sequ
 
 export function normalizeTimelineTrack(track?: Partial<SequenceTrack> | null, defaultChannelId = 0): SequenceTrack {
   const channelId = typeof track?.channelId === 'number' && Number.isFinite(track.channelId)
-    ? Math.max(0, Math.min(7, Math.round(track.channelId)))
+    ? Math.max(0, Math.min(15, Math.round(track.channelId)))
     : defaultChannelId;
   const numSteps = typeof track?.numSteps === 'number' && Number.isFinite(track.numSteps)
     ? Math.max(1, Math.min(STEP_COUNT, Math.round(track.numSteps)))

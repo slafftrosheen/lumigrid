@@ -22,11 +22,14 @@ export interface SceneZone {
   layers: [SceneLayer, SceneLayer, SceneLayer];
 }
 
+export type SceneChannel = SceneZone;
+
 export interface ScenePreset {
   index: number;
   name: string;
   globalBrightness: number;
   transitionMs: number;
+  channels?: SceneChannel[];
   zones: SceneZone[];
 }
 
@@ -93,6 +96,7 @@ export function getEffects(ip: string): Promise<EffectMeta[]> {
 }
 
 export const ZONE_COUNT = 8;
+export const CHANNEL_COUNT = 16;
 export const LAYER_COUNT = 3;
 export const MAX_PRESETS = 32;
 export const BLEND_MODES = ['normal', 'add', 'multiply', 'screen'] as const;
@@ -120,12 +124,17 @@ export function createDefaultZone(): SceneZone {
   };
 }
 
+export function createDefaultChannel(): SceneChannel {
+  return createDefaultZone();
+}
+
 export function createDefaultPreset(index: number, name?: string): ScenePreset {
   return {
     index,
     name: name ?? `Scene ${index}`,
     globalBrightness: 128,
     transitionMs: 1000,
+    channels: Array.from({ length: CHANNEL_COUNT }, () => createDefaultZone()),
     zones: Array.from({ length: ZONE_COUNT }, () => createDefaultZone()),
   };
 }
@@ -196,9 +205,16 @@ export function normalizeScene(preset: Partial<ScenePreset> | null, defaultIndex
     : 1000;
 
   const rawZones = preset?.zones || [];
+  const rawChannels = preset?.channels || [];
   const zones: SceneZone[] = [];
   for (let z = 0; z < ZONE_COUNT; z++) {
-    zones.push(normalizeZone(rawZones[z]));
+    zones.push(normalizeZone(rawZones[z] || rawChannels[z]));
+  }
+
+  const channels: SceneChannel[] = [];
+  for (let c = 0; c < CHANNEL_COUNT; c++) {
+    const fallback = c < ZONE_COUNT ? rawZones[c] : null;
+    channels.push(normalizeZone(rawChannels[c] || fallback));
   }
 
   return {
@@ -206,6 +222,7 @@ export function normalizeScene(preset: Partial<ScenePreset> | null, defaultIndex
     name,
     globalBrightness,
     transitionMs,
+    channels,
     zones,
   };
 }

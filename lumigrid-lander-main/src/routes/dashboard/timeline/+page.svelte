@@ -12,6 +12,7 @@
     STEP_COUNT,
     MIN_BPM,
     MAX_BPM,
+    CHANNEL_PORTS,
   } from '$lib/api/timeline';
   import { getSelectedNodeIp } from '$lib/auth/storage';
   import { nodeStore } from '$lib/state/nodeStore';
@@ -284,7 +285,7 @@
                     onclick={() => selectStep(t, 0)}
                     type="button"
                   >
-                    Zone {t + 1}
+                    Track {t + 1} ({CHANNEL_PORTS[track.channelId] ?? `Ch ${track.channelId}`})
                   </button>
                 </div>
               </td>
@@ -292,8 +293,8 @@
               <!-- Output Channel mapping -->
               <td class="cell-ch">
                 <select class="ch-select" bind:value={track.channelId}>
-                  {#each Array(8) as _, ci}
-                    <option value={ci}>Ch {ci}</option>
+                  {#each CHANNEL_PORTS as port, ci}
+                    <option value={ci}>{port}</option>
                   {/each}
                 </select>
               </td>
@@ -309,7 +310,7 @@
                     class:selected={isStepSelected}
                     onclick={() => selectStep(t, s)}
                     type="button"
-                    title="Zone {t + 1}, Step {s + 1}: {presetName(step.presetIndex)} ({step.lengthBeats} beats)"
+                    title="Track {t + 1} ({CHANNEL_PORTS[track.channelId] ?? track.channelId}), Step {s + 1}: {presetName(step.presetIndex)} ({step.lengthBeats} beats)"
                   >
                     {#if s < track.numSteps}
                       <span class="step-preset">P{step.presetIndex}</span>
@@ -392,10 +393,10 @@
       <section class="panel track-editor">
         {#if editTrack}
           <div class="panel-header">
-            <h3>Zone {selectedTrack + 1} Settings</h3>
+            <h3>Track {selectedTrack + 1} ({CHANNEL_PORTS[editTrack.channelId] ?? editTrack.channelId}) Settings</h3>
             <label class="inline-toggle">
               <input type="checkbox" bind:checked={editTrack.enabled} />
-              <span>Zone Enabled</span>
+              <span>Track Enabled</span>
             </label>
           </div>
 
@@ -403,8 +404,8 @@
             <label class="field">
               <span>Channel Output</span>
               <select bind:value={editTrack.channelId}>
-                {#each Array(8) as _, ci}
-                  <option value={ci}>Channel {ci}</option>
+                {#each CHANNEL_PORTS as port, ci}
+                  <option value={ci}>{port} ({ci < 8 ? 'Addressable Lane' : 'PWM Dimmer'})</option>
                 {/each}
               </select>
             </label>

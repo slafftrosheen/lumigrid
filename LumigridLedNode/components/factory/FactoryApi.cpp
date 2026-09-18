@@ -2450,7 +2450,7 @@ esp_err_t put_sequence(httpd_req_t* request) {
         cJSON* trk_item = nullptr;
         cJSON_ArrayForEach(trk_item, tracks) {
             if (trk_idx >= 8) break;
-            json_u8(trk_item, "channelId", 0, 7, seq.tracks[trk_idx].channel_id);
+            json_u8(trk_item, "channelId", 0, 15, seq.tracks[trk_idx].channel_id);
             json_u8(trk_item, "numSteps", 1, 16, seq.tracks[trk_idx].num_steps);
 
             const cJSON* trk_en = cJSON_GetObjectItemCaseSensitive(trk_item, "enabled");
