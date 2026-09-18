@@ -441,7 +441,7 @@
               <span class="stat-val">{controlSourceName(health.output.control_source)}</span>
             </div>
             <div class="stat-row">
-              <span>Active Preset</span>
+              <span>Active Scene</span>
               <span class="stat-val mono">P{health.output.active_preset}</span>
             </div>
             <div class="stat-row">
@@ -481,7 +481,7 @@
               <span class="stat-val">{health.dmx.packets_accepted}</span>
             </div>
             <div class="stat-row">
-              <span>Sequence Drops</span>
+              <span>Timeline Drops</span>
               <span class="stat-val">{health.dmx.packets_rejected_seq}</span>
             </div>
             <div class="stat-row">
