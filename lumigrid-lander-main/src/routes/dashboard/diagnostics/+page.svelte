@@ -191,6 +191,8 @@
   });
 </script>
 
+<svelte:head><title>Diagnostics — LumiGrid</title></svelte:head>
+
 {#if !nodeIp}
   <div class="diag-empty">
     <p>No node selected. Connect to a node in the header to view diagnostics.</p>
