@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
+  import OperatorDialog from '$lib/components/dashboard/OperatorDialog.svelte';
   import {
     getSelectedNodeIp,
     setSelectedNodeIp,
@@ -45,6 +46,8 @@
   let savedFleet = $state<SavedNodeInfo[]>([]);
   let newIpInput = $state('');
   let newNameInput = $state('');
+  let fleetDialog = $state<{ kind: 'rename' | 'remove'; ip: string; currentName: string } | null>(null);
+  let fleetDialogValue = $state('');
 
   function toast(msg: string) {
     actionToast = msg;
@@ -140,24 +143,43 @@
   }
 
   function handleRenameNode(ip: string, currentName: string) {
-    const newName = prompt(`Enter new label for node ${ip}:`, currentName);
-    if (newName && newName.trim()) {
-      renameSavedNode(ip, newName.trim());
-      refreshFleetList();
-      toast(`Renamed node ${ip}`);
-    }
+    fleetDialogValue = currentName;
+    fleetDialog = { kind: 'rename', ip, currentName };
   }
 
   function handleRemoveNode(ip: string) {
-    if (confirm(`Remove node ${ip} from registered fleet?`)) {
-      removeSavedNode(ip);
+    const currentName = savedFleet.find(node => node.ip === ip)?.name || ip;
+    fleetDialogValue = '';
+    fleetDialog = { kind: 'remove', ip, currentName };
+  }
+
+  function closeFleetDialog() {
+    fleetDialog = null;
+    fleetDialogValue = '';
+  }
+
+  function confirmFleetDialog(value: string) {
+    if (!fleetDialog) return;
+    const { kind, ip } = fleetDialog;
+
+    if (kind === 'rename') {
+      const nextName = value.trim();
+      if (!nextName) return;
+      renameSavedNode(ip, nextName);
       refreshFleetList();
-      if (nodeIp === ip) {
-        nodeIp = getSelectedNodeIp();
-        if (nodeIp) connect(nodeIp);
-      }
-      toast(`Removed node ${ip}`);
+      toast(`Renamed node ${ip}`);
+      closeFleetDialog();
+      return;
     }
+
+    removeSavedNode(ip);
+    refreshFleetList();
+    if (nodeIp === ip) {
+      nodeIp = getSelectedNodeIp();
+      if (nodeIp) connect(nodeIp);
+    }
+    toast(`Removed node ${ip}`);
+    closeFleetDialog();
   }
 
   // Live LED Output Canvas Rendering
@@ -630,6 +652,29 @@
     </section>
   {/if}
 </div>
+
+<OperatorDialog
+  open={fleetDialog?.kind === 'rename'}
+  title="Rename fleet node"
+  description={fleetDialog ? `Update the operator label for ${fleetDialog.ip}.` : ''}
+  confirmLabel="Save Name"
+  inputLabel="Node label"
+  inputPlaceholder="e.g. Stage Left Truss"
+  bind:value={fleetDialogValue}
+  confirmDisabled={!fleetDialogValue.trim()}
+  onconfirm={confirmFleetDialog}
+  oncancel={closeFleetDialog}
+/>
+
+<OperatorDialog
+  open={fleetDialog?.kind === 'remove'}
+  title="Remove fleet node?"
+  description={fleetDialog ? `Remove ${fleetDialog.currentName} (${fleetDialog.ip}) from this browser's registered fleet. This does not erase the physical node.` : ''}
+  confirmLabel="Remove Node"
+  tone="danger"
+  onconfirm={confirmFleetDialog}
+  oncancel={closeFleetDialog}
+/>
 
 <style>
   .overview-page {
