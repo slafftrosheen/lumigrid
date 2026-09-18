@@ -22,7 +22,7 @@
     }),
     elapsedMs = 0,
     readOnly = false,
-    color = '#00f0ff',
+    color = '#ff2d55',
   } = $props();
 
   let svgElement: SVGSVGElement | null = $state(null);
@@ -282,7 +282,7 @@
 
   .point-handle:hover circle:first-child {
     stroke-width: 3;
-    filter: drop-shadow(0 0 6px rgba(0, 240, 255, 0.8));
+    filter: drop-shadow(0 0 6px rgba(255, 45, 85, 0.8));
   }
 
   .point-handle.active {
