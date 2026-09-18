@@ -265,7 +265,7 @@
     </div>
   {:else}
     <!-- LIVE SHOW MONITOR -->
-    <div class="card monitor-card">
+    <div class="cue-surface monitor-card">
       <div class="monitor-header">
         <div class="status-indicator">
           <span class="status-dot" class:running={isRunning} class:holding={cueState === 'holding'} class:fading={cueState === 'fading'}></span>
@@ -341,7 +341,7 @@
     <!-- CUE LIST MANAGEMENT -->
     <div class="studio-grid">
       <!-- Sidebar / List selector -->
-      <div class="card lists-sidebar">
+      <div class="cue-surface lists-sidebar">
         <div class="sidebar-header">
           <h2>Cue Lists ({cueLists.length}/8)</h2>
           <button class="btn-icon" onclick={createNewList} title="New cue list" aria-label="New cue list">+</button>
@@ -366,7 +366,7 @@
 
       <!-- Main Cue List Editor -->
       {#if currentList}
-        <div class="card editor-main">
+        <div class="cue-surface editor-main">
           <div class="editor-header">
             <div class="editor-title-group">
               <input
@@ -523,7 +523,7 @@
     animation: fadeIn 0.2s ease;
   }
 
-  .card {
+  .cue-surface {
     background: var(--dash-surface);
     backdrop-filter: blur(18px);
     -webkit-backdrop-filter: blur(18px);
