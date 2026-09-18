@@ -955,9 +955,9 @@
     font-size: 0.85rem;
     padding: 0.4rem 0.6rem;
   }
-  .field input:focus, .field select:focus {
-    outline: none;
+  .field input:focus-visible, .field select:focus-visible {
     border-color: var(--dash-accent);
+    box-shadow: 0 0 0 3px rgba(var(--dash-accent-rgb),.12);
   }
   .toggle-field {
     display: flex;
