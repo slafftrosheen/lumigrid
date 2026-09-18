@@ -36,13 +36,23 @@
   let dialogEl: HTMLElement | null = null;
 
   $effect(() => {
-    if (!open) return;
+    if (!open || typeof document === 'undefined') return;
+
+    const previousFocus = document.activeElement as HTMLElement | null;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+
     tick().then(() => {
       const target = dialogEl?.querySelector<HTMLElement>(
         inputLabel ? 'input' : '[data-dialog-cancel]'
       );
       target?.focus();
     });
+
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      previousFocus?.focus?.();
+    };
   });
 
   function cancel() {
@@ -59,6 +69,29 @@
     if (event.key === 'Escape') {
       event.preventDefault();
       cancel();
+      return;
+    }
+
+    if (event.key !== 'Tab' || !dialogEl) return;
+
+    const focusable = Array.from(
+      dialogEl.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])'
+      )
+    ).filter(element => !element.hasAttribute('hidden'));
+
+    if (!focusable.length) return;
+
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    const active = document.activeElement;
+
+    if (event.shiftKey && (active === first || !dialogEl.contains(active))) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && active === last) {
+      event.preventDefault();
+      first.focus();
     }
   }
 </script>
@@ -79,6 +112,7 @@
       role="dialog"
       aria-modal="true"
       aria-labelledby="operator-dialog-title"
+      aria-describedby={description ? 'operator-dialog-description' : undefined}
       onsubmit={submit}
       onkeydown={onKeydown}
     >
@@ -89,7 +123,7 @@
         <div class="dialog-copy">
           <h2 id="operator-dialog-title">{title}</h2>
           {#if description}
-            <p>{description}</p>
+            <p id="operator-dialog-description">{description}</p>
           {/if}
         </div>
       </div>
