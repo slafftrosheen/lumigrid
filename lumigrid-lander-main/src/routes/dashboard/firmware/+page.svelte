@@ -788,7 +788,7 @@
     color: #86868b;
   }
   .ip-tag {
-    color: #64d2ff;
+    color: var(--dash-led);
     font-family: monospace;
   }
 
@@ -813,8 +813,8 @@
     background: rgba(255, 255, 255, 0.04);
   }
   .tab.active {
-    color: #0071e3;
-    background: rgba(0, 113, 227, 0.12);
+    color: var(--dash-accent);
+    background: rgba(var(--dash-accent-rgb), 0.12);
   }
 
   .error-banner {
@@ -847,7 +847,7 @@
     width: 30px;
     height: 30px;
     border: 3px solid rgba(255, 255, 255, 0.1);
-    border-top-color: #0071e3;
+    border-top-color: var(--dash-accent);
     border-radius: 50%;
     animation: spin 0.8s linear infinite;
   }
@@ -893,9 +893,9 @@
     color: #ff9f0a;
   }
   .badge-saved {
-    background: rgba(10, 132, 255, 0.15);
-    border: 1px solid rgba(10, 132, 255, 0.4);
-    color: #64d2ff;
+    background: rgba(48, 209, 88, 0.12);
+    border: 1px solid rgba(48, 209, 88, 0.3);
+    color: var(--dash-ok);
   }
   .config-actions {
     display: flex;
@@ -945,7 +945,7 @@
   }
   .field input:focus, .field select:focus {
     outline: none;
-    border-color: #0071e3;
+    border-color: var(--dash-accent);
   }
   .toggle-field {
     display: flex;
@@ -956,7 +956,7 @@
     cursor: pointer;
   }
   .toggle-field input {
-    accent-color: #0071e3;
+    accent-color: var(--dash-accent);
     width: 15px;
     height: 15px;
   }
@@ -1015,12 +1015,12 @@
     text-align: center;
     cursor: pointer;
     font-size: 0.82rem;
-    color: #64d2ff;
+    color: var(--dash-led);
     transition: all 0.15s ease;
   }
   .restore-file-label:hover {
-    border-color: #0071e3;
-    background: rgba(0, 113, 227, 0.08);
+    border-color: var(--dash-accent);
+    background: rgba(var(--dash-accent-rgb), 0.08);
   }
 
   /* Modal */
@@ -1089,8 +1089,8 @@
     transition: all 0.15s ease;
   }
   .drop-zone:hover, .drop-zone.has-file {
-    border-color: #0071e3;
-    background: rgba(0, 113, 227, 0.06);
+    border-color: var(--dash-accent);
+    background: rgba(var(--dash-accent-rgb), 0.06);
   }
   .drop-icon {
     font-size: 1.8rem;
@@ -1144,7 +1144,7 @@
     border-bottom: none;
   }
   .node-check {
-    accent-color: #0071e3;
+    accent-color: var(--dash-accent);
     width: 16px;
     height: 16px;
   }
@@ -1195,7 +1195,7 @@
 
   /* Buttons */
   .btn-primary {
-    background: #0071e3;
+    background: var(--dash-accent);
     color: #fff;
     border: none;
     border-radius: 8px;
@@ -1206,7 +1206,7 @@
     transition: background 0.15s ease;
   }
   .btn-primary:hover:not(:disabled) {
-    background: #0077ed;
+    background: var(--dash-accent-hover);
   }
   .btn-primary:disabled {
     opacity: 0.5;
