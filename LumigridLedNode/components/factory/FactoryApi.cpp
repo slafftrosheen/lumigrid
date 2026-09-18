@@ -1882,9 +1882,11 @@ esp_err_t get_channels(httpd_req_t* request) {
         char port[8];
         channel_port_name(i, port, sizeof(port));
 
-        bool configured = (hw.kind == ChannelKind::Addressable)
-            ? (c.pixel_count > 0 || c.enabled || c.name[0] != '\0')
-            : (c.enabled || c.name[0] != '\0');
+        // Hardware identity is not configuration. A1/P1 always exist even when
+        // nothing is connected; only electrical/runtime settings make a port configured.
+        const bool configured = (hw.kind == ChannelKind::Addressable)
+            ? (c.pixel_count > 0 || c.enabled || c.dmx_start_channel > 0 || c.max_milliwatts > 0)
+            : (c.enabled || c.dmx_start_channel > 0 || c.max_milliwatts > 0);
 
         cJSON* ch = cJSON_CreateObject();
         cJSON_AddNumberToObject(ch, "index", i);
@@ -2399,7 +2401,7 @@ esp_err_t get_sequence(httpd_req_t* request) {
     cJSON_AddBoolToObject(obj, "enabled", seq.enabled);
 
     cJSON* tracks = cJSON_CreateArray();
-    for (uint8_t i = 0; i < 8; ++i) {
+    for (uint8_t i = 0; i < 16; ++i) {
         cJSON* trk = cJSON_CreateObject();
         cJSON_AddNumberToObject(trk, "channelId", seq.tracks[i].channel_id);
         cJSON_AddNumberToObject(trk, "numSteps", seq.tracks[i].num_steps);
@@ -2449,7 +2451,7 @@ esp_err_t put_sequence(httpd_req_t* request) {
         int trk_idx = 0;
         cJSON* trk_item = nullptr;
         cJSON_ArrayForEach(trk_item, tracks) {
-            if (trk_idx >= 8) break;
+            if (trk_idx >= 16) break;
             json_u8(trk_item, "channelId", 0, 15, seq.tracks[trk_idx].channel_id);
             json_u8(trk_item, "numSteps", 1, 16, seq.tracks[trk_idx].num_steps);
 
