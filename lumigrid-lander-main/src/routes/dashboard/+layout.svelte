@@ -40,6 +40,7 @@
   let nodeList = $state<string[]>([]);
   let addIpVal = $state('');
   let liveState = $state(getNodeLiveSnapshot());
+  let navListEl: HTMLUListElement | null = null;
 
   async function sha256(s: string): Promise<string> {
     const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));
@@ -145,6 +146,18 @@
     { group: 'System',   href: '/dashboard/firmware',     icon: '⟳',  label: 'Firmware' },
   ];
 
+  $effect(() => {
+    // Keep the current destination visible in the horizontally scrolling mobile
+    // nav. On desktop scrollIntoView is effectively a no-op because the list is vertical.
+    $page.url.pathname;
+    requestAnimationFrame(() => {
+      navListEl?.querySelector<HTMLElement>('.nav-link.active')?.scrollIntoView({
+        block: 'nearest',
+        inline: 'center',
+      });
+    });
+  });
+
   let { children } = $props();
 </script>
 
@@ -221,18 +234,23 @@
       {#each nodeList as ip}
         <div class="node-chip">
           <button class="node-chip-select" class:active={nodeIp === ip} onclick={() => selectNode(ip)}>{ip}</button>
-          <button class="node-chip-del" onclick={() => removeNode(ip)} title="Remove">×</button>
+          <button class="node-chip-del" onclick={() => removeNode(ip)} title="Remove node" aria-label={`Remove node ${ip}`}>×</button>
         </div>
       {/each}
     </div>
 
-    <ul class="nav-links" role="list">
+    <ul class="nav-links" role="list" bind:this={navListEl}>
       {#each navLinks as { group, href, icon, label }, i}
         {#if i === 0 || navLinks[i - 1].group !== group}
           <li class="nav-group-label" aria-hidden="true">{group}</li>
         {/if}
         <li>
-          <a {href} class="nav-link" class:active={$page.url.pathname === href}>
+          <a
+            {href}
+            class="nav-link"
+            class:active={$page.url.pathname === href}
+            aria-current={$page.url.pathname === href ? 'page' : undefined}
+          >
             <span class="nav-icon">{icon}</span>
             <span>{label}</span>
           </a>
@@ -243,7 +261,7 @@
     <div class="role-badge" class:admin={isAdmin}>
       {isAdmin ? '◈ Admin' : '◦ Operator'}
     </div>
-    <button class="logout-btn" onclick={lockDashboard}>
+    <button class="logout-btn" onclick={lockDashboard} title="Lock dashboard">
       Lock
     </button>
   </nav>
