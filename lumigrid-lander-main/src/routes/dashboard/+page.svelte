@@ -958,12 +958,22 @@
 
   /* Section Card */
   .section-card {
-    background: var(--dash-surface);
+    position: relative;
+    overflow: hidden;
+    background: linear-gradient(180deg, rgba(29,29,31,.74), rgba(18,18,20,.74));
     backdrop-filter: blur(18px);
     border: 1px solid var(--dash-border);
     border-radius: var(--dash-radius-lg);
     box-shadow: var(--dash-shadow);
     padding: 1.5rem;
+  }
+  .section-card::before {
+    content: "";
+    position: absolute;
+    inset: 0 0 auto;
+    height: 1px;
+    background: linear-gradient(90deg, rgba(255,255,255,.18), transparent 58%);
+    pointer-events: none;
   }
   .section-card h3 {
     margin: 0 0 1rem;
@@ -1077,6 +1087,8 @@
     gap: 1rem;
   }
   .action-btn {
+    position: relative;
+    overflow: hidden;
     display: flex;
     align-items: center;
     gap: 0.85rem;
@@ -1091,9 +1103,21 @@
     transition: all 0.2s;
   }
   .action-btn:hover {
-    background: rgba(255, 255, 255, 0.09);
-    border-color: rgba(255, 255, 255, 0.16);
+    background: rgba(255,255,255,.09);
+    border-color: rgba(255,255,255,.16);
     transform: translateY(-2px);
+    box-shadow: 0 12px 26px rgba(0,0,0,.22);
+  }
+  .action-btn.nav-action::after {
+    content: "›";
+    margin-left: auto;
+    color: #636366;
+    font-size: 1.25rem;
+    transition: transform .18s ease, color .18s ease;
+  }
+  .action-btn.nav-action:hover::after {
+    color: var(--dash-accent);
+    transform: translateX(2px);
   }
   .action-btn.blackout-btn {
     background: rgba(255, 59, 48, 0.12);
@@ -1128,13 +1152,19 @@
     gap: 1rem;
   }
   .health-stat-card {
-    background: rgba(255, 255, 255, 0.03);
+    background: linear-gradient(180deg, rgba(255,255,255,.035), rgba(255,255,255,.018));
     border: 1px solid rgba(255, 255, 255, 0.06);
     border-radius: 12px;
     padding: 0.9rem 1rem;
     display: flex;
     flex-direction: column;
     gap: 0.25rem;
+    transition: transform .18s ease, border-color .18s ease, background .18s ease;
+  }
+  .health-stat-card:hover {
+    transform: translateY(-1px);
+    border-color: rgba(255,255,255,.11);
+    background: rgba(255,255,255,.045);
   }
   .stat-label {
     font-size: 0.72rem;
