@@ -1,5 +1,11 @@
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
-import { getSelectedNodeIp, setSelectedNodeIp, NODE_IP_KEY } from './storage';
+import {
+  getSelectedNodeIp,
+  setSelectedNodeIp,
+  normalizeNodeAddress,
+  NODE_IP_KEY,
+  NODE_REGISTRY_CHANGED_EVENT,
+} from './storage';
 
 class MockStorage implements Storage {
   private store: Record<string, string> = {};
@@ -63,6 +69,34 @@ describe('selected node storage', () => {
     setSelectedNodeIp('   ');
     expect(mockStorage.getItem(NODE_IP_KEY)).toBeNull();
     expect(getSelectedNodeIp()).toBe('');
+  });
+
+  it('normalizes operator-entered node addresses without accepting paths', () => {
+    expect(normalizeNodeAddress('192.168.1.50')).toBe('192.168.1.50');
+    expect(normalizeNodeAddress(' https://lumigrid.local/ ')).toBe('lumigrid.local');
+    expect(normalizeNodeAddress('10.0.0.4:8080')).toBe('10.0.0.4:8080');
+    expect(normalizeNodeAddress('lumigrid.local/api/v1')).toBeNull();
+    expect(normalizeNodeAddress('192.168.1.20?x=1')).toBeNull();
+    expect(normalizeNodeAddress('   ')).toBeNull();
+  });
+
+  it('emits fleet-change events for structural edits but not presence heartbeats', async () => {
+    const win = new EventTarget();
+    vi.stubGlobal('window', win);
+
+    const {
+      addSavedNode,
+      updateNodeLastSeen,
+    } = await import('./storage');
+
+    let changes = 0;
+    win.addEventListener(NODE_REGISTRY_CHANGED_EVENT, () => { changes += 1; });
+
+    addSavedNode('192.168.1.10', 'Stage Left');
+    expect(changes).toBe(1);
+
+    updateNodeLastSeen('192.168.1.10');
+    expect(changes).toBe(1);
   });
 
   it('manages saved fleet nodes, metadata, renaming, and removal', async () => {
