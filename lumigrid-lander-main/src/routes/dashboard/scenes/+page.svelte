@@ -30,6 +30,7 @@
   let activePreset = $state(-1);
   let sceneApplyPending = $state(false);
   let activationGeneration = $state(0);
+  let activationPreset = $state(-1);
   let expandedZone = $state<number | null>(0);
 
   let editScene = $state<ScenePreset | null>(null);
@@ -138,6 +139,7 @@
     if (status.outputFault) {
       activating = false;
       activationGeneration = 0;
+      activationPreset = -1;
       error = 'Scene was accepted, but the node reported a hardware output fault.';
       return;
     }
@@ -146,15 +148,13 @@
       typeof status.appliedGeneration === 'number' &&
       status.appliedGeneration >= activationGeneration
     ) {
+      const committedPreset = activationPreset;
       activating = false;
       activationGeneration = 0;
+      activationPreset = -1;
       sceneApplyPending = false;
-      toastMsg(`Scene ${idxForActiveMessage()} committed to hardware`);
+      toastMsg(`Scene ${committedPreset} committed to hardware`);
     }
-  }
-
-  function idxForActiveMessage(): number {
-    return editScene?.index ?? activePreset;
   }
 
   async function waitForAppliedGeneration(targetGeneration: number) {
@@ -181,6 +181,7 @@
     if (activating && activationGeneration === targetGeneration) {
       activating = false;
       activationGeneration = 0;
+      activationPreset = -1;
       error = lastPollError
         ? `Activation accepted, but output confirmation failed: ${lastPollError}`
         : 'Activation accepted, but no hardware commit was confirmed within 5 seconds.';
@@ -194,12 +195,14 @@
     try {
       const result = await activatePreset(nodeIp, idx);
       activationGeneration = result.generation;
+      activationPreset = result.preset;
       sceneApplyPending = true;
       await waitForAppliedGeneration(result.generation);
     } catch (e) {
       error = String(e);
       activating = false;
       activationGeneration = 0;
+      activationPreset = -1;
       sceneApplyPending = false;
     }
   }

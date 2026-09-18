@@ -961,7 +961,7 @@ esp_err_t post_activate(httpd_req_t* request) {
     snprintf(
         response,
         sizeof(response),
-        R"({"accepted":true,"preset":%u,"generation":%" PRIu32 "})",
+        "{\"accepted\":true,\"preset\":%u,\"generation\":%" PRIu32 "}",
         index,
         generation
     );
