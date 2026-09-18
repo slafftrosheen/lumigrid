@@ -502,7 +502,7 @@
   }
   .ip-mono {
     font-family: monospace;
-    color: #64d2ff;
+    color: var(--dash-led);
   }
   .header-right {
     display: flex;
@@ -552,7 +552,7 @@
     width: 32px;
     height: 32px;
     border: 3px solid rgba(255, 255, 255, 0.1);
-    border-top-color: #0071e3;
+    border-top-color: var(--dash-accent);
     border-radius: 50%;
     animation: spin 0.8s linear infinite;
   }
@@ -733,7 +733,7 @@
     gap: 0.5rem;
   }
   .param-slider-wrap input {
-    accent-color: #0071e3;
+    accent-color: var(--dash-accent);
     flex: 1;
   }
   .param-val {
@@ -796,7 +796,7 @@
   }
   .fx-card:hover {
     background: rgba(255, 255, 255, 0.07);
-    border-color: rgba(0, 113, 227, 0.4);
+    border-color: rgba(var(--dash-accent-rgb), 0.4);
     transform: translateY(-2px);
   }
   .fx-card.active {
@@ -860,10 +860,10 @@
     flex: 1;
   }
   .btn-send-lane, .btn-send-pwm {
-    background: rgba(0, 113, 227, 0.15);
-    border: 1px solid rgba(0, 113, 227, 0.35);
+    background: rgba(var(--dash-accent-rgb), 0.15);
+    border: 1px solid rgba(var(--dash-accent-rgb), 0.35);
     border-radius: 6px;
-    color: #64d2ff;
+    color: var(--dash-led);
     font-size: 0.75rem;
     font-weight: 600;
     padding: 0.3rem 0.7rem;
@@ -871,7 +871,7 @@
     transition: background 0.12s ease;
   }
   .btn-send-lane:hover, .btn-send-pwm:hover {
-    background: rgba(0, 113, 227, 0.3);
+    background: rgba(var(--dash-accent-rgb), 0.3);
   }
 
   /* PWM Channels */
