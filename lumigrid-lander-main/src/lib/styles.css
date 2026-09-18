@@ -22,6 +22,20 @@
   /* RF Magenta accent (matches WLED firmware --accent: #ff2d55) */
   --accent-primary: #ff2d55;
   --accent-cherry: #ff3b30;
+
+  /* Dashboard semantic aliases — keep operator UI on the Lander system */
+  --dash-accent: var(--accent-primary);
+  --dash-accent-hover: var(--accent-cherry);
+  --dash-accent-rgb: 255, 45, 85;
+  --dash-warm: var(--rf-amber);
+  --dash-led: var(--rf-cyan);
+  --dash-ok: #30d158;
+  --dash-danger: #ff453a;
+  --dash-surface: var(--glass-bg);
+  --dash-surface-strong: rgba(29,29,31,.88);
+  --dash-border: var(--glass-border);
+  --dash-text: var(--ink);
+  --dash-muted: var(--muted);
   
   /* Extended brand hues - vibrant LED colors */
   --rf-magenta:#ff2d55; 
