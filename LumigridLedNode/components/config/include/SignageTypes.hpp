@@ -99,7 +99,10 @@ struct ChannelConfig {
     // DMX patch
     uint16_t dmx_universe = 0;
     uint16_t dmx_start_channel = 0;
-    // Addressable: 0 = wash, 1 = direct pixel; PWM: single dimmer channel
+    // Addressable: 0 = wash, 1 = direct pixel.
+    // PWM: 0 = normal independent dimmer. Values 2..5 are reserved only for
+    // migration compatibility with legacy compound PWM fixtures:
+    // 2=R, 3=G, 4=B, 5=W. New UI/configuration must never create these modes.
     uint8_t dmx_mode = 0;
 };
 
@@ -458,7 +461,7 @@ struct SequencerTrack {
 };
 
 struct Sequence {
-    SequencerTrack tracks[8] = {};
+    SequencerTrack tracks[16] = {};
     uint16_t       bpm       = 120;
     bool           enabled   = false;
     uint32_t       checksum  = 0;
