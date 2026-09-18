@@ -769,12 +769,17 @@
   }
 
   .page-header {
+    position: sticky;
+    top: 0;
+    z-index: 18;
     display: flex;
     justify-content: space-between;
     align-items: center;
     gap: 1rem;
     flex-wrap: wrap;
-    background: var(--dash-surface);
+    background: rgba(22,22,24,.90);
+    backdrop-filter: blur(22px);
+    -webkit-backdrop-filter: blur(22px);
     border: 1px solid var(--dash-border);
     border-radius: var(--dash-radius-lg);
     box-shadow: var(--dash-shadow);
@@ -863,6 +868,9 @@
     gap: 1.25rem;
   }
   .config-toolbar {
+    position: sticky;
+    top: 74px;
+    z-index: 16;
     display: flex;
     justify-content: space-between;
     align-items: center;
@@ -911,7 +919,8 @@
     gap: 1.25rem;
   }
   .settings-card {
-    background: var(--dash-surface);
+    background: linear-gradient(180deg, rgba(29,29,31,.74), rgba(18,18,20,.74));
+    box-shadow: var(--dash-shadow);
     border: 1px solid var(--dash-border);
     border-radius: var(--dash-radius-lg);
     padding: 1.25rem;
@@ -976,7 +985,8 @@
     gap: 1.25rem;
   }
   .recovery-card {
-    background: var(--dash-surface);
+    background: linear-gradient(180deg, rgba(29,29,31,.74), rgba(18,18,20,.74));
+    box-shadow: var(--dash-shadow);
     border: 1px solid var(--dash-border);
     border-radius: var(--dash-radius-lg);
     padding: 1.5rem;
@@ -1070,7 +1080,8 @@
     align-items: flex-start;
   }
   .ota-upload-card, .ota-nodes-card {
-    background: var(--dash-surface);
+    background: linear-gradient(180deg, rgba(29,29,31,.74), rgba(18,18,20,.74));
+    box-shadow: var(--dash-shadow);
     border: 1px solid var(--dash-border);
     border-radius: var(--dash-radius-lg);
     padding: 1.25rem;
@@ -1142,7 +1153,9 @@
     gap: 0.5rem 0.75rem;
     padding: 0.6rem 0.5rem;
     border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+    transition: background .15s ease;
   }
+  .node-row:hover { background: rgba(255,255,255,.025); }
   .node-row:last-child {
     border-bottom: none;
   }
@@ -1259,6 +1272,7 @@
   }
 
   @media (max-width: 820px) {
+    .page-header, .config-toolbar { position: static; }
     .tab-bar { overflow-x: auto; }
     .tab { white-space: nowrap; }
     .settings-grid, .recovery-grid, .ota-layout { grid-template-columns: 1fr; }
