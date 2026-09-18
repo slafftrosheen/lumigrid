@@ -135,7 +135,15 @@
     };
   });
 
-  const navLinks = [
+  type NavLink = {
+    group: string;
+    href: string;
+    icon: string;
+    label: string;
+    adminOnly?: boolean;
+  };
+
+  const navLinks: NavLink[] = [
     { group: 'Overview', href: '/dashboard',              icon: '⬡',  label: 'Fleet' },
     { group: 'Create',   href: '/dashboard/scenes',       icon: '◆',  label: 'Scenes' },
     { group: 'Create',   href: '/dashboard/cues',         icon: '⏯',  label: 'Cues' },
@@ -147,8 +155,8 @@
     { group: 'System',   href: '/dashboard/thermal',      icon: '⬥',  label: 'Thermal' },
     { group: 'System',   href: '/dashboard/uptime',       icon: '▣',  label: 'Uptime' },
     { group: 'System',   href: '/dashboard/diagnostics',  icon: '⚕',  label: 'Diagnostics' },
-    { group: 'System',   href: '/dashboard/factory',      icon: '⚙',  label: 'Factory' },
-    { group: 'System',   href: '/dashboard/firmware',     icon: '⟳',  label: 'Firmware' },
+    { group: 'System',   href: '/dashboard/factory',      icon: '⚙',  label: 'Factory', adminOnly: true },
+    { group: 'System',   href: '/dashboard/firmware',     icon: '⟳',  label: 'Firmware', adminOnly: true },
   ];
 
   const mobilePrimaryHrefs = new Set([
@@ -157,8 +165,12 @@
     '/dashboard/timeline',
     '/dashboard/channels',
   ]);
-  const mobilePrimaryLinks = navLinks.filter(link => mobilePrimaryHrefs.has(link.href));
-  const mobileMoreLinks = navLinks.filter(link => !mobilePrimaryHrefs.has(link.href));
+  let visibleNavLinks = $derived(navLinks.filter(link => !link.adminOnly || isAdmin));
+  let mobilePrimaryLinks = $derived(visibleNavLinks.filter(link => mobilePrimaryHrefs.has(link.href)));
+  let mobileMoreLinks = $derived(visibleNavLinks.filter(link => !mobilePrimaryHrefs.has(link.href)));
+  let routeRequiresAdmin = $derived(
+    navLinks.some(link => link.href === $page.url.pathname && link.adminOnly)
+  );
 
   $effect(() => {
     // Route changes close the mobile utility sheet and keep the active desktop
@@ -243,8 +255,8 @@
     </div>
 
     <ul class="nav-links" role="list" bind:this={navListEl}>
-      {#each navLinks as { group, href, icon, label }, i}
-        {#if i === 0 || navLinks[i - 1].group !== group}
+      {#each visibleNavLinks as { group, href, icon, label }, i}
+        {#if i === 0 || visibleNavLinks[i - 1].group !== group}
           <li class="nav-group-label" aria-hidden="true">{group}</li>
         {/if}
         <li>
@@ -367,7 +379,16 @@
   {/if}
 
   <main class="dash-main">
-    {@render children()}
+    {#if routeRequiresAdmin && !isAdmin}
+      <section class="access-gate" aria-labelledby="access-gate-title">
+        <div class="access-gate-icon" aria-hidden="true">◇</div>
+        <h1 id="access-gate-title">Admin access required</h1>
+        <p>This maintenance workspace is hidden from Operator sessions. Lock the console and unlock with the Admin PIN to continue.</p>
+        <a href="/dashboard" class="access-gate-link">Return to Fleet</a>
+      </section>
+    {:else}
+      {@render children()}
+    {/if}
   </main>
 </div>
 {/if}
@@ -714,6 +735,46 @@
     transition: border-color .2s, color .2s;
   }
   .logout-btn:hover { border-color: #ff453a; color: #ff453a; }
+  .access-gate {
+    width: min(520px, 100%);
+    min-height: 320px;
+    margin: clamp(2rem, 8vh, 6rem) auto;
+    display: grid;
+    place-items: center;
+    align-content: center;
+    gap: .8rem;
+    padding: 2rem;
+    text-align: center;
+    background: linear-gradient(180deg, rgba(29,29,31,.74), rgba(18,18,20,.74));
+    border: 1px solid var(--dash-border);
+    border-radius: var(--dash-radius-xl);
+    box-shadow: var(--dash-shadow);
+  }
+  .access-gate-icon {
+    width: 48px;
+    height: 48px;
+    display: grid;
+    place-items: center;
+    border-radius: 15px;
+    background: color-mix(in oklab, var(--dash-warm) 12%, transparent);
+    border: 1px solid color-mix(in oklab, var(--dash-warm) 26%, transparent);
+    color: var(--dash-warm);
+    font-size: 1.25rem;
+  }
+  .access-gate h1 { margin: .2rem 0 0; font-size: 1.2rem; color: #fff; }
+  .access-gate p { max-width: 52ch; margin: 0; color: #8e8e93; font-size: .86rem; line-height: 1.55; }
+  .access-gate-link {
+    margin-top: .35rem;
+    padding: .55rem .85rem;
+    border-radius: 10px;
+    background: rgba(var(--dash-accent-rgb),.13);
+    border: 1px solid rgba(var(--dash-accent-rgb),.25);
+    color: var(--dash-accent);
+    font-size: .8rem;
+    font-weight: 700;
+    text-decoration: none;
+  }
+
   .dash-main {
     flex: 1;
     min-width: 0;
