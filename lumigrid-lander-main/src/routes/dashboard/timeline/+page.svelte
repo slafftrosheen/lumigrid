@@ -164,7 +164,7 @@
 {:else if loading}
   <div class="tl-loading">
     <div class="spinner"></div>
-    <p>Loading timeline sequence and presets...</p>
+    <p>Loading timeline workspace…</p>
   </div>
 {:else if seq}
   <div class="tl-root">
@@ -243,7 +243,7 @@
           onclick={save}
           disabled={saving}
           type="button"
-          title="Save timeline sequence to hardware"
+          title="Save timeline to node"
         >
           {saving ? 'Saving...' : 'Save'}
         </button>
