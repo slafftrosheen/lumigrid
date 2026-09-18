@@ -533,7 +533,12 @@
 
   /* Monitor Card */
   .monitor-card {
-    background: linear-gradient(180deg, rgba(29, 29, 31, 0.86) 0%, rgba(15, 15, 17, 0.92) 100%);
+    position: sticky;
+    top: 0;
+    z-index: 18;
+    background: linear-gradient(180deg, rgba(29,29,31,.92) 0%, rgba(15,15,17,.95) 100%);
+    backdrop-filter: blur(22px);
+    -webkit-backdrop-filter: blur(22px);
     border: 1px solid var(--dash-border);
     box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
     display: flex;
@@ -667,6 +672,7 @@
   }
 
   .btn-transport {
+    min-height: 36px;
     background: rgba(255, 255, 255, 0.05);
     border: 1px solid rgba(255, 255, 255, 0.15);
     color: #fff;
@@ -727,6 +733,8 @@
   }
 
   .lists-sidebar {
+    position: sticky;
+    top: 148px;
     display: flex;
     flex-direction: column;
     gap: 12px;
@@ -784,8 +792,9 @@
   }
 
   .list-nav-item.selected {
-    background: rgba(var(--dash-accent-rgb), 0.1);
-    border-color: rgba(var(--dash-accent-rgb), 0.4);
+    background: linear-gradient(90deg, rgba(var(--dash-accent-rgb),.18), rgba(var(--dash-accent-rgb),.07));
+    border-color: rgba(var(--dash-accent-rgb), 0.34);
+    box-shadow: inset 3px 0 0 var(--dash-accent);
   }
 
   .list-nav-info {
@@ -1054,7 +1063,9 @@
   }
 
   @media (max-width: 980px) {
+    .monitor-card { position: static; }
     .studio-grid { grid-template-columns: 1fr; }
+    .lists-sidebar { position: static; }
     .lists-sidebar { gap: .65rem; }
     .lists-nav {
       flex-direction: row;
