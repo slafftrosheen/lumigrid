@@ -1398,12 +1398,12 @@
     padding: 0.6rem 0.8rem;
     color: #f5f5f7;
     font-size: 0.88rem;
-    outline: none;
-    transition: border-color 0.15s ease;
+    transition: border-color .15s ease, box-shadow .15s ease;
   }
 
-  .text-input:focus, .select-input:focus {
+  .text-input:focus-visible, .select-input:focus-visible {
     border-color: var(--dash-accent);
+    box-shadow: 0 0 0 3px rgba(var(--dash-accent-rgb),.12);
   }
 
   .select-input option {
