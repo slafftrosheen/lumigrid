@@ -763,7 +763,9 @@
     flex-direction: column;
     gap: 1.25rem;
     color: #f5f5f7;
-    max-width: 1100px;
+    max-width: 1180px;
+    margin: 0 auto;
+    width: 100%;
   }
 
   .page-header {
@@ -772,9 +774,10 @@
     align-items: center;
     gap: 1rem;
     flex-wrap: wrap;
-    background: rgba(255, 255, 255, 0.03);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 14px;
+    background: var(--dash-surface);
+    border: 1px solid var(--dash-border);
+    border-radius: var(--dash-radius-lg);
+    box-shadow: var(--dash-shadow);
     padding: 0.85rem 1.25rem;
   }
   .page-header h1 {
@@ -908,9 +911,9 @@
     gap: 1.25rem;
   }
   .settings-card {
-    background: rgba(255, 255, 255, 0.02);
-    border: 1px solid rgba(255, 255, 255, 0.07);
-    border-radius: 12px;
+    background: var(--dash-surface);
+    border: 1px solid var(--dash-border);
+    border-radius: var(--dash-radius-lg);
     padding: 1.25rem;
     display: flex;
     flex-direction: column;
@@ -973,9 +976,9 @@
     gap: 1.25rem;
   }
   .recovery-card {
-    background: rgba(255, 255, 255, 0.02);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 14px;
+    background: var(--dash-surface);
+    border: 1px solid var(--dash-border);
+    border-radius: var(--dash-radius-lg);
     padding: 1.5rem;
     display: flex;
     flex-direction: column;
@@ -1034,7 +1037,7 @@
     z-index: 200;
   }
   .modal-card {
-    background: #1c1c1e;
+    background: var(--dash-surface-strong);
     border: 1px solid rgba(255, 69, 58, 0.4);
     border-radius: 14px;
     padding: 1.5rem;
@@ -1067,9 +1070,9 @@
     align-items: flex-start;
   }
   .ota-upload-card, .ota-nodes-card {
-    background: rgba(255, 255, 255, 0.02);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 14px;
+    background: var(--dash-surface);
+    border: 1px solid var(--dash-border);
+    border-radius: var(--dash-radius-lg);
     padding: 1.25rem;
     display: flex;
     flex-direction: column;
@@ -1254,4 +1257,14 @@
   @media (max-width: 800px) {
     .ota-layout { grid-template-columns: 1fr; }
   }
+
+  @media (max-width: 820px) {
+    .tab-bar { overflow-x: auto; }
+    .tab { white-space: nowrap; }
+    .settings-grid, .recovery-grid, .ota-layout { grid-template-columns: 1fr; }
+    .config-toolbar { align-items: stretch; }
+    .config-actions { width: 100%; }
+    .config-actions button { flex: 1; }
+  }
+
 </style>
