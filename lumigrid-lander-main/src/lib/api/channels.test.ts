@@ -14,51 +14,41 @@ describe('channels API contracts (/api/v1/channels and /api/v1/channel/test)', (
   });
 
   it('fetches all 16 hardware channels from /api/v1/channels', async () => {
-    const mockChannels: HardwareChannel[] = [
-      {
-        index: 0,
-        port: 'A1',
-        kind: 'addressable',
-        hardwareId: 0,
-        gpio: 16,
-        configured: true,
-        enabled: true,
-        name: 'Front Logo',
-        maxBrightness: 255,
-        gammaCorrection: true,
-        maxMilliwatts: 0,
-        dmxUniverse: 1,
-        dmxStartChannel: 1,
-        dmxMode: 0,
-        addressable: { type: 'WS2812', pixels: 120, pixelOrder: 'GRB' },
-      },
-      {
-        index: 8,
-        port: 'P1',
-        kind: 'pwm',
-        hardwareId: 0,
+    const mockChannels: HardwareChannel[] = Array.from({ length: 16 }, (_, index) => {
+      const addressable = index < 8;
+      return {
+        index,
+        port: addressable ? `A${index + 1}` : `P${index - 7}`,
+        kind: addressable ? 'addressable' : 'pwm',
+        hardwareId: addressable ? index : index - 8,
+        ...(addressable ? { gpio: [16, 4, 17, 18, 19, 23, 26, 27][index] } : {}),
         configured: false,
         enabled: false,
         name: '',
         maxBrightness: 255,
         gammaCorrection: true,
         maxMilliwatts: 0,
-        dmxUniverse: 1,
-        dmxStartChannel: 1,
+        dmxUniverse: 0,
+        dmxStartChannel: 0,
         dmxMode: 0,
-      },
-    ];
+        ...(addressable
+          ? { addressable: { type: 'WS2812' as const, pixels: 0, pixelOrder: 'GRB' as const } }
+          : {}),
+      };
+    });
 
     vi.mocked(fetch).mockResolvedValue(
       new Response(JSON.stringify({ channels: mockChannels }), { status: 200 }),
     );
 
     const channels = await getChannels('192.168.1.50');
-    expect(channels).toHaveLength(2);
+    expect(channels).toHaveLength(16);
     expect(channels[0].port).toBe('A1');
     expect(channels[0].kind).toBe('addressable');
-    expect(channels[1].port).toBe('P1');
-    expect(channels[1].kind).toBe('pwm');
+    expect(channels[7].port).toBe('A8');
+    expect(channels[8].port).toBe('P1');
+    expect(channels[15].port).toBe('P8');
+    expect(channels.every(ch => !ch.configured && !ch.enabled)).toBe(true);
 
     expect(vi.mocked(fetch)).toHaveBeenCalledWith(
       'http://192.168.1.50/api/v1/channels',
