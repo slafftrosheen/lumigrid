@@ -136,11 +136,17 @@ esp_err_t ConfigStore::load_scene(uint8_t index, SceneConfig& scene) {
     char key[12];
     make_key(key, sizeof(key), "scene", index);
 
-    // Legacy scenes were zone-based. Resolve each new physical channel through
-    // the migrated group masks instead of assuming A1/P1 == Zone 0, etc.
+    // Legacy scenes were zone-based. Resolve topology lazily only when an old
+    // scene blob is actually encountered; normal v2 scene loads stay NVS-light.
     DeviceConfig topology_cfg;
-    const bool have_topology = (load_config(topology_cfg) == ESP_OK);
+    bool topology_checked = false;
+    bool have_topology = false;
+    bool migrated_legacy_scene = false;
     auto legacy_zone_for_channel = [&](uint8_t channel) -> uint8_t {
+        if (!topology_checked) {
+            have_topology = (load_config(topology_cfg) == ESP_OK);
+            topology_checked = true;
+        }
         if (have_topology && channel < 16) {
             const uint16_t bit = static_cast<uint16_t>(1U << channel);
             for (uint8_t z = 0; z < 8; ++z) {
@@ -187,6 +193,7 @@ esp_err_t ConfigStore::load_scene(uint8_t index, SceneConfig& scene) {
                         }
                     }
                     out.checksum = calc_scene_crc(out);
+                    migrated_legacy_scene = true;
                     ESP_LOGI(TAG, "Migrated SceneConfigV1 (8-zone) %s to v2 (16-channel)", k);
                     return ESP_OK;
                 }
@@ -241,6 +248,7 @@ esp_err_t ConfigStore::load_scene(uint8_t index, SceneConfig& scene) {
                     }
                     
                     out.checksum = calc_scene_crc(out);
+                    migrated_legacy_scene = true;
                     ESP_LOGI(TAG, "Migrated legacy scene %s", k);
                     return ESP_OK;
                 }
@@ -268,6 +276,15 @@ esp_err_t ConfigStore::load_scene(uint8_t index, SceneConfig& scene) {
                     ESP_LOGW(TAG, "Scene %u primary restore commit failed: %s", index, esp_err_to_name(restore_err));
                 }
             }
+        }
+    }
+
+    if (err == ESP_OK && migrated_legacy_scene) {
+        // Persist the channel-based representation immediately so later scene
+        // playback never has to re-run legacy topology resolution.
+        const esp_err_t persist_err = save_scene(index, scene);
+        if (persist_err != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to persist migrated scene %u: %s", index, esp_err_to_name(persist_err));
         }
     }
     
