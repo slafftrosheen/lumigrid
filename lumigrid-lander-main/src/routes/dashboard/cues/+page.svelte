@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import OperatorDialog from '$lib/components/dashboard/OperatorDialog.svelte';
   import {
     getCueLists,
     getCueList,
@@ -29,6 +30,7 @@
   let saving = $state(false);
   let error = $state('');
   let toast = $state('');
+  let deleteListDialogOpen = $state(false);
 
   // Live telemetry from nodeStore
   let liveStatus = $derived($nodeStore.status);
@@ -168,22 +170,26 @@
     await saveCurrentList();
   }
 
-  async function deleteCurrentList() {
+  function deleteCurrentList() {
     if (!nodeIp || !currentList) return;
-    if (confirm(`Delete cue list "${currentList.name}"?`)) {
-      try {
-        await deleteCueList(nodeIp, currentList.index);
-        toastMsg('Cue list deleted');
-        cueLists = await getCueLists(nodeIp);
-        if (cueLists.length > 0) {
-          await selectList(cueLists[0].index);
-        } else {
-          currentList = createDefaultCueList(0);
-          selectedListIdx = 0;
-        }
-      } catch (e: any) {
-        toastMsg(`Delete failed: ${e?.message || e}`);
+    deleteListDialogOpen = true;
+  }
+
+  async function confirmDeleteCurrentList() {
+    if (!nodeIp || !currentList) return;
+    try {
+      await deleteCueList(nodeIp, currentList.index);
+      toastMsg('Cue list deleted');
+      cueLists = await getCueLists(nodeIp);
+      if (cueLists.length > 0) {
+        await selectList(cueLists[0].index);
+      } else {
+        currentList = createDefaultCueList(0);
+        selectedListIdx = 0;
       }
+      deleteListDialogOpen = false;
+    } catch (e: any) {
+      toastMsg(`Delete failed: ${e?.message || e}`);
     }
   }
 
@@ -480,6 +486,18 @@
     </div>
   {/if}
 </div>
+
+<OperatorDialog
+  open={deleteListDialogOpen}
+  title="Delete cue list?"
+  description={currentList
+    ? `Delete “${currentList.name}” and its ${currentList.cues.length} cue${currentList.cues.length === 1 ? '' : 's'} from the selected node.`
+    : ''}
+  confirmLabel="Delete Cue List"
+  tone="danger"
+  onconfirm={confirmDeleteCurrentList}
+  oncancel={() => (deleteListDialogOpen = false)}
+/>
 
 <style>
   .cues-container {
