@@ -501,7 +501,7 @@
     to { opacity: 1; transform: translateY(0); }
   }
 
-  @media (max-width: 760px) {
+  @media (max-width: 768px) {
     .sched-header { position: static; align-items: flex-start; gap: .8rem; flex-wrap: wrap; }
     .sched-header .btn-save { width: 100%; }
     .week-grid { overflow-x: auto; }
