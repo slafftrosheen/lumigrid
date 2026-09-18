@@ -395,7 +395,7 @@
                 <tr>
                   <th style="width: 40px">#</th>
                   <th>Label</th>
-                  <th>Preset Scene</th>
+                  <th>Scene</th>
                   <th>Hold Time</th>
                   <th>Fade Time</th>
                   <th>Curve</th>
@@ -848,7 +848,11 @@
     font-size: 1.1rem;
     font-weight: 600;
     padding: 8px 12px;
-    outline: none;
+  }
+
+  .title-input:focus-visible {
+    border-color: var(--dash-accent);
+    box-shadow: 0 0 0 3px rgba(var(--dash-accent-rgb),.12);
   }
 
   .select-mode {
@@ -858,7 +862,11 @@
     color: #fff;
     padding: 8px 12px;
     font-size: 0.9rem;
-    outline: none;
+  }
+
+  .select-mode:focus-visible {
+    border-color: var(--dash-accent);
+    box-shadow: 0 0 0 3px rgba(var(--dash-accent-rgb),.12);
   }
 
   .editor-actions {
@@ -950,9 +958,18 @@
     color: #fff;
     padding: 6px 8px;
     font-size: 0.85rem;
-    outline: none;
     width: 100%;
     box-sizing: border-box;
+  }
+
+  .table-input:focus-visible, .table-select:focus-visible {
+    border-color: var(--dash-accent);
+    box-shadow: 0 0 0 3px rgba(var(--dash-accent-rgb),.10);
+  }
+
+  .time-input-group:focus-within {
+    border-color: var(--dash-accent);
+    box-shadow: 0 0 0 3px rgba(var(--dash-accent-rgb),.10);
   }
 
   .time-input-group {
@@ -970,7 +987,6 @@
     color: #fff;
     padding: 6px 0;
     width: 70px;
-    outline: none;
   }
 
   .unit {
