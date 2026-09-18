@@ -874,12 +874,14 @@
 
   /* Hardware Banks */
   .bank-section {
-    background: rgba(26, 26, 28, 0.75);
-    backdrop-filter: blur(16px);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 20px;
-    padding: 1.5rem;
-    margin-bottom: 2rem;
+    background: var(--dash-surface);
+    backdrop-filter: blur(18px);
+    -webkit-backdrop-filter: blur(18px);
+    border: 1px solid var(--dash-border);
+    border-radius: var(--dash-radius-lg);
+    padding: 1.35rem;
+    margin-bottom: 1.25rem;
+    box-shadow: var(--dash-shadow);
   }
 
   .bank-header {
@@ -944,9 +946,9 @@
   }
 
   .connector-card {
-    background: rgba(255, 255, 255, 0.03);
-    border: 1px solid rgba(255, 255, 255, 0.07);
-    border-radius: 14px;
+    background: rgba(255, 255, 255, 0.035);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: var(--dash-radius-md);
     padding: 1.1rem;
     display: flex;
     flex-direction: column;
@@ -957,10 +959,12 @@
     user-select: none;
   }
 
-  .connector-card:hover {
-    background: rgba(255, 255, 255, 0.06);
-    border-color: rgba(255, 255, 255, 0.18);
+  .connector-card:hover,
+  .connector-card:focus-visible {
+    background: rgba(255, 255, 255, 0.065);
+    border-color: rgba(255, 255, 255, 0.2);
     transform: translateY(-2px);
+    box-shadow: 0 14px 28px rgba(0,0,0,.2);
   }
 
   .connector-card.is-active.addr {
@@ -1170,9 +1174,11 @@
   }
 
   .modal-content {
-    background: #1c1c1e;
-    border: 1px solid rgba(255, 255, 255, 0.15);
-    border-radius: 20px;
+    background: var(--dash-surface-strong);
+    backdrop-filter: blur(24px);
+    -webkit-backdrop-filter: blur(24px);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: var(--dash-radius-xl);
     width: 100%;
     max-width: 680px;
     max-height: 90vh;
@@ -1438,4 +1444,31 @@
     background: transparent;
     border-color: rgba(255, 255, 255, 0.12);
   }
+
+  @media (max-width: 720px) {
+    .page-header { margin-bottom: 1.25rem; }
+    .page-header .action-btn { width: 100%; }
+    .bank-section { padding: 1rem; }
+    .bank-header { align-items: flex-start; }
+    .bank-hint { width: 100%; }
+    .connector-grid { grid-template-columns: 1fr; }
+    .connector-card { min-height: 150px; }
+    .modal-backdrop {
+      padding: 0;
+      align-items: flex-end;
+    }
+    .modal-content {
+      max-width: none;
+      max-height: 92dvh;
+      border-radius: 22px 22px 0 0;
+      border-bottom: 0;
+    }
+    .modal-header { padding: 1.15rem 1rem .9rem; }
+    .modal-body { padding: 1rem; }
+    .modal-footer { padding: .9rem 1rem calc(.9rem + env(safe-area-inset-bottom)); }
+    .form-row { flex-direction: column; gap: .8rem; }
+    .form-field { min-width: 0; }
+    .group-grid { grid-template-columns: 1fr 1fr; }
+  }
+
 </style>
