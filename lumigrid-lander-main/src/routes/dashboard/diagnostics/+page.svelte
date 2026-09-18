@@ -147,7 +147,7 @@
   }
 
   function controlSourceName(cs: number): string {
-    const names = ['None', 'Scheduler', 'DMX', 'Manual', 'Preset', 'Sequence'];
+    const names = ['None', 'Schedule', 'DMX', 'Manual', 'Scene', 'Timeline'];
     return names[cs] ?? `Source(${cs})`;
   }
 
