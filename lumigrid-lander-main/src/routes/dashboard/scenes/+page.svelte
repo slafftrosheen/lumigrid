@@ -358,6 +358,7 @@
             class="lib-item"
             class:active={selectedIdx === i}
             class:empty={!preset}
+            aria-pressed={selectedIdx === i}
             onclick={() => selectPreset(i)}
             type="button"
           >
@@ -483,6 +484,7 @@
               <button
                 class="zone-preview-box"
                 class:selected={expandedChannel === zi}
+                aria-pressed={expandedChannel === zi}
                 onclick={() => (expandedChannel = zi)}
                 style="background: rgb({preview.r}, {preview.g}, {preview.b});"
                 type="button"
@@ -606,6 +608,7 @@
             <div class="zone-card" class:active-zone={expandedChannel === ci} class:pwm-channel={ci >= 8}>
               <button
                 class="zone-header"
+                aria-expanded={expandedChannel === ci}
                 onclick={() => (expandedChannel = expandedChannel === ci ? null : ci)}
                 type="button"
               >
