@@ -83,7 +83,8 @@ struct ControlSnapshot {
 /// Logical control source arbitration engine.
 ///
 /// Resolves which control source (LiveDmx, ManualOverride, Scheduler,
-/// ScenePlayback, Fallback) owns each zone, layer, and fixture.
+/// ScenePlayback, Fallback) owns each channel. Zone/layer methods remain
+/// compatibility paths for legacy live-stream inputs.
 /// Physical output commits belong to OutputScheduler.
 class ControlSourceManager {
 public:
@@ -97,7 +98,7 @@ public:
     // A lease of 0 means indefinite (until explicitly released).
     bool acquire(ControlSource source, uint32_t lease_ms = 0,
                  uint8_t zone_mask = 0xFF, uint8_t layer_mask = 0x07,
-                 uint16_t fixture_mask = 0,
+                 uint16_t channel_mask = 0,
                  bool takeover = false);
     
     // Release control for a specific source.
@@ -110,8 +111,7 @@ public:
     // Resolve which source owns a specific zone and layer at this moment.
     ControlSource resolve(uint8_t zone_idx, uint8_t layer_idx, uint32_t current_ms) const;
 
-    // ACTUAL RENDERING AUTHORITY:
-    // Resolve which source owns a specific fixture at this moment (fixture override takes precedence).
+    // Legacy compatibility wrapper. New channel-first code should use resolve_channel().
     ControlSource resolve_fixture(uint8_t fixture_idx, uint8_t zone_idx, uint32_t current_ms) const;
 
     // DIAGNOSTIC DOMINANT SOURCE ONLY:
