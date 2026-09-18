@@ -234,7 +234,7 @@
   }
 
   async function removeScene(idx: number) {
-    if (!confirm(`Clear preset slot ${idx}? This will reset slot ${idx} on the node.`)) return;
+    if (!confirm(`Clear scene slot ${idx + 1}? This will reset that scene on the node.`)) return;
     try {
       if (nodeIp) {
         await deletePreset(nodeIp, idx);
@@ -245,7 +245,7 @@
         savedSnapshot = null;
         selectedIdx = null;
       }
-      toastMsg(`Cleared preset slot ${idx}`);
+      toastMsg(`Cleared scene slot ${idx + 1}`);
     } catch (e) {
       error = String(e);
     }
