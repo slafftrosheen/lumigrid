@@ -30,7 +30,7 @@ export function saveSequence(ip: string, seq: Sequence): Promise<{ saved: true }
   });
 }
 
-export const TRACK_COUNT = 8;
+export const TRACK_COUNT = 16;
 export const STEP_COUNT = 16;
 export const MIN_BPM = 10;
 export const MAX_BPM = 500;
