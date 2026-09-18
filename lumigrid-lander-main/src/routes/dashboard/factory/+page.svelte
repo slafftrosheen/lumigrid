@@ -476,7 +476,9 @@
     flex-direction: column;
     gap: 1.25rem;
     color: #f5f5f7;
-    max-width: 1100px;
+    max-width: 1180px;
+    margin: 0 auto;
+    width: 100%;
   }
 
   .factory-header {
@@ -485,9 +487,10 @@
     align-items: center;
     gap: 1rem;
     flex-wrap: wrap;
-    background: rgba(255, 255, 255, 0.03);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 14px;
+    background: var(--dash-surface);
+    border: 1px solid var(--dash-border);
+    border-radius: var(--dash-radius-lg);
+    box-shadow: var(--dash-shadow);
     padding: 0.85rem 1.25rem;
   }
   .factory-header h1 {
@@ -614,9 +617,9 @@
 
   /* Panels */
   .panel {
-    background: rgba(255, 255, 255, 0.02);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 14px;
+    background: var(--dash-surface);
+    border: 1px solid var(--dash-border);
+    border-radius: var(--dash-radius-lg);
     padding: 1.25rem;
     display: flex;
     flex-direction: column;
@@ -983,4 +986,18 @@
     padding: 0.55rem 1.25rem;
     font-size: 0.85rem;
   }
+
+  @media (max-width: 720px) {
+    .factory-header { align-items: flex-start; }
+    .header-right { width: 100%; }
+    .header-right button { flex: 1; }
+    .abort-banner { align-items: stretch; }
+    .abort-btn { width: 100%; }
+    .params-bar { gap: 1rem; }
+    .param-group { min-width: 100%; }
+    .param-actions { margin-left: 0; width: 100%; }
+    .param-actions button { width: 100%; }
+    .effects-grid { grid-template-columns: 1fr; }
+  }
+
 </style>
