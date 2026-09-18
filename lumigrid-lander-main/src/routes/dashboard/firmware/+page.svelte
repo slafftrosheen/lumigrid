@@ -669,7 +669,7 @@
             <span class="rec-icon">♻️</span>
             <div>
               <h3>Restore from Backup</h3>
-              <p>Upload a previously exported LumiGrid JSON backup to overwrite configuration and restore presets.</p>
+              <p>Upload a previously exported LumiGrid JSON backup to replace configuration and restore scenes.</p>
             </div>
           </div>
 
@@ -799,7 +799,7 @@
         {/each}
 
         {#if !nodes.length}
-          <div class="empty-box">No fleet nodes registered. Add nodes in the sidebar.</div>
+          <div class="empty-box">No fleet nodes registered. Add a node from Fleet.</div>
         {/if}
       </div>
     </div>
