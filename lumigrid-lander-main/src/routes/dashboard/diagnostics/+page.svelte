@@ -618,10 +618,13 @@
 
 <style>
   .diag-root {
+    width: 100%;
+    max-width: 1240px;
+    margin: 0 auto;
     display: flex;
     flex-direction: column;
     gap: 1.25rem;
-    color: #f5f5f7;
+    color: var(--dash-text);
   }
 
   .diag-loading, .diag-empty {
@@ -652,9 +655,12 @@
     align-items: center;
     gap: 1rem;
     flex-wrap: wrap;
-    background: rgba(255, 255, 255, 0.03);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 14px;
+    background: var(--dash-surface);
+    backdrop-filter: blur(18px);
+    -webkit-backdrop-filter: blur(18px);
+    border: 1px solid var(--dash-border);
+    border-radius: var(--dash-radius-lg);
+    box-shadow: var(--dash-shadow);
     padding: 0.85rem 1.25rem;
   }
   .diag-header h2 {
@@ -752,9 +758,9 @@
 
   /* Confidence Card */
   .confidence-card {
-    background: rgba(255, 255, 255, 0.03);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 14px;
+    background: var(--dash-surface);
+    border: 1px solid var(--dash-border);
+    border-radius: var(--dash-radius-lg);
     padding: 1rem 1.25rem;
   }
   .confidence-header {
@@ -889,9 +895,9 @@
 
   /* Events View */
   .events-container {
-    background: rgba(255, 255, 255, 0.02);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 14px;
+    background: var(--dash-surface);
+    border: 1px solid var(--dash-border);
+    border-radius: var(--dash-radius-lg);
     padding: 1rem;
     display: flex;
     flex-direction: column;
@@ -1058,4 +1064,16 @@
     .stats-grid { grid-template-columns: 1fr; }
     .stat-grid-2col { grid-template-columns: 1fr; }
   }
+
+  @media (max-width: 760px) {
+    .diag-header { align-items: flex-start; }
+    .header-actions { width: 100%; justify-content: space-between; }
+    .tab-bar { overflow-x: auto; padding-bottom: .35rem; }
+    .tab { white-space: nowrap; }
+    .confidence-grid, .stats-grid, .stat-grid-2col { grid-template-columns: 1fr; }
+    .search-input { width: 100%; }
+    .events-toolbar { align-items: stretch; }
+    .level-filters { overflow-x: auto; }
+  }
+
 </style>
