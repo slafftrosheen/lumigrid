@@ -122,9 +122,9 @@
 
 <style>
   .track-editor-card {
-    background: rgba(17, 24, 39, 0.7);
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    border-radius: 8px;
+    background: rgba(255,255,255,.035);
+    border: 1px solid rgba(255,255,255,.09);
+    border-radius: var(--dash-radius-md);
     padding: 14px;
     margin-bottom: 12px;
     display: flex;
@@ -152,7 +152,7 @@
     background: rgba(var(--dash-accent-rgb), 0.1);
     border: 1px solid rgba(var(--dash-accent-rgb), 0.3);
     padding: 2px 8px;
-    border-radius: 4px;
+    border-radius: 7px;
     letter-spacing: 0.05em;
   }
 
@@ -173,8 +173,8 @@
 
   .btn-delete {
     background: transparent;
-    border: 1px solid rgba(239, 68, 68, 0.4);
-    color: #ef4444;
+    border: 1px solid rgba(255, 69, 58, 0.4);
+    color: var(--dash-danger);
     border-radius: 4px;
     padding: 3px 8px;
     cursor: pointer;
@@ -184,8 +184,8 @@
   }
 
   .btn-delete:hover {
-    background: rgba(239, 68, 68, 0.2);
-    border-color: #ef4444;
+    background: rgba(255, 69, 58, 0.2);
+    border-color: var(--dash-danger);
   }
 
   .track-params-grid {
@@ -208,9 +208,10 @@
   }
 
   .select-input, .number-input {
-    background: rgba(10, 14, 23, 0.9);
-    border: 1px solid rgba(255, 255, 255, 0.15);
-    border-radius: 4px;
+    min-height: 38px;
+    background: rgba(255,255,255,.05);
+    border: 1px solid rgba(255,255,255,.13);
+    border-radius: 8px;
     color: #fff;
     padding: 6px 8px;
     font-size: 0.85rem;
