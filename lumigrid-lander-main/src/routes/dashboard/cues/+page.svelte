@@ -239,6 +239,8 @@
   });
 </script>
 
+<svelte:head><title>Cue Studio — LumiGrid</title></svelte:head>
+
 <div class="cues-container">
   <div class="header-row">
     <div>
