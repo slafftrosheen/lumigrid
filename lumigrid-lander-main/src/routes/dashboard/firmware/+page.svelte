@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import OperatorDialog from '$lib/components/dashboard/OperatorDialog.svelte';
   import {
     getInfo,
     uploadFirmware,
@@ -54,6 +55,7 @@
   let binName = $state('');
   let prevBin = $state<File | null>(null);
   let runningOta = $state(false);
+  let otaConfirmOpen = $state(false);
 
   const STATUS_LABEL: Record<string, string> = {
     idle: 'Ready',
@@ -210,10 +212,14 @@
     selected = s;
   }
 
-  async function startOta() {
-    if (!binFile || !selected.size) return;
-    if (!confirm(`Launch staged OTA deployment for binary "${binName}" across ${selected.size} selected node(s)? (Preflight -> Canary -> Remaining fleet 2 at a time)`)) return;
+  function startOta() {
+    if (!binFile || !selected.size || runningOta) return;
+    otaConfirmOpen = true;
+  }
 
+  async function executeOta() {
+    if (!binFile || !selected.size || runningOta) return;
+    otaConfirmOpen = false;
     runningOta = true;
     prevBin = binFile;
     const selectedNodes = nodes.filter(n => selected.has(n.ip));
@@ -625,47 +631,6 @@
         </div>
       </div>
 
-      <!-- Confirmation Modal -->
-      {#if restoreConfirmOpen}
-        <div
-          class="modal-backdrop"
-          onclick={() => (restoreConfirmOpen = false)}
-          role="presentation"
-        >
-          <div
-            class="modal-card"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="restore-dialog-title"
-            tabindex="-1"
-            onclick={(e) => e.stopPropagation()}
-            onkeydown={(e) => { if (e.key === 'Escape') restoreConfirmOpen = false; }}
-          >
-            <h3 id="restore-dialog-title">⚠️ Confirm Destructive Restore</h3>
-            <p>
-              Restoring this backup will replace current configuration and scenes on node <strong>{selectedNodeIp}</strong>. Any unsaved edits will be overwritten.
-            </p>
-            <div class="modal-actions">
-              <button
-                class="btn-secondary"
-                onclick={() => (restoreConfirmOpen = false)}
-                type="button"
-                autofocus
-              >
-                Cancel
-              </button>
-              <button
-                class="btn-danger"
-                onclick={executeRestore}
-                disabled={restoreLoading}
-                type="button"
-              >
-                {restoreLoading ? 'Restoring...' : 'Proceed With Restore'}
-              </button>
-            </div>
-          </div>
-        </div>
-      {/if}
     </div>
 
   <!-- TAB 3: OTA FIRMWARE UPDATE -->
@@ -772,6 +737,32 @@
     </div>
   {/if}
 </div>
+
+<OperatorDialog
+  open={restoreConfirmOpen}
+  title="Restore backup to this node?"
+  description={restoreFile
+    ? `“${restoreFile.name}” will replace the current configuration and scenes on ${selectedNodeIp}. Unsaved changes on the node will be overwritten.`
+    : ''}
+  confirmLabel="Restore Backup"
+  tone="danger"
+  busy={restoreLoading}
+  onconfirm={executeRestore}
+  oncancel={() => (restoreConfirmOpen = false)}
+/>
+
+<OperatorDialog
+  open={otaConfirmOpen}
+  title="Start staged firmware deployment?"
+  description={binFile
+    ? `Deploy “${binName}” to ${selected.size} selected node${selected.size === 1 ? '' : 's'}. LumiGrid will run preflight, update one canary, then roll out to the remaining fleet two nodes at a time.`
+    : ''}
+  confirmLabel="Start Deployment"
+  tone="warning"
+  busy={runningOta}
+  onconfirm={executeOta}
+  oncancel={() => (otaConfirmOpen = false)}
+/>
 
 <style>
   .config-page {
@@ -1050,42 +1041,6 @@
   .restore-file-label:hover {
     border-color: var(--dash-accent);
     background: rgba(var(--dash-accent-rgb), 0.08);
-  }
-
-  /* Modal */
-  .modal-backdrop {
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.7);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 200;
-  }
-  .modal-card {
-    background: var(--dash-surface-strong);
-    border: 1px solid rgba(255, 69, 58, 0.4);
-    border-radius: 14px;
-    padding: 1.5rem;
-    max-width: 450px;
-    display: flex;
-    flex-direction: column;
-    gap: 1rem;
-  }
-  .modal-card h3 {
-    margin: 0;
-    color: #ff453a;
-  }
-  .modal-card p {
-    margin: 0;
-    font-size: 0.85rem;
-    color: #ddd;
-    line-height: 1.4;
-  }
-  .modal-actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: 0.5rem;
   }
 
   /* OTA Layout */
