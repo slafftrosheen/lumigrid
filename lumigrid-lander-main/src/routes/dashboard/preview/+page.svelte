@@ -8,6 +8,7 @@
   let gifName = $state('');
   let playing = $state(false);
   let error   = $state('');
+  const MAX_GIF_BYTES = 20 * 1024 * 1024;
   let canvasEl = $state<HTMLCanvasElement | null>(null);
   let previewEl = $state<HTMLCanvasElement | null>(null);
   let rafId: number | null = null;
@@ -71,26 +72,47 @@
     rafId = requestAnimationFrame(renderFrame);
   }
 
-  function onFile(e: Event) {
-    const files = (e.target as HTMLInputElement).files;
-    if (!files?.length) return;
+  function loadGifFile(file: File) {
+    const isGif = file.name.toLowerCase().endsWith('.gif')
+      && (!file.type || file.type === 'image/gif');
+
+    if (!isGif) {
+      error = 'Choose an animated GIF file.';
+      return;
+    }
+    if (file.size <= 0) {
+      error = 'The selected GIF is empty.';
+      return;
+    }
+    if (file.size > MAX_GIF_BYTES) {
+      error = 'GIF is too large for preview. Use a file under 20 MB.';
+      return;
+    }
+
     stopPlay();
     error = '';
-    gifName = files[0].name;
+    gifName = file.name;
+
     const reader = new FileReader();
+    reader.onerror = () => {
+      error = 'Could not read the selected GIF.';
+    };
     reader.onload = (ev) => {
       const url = ev.target?.result as string;
       gifUrl = url;
-      // Create image element for GIF playback
+
       const img = new Image();
+      img.onerror = () => {
+        error = 'The selected file could not be decoded as a GIF.';
+        gifUrl = '';
+        gifName = '';
+      };
       img.onload = () => {
         imgEl = img;
-        // Size hidden canvas to image natural size (or 640×360 max)
         if (canvasEl) {
           canvasEl.width  = Math.min(img.naturalWidth  || 640, 1280);
           canvasEl.height = Math.min(img.naturalHeight || 360, 720);
         }
-        // Size preview canvas
         if (previewEl) {
           const CELL = 18, GAP = 3;
           previewEl.width  = gridW * (CELL + GAP);
@@ -100,18 +122,18 @@
       };
       img.src = url;
     };
-    reader.readAsDataURL(files[0]);
+    reader.readAsDataURL(file);
+  }
+
+  function onFile(e: Event) {
+    const file = (e.target as HTMLInputElement).files?.[0];
+    if (file) loadGifFile(file);
   }
 
   function onDrop(e: DragEvent) {
     e.preventDefault();
     const file = e.dataTransfer?.files[0];
-    if (!file || !file.name.toLowerCase().endsWith('.gif')) { error = 'Only GIF files are supported'; return; }
-    const input = document.createElement('input');
-    input.type = 'file';
-    const fakeEvt = new Event('change');
-    Object.defineProperty(fakeEvt, 'target', { value: { files: e.dataTransfer?.files } });
-    onFile(fakeEvt);
+    if (file) loadGifFile(file);
   }
 
   function onDragOver(e: DragEvent) { e.preventDefault(); }
