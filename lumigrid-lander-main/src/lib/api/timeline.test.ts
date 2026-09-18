@@ -17,7 +17,7 @@ import {
 } from './timeline';
 
 describe('timeline model & serialization', () => {
-  it('creates default steps, tracks, and 8-track sequence', () => {
+  it('creates default steps, tracks, and 16-track sequence', () => {
     const step = createDefaultStep();
     expect(step.presetIndex).toBe(0);
     expect(step.lengthBeats).toBe(4);
