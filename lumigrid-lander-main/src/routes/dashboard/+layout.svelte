@@ -130,19 +130,19 @@
   });
 
   const navLinks = [
-    { href: '/dashboard',              icon: '⬡',  label: 'Fleet' },
-    { href: '/dashboard/scenes',       icon: '◆',  label: 'Scenes' },
-    { href: '/dashboard/cues',         icon: '⏯',  label: 'Cues' },
-    { href: '/dashboard/timeline',     icon: '▤',  label: 'Timeline' },
-    { href: '/dashboard/schedule',     icon: '◷',  label: 'Schedule' },
-    { href: '/dashboard/channels',     icon: '◈',  label: 'Channels' },
-    { href: '/dashboard/thermal',      icon: '⬥',  label: 'Thermal' },
-    { href: '/dashboard/visualizer',   icon: '▶',  label: 'Visualizer' },
-    { href: '/dashboard/uptime',       icon: '▣',  label: 'Uptime' },
-    { href: '/dashboard/diagnostics',  icon: '⚕',  label: 'Diagnostics' },
-    { href: '/dashboard/factory',      icon: '⚙',  label: 'Factory' },
-    { href: '/dashboard/preview',      icon: '◉',  label: 'Preview' },
-    { href: '/dashboard/firmware',     icon: '⟳',  label: 'Firmware' },
+    { group: 'Overview', href: '/dashboard',              icon: '⬡',  label: 'Fleet' },
+    { group: 'Create',   href: '/dashboard/scenes',       icon: '◆',  label: 'Scenes' },
+    { group: 'Create',   href: '/dashboard/cues',         icon: '⏯',  label: 'Cues' },
+    { group: 'Create',   href: '/dashboard/timeline',     icon: '▤',  label: 'Timeline' },
+    { group: 'Create',   href: '/dashboard/schedule',     icon: '◷',  label: 'Schedule' },
+    { group: 'Output',   href: '/dashboard/channels',     icon: '◈',  label: 'Channels' },
+    { group: 'Output',   href: '/dashboard/visualizer',   icon: '▶',  label: 'Visualizer' },
+    { group: 'Output',   href: '/dashboard/preview',      icon: '◉',  label: 'Preview' },
+    { group: 'System',   href: '/dashboard/thermal',      icon: '⬥',  label: 'Thermal' },
+    { group: 'System',   href: '/dashboard/uptime',       icon: '▣',  label: 'Uptime' },
+    { group: 'System',   href: '/dashboard/diagnostics',  icon: '⚕',  label: 'Diagnostics' },
+    { group: 'System',   href: '/dashboard/factory',      icon: '⚙',  label: 'Factory' },
+    { group: 'System',   href: '/dashboard/firmware',     icon: '⟳',  label: 'Firmware' },
   ];
 
   let { children } = $props();
@@ -227,7 +227,10 @@
     </div>
 
     <ul class="nav-links" role="list">
-      {#each navLinks as { href, icon, label }}
+      {#each navLinks as { group, href, icon, label }, i}
+        {#if i === 0 || navLinks[i - 1].group !== group}
+          <li class="nav-group-label" aria-hidden="true">{group}</li>
+        {/if}
         <li>
           <a {href} class="nav-link" class:active={$page.url.pathname === href}>
             <span class="nav-icon">{icon}</span>
@@ -244,6 +247,26 @@
       Lock
     </button>
   </nav>
+
+  <div class="mobile-topbar">
+    <a class="mobile-brand" href="/dashboard" aria-label="LumiGrid fleet">⬡</a>
+    <select
+      class="mobile-node-select"
+      aria-label="Active node"
+      value={nodeIp}
+      onchange={(e) => selectNode((e.target as HTMLSelectElement).value)}
+    >
+      {#if !nodeList.length}<option value="">No nodes</option>{/if}
+      {#each nodeList as ip}
+        <option value={ip}>{ip}</option>
+      {/each}
+    </select>
+    <span class="mobile-status {liveState.connection}" title={liveState.connection}>
+      <span class="status-dot"></span>
+      <span>{liveState.connection === 'connected' ? 'Live' : liveState.connection === 'connecting' ? '…' : 'Off'}</span>
+    </span>
+    <button class="mobile-lock" onclick={lockDashboard} title="Lock dashboard" aria-label="Lock dashboard">⌁</button>
+  </div>
 
   <main class="dash-main">
     {@render children()}
@@ -444,6 +467,16 @@
     scrollbar-width: none;
   }
   .nav-links::-webkit-scrollbar { display: none; }
+  .nav-group-label {
+    list-style: none;
+    margin: .65rem .55rem .15rem;
+    color: #636366;
+    font-size: .58rem;
+    font-weight: 800;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+  }
+  .mobile-topbar { display: none; }
   .nav-link {
     display: flex;
     align-items: center;
@@ -572,7 +605,65 @@
     .dash-brand,
     .node-section,
     .role-badge,
-    .logout-btn { display: none; }
+    .logout-btn,
+    .nav-group-label { display: none; }
+
+    .mobile-topbar {
+      position: fixed;
+      inset: env(safe-area-inset-top) 0 auto 0;
+      height: 54px;
+      z-index: 1190;
+      display: grid;
+      grid-template-columns: 34px minmax(0, 1fr) auto 34px;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 10px;
+      background: rgba(15,15,17,.94);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border-bottom: 1px solid rgba(255,255,255,.08);
+      box-shadow: 0 10px 30px rgba(0,0,0,.22);
+    }
+    .mobile-brand {
+      display: grid;
+      place-items: center;
+      color: var(--dash-accent);
+      text-decoration: none;
+      font-size: 1.35rem;
+      font-weight: 700;
+    }
+    .mobile-node-select {
+      width: 100%;
+      min-width: 0;
+      height: 38px;
+      background: rgba(255,255,255,.06);
+      border: 1px solid rgba(255,255,255,.11);
+      border-radius: 10px;
+      color: #f5f5f7;
+      padding: 0 .65rem;
+      font: .78rem ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .mobile-status {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      color: #8e8e93;
+      font-size: .65rem;
+      font-weight: 700;
+    }
+    .mobile-status.connected { color: var(--dash-ok); }
+    .mobile-status.connecting { color: var(--dash-warm); }
+    .mobile-lock {
+      width: 34px;
+      height: 34px;
+      display: grid;
+      place-items: center;
+      border: 1px solid rgba(255,255,255,.1);
+      border-radius: 10px;
+      background: rgba(255,255,255,.04);
+      color: #a1a1a6;
+      cursor: pointer;
+    }
 
     .nav-links {
       flex: 1;
@@ -586,7 +677,7 @@
       overflow-y: hidden;
       scroll-snap-type: x proximity;
     }
-    .nav-links li {
+    .nav-links > li:not(.nav-group-label) {
       flex: 0 0 62px;
       scroll-snap-align: center;
     }
@@ -616,7 +707,7 @@
     }
     .nav-link span:last-child { display: block; }
     .dash-main {
-      padding: 1rem;
+      padding: calc(1rem + 54px + env(safe-area-inset-top)) 1rem 1rem;
       max-height: none;
       overflow: visible;
     }
