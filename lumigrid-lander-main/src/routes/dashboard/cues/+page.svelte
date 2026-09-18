@@ -352,6 +352,7 @@
             <button
               class="list-nav-item"
               class:selected={cl.index === selectedListIdx}
+              aria-pressed={cl.index === selectedListIdx}
               onclick={() => selectList(cl.index)}
             >
               <div class="list-nav-info">
