@@ -237,7 +237,7 @@
   .field { display: flex; flex-direction: column; gap: .25rem; }
   .field span { font-size: .72rem; font-weight: 600; color: #a1a1a6; text-transform: uppercase; letter-spacing: .05em; }
   .field input { background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.12); border-radius: 8px; color: #f5f5f7; font-size: .9rem; padding: .4rem .65rem; width: 80px; }
-  .field input:focus { outline: none; border-color: var(--dash-accent); }
+  .field input:focus-visible { border-color: var(--dash-accent); box-shadow: 0 0 0 3px rgba(var(--dash-accent-rgb),.12); }
 
   .drop-zone {
     border: 2px dashed rgba(255,255,255,.15);
