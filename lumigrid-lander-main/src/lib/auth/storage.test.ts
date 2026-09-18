@@ -112,11 +112,13 @@ describe('selected node storage', () => {
 
     addSavedNode('192.168.1.10', 'Stage Left');
     addSavedNode('192.168.1.20', 'Stage Right');
+    addSavedNode('https://lumigrid.local/', 'Workshop');
 
     let nodes = getSavedNodes();
-    expect(nodes).toHaveLength(2);
+    expect(nodes).toHaveLength(3);
     expect(nodes[0].name).toBe('Stage Left');
     expect(nodes[1].name).toBe('Stage Right');
+    expect(nodes[2]).toMatchObject({ ip: 'lumigrid.local', name: 'Workshop' });
 
     renameSavedNode('192.168.1.10', 'Main Truss');
     nodes = getSavedNodes();
@@ -127,8 +129,9 @@ describe('selected node storage', () => {
 
     removeSavedNode('192.168.1.10');
     nodes = getSavedNodes();
-    expect(nodes).toHaveLength(1);
+    expect(nodes).toHaveLength(2);
     expect(nodes[0].ip).toBe('192.168.1.20');
+    expect(nodes[1].ip).toBe('lumigrid.local');
   });
 });
 
