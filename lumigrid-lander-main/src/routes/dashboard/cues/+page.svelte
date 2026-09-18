@@ -344,7 +344,7 @@
       <div class="card lists-sidebar">
         <div class="sidebar-header">
           <h2>Cue Lists ({cueLists.length}/8)</h2>
-          <button class="btn-icon" onclick={createNewList} title="New Cue List">+</button>
+          <button class="btn-icon" onclick={createNewList} title="New cue list" aria-label="New cue list">+</button>
         </div>
 
         <div class="lists-nav">
@@ -459,9 +459,9 @@
                       </select>
                     </td>
                     <td class="cue-actions">
-                      <button class="icon-btn" onclick={() => moveCue(idx, 'up')} disabled={idx === 0}>▲</button>
-                      <button class="icon-btn" onclick={() => moveCue(idx, 'down')} disabled={idx === currentList.cues.length - 1}>▼</button>
-                      <button class="icon-btn remove" onclick={() => removeCue(idx)}>✕</button>
+                      <button class="icon-btn" onclick={() => moveCue(idx, 'up')} disabled={idx === 0} title="Move cue up" aria-label="Move cue up">▲</button>
+                      <button class="icon-btn" onclick={() => moveCue(idx, 'down')} disabled={idx === currentList.cues.length - 1} title="Move cue down" aria-label="Move cue down">▼</button>
+                      <button class="icon-btn remove" onclick={() => removeCue(idx)} title="Remove cue" aria-label="Remove cue">✕</button>
                     </td>
                   </tr>
                 {/each}
