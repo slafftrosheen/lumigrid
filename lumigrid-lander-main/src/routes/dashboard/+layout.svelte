@@ -277,6 +277,32 @@
 <style>
   :global(body) { margin: 0; }
 
+  /* The public Lander intentionally gives headings animated gradients and all
+     buttons a 44px minimum. The operator app uses the same design tokens, but
+     needs denser controls and calmer typography. Keep those concerns isolated. */
+  :global(.dash-root h1),
+  :global(.dash-root h2),
+  :global(.dash-root h3),
+  :global(.pin-wall h1) {
+    background: none;
+    background-image: none;
+    -webkit-background-clip: initial;
+    background-clip: initial;
+    -webkit-text-fill-color: currentColor;
+    color: inherit;
+    animation: none;
+  }
+  :global(.dash-root button),
+  :global(.pin-wall button) {
+    min-height: 0;
+  }
+  :global(.dash-root input),
+  :global(.dash-root select),
+  :global(.dash-root textarea) {
+    font-family: inherit;
+  }
+
+
   .pin-wall {
     min-height: 100dvh;
     display: flex;
