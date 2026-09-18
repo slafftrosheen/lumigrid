@@ -606,9 +606,9 @@
     font-family: monospace;
     text-align: center;
   }
-  .bpm-control input:focus {
-    outline: none;
+  .bpm-control input:focus-visible {
     border-color: var(--dash-accent);
+    box-shadow: 0 0 0 3px rgba(var(--dash-accent-rgb),.12);
   }
 
   .beat-dots {
