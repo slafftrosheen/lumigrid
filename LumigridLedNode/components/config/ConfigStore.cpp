@@ -38,8 +38,19 @@ uint32_t calc_device_crc(const DeviceConfigV2& dc) {
     return esp_rom_crc32_le(0, (const uint8_t*)&dc, sizeof(DeviceConfigV2) - sizeof(uint32_t));
 }
 
+struct SequenceV1 {
+    SequencerTrack tracks[8] = {};
+    uint16_t bpm = 120;
+    bool enabled = false;
+    uint32_t checksum = 0;
+};
+
 uint32_t calc_seq_crc(const Sequence& s) {
     return esp_rom_crc32_le(0, (const uint8_t*)&s, sizeof(Sequence) - sizeof(uint32_t));
+}
+
+uint32_t calc_seq_v1_crc(const SequenceV1& s) {
+    return esp_rom_crc32_le(0, (const uint8_t*)&s, sizeof(SequenceV1) - sizeof(uint32_t));
 }
 
 uint32_t calc_calendar_crc(const CalendarSchedule& c) {
@@ -125,6 +136,23 @@ esp_err_t ConfigStore::load_scene(uint8_t index, SceneConfig& scene) {
     char key[12];
     make_key(key, sizeof(key), "scene", index);
 
+    // Legacy scenes were zone-based. Resolve each new physical channel through
+    // the migrated group masks instead of assuming A1/P1 == Zone 0, etc.
+    DeviceConfig topology_cfg;
+    const bool have_topology = (load_config(topology_cfg) == ESP_OK);
+    auto legacy_zone_for_channel = [&](uint8_t channel) -> uint8_t {
+        if (have_topology && channel < 16) {
+            const uint16_t bit = static_cast<uint16_t>(1U << channel);
+            for (uint8_t z = 0; z < 8; ++z) {
+                if ((topology_cfg.groups[z].channel_mask & bit) != 0) {
+                    return z;
+                }
+            }
+        }
+        // Legacy v1 migration assigned ungrouped fixtures to zone 0.
+        return 0;
+    };
+
     auto load_from_key = [&](const char* k, SceneConfig& out) -> esp_err_t {
         size_t len = 0;
         esp_err_t err = nvs_get_blob(handle_, k, nullptr, &len);
@@ -155,7 +183,7 @@ esp_err_t ConfigStore::load_scene(uint8_t index, SceneConfig& scene) {
                     out.schema_version = 2;
                     for (uint8_t ch = 0; ch < 16; ++ch) {
                         for (uint8_t l = 0; l < 3; ++l) {
-                            out.channels[ch].layers[l] = v1->zones[ch % 8].layers[l];
+                            out.channels[ch].layers[l] = v1->zones[legacy_zone_for_channel(ch)].layers[l];
                         }
                     }
                     out.checksum = calc_scene_crc(out);
@@ -200,7 +228,7 @@ esp_err_t ConfigStore::load_scene(uint8_t index, SceneConfig& scene) {
                     out.schema_version = 2;
                     
                     for (int ch = 0; ch < 16; ++ch) {
-                        int i = ch % 8;
+                        const uint8_t i = legacy_zone_for_channel(static_cast<uint8_t>(ch));
                         out.channels[ch].layers[0].effect = old.zones[i].effect;
                         out.channels[ch].layers[0].primary_color = old.zones[i].primary_color;
                         out.channels[ch].layers[0].secondary_color = old.zones[i].secondary_color;
@@ -832,12 +860,10 @@ bool ConfigStore::migrate_v2_to_v3(const DeviceConfigV2& v2, DeviceConfig& v3, u
     safe_strncpy(v3.site_label, v2.site_label, sizeof(v3.site_label));
     safe_strncpy(v3.group_label, v2.group_label, sizeof(v3.group_label));
 
-    // Initialize all 16 channels with default port labels
+    // Initialize all 16 physical channels as present-but-unconfigured.
+    // Port identity (A1..A8/P1..P8) comes from ChannelHardware, not user labels.
     for (uint8_t ch = 0; ch < 16; ++ch) {
-        channel_port_name(ch, v3.channels[ch].name, sizeof(v3.channels[ch].name));
-        v3.channels[ch].enabled = false;
-        v3.channels[ch].max_brightness = 255;
-        v3.channels[ch].gamma_correction = true;
+        v3.channels[ch] = ChannelConfig{};
     }
 
     // Migrate groups from legacy zones
@@ -878,26 +904,51 @@ bool ConfigStore::migrate_v2_to_v3(const DeviceConfigV2& v2, DeviceConfig& v3, u
                 v3.groups[fix.zone_id].channel_mask |= (1U << ch);
             }
         } else if (is_pwm) {
-            uint8_t p_idx = fix.physical_output_index[0];
-            uint8_t hw_id = (p_idx < 16) ? v2.physical_outputs[p_idx].hardware_id : (f % 8);
-            if (hw_id >= 8) hw_id = f % 8;
-            uint8_t ch = 8 + hw_id; // Channels 8..15 are P1..P8
+            const uint8_t channels_used =
+                (fix.profile == FixtureProfile::PWM_Single) ? 1 :
+                (fix.profile == FixtureProfile::PWM_RGB ? 3 : 4);
 
-            v3.channels[ch].enabled = true;
-            v3.channels[ch].max_brightness = fix.max_brightness;
-            v3.channels[ch].gamma_correction = fix.gamma_correction;
-            v3.channels[ch].max_milliwatts = fix.max_milliwatts;
-            v3.channels[ch].dmx_universe = fix.dmx_universe;
-            v3.channels[ch].dmx_start_channel = fix.dmx_start_channel;
-            v3.channels[ch].dmx_mode = 0;
+            for (uint8_t component = 0; component < channels_used; ++component) {
+                const uint8_t p_idx = fix.physical_output_index[component];
+                if (p_idx >= 16) {
+                    if (out_warning_count) (*out_warning_count)++;
+                    continue;
+                }
 
-            if (fix.zone_id < 8) {
-                v3.groups[fix.zone_id].channel_mask |= (1U << ch);
+                const auto& phys = v2.physical_outputs[p_idx];
+                if (!phys.enabled || phys.type != OutputType::PWM || phys.hardware_id >= 8) {
+                    if (out_warning_count) (*out_warning_count)++;
+                    continue;
+                }
+
+                const uint8_t ch = static_cast<uint8_t>(8 + phys.hardware_id);
+                auto& dst = v3.channels[ch];
+                dst.enabled = true;
+                dst.max_brightness = fix.max_brightness;
+                dst.gamma_correction = fix.gamma_correction;
+                dst.max_milliwatts = fix.max_milliwatts == 0
+                    ? 0
+                    : static_cast<uint16_t>((fix.max_milliwatts + channels_used - 1) / channels_used);
+                dst.dmx_universe = fix.dmx_universe;
+                dst.dmx_start_channel = fix.dmx_start_channel == 0
+                    ? 0
+                    : static_cast<uint16_t>(fix.dmx_start_channel + component);
+
+                // Preserve old compound PWM colour semantics without exposing
+                // compound fixtures in the new UI. 0 is normal mono; 2..5 are
+                // migration-only R/G/B/W component selectors.
+                dst.dmx_mode = (fix.profile == FixtureProfile::PWM_Single)
+                    ? 0
+                    : static_cast<uint8_t>(2 + component);
+
+                if (fix.zone_id < 8) {
+                    v3.groups[fix.zone_id].channel_mask |= static_cast<uint16_t>(1U << ch);
+                }
             }
 
             if (fix.profile == FixtureProfile::PWM_RGB || fix.profile == FixtureProfile::PWM_RGBW) {
-                ESP_LOGW(TAG, "Legacy compound PWM fixture %u mapped to primary channel P%u", f, hw_id + 1);
-                if (out_warning_count) (*out_warning_count)++;
+                ESP_LOGI(TAG, "Legacy compound PWM fixture %u decomposed into %u physical P channels",
+                         f, channels_used);
             }
         }
     }
@@ -1027,14 +1078,6 @@ esp_err_t ConfigStore::load_config(DeviceConfig& config) {
         }
     }
 
-    if (err == ESP_OK && !has_configured_fixtures(config)) {
-        ESP_LOGW(TAG, "No configured channels found in loaded config, forcing default hardware topology");
-        populate_default_topology(config);
-        config.checksum = calc_device_crc(config);
-        save_config(config);
-        needs_persist = true;
-    }
-
     if (err == ESP_OK) {
         validate_config(config, &cached_val_res_);
     } else {
@@ -1046,32 +1089,23 @@ esp_err_t ConfigStore::load_config(DeviceConfig& config) {
 }
 
 void ConfigStore::populate_default_topology(DeviceConfig& config) {
-    // 1. Setup 8 Addressable Channels (A1..A8)
-    for (uint8_t i = 0; i < 8; ++i) {
-        channel_port_name(i, config.channels[i].name, sizeof(config.channels[i].name));
-        config.channels[i].enabled = true;
-        config.channels[i].addressable_type = AddressableType::WS2812;
-        config.channels[i].pixel_order = PixelOrder::GRB;
-        config.channels[i].pixel_count = 144;
-        config.channels[i].max_brightness = 255;
-        config.channels[i].gamma_correction = true;
+    // Hardware identity is immutable and supplied by ChannelHardware. Config
+    // defaults describe zero connected loads: every connector is visible in the
+    // API/UI but remains disabled until the operator configures it.
+    for (uint8_t i = 0; i < 16; ++i) {
+        config.channels[i] = ChannelConfig{};
     }
 
-    // 2. Setup 8 PWM Channels (P1..P8)
-    for (uint8_t i = 8; i < 16; ++i) {
-        channel_port_name(i, config.channels[i].name, sizeof(config.channels[i].name));
-        config.channels[i].enabled = true;
-        config.channels[i].max_brightness = 255;
-        config.channels[i].gamma_correction = true;
-    }
-
-    // 3. Default Groups (channel masks)
+    // Useful selection groups may exist on a fresh node without implying that
+    // any physical output is configured or enabled.
+    config.groups[0] = ChannelGroup{};
     safe_strncpy(config.groups[0].name, "All Addressable", sizeof(config.groups[0].name));
-    config.groups[0].channel_mask = 0x00FF; // Channels 0..7
+    config.groups[0].channel_mask = 0x00FF;
     config.groups[0].enabled = true;
 
+    config.groups[1] = ChannelGroup{};
     safe_strncpy(config.groups[1].name, "All PWM", sizeof(config.groups[1].name));
-    config.groups[1].channel_mask = 0xFF00; // Channels 8..15
+    config.groups[1].channel_mask = 0xFF00;
     config.groups[1].enabled = true;
 }
 
@@ -1101,46 +1135,73 @@ esp_err_t ConfigStore::save_sequence(const Sequence& seq) {
 }
 
 esp_err_t ConfigStore::load_sequence(Sequence& seq) {
+    bool migrated = false;
+
     auto load_from_key = [&](const char* k, Sequence& out) -> esp_err_t {
         size_t len = 0;
         esp_err_t err = nvs_get_blob(handle_, k, nullptr, &len);
-        if (err == ESP_OK && len > 0) {
-            if (len <= sizeof(Sequence)) {
-                len = sizeof(Sequence);
-                err = nvs_get_blob(handle_, k, &out, &len);
-                if (err == ESP_OK) {
-                    if (out.checksum != calc_seq_crc(out)) {
-                        ESP_LOGW(TAG, "Sequence %s CRC mismatch", k);
-                        return ESP_ERR_NVS_INVALID_STATE;
-                    }
-                    return ESP_OK;
-                }
-            } else {
-                err = ESP_ERR_NVS_INVALID_LENGTH;
+        if (err != ESP_OK || len == 0) return err;
+
+        if (len == sizeof(Sequence)) {
+            len = sizeof(Sequence);
+            err = nvs_get_blob(handle_, k, &out, &len);
+            if (err != ESP_OK) return err;
+            if (out.checksum != calc_seq_crc(out)) {
+                ESP_LOGW(TAG, "Sequence %s CRC mismatch", k);
+                return ESP_ERR_NVS_INVALID_STATE;
             }
+            return ESP_OK;
         }
-        return err;
+
+        if (len == sizeof(SequenceV1)) {
+            SequenceV1 old{};
+            size_t old_len = sizeof(old);
+            err = nvs_get_blob(handle_, k, &old, &old_len);
+            if (err != ESP_OK) return err;
+            if (old.checksum != calc_seq_v1_crc(old)) {
+                ESP_LOGW(TAG, "Legacy 8-track sequence %s CRC mismatch", k);
+                return ESP_ERR_NVS_INVALID_STATE;
+            }
+
+            out = Sequence{};
+            for (uint8_t i = 0; i < 8; ++i) {
+                out.tracks[i] = old.tracks[i];
+            }
+            for (uint8_t i = 8; i < 16; ++i) {
+                out.tracks[i] = SequencerTrack{};
+                out.tracks[i].channel_id = i;
+                out.tracks[i].enabled = false;
+            }
+            out.bpm = old.bpm;
+            out.enabled = old.enabled;
+            out.checksum = calc_seq_crc(out);
+            migrated = true;
+            ESP_LOGI(TAG, "Migrated sequence %s from 8 tracks to 16 physical-channel tracks", k);
+            return ESP_OK;
+        }
+
+        return ESP_ERR_NVS_INVALID_LENGTH;
     };
 
     esp_err_t err = load_from_key("seq_main", seq);
-    if (err == ESP_ERR_NVS_INVALID_STATE) {
+    if (err == ESP_ERR_NVS_INVALID_STATE || err == ESP_ERR_NVS_INVALID_LENGTH) {
         ESP_LOGW(TAG, "Restoring Sequence from backup slot");
         err = load_from_key("seq_main_bak", seq);
-        if (err == ESP_OK) {
-            esp_err_t restore_err = nvs_set_blob(handle_, "seq_main", &seq, sizeof(Sequence));
-            if (restore_err != ESP_OK) {
-                ESP_LOGW(TAG, "Sequence primary restore write failed: %s", esp_err_to_name(restore_err));
-            } else {
-                restore_err = nvs_commit(handle_);
-                if (restore_err != ESP_OK) {
-                    ESP_LOGW(TAG, "Sequence primary restore commit failed: %s", esp_err_to_name(restore_err));
-                }
-            }
+    }
+
+    if (err == ESP_OK && migrated) {
+        const esp_err_t persist_err = save_sequence(seq);
+        if (persist_err != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to persist migrated 16-track sequence: %s", esp_err_to_name(persist_err));
+            return persist_err;
         }
     }
 
-    if (err == ESP_ERR_NVS_NOT_FOUND || err == ESP_ERR_NVS_INVALID_STATE) {
+    if (err == ESP_ERR_NVS_NOT_FOUND || err == ESP_ERR_NVS_INVALID_STATE || err == ESP_ERR_NVS_INVALID_LENGTH) {
         seq = Sequence{};
+        for (uint8_t i = 0; i < 16; ++i) {
+            seq.tracks[i].channel_id = i;
+        }
         seq.checksum = calc_seq_crc(seq);
         return ESP_OK;
     }
