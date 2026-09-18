@@ -482,11 +482,11 @@
               <input type="text" maxlength={31} bind:value={currentConfig.deviceName} />
             </label>
             <label class="field">
-              <span>Active Preset Index</span>
+              <span>Active Scene Slot</span>
               <input type="number" min="0" max="31" bind:value={currentConfig.activePresetIndex} />
             </label>
             <label class="field">
-              <span>Fallback Preset Index</span>
+              <span>Fallback Scene Slot</span>
               <input type="number" min="0" max="31" bind:value={currentConfig.fallbackPresetIndex} />
             </label>
           </div>
@@ -573,7 +573,7 @@
             <span class="rec-icon">📦</span>
             <div>
               <h3>Export Full Node Backup</h3>
-              <p>Download complete JSON snapshot containing all 32 scene presets, timeline sequences, schedules, and device configuration.</p>
+              <p>Download a complete JSON snapshot containing all 32 scenes, timeline data, schedules, and device configuration.</p>
             </div>
           </div>
           <button
