@@ -213,7 +213,7 @@
 </div>
 
 <style>
-  .page { max-width: 900px; }
+  .page { width:100%; max-width: 980px; margin:0 auto; }
   .page-header { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 1.5rem; gap: 1rem; flex-wrap: wrap; }
   h1 { margin: 0; font-size: 1.6rem; font-weight: 700; color: #f5f5f7; }
   .sub { margin: .25rem 0 0; color: #a1a1a6; font-size: .85rem; }
@@ -222,7 +222,7 @@
   .err-box { background: rgba(255,69,58,.12); border: 1px solid rgba(255,69,58,.3); border-radius: 12px; color: #ff453a; padding: 1rem; font-size: .85rem; font-family: monospace; }
   .dash-grid { display: grid; grid-template-columns: 180px 1fr; grid-template-rows: auto auto; gap: 1rem; }
   @media (max-width: 600px) { .dash-grid { grid-template-columns: 1fr; } }
-  .card { background: rgba(29,29,31,.75); backdrop-filter: blur(16px); border: 1px solid rgba(255,255,255,.08); border-radius: 20px; padding: 1.25rem; }
+  .card { background: var(--dash-surface); backdrop-filter: blur(18px); border: 1px solid var(--dash-border); border-radius: var(--dash-radius-lg); padding: 1.25rem; box-shadow: var(--dash-shadow); }
   h2 { margin: 0 0 1rem; font-size: .95rem; font-weight: 600; color: #f5f5f7; }
   .gauge-card { grid-row: 1 / 2; display: flex; flex-direction: column; align-items: center; gap: .5rem; }
   .gauge-svg { width: 100%; max-width: 160px; }
