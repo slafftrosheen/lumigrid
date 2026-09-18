@@ -445,7 +445,7 @@
             </div>
             <div class="stat-row">
               <span>Active Scene</span>
-              <span class="stat-val mono">P{health.output.active_preset}</span>
+              <span class="stat-val mono">Scene {health.output.active_preset + 1}</span>
             </div>
             <div class="stat-row">
               <span>Live Render Objects</span>
