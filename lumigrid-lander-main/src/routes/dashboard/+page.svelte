@@ -543,7 +543,7 @@
           <span class="btn-icon">⟳</span>
           <span class="btn-text">
             <strong>Toggle Auto-Loop</strong>
-            <small>{liveState.status?.autoLoop ? 'Disable auto-cycling' : 'Enable sequence loop'}</small>
+            <small>{liveState.status?.autoLoop ? 'Disable auto-cycling' : 'Enable timeline loop'}</small>
           </span>
         </button>
 
