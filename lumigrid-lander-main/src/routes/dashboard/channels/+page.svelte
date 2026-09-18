@@ -319,7 +319,7 @@
   {:else if error}
     <div class="err-box">
       <strong>Failed to load channels:</strong> {error}
-      <br><small>Ensure the node is reachable and running firmware v2.0+ with /api/v1/channels support.</small>
+      <br><small>Ensure the selected node is online and reachable, then refresh.</small>
     </div>
 
   {:else}
