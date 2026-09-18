@@ -277,6 +277,60 @@
 <style>
   :global(body) { margin: 0; }
 
+  :global(.dash-root),
+  :global(.pin-wall) {
+    color-scheme: dark;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  :global(.dash-root ::selection),
+  :global(.pin-wall ::selection) {
+    background: rgba(var(--dash-accent-rgb), .32);
+    color: #fff;
+  }
+
+  :global(.dash-root button),
+  :global(.dash-root a),
+  :global(.dash-root input),
+  :global(.dash-root select),
+  :global(.dash-root textarea),
+  :global(.dash-root [role="button"]),
+  :global(.pin-wall button),
+  :global(.pin-wall input) {
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  :global(.dash-root button:focus-visible),
+  :global(.dash-root a:focus-visible),
+  :global(.dash-root input:focus-visible),
+  :global(.dash-root select:focus-visible),
+  :global(.dash-root textarea:focus-visible),
+  :global(.dash-root [role="button"]:focus-visible),
+  :global(.pin-wall button:focus-visible),
+  :global(.pin-wall input:focus-visible) {
+    outline: 2px solid var(--dash-accent);
+    outline-offset: 2px;
+    box-shadow: 0 0 0 4px rgba(var(--dash-accent-rgb), .12);
+  }
+
+  :global(.dash-root input),
+  :global(.dash-root select),
+  :global(.dash-root textarea) {
+    caret-color: var(--dash-accent);
+  }
+
+  :global(.dash-root select option) {
+    background: #171719;
+    color: #f5f5f7;
+  }
+
+  :global(.dash-root button:disabled),
+  :global(.dash-root input:disabled),
+  :global(.dash-root select:disabled) {
+    cursor: not-allowed;
+  }
+
   /* The public Lander intentionally gives headings animated gradients and all
      buttons a 44px minimum. The operator app uses the same design tokens, but
      needs denser controls and calmer typography. Keep those concerns isolated. */
@@ -352,7 +406,7 @@
     margin-bottom: .75rem;
     box-sizing: border-box;
   }
-  .pin-input:focus { outline: none; border-color: #ff2d55; box-shadow: 0 0 0 2px rgba(255,45,85,.25); }
+  .pin-input:focus-visible { border-color: var(--dash-accent); }
   .pin-error { color: #ff453a; font-size: .85rem; margin: -.4rem 0 .6rem; }
   .pin-btn {
     width: 100%;
@@ -438,7 +492,7 @@
     padding: .3rem .45rem;
     font-family: monospace;
   }
-  .node-add-input:focus { outline: none; border-color: #ff2d55; }
+  .node-add-input:focus-visible { border-color: var(--dash-accent); }
   .icon-btn {
     background: rgba(255,45,85,.75);
     color: #fff;
@@ -605,6 +659,20 @@
     color: #00d4ff;
     border-color: rgba(0,212,255,.2);
   }
+  @media (prefers-reduced-motion: reduce) {
+    :global(.dash-root *),
+    :global(.dash-root *::before),
+    :global(.dash-root *::after),
+    :global(.pin-wall *),
+    :global(.pin-wall *::before),
+    :global(.pin-wall *::after) {
+      scroll-behavior: auto !important;
+      animation-duration: .01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: .01ms !important;
+    }
+  }
+
   @media (max-width: 980px) {
     .dash-nav { width: 196px; padding-inline: .75rem; }
     .nav-link { padding-inline: .55rem; font-size: .82rem; }
