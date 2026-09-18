@@ -248,12 +248,12 @@
       </div>
     </header>
 
-    <!-- Visual 8-Zone Beat Grid -->
+    <!-- Visual 16-Channel Beat Grid -->
     <div class="tl-grid-wrap">
       <table class="tl-grid">
         <thead>
           <tr>
-            <th class="col-track">Zone / Track</th>
+            <th class="col-track">Track</th>
             <th class="col-ch">Channel</th>
             {#each Array(STEP_COUNT) as _, i}
               <th class="col-step">{(i + 1).toString().padStart(2, '0')}</th>
@@ -333,7 +333,7 @@
       <section class="panel step-editor">
         {#if editTrack && editStep}
           <div class="panel-header">
-            <h3>Zone {selectedTrack + 1} · Step {selectedStep + 1}</h3>
+            <h3>Track {selectedTrack + 1} · {CHANNEL_PORTS[editTrack.channelId] ?? editTrack.channelId} · Step {selectedStep + 1}</h3>
             <div class="panel-header-actions">
               <label class="inline-toggle">
                 <input
@@ -383,7 +383,7 @@
             </div>
           {:else}
             <p class="editor-inactive">
-              Step {selectedStep + 1} is currently inactive for Zone {selectedTrack + 1} (active range: 1–{editTrack.numSteps}). Check "Step Active" to enable it.
+              Step {selectedStep + 1} is currently inactive for {CHANNEL_PORTS[editTrack.channelId] ?? `channel ${editTrack.channelId}`} (active range: 1–{editTrack.numSteps}). Check "Step Active" to enable it.
             </p>
           {/if}
         {/if}
