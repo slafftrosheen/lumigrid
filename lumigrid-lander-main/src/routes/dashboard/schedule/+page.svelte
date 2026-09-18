@@ -166,6 +166,7 @@
           class="week-row"
           class:disabled={!entry.enabled}
           class:selected={selectedIdx === i}
+          aria-pressed={selectedIdx === i}
           onclick={() => selectedIdx = i}
           type="button"
         >
@@ -234,6 +235,7 @@
               <button
                 class="day-btn"
                 class:active={isDayActive(editEntry, idx)}
+                aria-pressed={isDayActive(editEntry, idx)}
                 onclick={() => toggleDay(editEntry, idx)}
                 title={DAY_FULL[idx]}
               >
