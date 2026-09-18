@@ -35,13 +35,13 @@
     enabled: false,
     name: '',
     addressableType: 'WS2812',
-    pixelCount: 60,
+    pixelCount: 0,
     pixelOrder: 'GRB',
     maxBrightness: 255,
     gammaCorrection: true,
     powerLimitW: 0,
-    dmxUniverse: 1,
-    dmxStartChannel: 1,
+    dmxUniverse: 0,
+    dmxStartChannel: 0,
     dmxMode: 0,
     groupBits: [false, false, false, false, false, false, false, false],
     pwmLevel: 0,
@@ -179,7 +179,7 @@
       enabled: ch.enabled,
       name: ch.name || '',
       addressableType: ch.addressable?.type ?? 'WS2812',
-      pixelCount: ch.addressable?.pixels || 60,
+      pixelCount: ch.addressable?.pixels ?? 0,
       pixelOrder: ch.addressable?.pixelOrder ?? 'GRB',
       maxBrightness: ch.maxBrightness ?? 255,
       gammaCorrection: ch.gammaCorrection ?? true,
@@ -223,17 +223,27 @@
       const typeNum = editForm.addressableType === 'SK6812' ? 1 : 0;
 
       const idx = selectedChannel.index;
+      const pixelCount = idx < 8
+        ? Math.max(0, Math.min(1024, Math.trunc(editForm.pixelCount || 0)))
+        : 0;
+
+      if (idx < 8 && editForm.enabled && pixelCount < 1) {
+        toastMsg(`Set a pixel count before enabling ${selectedChannel.port}`);
+        savingChannel = false;
+        return;
+      }
+
       config.channels[idx] = {
         name: editForm.name.slice(0, 23),
         enabled: editForm.enabled,
         addressableType: typeNum,
         pixelOrder: orderNum,
-        pixelCount: idx < 8 ? Math.max(1, editForm.pixelCount) : 0,
+        pixelCount,
         maxBrightness: Math.max(0, Math.min(255, editForm.maxBrightness)),
         gammaCorrection: editForm.gammaCorrection,
         maxMilliwatts: Math.max(0, editForm.powerLimitW * 1000),
-        dmxUniverse: Math.max(1, editForm.dmxUniverse),
-        dmxStartChannel: Math.max(1, Math.min(512, editForm.dmxStartChannel)),
+        dmxUniverse: Math.max(0, Math.min(63999, Math.trunc(editForm.dmxUniverse || 0))),
+        dmxStartChannel: Math.max(0, Math.min(512, Math.trunc(editForm.dmxStartChannel || 0))),
         dmxMode: editForm.dmxMode,
       };
 
@@ -368,7 +378,7 @@
             </div>
 
             <div class="card-footer">
-              <span class="hw-spec">RMT{ch.hardwareId} · GPIO{ch.gpio}</span>
+              <span class="hw-spec">Addressable data output</span>
               <button
                 class="test-btn"
                 class:flashing={isTesting}
@@ -447,7 +457,7 @@
             </div>
 
             <div class="card-footer">
-              <span class="hw-spec">PCA9685 ch{ch.hardwareId}</span>
+              <span class="hw-spec">12-bit PWM output</span>
               <button
                 class="test-btn"
                 class:flashing={isTesting}
@@ -533,11 +543,13 @@
                 <span class="field-label">Pixel Count</span>
                 <input
                   type="number"
-                  min="1"
+                  min="0"
                   max="1024"
+                  placeholder="0 = unconfigured"
                   bind:value={editForm.pixelCount}
                   class="text-input"
                 />
+                <span class="input-hint">Set the connected strip length. 0 keeps this port unconfigured.</span>
               </label>
 
               <label class="form-field">
@@ -668,39 +680,24 @@
             {/each}
           </div>
 
-          <!-- Immutable Hardware Details (Read-only) -->
+          <!-- Fixed physical identity -->
           <div class="section-divider">
-            <span>Hardware Details (Immutable)</span>
+            <span>Connector Identity</span>
           </div>
 
           <div class="hw-readout">
             <div class="hw-item">
-              <span class="hw-k">Connector Port</span>
+              <span class="hw-k">Physical Port</span>
               <span class="hw-v">{selectedChannel.port}</span>
             </div>
             <div class="hw-item">
-              <span class="hw-k">Channel Index</span>
-              <span class="hw-v">{selectedChannel.index} (0..15)</span>
+              <span class="hw-k">Output Type</span>
+              <span class="hw-v">{selectedChannel.kind === 'addressable' ? 'Addressable LED' : 'PWM Dimmer'}</span>
             </div>
             <div class="hw-item">
-              <span class="hw-k">Hardware Kind</span>
-              <span class="hw-v">{selectedChannel.kind.toUpperCase()}</span>
+              <span class="hw-k">Controller Mapping</span>
+              <span class="hw-v">Fixed · not editable</span>
             </div>
-            {#if selectedChannel.kind === 'addressable'}
-              <div class="hw-item">
-                <span class="hw-k">ESP32 RMT Lane</span>
-                <span class="hw-v">RMT {selectedChannel.hardwareId}</span>
-              </div>
-              <div class="hw-item">
-                <span class="hw-k">ESP32 GPIO Pin</span>
-                <span class="hw-v">GPIO {selectedChannel.gpio}</span>
-              </div>
-            {:else}
-              <div class="hw-item">
-                <span class="hw-k">PCA9685 Driver</span>
-                <span class="hw-v">Channel {selectedChannel.hardwareId}</span>
-              </div>
-            {/if}
           </div>
         </div>
 
