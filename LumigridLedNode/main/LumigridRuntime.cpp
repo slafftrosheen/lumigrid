@@ -426,12 +426,15 @@ esp_err_t LumigridRuntime::start() {
     if (ap_netif) {
         esp_netif_ip_info_t ip_info;
         if (esp_netif_get_ip_info(ap_netif, &ip_info) == ESP_OK) {
-            ESP_LOGI("lumigrid",
-                "=== UI READY === Connect to '%s' then open http://" IPSTR " ===",
-                wifi_cfg.ap_ssid.c_str(),
-                IP2STR(&ip_info.ip));
+            ESP_LOGW("lumigrid", "==================================================");
+            ESP_LOGW("lumigrid", "  ACCESS POINT READY");
+            ESP_LOGW("lumigrid", "  SSID:     %s", wifi_cfg.ap_ssid.c_str());
+            ESP_LOGW("lumigrid", "  Password: %s", wifi_cfg.ap_password.empty() ? "(Open / None)" : wifi_cfg.ap_password.c_str());
+            ESP_LOGW("lumigrid", "  Web UI:   http://" IPSTR, IP2STR(&ip_info.ip));
+            ESP_LOGW("lumigrid", "==================================================");
         }
     }
+
 
     lifecycle_state_ = RuntimeLifecycle::ServicesStarting;
 

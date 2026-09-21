@@ -26,38 +26,57 @@ esp_err_t WifiService::start(const WifiConfig& config,
         err = nvs_flash_init();
     }
     ESP_RETURN_ON_ERROR(err, kTag, "nvs init");
-    ESP_RETURN_ON_ERROR(esp_netif_init(), kTag, "netif");
-    ESP_RETURN_ON_ERROR(esp_event_loop_create_default(), kTag, "event loop");
 
-    esp_netif_create_default_wifi_sta();
-    esp_netif_create_default_wifi_ap();
+    esp_err_t netif_err = esp_netif_init();
+    if (netif_err != ESP_OK && netif_err != ESP_ERR_INVALID_STATE) {
+        ESP_RETURN_ON_ERROR(netif_err, kTag, "netif");
+    }
 
-    wifi_init_config_t init_cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_RETURN_ON_ERROR(esp_wifi_init(&init_cfg), kTag, "wifi init");
+    esp_err_t loop_err = esp_event_loop_create_default();
+    if (loop_err != ESP_OK && loop_err != ESP_ERR_INVALID_STATE) {
+        ESP_RETURN_ON_ERROR(loop_err, kTag, "event loop");
+    }
 
-    ESP_RETURN_ON_ERROR(
-        esp_event_handler_instance_register(
-            WIFI_EVENT,
-            ESP_EVENT_ANY_ID,
-            &WifiService::event_handler,
-            this,
-            nullptr
-        ),
-        kTag,
-        "wifi event"
-    );
+    if (!sta_netif_) {
+        sta_netif_ = esp_netif_create_default_wifi_sta();
+    }
+    if (!ap_netif_) {
+        ap_netif_ = esp_netif_create_default_wifi_ap();
+    }
 
-    ESP_RETURN_ON_ERROR(
-        esp_event_handler_instance_register(
-            IP_EVENT,
-            IP_EVENT_STA_GOT_IP,
-            &WifiService::event_handler,
-            this,
-            nullptr
-        ),
-        kTag,
-        "ip event"
-    );
+    if (!wifi_init_done_) {
+        wifi_init_config_t init_cfg = WIFI_INIT_CONFIG_DEFAULT();
+        ESP_RETURN_ON_ERROR(esp_wifi_init(&init_cfg), kTag, "wifi init");
+        wifi_init_done_ = true;
+    }
+
+    if (!wifi_event_instance_) {
+        ESP_RETURN_ON_ERROR(
+            esp_event_handler_instance_register(
+                WIFI_EVENT,
+                ESP_EVENT_ANY_ID,
+                &WifiService::event_handler,
+                this,
+                &wifi_event_instance_
+            ),
+            kTag,
+            "wifi event"
+        );
+    }
+
+    if (!ip_event_instance_) {
+        ESP_RETURN_ON_ERROR(
+            esp_event_handler_instance_register(
+                IP_EVENT,
+                IP_EVENT_STA_GOT_IP,
+                &WifiService::event_handler,
+                this,
+                &ip_event_instance_
+            ),
+            kTag,
+            "ip event"
+        );
+    }
 
     switch (config.mode) {
         case WifiMode::StaOnly:
@@ -99,10 +118,19 @@ esp_err_t WifiService::start_ap() {
                  sizeof(ap_cfg.ap.password) - 1);
 
     ap_cfg.ap.ssid_len = config_.ap_ssid.size();
+    ap_cfg.ap.channel = (config_.ap_channel >= 1 && config_.ap_channel <= 13) ? config_.ap_channel : 1;
     ap_cfg.ap.max_connection = 4;
-    ap_cfg.ap.authmode = config_.ap_password.empty()
-        ? WIFI_AUTH_OPEN
-        : WIFI_AUTH_WPA2_PSK;
+    if (config_.ap_password.empty() || config_.ap_password.length() < 8) {
+        ap_cfg.ap.authmode = WIFI_AUTH_OPEN;
+        ap_cfg.ap.password[0] = '\0';
+    } else {
+        ap_cfg.ap.authmode = WIFI_AUTH_WPA2_PSK;
+    }
+
+    ESP_LOGI(kTag, "Starting SoftAP: SSID='%s', channel=%u, authmode=%s",
+             ap_cfg.ap.ssid,
+             ap_cfg.ap.channel,
+             (ap_cfg.ap.authmode == WIFI_AUTH_OPEN) ? "OPEN" : "WPA2_PSK");
 
     ESP_RETURN_ON_ERROR(esp_wifi_set_mode(WIFI_MODE_AP), kTag, "set ap mode");
     ESP_RETURN_ON_ERROR(esp_wifi_set_config(WIFI_IF_AP, &ap_cfg), kTag, "ap cfg");
@@ -149,7 +177,30 @@ void WifiService::event_handler(void* arg,
         self->has_ip_ = true;
         self->state_ = WifiState::Connected;
         if (self->callback_) self->callback_(self->state_);
+        return;
     }
+
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_AP_START) {
+        ESP_LOGI(kTag, "SoftAP started successfully (SSID: %s, Channel: %d)",
+                 self->config_.ap_ssid.c_str(), self->config_.ap_channel);
+        self->state_ = WifiState::ApActive;
+        self->has_ip_ = true;
+        if (self->callback_) self->callback_(self->state_);
+        return;
+    }
+
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_AP_STACONNECTED) {
+        auto* event = static_cast<wifi_event_ap_staconnected_t*>(event_data);
+        ESP_LOGI(kTag, "Station joined SoftAP: aid=%d", event->aid);
+        return;
+    }
+
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_AP_STADISCONNECTED) {
+        auto* event = static_cast<wifi_event_ap_stadisconnected_t*>(event_data);
+        ESP_LOGI(kTag, "Station left SoftAP: aid=%d", event->aid);
+        return;
+    }
+
 }
 
 WifiState WifiService::state() const {
@@ -168,3 +219,4 @@ esp_err_t WifiService::stop() {
 }
 
 } // namespace lg
+

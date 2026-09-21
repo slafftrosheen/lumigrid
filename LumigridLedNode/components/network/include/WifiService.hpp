@@ -7,6 +7,7 @@
 
 #include "esp_err.h"
 #include "esp_event.h"
+#include "esp_netif_types.h"
 
 namespace lg {
 
@@ -22,6 +23,7 @@ struct WifiConfig {
     std::string sta_password;
     std::string ap_ssid = "LumiGrid-Factory";
     std::string ap_password; // Configured at runtime, non-universal
+    uint8_t ap_channel = 1;
     uint8_t max_retry = 10;
 };
 
@@ -58,6 +60,13 @@ private:
     std::atomic<WifiState> state_{WifiState::Idle};
     uint8_t retries_ = 0;
     std::atomic<bool> has_ip_{false};
+
+    esp_netif_t* sta_netif_ = nullptr;
+    esp_netif_t* ap_netif_ = nullptr;
+    bool wifi_init_done_ = false;
+    esp_event_handler_instance_t wifi_event_instance_ = nullptr;
+    esp_event_handler_instance_t ip_event_instance_ = nullptr;
 };
 
 } // namespace lg
+
