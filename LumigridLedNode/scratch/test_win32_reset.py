@@ -3,7 +3,7 @@ import ctypes
 from ctypes import wintypes
 import time
 
-port = "COM7"
+port = "COM3"
 baud = 115200
 
 SETRTS = 3

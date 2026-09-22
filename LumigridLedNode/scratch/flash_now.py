@@ -2,13 +2,13 @@ import subprocess
 import sys
 import time
 
-esptool = r"C:\Users\alisi\.platformio\packages\tool-esptoolpy\esptool.py"
-python_exe = r"C:\Python314\python.exe"
+esptool = r"C:\Users\slavd\.platformio\packages\tool-esptoolpy\esptool.py"
+python_exe = r"C:\Users\slavd\.platformio\penv\Scripts\python.exe"
 
 cmd = [
     python_exe, "-u",
     esptool,
-    "--port", "COM7",
+    "--port", "COM3",
     "--baud", "460800",
     "--before", "default_reset",
     "--after", "hard_reset",
@@ -24,7 +24,7 @@ cmd = [
 ]
 
 print("=" * 65, flush=True)
-print("  ESP32 FLASH TOOL READY ON COM7 (460800 baud)", flush=True)
+print("  ESP32 FLASH TOOL READY ON COM3 (460800 baud)", flush=True)
 print("=" * 65, flush=True)
 print("  CRITICAL BUTTON TIMING:", flush=True)
 print("  1. Press and HOLD the [BOOT] (or IO0) button.", flush=True)

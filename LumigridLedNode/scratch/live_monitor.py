@@ -3,7 +3,7 @@ import serial.tools.list_ports
 import time
 import sys
 
-port = 'COM7'
+port = 'COM3'
 baud = 115200
 
 print(f"Monitoring {port} (will auto-reconnect on USB unplug/replug)...", flush=True)

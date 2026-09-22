@@ -3,10 +3,10 @@ import time
 import sys
 
 cmd = [
-    r"C:\Python314\python.exe",
-    r"C:\Users\alisi\.platformio\packages\tool-esptoolpy\esptool.py",
+    r"C:\Users\slavd\.platformio\penv\Scripts\python.exe",
+    r"C:\Users\slavd\.platformio\packages\tool-esptoolpy\esptool.py",
     "--chip", "esp32",
-    "--port", "COM7",
+    "--port", "COM3",
     "--baud", "115200",
     "--before", "default_reset",
     "--after", "hard_reset",
@@ -16,12 +16,13 @@ cmd = [
     "--flash_size", "4MB",
     "0x1000", r".pio\build\factory\bootloader.bin",
     "0x8000", r".pio\build\factory\partitions.bin",
+    "0xd000", r".pio\build\factory\ota_data_initial.bin",
     "0x10000", r".pio\build\factory\firmware.bin"
 ]
 
 print("=== Flashing Loop: Hold the BOOT button on the ESP32 until connection succeeds ===")
-for attempt in range(1, 6):
-    print(f"\n>>> Attempt {attempt}/5: Connecting to COM7...")
+for attempt in range(1, 15):
+    print(f"\n>>> Attempt {attempt}/14: Connecting to COM3...")
     res = subprocess.run(cmd)
     if res.returncode == 0:
         print("\n========================================")
@@ -30,5 +31,5 @@ for attempt in range(1, 6):
         sys.exit(0)
     time.sleep(1)
 
-print("Failed after 5 attempts.")
+print("Failed after attempts.")
 sys.exit(1)
