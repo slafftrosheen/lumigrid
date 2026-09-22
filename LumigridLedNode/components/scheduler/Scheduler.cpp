@@ -1,4 +1,3 @@
-// components/scheduler/Scheduler.cpp
 #include "Scheduler.hpp"
 #include "esp_log.h"
 #include "esp_sntp.h"
@@ -13,8 +12,9 @@ namespace lg {
 Scheduler::Scheduler(
     ConfigStore& config,
     LightingRuntime& engine,
-    ClockDiscipline& clock
-) : config_(config), engine_(engine), clock_(clock) {}
+    ClockDiscipline& clock,
+    CueRunner* cue_runner
+) : config_(config), engine_(engine), clock_(clock), cue_runner_(cue_runner) {}
 
 esp_err_t Scheduler::start(const char* timezone) {
     if (running_) {
@@ -32,6 +32,14 @@ esp_err_t Scheduler::start(const char* timezone) {
     ESP_LOGI(TAG, "SNTP initialized, waiting for sync...");
 
     running_ = true;
+    if (shutdown_sem_ == nullptr) {
+        shutdown_sem_ = xSemaphoreCreateBinary();
+        if (shutdown_sem_ == nullptr) {
+            running_ = false;
+            esp_sntp_stop();
+            return ESP_ERR_NO_MEM;
+        }
+    }
     const BaseType_t created = xTaskCreatePinnedToCore(
         task_entry, "scheduler", 4096, this, 2, &task_handle_, 0
     );
@@ -46,32 +54,44 @@ esp_err_t Scheduler::start(const char* timezone) {
 }
 
 esp_err_t Scheduler::stop() {
+    if (!running_) return ESP_OK;
     running_ = false;
+    if (task_handle_) {
+        xTaskAbortDelay(task_handle_);
+    }
     esp_sntp_stop();
+    if (shutdown_sem_ && task_handle_) {
+        if (xSemaphoreTake(shutdown_sem_, pdMS_TO_TICKS(3000)) != pdTRUE) {
+            ESP_LOGW(TAG, "Scheduler task did not exit within 3s — possible resource leak");
+        }
+    }
+    task_handle_ = nullptr;
     return ESP_OK;
 }
 
 void Scheduler::task_entry(void* arg) {
     static_cast<Scheduler*>(arg)->task();
+    Scheduler* self = static_cast<Scheduler*>(arg);
+    if (self->shutdown_sem_) {
+        xSemaphoreGive(self->shutdown_sem_);
+    }
     vTaskDelete(nullptr);
 }
 
 void Scheduler::task() {
     for (int attempt = 0; attempt < 30; ++attempt) {
+        if (!running_) return;
         if (clock_.has_epoch()) {
             time_synced_ = true;
             break;
         }
         vTaskDelay(pdMS_TO_TICKS(2000));
-        time_t now_epoch;
-        time(&now_epoch);
-        struct tm now_tm;
-        localtime_r(&now_epoch, &now_tm);
+        if (!running_) return;
 
-        if (now_tm.tm_year > (2024 - 1900)) {
-            clock_.set_epoch(
-                uint64_t(now_epoch) * 1000ULL
-            );
+        if (esp_sntp_get_sync_status() == SNTP_SYNC_STATUS_COMPLETED) {
+            time_t now_epoch;
+            time(&now_epoch);
+            clock_.set_epoch(uint64_t(now_epoch) * 1000ULL);
             time_synced_ = true;
             break;
         }
@@ -83,14 +103,12 @@ void Scheduler::task() {
 
     TickType_t xLastWakeTime = xTaskGetTickCount();
     while (running_) {
-        vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(50)); // Evaluate 20x a second
+        vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(50));
 
         if (!time_synced_) {
-            time_t now_epoch;
-            time(&now_epoch);
-            struct tm now_tm;
-            localtime_r(&now_epoch, &now_tm);
-            if (now_tm.tm_year > (2024 - 1900)) {
+            if (esp_sntp_get_sync_status() == SNTP_SYNC_STATUS_COMPLETED) {
+                time_t now_epoch;
+                time(&now_epoch);
                 clock_.set_epoch(uint64_t(now_epoch) * 1000ULL);
                 time_synced_ = true;
             } else if (clock_.has_epoch()) {
@@ -100,6 +118,9 @@ void Scheduler::task() {
 
         const uint64_t clock_ms = clock_.now_ms();
         refresh_config(clock_ms);
+        if (cue_runner_) {
+            cue_runner_->update(static_cast<uint32_t>(clock_ms));
+        }
         evaluate_calendar(calendar_, clock_ms);
 
         if (sequence_.bpm == 0 ||
@@ -166,12 +187,23 @@ void Scheduler::evaluate_calendar(
                 step_index = 255;
             }
             ESP_LOGI(TAG, "Calendar started sequence");
+        } else if (entry.action == CalendarAction::CueList) {
+            calendar_sequence_active_ = false;
+            engine_.release_control(ControlSource::Scheduler);
+            engine_.release_control(ControlSource::ManualOverride);
+            if (cue_runner_) {
+                cue_runner_->start(entry.cue_list_index, 0, static_cast<uint32_t>(clock_ms));
+                ESP_LOGI(TAG, "Calendar triggered cue list %u", entry.cue_list_index);
+            }
         } else {
             calendar_sequence_active_ = false;
             engine_.release_control(ControlSource::Scheduler);
             engine_.release_control(ControlSource::ManualOverride);
-            engine_.activate_scene(entry.preset_index);
-            ESP_LOGI(TAG, "Calendar activated preset %u", entry.preset_index);
+            if (engine_.activate_scene_checked(entry.preset_index)) {
+                ESP_LOGI(TAG, "Calendar activated preset %u", entry.preset_index);
+            } else {
+                ESP_LOGW(TAG, "Calendar rejected preset %u: scene unavailable or runtime stopping", entry.preset_index);
+            }
         }
     }
 }
@@ -184,15 +216,15 @@ void Scheduler::evaluate(const Sequence& seq, uint64_t clock_ms) {
     ));
 
     SceneConfig active_composite;
-    // Just use a base preset name for reference
-    strncpy(active_composite.name, "Sequenced", sizeof(active_composite.name));
+    strncpy(active_composite.name, "Sequenced", sizeof(active_composite.name) - 1);
+    active_composite.name[sizeof(active_composite.name) - 1] = '\0';
     active_composite.global_brightness = 255;
     active_composite.transition_ms = 0;
 
     bool any_track_enabled = false;
     bool state_changed = false;
 
-    for (uint8_t i = 0; i < 8; ++i) {
+    for (uint8_t i = 0; i < 16; ++i) {
         const auto& track = seq.tracks[i];
         if (!track.enabled || track.num_steps == 0) {
             if (last_step_index_[i] != 255) {
@@ -228,8 +260,8 @@ void Scheduler::evaluate(const Sequence& seq, uint64_t clock_ms) {
 
         uint8_t preset_idx = track.steps[current_step].preset_index;
         SceneConfig p;
-        if (config_.load_scene(preset_idx, p) == ESP_OK) {
-            active_composite.zones[track.channel_id] = p.zones[track.channel_id];
+        if (config_.load_scene(preset_idx, p) == ESP_OK && track.channel_id < 16) {
+            active_composite.channels[track.channel_id] = p.channels[track.channel_id];
             active_composite.global_brightness = std::min(
                 active_composite.global_brightness,
                 p.global_brightness

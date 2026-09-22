@@ -60,7 +60,6 @@ private:
     std::atomic<WifiState> state_{WifiState::Idle};
     uint8_t retries_ = 0;
     std::atomic<bool> has_ip_{false};
-
     esp_netif_t* sta_netif_ = nullptr;
     esp_netif_t* ap_netif_ = nullptr;
     bool wifi_init_done_ = false;

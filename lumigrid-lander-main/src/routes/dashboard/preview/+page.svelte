@@ -8,6 +8,7 @@
   let gifName = $state('');
   let playing = $state(false);
   let error   = $state('');
+  const MAX_GIF_BYTES = 20 * 1024 * 1024;
   let canvasEl = $state<HTMLCanvasElement | null>(null);
   let previewEl = $state<HTMLCanvasElement | null>(null);
   let rafId: number | null = null;
@@ -71,26 +72,47 @@
     rafId = requestAnimationFrame(renderFrame);
   }
 
-  function onFile(e: Event) {
-    const files = (e.target as HTMLInputElement).files;
-    if (!files?.length) return;
+  function loadGifFile(file: File) {
+    const isGif = file.name.toLowerCase().endsWith('.gif')
+      && (!file.type || file.type === 'image/gif');
+
+    if (!isGif) {
+      error = 'Choose an animated GIF file.';
+      return;
+    }
+    if (file.size <= 0) {
+      error = 'The selected GIF is empty.';
+      return;
+    }
+    if (file.size > MAX_GIF_BYTES) {
+      error = 'GIF is too large for preview. Use a file under 20 MB.';
+      return;
+    }
+
     stopPlay();
     error = '';
-    gifName = files[0].name;
+    gifName = file.name;
+
     const reader = new FileReader();
+    reader.onerror = () => {
+      error = 'Could not read the selected GIF.';
+    };
     reader.onload = (ev) => {
       const url = ev.target?.result as string;
       gifUrl = url;
-      // Create image element for GIF playback
+
       const img = new Image();
+      img.onerror = () => {
+        error = 'The selected file could not be decoded as a GIF.';
+        gifUrl = '';
+        gifName = '';
+      };
       img.onload = () => {
         imgEl = img;
-        // Size hidden canvas to image natural size (or 640×360 max)
         if (canvasEl) {
           canvasEl.width  = Math.min(img.naturalWidth  || 640, 1280);
           canvasEl.height = Math.min(img.naturalHeight || 360, 720);
         }
-        // Size preview canvas
         if (previewEl) {
           const CELL = 18, GAP = 3;
           previewEl.width  = gridW * (CELL + GAP);
@@ -100,18 +122,18 @@
       };
       img.src = url;
     };
-    reader.readAsDataURL(files[0]);
+    reader.readAsDataURL(file);
+  }
+
+  function onFile(e: Event) {
+    const file = (e.target as HTMLInputElement).files?.[0];
+    if (file) loadGifFile(file);
   }
 
   function onDrop(e: DragEvent) {
     e.preventDefault();
     const file = e.dataTransfer?.files[0];
-    if (!file || !file.name.toLowerCase().endsWith('.gif')) { error = 'Only GIF files are supported'; return; }
-    const input = document.createElement('input');
-    input.type = 'file';
-    const fakeEvt = new Event('change');
-    Object.defineProperty(fakeEvt, 'target', { value: { files: e.dataTransfer?.files } });
-    onFile(fakeEvt);
+    if (file) loadGifFile(file);
   }
 
   function onDragOver(e: DragEvent) { e.preventDefault(); }
@@ -205,8 +227,15 @@
 </div>
 
 <style>
-  .page { max-width: 1000px; }
-  .page-header { margin-bottom: 1.5rem; }
+  .page { width:100%; max-width: 1080px; margin:0 auto; }
+  .page-header {
+    margin-bottom: 1.25rem;
+    padding: .85rem 1rem;
+    background: rgba(22,22,24,.86);
+    border: 1px solid var(--dash-border);
+    border-radius: var(--dash-radius-lg);
+    box-shadow: var(--dash-shadow);
+  }
   h1 { margin: 0; font-size: 1.6rem; font-weight: 700; color: #f5f5f7; }
   .sub { margin: .25rem 0 0; color: #a1a1a6; font-size: .85rem; }
   .err-box { background: rgba(255,69,58,.12); border: 1px solid rgba(255,69,58,.3); border-radius: 12px; color: #ff453a; padding: .9rem 1rem; font-size: .85rem; margin-bottom: 1rem; }
@@ -215,10 +244,11 @@
   @media (max-width: 700px) { .layout { grid-template-columns: 1fr; } }
 
   .controls-card, .preview-card {
-    background: rgba(29,29,31,.72);
-    backdrop-filter: blur(16px);
-    border: 1px solid rgba(255,255,255,.08);
-    border-radius: 18px;
+    background: linear-gradient(180deg, rgba(29,29,31,.74), rgba(18,18,20,.74));
+    backdrop-filter: blur(18px);
+    border: 1px solid var(--dash-border);
+    border-radius: var(--dash-radius-lg);
+    box-shadow: var(--dash-shadow);
     padding: 1.25rem;
     display: flex;
     flex-direction: column;
@@ -229,7 +259,7 @@
   .field { display: flex; flex-direction: column; gap: .25rem; }
   .field span { font-size: .72rem; font-weight: 600; color: #a1a1a6; text-transform: uppercase; letter-spacing: .05em; }
   .field input { background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.12); border-radius: 8px; color: #f5f5f7; font-size: .9rem; padding: .4rem .65rem; width: 80px; }
-  .field input:focus { outline: none; border-color: #ff2d55; }
+  .field input:focus-visible { border-color: var(--dash-accent); box-shadow: 0 0 0 3px rgba(var(--dash-accent-rgb),.12); }
 
   .drop-zone {
     border: 2px dashed rgba(255,255,255,.15);
@@ -239,15 +269,15 @@
     cursor: pointer;
     transition: border-color .2s, background .2s;
   }
-  .drop-zone:hover { border-color: #ff2d55; background: rgba(255,45,85,.06); }
+  .drop-zone:hover { border-color: var(--dash-accent); background: rgba(var(--dash-accent-rgb),.06); }
   .drop-icon { font-size: 2rem; margin-bottom: .4rem; }
   .drop-text { margin: 0; font-size: .82rem; color: #f5f5f7; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .drop-hint { margin: .2rem 0 0; font-size: .7rem; color: #a1a1a6; }
   .file-input { display: none; }
 
   .playback-btns { display: flex; gap: .5rem; }
-  .play-btn { flex: 1; background: rgba(255,45,85,.85); border: none; border-radius: 8px; color: #fff; font-weight: 600; font-size: .85rem; padding: .55rem; cursor: pointer; transition: background .2s; }
-  .play-btn:hover:not(:disabled) { background: #ff3b30; }
+  .play-btn { flex: 1; background: var(--dash-accent); border: none; border-radius: 8px; color: #fff; font-weight: 600; font-size: .85rem; padding: .55rem; cursor: pointer; transition: background .2s; }
+  .play-btn:hover:not(:disabled) { background: var(--dash-accent-hover); }
   .play-btn:disabled { opacity: .4; cursor: default; }
   .stop-btn { flex: 1; background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.12); border-radius: 8px; color: #f5f5f7; font-size: .85rem; padding: .55rem; cursor: pointer; }
   .stop-btn:disabled { opacity: .4; cursor: default; }
@@ -256,9 +286,21 @@
   .original-gif { width: 100%; max-height: 120px; object-fit: contain; border-radius: 8px; border: 1px solid rgba(255,255,255,.08); }
 
   .hidden-canvas { display: none; }
-  .preview-wrap { display: flex; align-items: center; justify-content: center; min-height: 200px; background: #000; border-radius: 12px; overflow: auto; }
+  .preview-wrap {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 260px;
+    background:
+      linear-gradient(45deg, rgba(255,255,255,.018) 25%, transparent 25%) 0 0 / 20px 20px,
+      linear-gradient(-45deg, rgba(255,255,255,.018) 25%, transparent 25%) 0 10px / 20px 20px,
+      #050506;
+    border: 1px solid rgba(255,255,255,.06);
+    border-radius: var(--dash-radius-md);
+    overflow: auto;
+  }
   .preview-canvas { image-rendering: pixelated; display: block; }
   .preview-placeholder { display: flex; flex-direction: column; align-items: center; gap: .75rem; color: #a1a1a6; padding: 2rem; }
-  .ph-icon { font-size: 2.5rem; background: linear-gradient(135deg, #ff2d55, #00d4ff); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .ph-icon { font-size: 2.5rem; background: linear-gradient(135deg, var(--dash-accent), var(--dash-warm)); -webkit-background-clip: text; background-clip: text; color: transparent; }
   .preview-note { font-size: .72rem; color: #a1a1a6; margin: 0; text-align: center; }
 </style>

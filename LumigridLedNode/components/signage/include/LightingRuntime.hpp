@@ -12,6 +12,7 @@
 #include "SceneManager.hpp"
 #include "RenderTypes.hpp"
 
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -20,12 +21,93 @@ namespace lg {
 
 class LightingRuntime {
 public:
+    enum class LifecycleState : uint8_t {
+        Constructed = 0,
+        Starting = 1,
+        Running = 2,
+        Stopping = 3,
+        Stopped = 4,
+        Faulted = 5
+    };
+
     LightingRuntime(ControlSourceManager& source_manager, OutputController& controller, ConfigStore& config);
     ~LightingRuntime();
 
     esp_err_t start();
 
     void activate_scene(uint8_t index);
+    // Truthful control-plane activation boundary. Unlike the legacy void method,
+    // this reports load/rejection failures and only accepts activation while the
+    // runtime is atomically observed in the Running lifecycle state.
+    bool activate_scene_checked(uint8_t index, uint32_t* generation = nullptr) {
+        if (!mutex_ ||
+            lifecycle_state_.load(std::memory_order_acquire) != LifecycleState::Running ||
+            shutting_down_.load(std::memory_order_acquire)) {
+            return false;
+        }
+
+        xSemaphoreTake(mutex_, portMAX_DELAY);
+        const bool accepted = scene_manager_.activate_scene(
+            index,
+            static_cast<uint32_t>(esp_timer_get_time() / 1000ULL)
+        );
+
+        if (accepted) {
+            const uint32_t next_generation =
+                requested_scene_generation_.fetch_add(1, std::memory_order_acq_rel) + 1;
+            requested_scene_index_.store(index, std::memory_order_release);
+            if (generation) {
+                *generation = next_generation;
+            }
+        }
+
+        xSemaphoreGive(mutex_);
+        return accepted;
+    }
+
+    bool activate_scene_custom(uint8_t index, uint16_t fade_ms, TransitionCurve curve, uint32_t* generation = nullptr) {
+        if (!mutex_ ||
+            lifecycle_state_.load(std::memory_order_acquire) != LifecycleState::Running ||
+            shutting_down_.load(std::memory_order_acquire)) {
+            return false;
+        }
+
+        xSemaphoreTake(mutex_, portMAX_DELAY);
+        const bool accepted = scene_manager_.activate_scene_custom(
+            index,
+            fade_ms,
+            curve,
+            static_cast<uint32_t>(esp_timer_get_time() / 1000ULL)
+        );
+
+        if (accepted) {
+            const uint32_t next_generation =
+                requested_scene_generation_.fetch_add(1, std::memory_order_acq_rel) + 1;
+            requested_scene_index_.store(index, std::memory_order_release);
+            if (generation) {
+                *generation = next_generation;
+            }
+        }
+
+        xSemaphoreGive(mutex_);
+        return accepted;
+    }
+
+    bool prepare_manual_transition(uint8_t target_index) {
+        if (!mutex_ || lifecycle_state_.load(std::memory_order_acquire) != LifecycleState::Running) return false;
+        xSemaphoreTake(mutex_, portMAX_DELAY);
+        bool res = scene_manager_.prepare_manual_transition(target_index);
+        xSemaphoreGive(mutex_);
+        return res;
+    }
+
+    void set_manual_transition_progress(uint16_t progress_q15) {
+        if (!mutex_) return;
+        xSemaphoreTake(mutex_, portMAX_DELAY);
+        scene_manager_.set_manual_transition_progress(progress_q15);
+        xSemaphoreGive(mutex_);
+    }
+
     void activate_scene_direct(const SceneConfig& scene, bool immediate = false);
 
     /// Atomically submit a full live DMX frame from DmxRouter (returns false if rejected or unavailable)
@@ -44,6 +126,24 @@ public:
     uint8_t active_scene_index() const;
     bool is_fallback_active() const;
     bool is_transitioning() const;
+    uint16_t transition_progress_q15() const;
+    TransitionCurve transition_curve() const;
+    void set_transition_curve(TransitionCurve curve);
+    SceneManager& scene_manager() { return scene_manager_; }
+    const SceneManager& scene_manager() const { return scene_manager_; }
+
+    uint8_t requested_scene_index() const {
+        return requested_scene_index_.load(std::memory_order_acquire);
+    }
+    uint32_t requested_scene_generation() const {
+        return requested_scene_generation_.load(std::memory_order_acquire);
+    }
+    uint32_t applied_scene_generation() const {
+        return applied_scene_generation_.load(std::memory_order_acquire);
+    }
+    bool scene_apply_pending() const {
+        return requested_scene_generation() > applied_scene_generation();
+    }
 
     PowerBudget& power_budget() { return power_budget_; }
     const PowerBudget& power_budget() const { return power_budget_; }
@@ -57,14 +157,6 @@ public:
 
     // Absolute E-Stop safety state with latched recovery semantics
     void trigger_estop();
-    enum class LifecycleState : uint8_t {
-        Constructed = 0,
-        Starting = 1,
-        Running = 2,
-        Stopping = 3,
-        Stopped = 4,
-        Faulted = 5
-    };
 
     LifecycleState lifecycle_state() const {
         return lifecycle_state_.load(std::memory_order_acquire);
@@ -113,6 +205,18 @@ public:
     uint32_t output_fault_frame_count() const {
         return output_fault_frame_count_.load(std::memory_order_relaxed);
     }
+    uint32_t frame_count() const {
+        return frame_count_;
+    }
+    uint8_t current_brightness() const {
+        return current_render_scene_.global_brightness;
+    }
+    uint16_t last_pwm_level(uint8_t channel) const {
+        if (channel >= 8 && channel < 16) {
+            return last_pwm_duty_[channel - 8];
+        }
+        return 0;
+    }
     uint8_t active_live_objects() const;
 
     DeviceConfig get_config_snapshot() const;
@@ -156,6 +260,13 @@ private:
     std::atomic<uint32_t> output_fault_count_{0};
     std::atomic<uint32_t> output_commit_failure_count_{0};
     std::atomic<uint32_t> output_fault_frame_count_{0};
+
+    // Scene request/application handshake. A generation becomes "applied" only
+    // after a frame rendered from that request successfully commits to output.
+    std::atomic<uint8_t> requested_scene_index_{0};
+    std::atomic<uint32_t> requested_scene_generation_{0};
+    std::atomic<uint32_t> applied_scene_generation_{0};
+
     std::atomic<bool> shutting_down_{false};
     SemaphoreHandle_t shutdown_sem_ = nullptr;
 
@@ -170,6 +281,11 @@ private:
     RenderFrame current_render_frame_;
     FixtureFrame current_composited_zone_;
     FixtureFrame current_layer_frame_;
+    FixtureFrame transition_layer_frame_;
+    FixtureFrame current_live_src_;
+    SceneConfig current_render_scene_{};
+    DeviceConfig current_local_cfg_{};
+    std::array<uint16_t, 8> last_pwm_duty_{};
 
     uint16_t beat_period_ms_ = 500;
     uint32_t enable_ms_ = 0;

@@ -22,7 +22,9 @@ idf_component_register(
         network
         protocols
         mqtt
+        control
         app_update
+        show
 )
 
 # LittleFS image: enable when web/dist frontend build exists.

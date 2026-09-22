@@ -114,7 +114,7 @@ private:
 
     std::atomic<bool> output_enabled_{true};
     std::atomic<bool> estop_latched_{false};
-    std::atomic<bool> topology_valid_{true};
+    std::atomic<bool> topology_valid_{false};  // Set to true only after a successful reconfigure()
     std::atomic<bool> pwm_available_{false};
     std::atomic<uint32_t> failed_commit_count_{0};
     std::atomic<esp_err_t> last_commit_error_{ESP_OK};

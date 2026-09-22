@@ -9,31 +9,6 @@ static const char* TAG = "SceneManager";
 
 namespace lg {
 
-namespace {
-uint8_t lerp8(uint8_t a, uint8_t b, uint8_t t) {
-    return static_cast<uint8_t>(a + (int16_t(b) - a) * t / 255);
-}
-
-void blend_scenes_into(SceneConfig& dest, const SceneConfig& from, const SceneConfig& to, uint8_t t) {
-    dest = to; // Copy target's structure/metadata
-    dest.global_brightness = lerp8(from.global_brightness, to.global_brightness, t);
-
-    for (uint8_t z = 0; z < 8; ++z) {
-        for (uint8_t l = 0; l < 3; ++l) {
-            dest.zones[z].layers[l].primary_color.r = lerp8(from.zones[z].layers[l].primary_color.r, to.zones[z].layers[l].primary_color.r, t);
-            dest.zones[z].layers[l].primary_color.g = lerp8(from.zones[z].layers[l].primary_color.g, to.zones[z].layers[l].primary_color.g, t);
-            dest.zones[z].layers[l].primary_color.b = lerp8(from.zones[z].layers[l].primary_color.b, to.zones[z].layers[l].primary_color.b, t);
-                
-            dest.zones[z].layers[l].secondary_color.r = lerp8(from.zones[z].layers[l].secondary_color.r, to.zones[z].layers[l].secondary_color.r, t);
-            dest.zones[z].layers[l].secondary_color.g = lerp8(from.zones[z].layers[l].secondary_color.g, to.zones[z].layers[l].secondary_color.g, t);
-            dest.zones[z].layers[l].secondary_color.b = lerp8(from.zones[z].layers[l].secondary_color.b, to.zones[z].layers[l].secondary_color.b, t);
-                
-            dest.zones[z].layers[l].opacity = lerp8(from.zones[z].layers[l].opacity, to.zones[z].layers[l].opacity, t);
-        }
-    }
-}
-}
-
 SceneManager::SceneManager(ConfigStore& config) : config_(config) {}
 
 void SceneManager::init() {
@@ -48,7 +23,8 @@ void SceneManager::init() {
         if (config_.load_scene(0, scene) != ESP_OK) {
             ESP_LOGW(TAG, "No scenes available, starting with blackout");
             scene = SceneConfig{};
-            strncpy(scene.name, "Default", sizeof(scene.name));
+            strncpy(scene.name, "Default", sizeof(scene.name) - 1);
+            scene.name[sizeof(scene.name) - 1] = '\0';
         }
     }
 
@@ -56,6 +32,11 @@ void SceneManager::init() {
     render_scene_ = scene;
     active_index_ = active_idx;
     saved_active_index_ = active_idx;
+    if (config_.load_scene_motion(active_idx, current_motion_) != ESP_OK) {
+        current_motion_.reset();
+    }
+    target_motion_ = current_motion_;
+    transition_curve_ = current_motion_.transition_curve;
     const uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
     scene_started_ms_ = now;
     last_command_ms_ = now;
@@ -66,42 +47,109 @@ void SceneManager::update_device_config(const DeviceConfig& cfg) {
     device_cfg_ = cfg;
 }
 
-void SceneManager::activate_scene(uint8_t index, uint32_t current_ms) {
+bool SceneManager::activate_scene_custom(uint8_t index, uint16_t fade_ms, TransitionCurve curve, uint32_t current_ms) {
     SceneConfig scene;
-    if (config_.load_scene(index, scene) != ESP_OK) {
-        ESP_LOGW(TAG, "Preset %u not found", index);
-        return;
+    const esp_err_t load_result = config_.load_scene(index, scene);
+    if (load_result != ESP_OK) {
+        ESP_LOGW(TAG, "Preset %u cannot be activated: load failed (%s)", index, esp_err_to_name(load_result));
+        return false;
     }
 
     last_command_ms_ = current_ms;
 
     if (transitioning_) {
-        const uint32_t elapsed = current_ms - transition_start_ms_;
-        const uint8_t t = std::min(uint8_t(255), static_cast<uint8_t>((uint32_t(elapsed) * 255) / transition_duration_ms_));
-        blend_scenes_into(current_scene_, current_scene_, target_scene_, t);
+        SceneConfig sampled{};
+        sample_scene_morph(sampled, current_scene_, target_scene_, transition_progress_q15_);
+        current_scene_ = sampled;
+        current_motion_ = target_motion_;
     }
 
     target_scene_ = scene;
+    if (config_.load_scene_motion(index, target_motion_) != ESP_OK) {
+        target_motion_.reset();
+    }
+    transition_curve_ = curve;
     transition_start_ms_ = current_ms;
-    transition_duration_ms_ = std::max<uint32_t>(1, scene.transition_ms);
+    transition_duration_ms_ = std::max<uint32_t>(1, fade_ms);
+    transition_progress_q15_ = 0;
     transitioning_ = true;
+    manual_transition_ = false;
     active_index_ = index;
     fallback_active_ = false;
 
-    config_.save_active_state(index);
-    ESP_LOGI(TAG, "Transitioning to preset %u: \"%s\" (%u ms fade)", index, scene.name, scene.transition_ms);
+    const esp_err_t persist_result = config_.save_active_state(index);
+    if (persist_result != ESP_OK) {
+        ESP_LOGW(TAG, "Preset %u activated but active-state persistence failed (%s)", index, esp_err_to_name(persist_result));
+    }
+    ESP_LOGI(TAG, "Transitioning to preset %u: \"%s\" (%u ms fade)", index, scene.name, fade_ms);
+    return true;
+}
+
+bool SceneManager::activate_scene(uint8_t index, uint32_t current_ms) {
+    SceneConfig scene;
+    if (config_.load_scene(index, scene) != ESP_OK) return false;
+    SceneMotionConfig motion;
+    if (config_.load_scene_motion(index, motion) != ESP_OK) motion.reset();
+    return activate_scene_custom(index, scene.transition_ms, motion.transition_curve, current_ms);
+}
+
+bool SceneManager::prepare_manual_transition(uint8_t target_index) {
+    SceneConfig scene;
+    if (config_.load_scene(target_index, scene) != ESP_OK) return false;
+    if (transitioning_ && !manual_transition_) {
+        SceneConfig sampled{};
+        sample_scene_morph(sampled, current_scene_, target_scene_, transition_progress_q15_);
+        current_scene_ = sampled;
+        current_motion_ = target_motion_;
+    }
+    target_scene_ = scene;
+    manual_target_index_ = target_index;
+    if (config_.load_scene_motion(target_index, target_motion_) != ESP_OK) {
+        target_motion_.reset();
+    }
+    transitioning_ = true;
+    manual_transition_ = true;
+    transition_progress_q15_ = 0;
+    return true;
+}
+
+void SceneManager::set_manual_transition_progress(uint16_t progress_q15) {
+    if (!manual_transition_) return;
+    transition_progress_q15_ = std::min<uint16_t>(32768, progress_q15);
+    if (transition_progress_q15_ >= 32768) {
+        current_scene_ = target_scene_;
+        current_motion_ = target_motion_;
+        active_index_ = manual_target_index_;
+        transitioning_ = false;
+        manual_transition_ = false;
+        (void)config_.save_active_state(active_index_);
+    }
 }
 
 void SceneManager::activate_scene_direct(const SceneConfig& scene, uint32_t current_ms, bool immediate) {
     last_command_ms_ = current_ms;
     if (immediate) {
         current_scene_ = scene;
+        target_scene_ = scene;
+        current_motion_.reset();
+        target_motion_.reset();
+        transition_curve_ = TransitionCurve::EaseInOut;
         transitioning_ = false;
+        transition_progress_q15_ = 32768;
         scene_started_ms_ = current_ms;
     } else {
+        if (transitioning_) {
+            SceneConfig sampled{};
+            sample_scene_morph(sampled, current_scene_, target_scene_, transition_progress_q15_);
+            current_scene_ = sampled;
+            current_motion_ = target_motion_;
+        }
         target_scene_ = scene;
+        target_motion_.reset();
+        transition_curve_ = TransitionCurve::EaseInOut;
         transition_start_ms_ = current_ms;
         transition_duration_ms_ = std::max<uint32_t>(1, scene.transition_ms);
+        transition_progress_q15_ = 0;
         transitioning_ = true;
     }
     fallback_active_ = false;
@@ -127,13 +175,19 @@ const SceneConfig& SceneManager::process_frame(uint32_t current_ms) {
                 if (config_.load_scene(device_cfg_.fallback_preset_index, fallback) == ESP_OK) {
                     saved_active_index_ = active_index_;
                     if (transitioning_) {
-                        const uint32_t elapsed = current_ms - transition_start_ms_;
-                        const uint8_t t = std::min(uint8_t(255), static_cast<uint8_t>((uint32_t(elapsed) * 255) / transition_duration_ms_));
-                        blend_scenes_into(current_scene_, current_scene_, target_scene_, t);
+                        SceneConfig sampled{};
+                        sample_scene_morph(sampled, current_scene_, target_scene_, transition_progress_q15_);
+                        current_scene_ = sampled;
+                        current_motion_ = target_motion_;
                     }
                     target_scene_ = fallback;
+                    if (config_.load_scene_motion(device_cfg_.fallback_preset_index, target_motion_) != ESP_OK) {
+                        target_motion_.reset();
+                    }
+                    transition_curve_ = target_motion_.transition_curve;
                     transition_start_ms_ = current_ms;
                     transition_duration_ms_ = std::max<uint32_t>(1, fallback.transition_ms);
+                    transition_progress_q15_ = 0;
                     transitioning_ = true;
                     fallback_active_ = true;
                     active_index_ = device_cfg_.fallback_preset_index;
@@ -148,21 +202,36 @@ const SceneConfig& SceneManager::process_frame(uint32_t current_ms) {
 
     // 2. Process Transition
     if (transitioning_) {
+        if (manual_transition_) {
+            sample_scene_morph(render_scene_, current_scene_, target_scene_, transition_progress_q15_);
+            AutomationEngine::apply(render_scene_, target_motion_, 0);
+            return render_scene_;
+        }
         const uint32_t elapsed = current_ms - transition_start_ms_;
         if (elapsed >= transition_duration_ms_) {
             current_scene_ = target_scene_;
+            current_motion_ = target_motion_;
             transitioning_ = false;
+            transition_progress_q15_ = 32768;
             scene_started_ms_ = current_ms;
             ESP_LOGI(TAG, "Transition complete -> \"%s\"", current_scene_.name);
-            return current_scene_;
+            render_scene_ = current_scene_;
+            AutomationEngine::apply(render_scene_, current_motion_, 0);
+            return render_scene_;
         } else {
-            const uint8_t t = static_cast<uint8_t>((uint32_t(elapsed) * 255) / transition_duration_ms_);
-            blend_scenes_into(render_scene_, current_scene_, target_scene_, t);
+            const uint16_t linear_t = static_cast<uint16_t>(
+                std::min<uint32_t>(32768, (uint64_t(elapsed) * 32768) / transition_duration_ms_)
+            );
+            transition_progress_q15_ = apply_curve_q15(transition_curve_, linear_t);
+            sample_scene_morph(render_scene_, current_scene_, target_scene_, transition_progress_q15_);
+            AutomationEngine::apply(render_scene_, target_motion_, elapsed);
             return render_scene_;
         }
     }
 
-    return current_scene_;
+    render_scene_ = current_scene_;
+    AutomationEngine::apply(render_scene_, current_motion_, current_ms - scene_started_ms_);
+    return render_scene_;
 }
 
 } // namespace lg

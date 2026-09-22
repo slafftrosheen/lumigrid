@@ -118,17 +118,37 @@ public:
     bool is_primary_valid() const { return primary_valid_; }
     bool is_backup_valid() const { return backup_valid_; }
 
-    /// Calculates required DMX channel span for a fixture (Batch 5 Item 9)
+    /// Calculates required DMX channel span for a fixture (legacy)
     static bool calculate_dmx_span(const FixtureConfig& fixture, uint32_t& required_channels);
+
+    /// Calculates required DMX channel span for a channel (Batch 12 / LG-023)
+    static bool calculate_dmx_span(const ChannelConfig& channel, uint8_t channel_index, uint32_t& required_channels);
 
     /// Determines if a fixture is configured vs unused/disabled (Batch 6 Item 10)
     static bool is_fixture_configured(const FixtureConfig& fixture, const DeviceConfig& config);
 
-    /// Pure configuration validator (Batch 4, 5, 6)
+    /// Determines if ANY fixture is configured
+    static bool has_configured_fixtures(const DeviceConfig& config);
+
+    /// Pure configuration validator (Batch 4, 5, 6, LG-023)
     static esp_err_t validate_config(const DeviceConfig& config, ConfigValidationResult* out_result = nullptr);
 
     // Explicit Schema v1 -> v2 Migration (Item 16, Batch 3 Item 11)
-    static bool migrate_v1_to_v2(const DeviceConfigV1& v1, DeviceConfig& v2, uint32_t* out_warning_count = nullptr);
+    static bool migrate_v1_to_v2(const DeviceConfigV1& v1, DeviceConfigV2& v2, uint32_t* out_warning_count = nullptr);
+
+    // Explicit Schema v2 -> v3 Migration (LG-023 16-Channel Hardware Truth)
+    static bool migrate_v2_to_v3(const DeviceConfigV2& v2, DeviceConfig& v3, uint32_t* out_warning_count = nullptr);
+
+    // ── Scene Motion (Batch 11 Item 18) ──
+    esp_err_t save_scene_motion(uint8_t index, const SceneMotionConfig& motion);
+    esp_err_t load_scene_motion(uint8_t index, SceneMotionConfig& motion);
+    esp_err_t delete_scene_motion(uint8_t index);
+
+    // ── Cue Lists (Batch 11 Item 20) ──
+    esp_err_t save_cue_list(uint8_t index, const CueList& list);
+    esp_err_t load_cue_list(uint8_t index, CueList& list);
+    esp_err_t delete_cue_list(uint8_t index);
+    uint8_t   cue_list_count();
 
     // ── Sequences ──
     esp_err_t save_sequence(const Sequence& seq);
@@ -152,6 +172,9 @@ private:
 
     /// Creates a default "Warm White" preset if no presets exist.
     void ensure_defaults();
+
+    /// Populates physical hardware definitions based on board constants
+    void populate_default_topology(DeviceConfig& config);
 };
 
 } // namespace lg

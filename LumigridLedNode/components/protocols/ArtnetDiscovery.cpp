@@ -145,6 +145,7 @@ esp_err_t ArtnetDiscovery::start(const ArtnetNodeInfo& info, ArtnetDmxCallback d
 }
 
 esp_err_t ArtnetDiscovery::stop() {
+    TaskHandle_t task_to_wait = nullptr;
     int sock_to_close = -1;
     {
         std::lock_guard<std::mutex> lock(mtx_);
@@ -152,9 +153,23 @@ esp_err_t ArtnetDiscovery::stop() {
         running_ = false;
         sock_to_close = sock_;
         sock_ = -1;
+        task_to_wait = task_handle_;
     }
     if (sock_to_close >= 0) {
         ::close(sock_to_close);
+    }
+    // Wait for the worker task to finish before returning, preventing
+    // use-after-free if this object is destroyed or restarted immediately.
+    if (task_to_wait) {
+        // The task sets task_handle_ = nullptr before vTaskDelete.
+        // Poll briefly; recvfrom timeout is 50ms max so it exits quickly.
+        for (int i = 0; i < 40; ++i) {
+            {
+                std::lock_guard<std::mutex> lock(mtx_);
+                if (task_handle_ == nullptr) break;
+            }
+            vTaskDelay(pdMS_TO_TICKS(50));
+        }
     }
     return ESP_OK;
 }
@@ -247,10 +262,13 @@ void ArtnetDiscovery::task() {
         }
     }
 
-    ::close(sock);
     {
         std::lock_guard<std::mutex> lock(mtx_);
-        if (sock_ == sock) sock_ = -1;
+        // Only close if stop() didn't already take ownership (sock_ == -1).
+        if (sock_ == sock) {
+            ::close(sock);
+            sock_ = -1;
+        }
         task_handle_ = nullptr;
     }
     vTaskDelete(nullptr);

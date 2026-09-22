@@ -9,9 +9,14 @@
 #include "DmxRouter.hpp"
 #include "FactoryRunner.hpp"
 #include "FactoryApi.hpp"
+#include "CommandReceipt.hpp"
+#include "JobManager.hpp"
 #include "LumigridRuntime.hpp"
 #include "ArtnetDiscovery.hpp"
 #include "SacnReceiver.hpp"
+#include "SceneTransition.hpp"
+#include "AutomationEngine.hpp"
+#include "CueRunner.hpp"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -2510,6 +2515,412 @@ bool test_batch9_burnin_blockers() {
     return true;
 }
 
+// ============================================================================
+// Batch 9: Checked scene activation lifecycle contract
+// ============================================================================
+bool test_batch9_checked_scene_activation_lifecycle_guard() {
+    ESP_LOGI(
+        TAG,
+        "Batch 9: Checked scene activation lifecycle guard..."
+    );
+
+    ControlSourceManager source_manager;
+    source_manager.init();
+
+    OutputController controller;
+    ConfigStore config_store;
+
+    LightingRuntime runtime(
+        source_manager,
+        controller,
+        config_store
+    );
+
+    /*
+     * Constructed runtime is not allowed to claim that a scene request
+     * was accepted.
+     */
+    assert(
+        runtime.lifecycle_state() ==
+        LightingRuntime::LifecycleState::Constructed
+    );
+
+    assert(runtime.activate_scene_checked(0) == false);
+
+    /*
+     * Exercise a real lifecycle transition. We intentionally don't assert
+     * that preset 0 activates while Running because the test suite must not
+     * depend on an existing persisted scene slot.
+     */
+    assert(runtime.start() == ESP_OK);
+
+    assert(
+        runtime.lifecycle_state() ==
+        LightingRuntime::LifecycleState::Running
+    );
+
+    runtime.stop();
+
+    assert(
+        runtime.lifecycle_state() ==
+        LightingRuntime::LifecycleState::Stopped
+    );
+
+    /*
+     * Stopped runtime must also reject activation rather than silently
+     * claiming success.
+     */
+    assert(runtime.activate_scene_checked(0) == false);
+
+    ESP_LOGI(
+        TAG,
+        "[PASS] Batch 9 checked activation lifecycle guard passed."
+    );
+
+    return true;
+}
+
+// ============================================================================
+// Batch 11 Phase 0: Truthful Control Contract Tests
+// ============================================================================
+bool test_batch11_phase0_truthful_control_contract() {
+    ESP_LOGI(TAG, "Batch 11 Phase 0: Truthful control contract tests...");
+
+    // 1. CommandJournal wrap-safe latest comparison & entry integrity
+    {
+        CommandJournal journal;
+        CommandReceipt receipt{};
+
+        // Accept a sequence of commands
+        uint32_t id1 = journal.accept(CommandDomain::Factory, 10);
+        uint32_t id2 = journal.accept(CommandDomain::Factory, 11);
+        assert(id1 == 1);
+        assert(id2 == 2);
+
+        assert(journal.get(id1, receipt) == true);
+        assert(receipt.id == id1);
+        assert(receipt.state == CommandState::Accepted);
+        assert(receipt.domain == CommandDomain::Factory);
+        assert(receipt.generation == 10);
+
+        journal.applying(id1);
+        assert(journal.get(id1, receipt) == true);
+        assert(receipt.state == CommandState::Applying);
+
+        journal.applied(id1);
+        assert(journal.get(id1, receipt) == true);
+        assert(receipt.state == CommandState::Applied);
+
+        journal.failed(id2, -100);
+        assert(journal.get(id2, receipt) == true);
+        assert(receipt.state == CommandState::Failed);
+        assert(receipt.error_code == -100);
+
+        // Verify get_latest
+        assert(journal.get_latest(CommandDomain::Factory, receipt) == true);
+        assert(receipt.id == id2);
+    }
+
+    // 2. JobManager exclusivity and archival
+    {
+        JobManager job_mgr;
+        uint32_t job1 = 0;
+        uint32_t job2 = 0;
+
+        // Starting first job succeeds
+        esp_err_t err = job_mgr.start_job(JobType::Ota, &job1);
+        assert(err == ESP_OK);
+        assert(job1 != 0);
+
+        OperationJob current_job{};
+        assert(job_mgr.get_current(current_job) == true);
+        assert(current_job.job_id == job1);
+        assert(current_job.state == JobState::Queued);
+
+        // Attempting to start second job while job 1 is Queued MUST FAIL
+        err = job_mgr.start_job(JobType::Restore, &job2);
+        assert(err == ESP_ERR_INVALID_STATE);
+
+        // Move to Preparing
+        job_mgr.update_progress(job1, JobState::Preparing, 10);
+        err = job_mgr.start_job(JobType::Restore, &job2);
+        assert(err == ESP_ERR_INVALID_STATE);
+
+        // Move to Running
+        job_mgr.update_progress(job1, JobState::Running, 50);
+        err = job_mgr.start_job(JobType::Restore, &job2);
+        assert(err == ESP_ERR_INVALID_STATE);
+
+        // Move to Verifying
+        job_mgr.update_progress(job1, JobState::Verifying, 90);
+        err = job_mgr.start_job(JobType::Restore, &job2);
+        assert(err == ESP_ERR_INVALID_STATE);
+
+        // Complete job 1 (terminal state)
+        job_mgr.complete_job(job1);
+        assert(job_mgr.get_current(current_job) == true);
+        assert(current_job.state == JobState::Completed);
+
+        // Now starting job 2 MUST SUCCEED, archiving job 1
+        err = job_mgr.start_job(JobType::Restore, &job2);
+        assert(err == ESP_OK);
+        assert(job2 != job1);
+
+        // Job 1 should now be found in history
+        OperationJob hist_job{};
+        assert(job_mgr.get_job(job1, hist_job) == true);
+        assert(hist_job.job_id == job1);
+        assert(hist_job.state == JobState::Completed);
+
+        // Current job is job 2
+        assert(job_mgr.get_current(current_job) == true);
+        assert(current_job.job_id == job2);
+        assert(current_job.state == JobState::Queued);
+
+        // Fail job 2 (terminal state)
+        job_mgr.fail_job(job2, -1, "Test error");
+        assert(job_mgr.get_current(current_job) == true);
+        assert(current_job.state == JobState::Failed);
+
+        // Starting a new job after failure MUST SUCCEED
+        uint32_t job3 = 0;
+        err = job_mgr.start_job(JobType::BurnIn, &job3);
+        assert(err == ESP_OK);
+        assert(job3 != job2);
+    }
+
+    // 3. FactoryRunner Truthful Command Lifecycle Contract
+    {
+        ControlSourceManager sm;
+        OutputController ctrl;
+        CommandJournal journal;
+
+        FactoryRunner runner(sm, ctrl);
+        runner.set_command_journal(&journal);
+
+        // Accept command 1 in journal
+        uint32_t cmd1 = journal.accept(CommandDomain::Factory);
+        CommandReceipt receipt{};
+        assert(journal.get(cmd1, receipt) == true);
+        assert(receipt.state == CommandState::Accepted);
+
+        // Start runner
+        assert(runner.start() == ESP_OK);
+
+        // Enqueue command with cmd1
+        FactoryCommand command;
+        command.command_id = cmd1;
+        command.type = FactoryCommandType::SelectEffect;
+        command.effect = FactoryEffect::WhiteWalk;
+        command.brightness = 32;
+        command.duration_ms = 1000;
+        assert(runner.enqueue(command) == true);
+
+        // Wait a few frames for runner to dequeue and commit
+        vTaskDelay(pdMS_TO_TICKS(100));
+
+        // After output commit, cmd1 MUST be Applied!
+        assert(journal.get(cmd1, receipt) == true);
+        assert(receipt.state == CommandState::Applied);
+
+        // Test Superseded: enqueue cmd2 then immediately cmd3
+        uint32_t cmd2 = journal.accept(CommandDomain::Factory);
+        uint32_t cmd3 = journal.accept(CommandDomain::Factory);
+        FactoryCommand fc2;
+        fc2.command_id = cmd2;
+        fc2.type = FactoryCommandType::PixelLaneSolid;
+        fc2.lane_or_channel = 0;
+        fc2.red = 255;
+        fc2.duration_ms = 1000;
+
+        FactoryCommand fc3;
+        fc3.command_id = cmd3;
+        fc3.type = FactoryCommandType::PixelLaneSolid;
+        fc3.lane_or_channel = 1;
+        fc3.green = 255;
+        fc3.duration_ms = 1000;
+
+        assert(runner.enqueue(fc2) == true);
+        assert(runner.enqueue(fc3) == true);
+
+        vTaskDelay(pdMS_TO_TICKS(100));
+
+        assert(journal.get(cmd2, receipt) == true);
+        assert(receipt.state == CommandState::Superseded);
+        assert(journal.get(cmd3, receipt) == true);
+        assert(receipt.state == CommandState::Applied);
+
+        // Test Failed when output commit fails (e.g. estop latched)
+        ctrl.latch_estop();
+        uint32_t cmd4 = journal.accept(CommandDomain::Factory);
+        FactoryCommand fc4;
+        fc4.command_id = cmd4;
+        fc4.type = FactoryCommandType::SelectEffect;
+        fc4.effect = FactoryEffect::Rainbow;
+        fc4.duration_ms = 1000;
+        assert(runner.enqueue(fc4) == true);
+
+        vTaskDelay(pdMS_TO_TICKS(100));
+
+        assert(journal.get(cmd4, receipt) == true);
+        assert(receipt.state == CommandState::Failed);
+
+        ctrl.clear_estop();
+        runner.stop();
+    }
+
+    ESP_LOGI(TAG, "[PASS] Batch 11 Phase 0 truthful control contract tests passed.");
+    return true;
+}
+
+bool test_lg022_show_engine() {
+    ESP_LOGI(TAG, "Testing LG-022 Show Engine, Curves, Automation, and Cues...");
+
+    // 1. Q15 Fixed-Point Curves
+    assert(smoothstep_q15(0) == 0);
+    assert(smoothstep_q15(16384) == 16384);
+    assert(smoothstep_q15(32768) == 32768);
+    assert(smoothstep_q15(40000) == 32768);
+
+    assert(apply_curve_q15(TransitionCurve::Linear, 0) == 0);
+    assert(apply_curve_q15(TransitionCurve::Linear, 16384) == 16384);
+    assert(apply_curve_q15(TransitionCurve::Linear, 32768) == 32768);
+
+    assert(apply_curve_q15(TransitionCurve::Step, 10000) == 0);
+    assert(apply_curve_q15(TransitionCurve::Step, 20000) == 32768);
+
+    assert(apply_curve_q15(TransitionCurve::EaseIn, 0) == 0);
+    assert(apply_curve_q15(TransitionCurve::EaseIn, 32768) == 32768);
+    assert(apply_curve_q15(TransitionCurve::EaseIn, 16384) == 8192);
+
+    assert(apply_curve_q15(TransitionCurve::EaseOut, 16384) == 24576);
+
+    // 2. Parameter Morphing
+    LayerConfig l1{}, l2{};
+    l1.effect = 1; // Solid
+    l1.blend_mode = BlendMode::Normal;
+    l1.palette_id = 0;
+    l1.enabled = true;
+    l1.primary_color = {100, 50, 0};
+    l1.speed_ms = 1000;
+    l1.fx_param = 20;
+
+    l2 = l1;
+    l2.primary_color = {200, 150, 100};
+    l2.speed_ms = 2000;
+    l2.fx_param = 120;
+
+    assert(can_parameter_morph(l1, l2) == true);
+    l2.effect = 2; // Rainbow
+    assert(can_parameter_morph(l1, l2) == false);
+    l2.effect = 1;
+
+    LayerConfig morphed = sample_layer_morph(l1, l2, 16384); // 50%
+    assert(morphed.primary_color.r == 150);
+    assert(morphed.primary_color.g == 100);
+    assert(morphed.primary_color.b == 50);
+    assert(morphed.speed_ms == 1500);
+    assert(morphed.fx_param == 70);
+
+    // 3. AutomationEngine & Loop Wrap Interpolation
+    AutomationTrack track{};
+    track.target = AutomationTarget::GlobalBrightness;
+    track.curve = AutomationCurve::Linear;
+    track.period_ms = 1000;
+    track.loop = true;
+    track.point_count = 2;
+    track.points[0] = {10000, 10000};
+    track.points[1] = {50000, 50000};
+
+    uint16_t v_mid = AutomationEngine::sample_track(track, 500);
+    assert(v_mid >= 32000 && v_mid <= 33500);
+
+    uint16_t v_start = AutomationEngine::sample_track(track, 0);
+    assert(v_start >= 10000 && v_start <= 50000);
+
+    // In-place scene application
+    SceneConfig sc{};
+    sc.global_brightness = 0;
+    SceneMotionConfig sm{};
+    sm.track_count = 1;
+    sm.tracks[0].target = AutomationTarget::GlobalBrightness;
+    sm.tracks[0].curve = AutomationCurve::Linear;
+    sm.tracks[0].period_ms = 1000;
+    sm.tracks[0].loop = false;
+    sm.tracks[0].point_count = 2;
+    sm.tracks[0].points[0] = {0, 0};
+    sm.tracks[0].points[1] = {65535, 255};
+
+    AutomationEngine::apply(sc, sm, 500);
+    assert(sc.global_brightness >= 126 && sc.global_brightness <= 130);
+
+    // 4. CueRunner State Machine
+    {
+        ControlSourceManager sman;
+        OutputController out;
+        ConfigStore cfg;
+        LightingRuntime lighting(sman, out, cfg);
+        CueRunner runner(cfg, lighting);
+
+        CueList list{};
+        list.mode = CueRunMode::SingleShot;
+        list.count = 2;
+        list.cues[0] = {0, 1000, 500, TransitionCurve::Linear, "Cue 1"};
+        list.cues[1] = {1, 1000, 500, TransitionCurve::Linear, "Cue 2"};
+
+        assert(runner.start(list, 0, 1000) == ESP_OK);
+        assert(runner.is_running() == true);
+        assert(runner.current_cue_index() == 0);
+        assert(runner.next_cue_index() == 1);
+
+        // At t=1250: cue 0 is fading
+        runner.update(1250);
+        assert(runner.state() == CueRunnerState::Fading);
+
+        // At t=2200: cue 0 is holding
+        runner.update(2200);
+        assert(runner.state() == CueRunnerState::Holding);
+
+        // At t=2600: hold complete -> transitioned to cue 1 fading
+        runner.update(2600);
+        assert(runner.current_cue_index() == 1);
+        assert(runner.state() == CueRunnerState::Fading);
+
+        // At t=4200: cue 1 finishes holding, SingleShot stops runner
+        runner.update(4200);
+        assert(runner.is_running() == false);
+        assert(runner.state() == CueRunnerState::Stopped);
+
+        // PingPong test
+        list.mode = CueRunMode::PingPong;
+        assert(runner.start(list, 0, 5000) == ESP_OK);
+        runner.update(5000 + 1600);
+        assert(runner.current_cue_index() == 1);
+        runner.update(5000 + 3200);
+        assert(runner.current_cue_index() == 0);
+
+        // Manual mode test
+        list.mode = CueRunMode::Manual;
+        assert(runner.start(list, 0, 10000) == ESP_OK);
+        runner.set_manual_fade(16384);
+        assert(runner.manual_fade_q15() == 16384);
+        runner.stop(10100);
+        assert(runner.is_running() == false);
+    }
+
+    // 5. Calendar Schedule NVS binary compatibility
+    static_assert(sizeof(CalendarScheduleEntry) == 8, "CalendarScheduleEntry size changed!");
+    static_assert(sizeof(CalendarSchedule) == 68, "CalendarSchedule size changed!");
+
+    CalendarSchedule sched{};
+    sched.entries[0].action = CalendarAction::CueList;
+    sched.entries[0].cue_list_index = 3;
+    assert(sched.entries[0].cue_list_index == 3);
+
+    ESP_LOGI(TAG, "[PASS] LG-022 Show Engine hardening tests passed.");
+    return true;
+}
+
 } // namespace
 
 bool run_runtime_hardening_tests() {
@@ -2576,6 +2987,13 @@ bool run_runtime_hardening_tests() {
 
     // Batch 9 Tests
     all_ok &= test_batch9_burnin_blockers();
+    all_ok &= test_batch9_checked_scene_activation_lifecycle_guard();
+
+    // Batch 11 Phase 0 Tests
+    all_ok &= test_batch11_phase0_truthful_control_contract();
+
+    // LG-022 Show Engine Tests
+    all_ok &= test_lg022_show_engine();
 
     if (all_ok) {
         ESP_LOGI(TAG, "==================================================");

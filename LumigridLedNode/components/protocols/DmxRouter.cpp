@@ -1,6 +1,7 @@
 // components/protocols/DmxRouter.cpp
 #include "DmxRouter.hpp"
 #include "LightingRuntime.hpp"
+#include "ChannelHardware.hpp"
 #include "esp_timer.h"
 #include "esp_log.h"
 #include <algorithm>
@@ -33,14 +34,15 @@ void DmxRouter::update_config(const DeviceConfig& config) {
             patch_changed = true;
         }
         if (!patch_changed) {
-            for (uint8_t f = 0; f < 16; ++f) {
-                const auto& cur = fixtures_[f];
-                const auto& nxt = config.fixtures[f];
+            for (uint8_t ch = 0; ch < 16; ++ch) {
+                const auto& cur = channels_[ch];
+                const auto& nxt = config.channels[ch];
                 if (cur.dmx_universe != nxt.dmx_universe ||
                     cur.dmx_start_channel != nxt.dmx_start_channel ||
                     cur.dmx_mode != nxt.dmx_mode ||
-                    cur.num_pixels != nxt.num_pixels ||
-                    cur.profile != nxt.profile) {
+                    cur.pixel_count != nxt.pixel_count ||
+                    cur.addressable_type != nxt.addressable_type ||
+                    cur.enabled != nxt.enabled) {
                     patch_changed = true;
                     break;
                 }
@@ -48,8 +50,8 @@ void DmxRouter::update_config(const DeviceConfig& config) {
         }
 
         protocol_cfg_ = config.protocol;
-        for (uint8_t f = 0; f < 16; ++f) {
-            fixtures_[f] = config.fixtures[f];
+        for (uint8_t ch = 0; ch < 16; ++ch) {
+            channels_[ch] = config.channels[ch];
         }
 
         if (patch_changed) {
@@ -93,22 +95,13 @@ size_t DmxRouter::collect_patched_universes(const DeviceConfig& config, uint16_t
         }
     };
 
-    // Include universe_start only when zone wash is configured and at least one fixture consumes it
-    bool has_zone_consumer = false;
-    for (const auto& fix : config.fixtures) {
-        if (fix.num_pixels > 0 && fix.dmx_start_channel == 0) {
-            has_zone_consumer = true;
-            break;
-        }
-    }
-    if (config.protocol.zone_start_channel > 0 && has_zone_consumer) {
+    if (config.protocol.zone_start_channel > 0) {
         add_universe(config.protocol.universe_start);
     }
 
-    // Include fixture universes only for configured fixtures with dmx_start_channel > 0
-    for (const auto& fix : config.fixtures) {
-        if (fix.num_pixels > 0 && fix.dmx_start_channel > 0) {
-            add_universe(fix.dmx_universe);
+    for (const auto& ch : config.channels) {
+        if (ch.enabled && ch.dmx_start_channel > 0) {
+            add_universe(ch.dmx_universe);
         }
     }
 
@@ -122,8 +115,8 @@ size_t DmxRouter::get_active_universes(uint16_t* out_universes, size_t max_count
     std::lock_guard<std::mutex> lock(frame_mutex_);
     DeviceConfig cfg{};
     cfg.protocol = protocol_cfg_;
-    for (size_t i = 0; i < fixtures_.size(); ++i) {
-        cfg.fixtures[i] = fixtures_[i];
+    for (size_t i = 0; i < channels_.size(); ++i) {
+        cfg.channels[i] = channels_[i];
     }
     return collect_patched_universes(cfg, out_universes, max_count);
 }
@@ -208,15 +201,15 @@ void DmxRouter::clear_assembled_patch_locked(uint16_t universe) {
         assembled_frame_.dmx_telemetry_len = 0;
     }
 
-    // 2. Direct Fixtures
-    for (uint8_t f = 0; f < 16; ++f) {
-        const auto& fix = fixtures_[f];
-        if (fix.dmx_start_channel > 0 && fix.dmx_universe == universe) {
-            auto& lf = assembled_frame_.fixtures[f];
-            lf.active = false;
-            lf.opacity = 0;
-            for (auto& px : lf.pixels) px = {0, 0, 0, 0};
-            lf.pwm.fill(0);
+    // 2. Channels
+    for (uint8_t ch = 0; ch < 16; ++ch) {
+        const auto& c = channels_[ch];
+        if (c.dmx_start_channel > 0 && c.dmx_universe == universe) {
+            auto& lc = assembled_frame_.channels[ch];
+            lc.active = false;
+            lc.opacity = 0;
+            for (auto& px : lc.pixels) px = {0, 0, 0, 0};
+            lc.pwm = 0;
         }
     }
 }
@@ -471,8 +464,8 @@ void DmxRouter::process_frame(uint16_t universe, const uint8_t* data, uint16_t l
         std::lock_guard<std::mutex> lock(frame_mutex_);
         relevant = (universe == protocol_cfg_.universe_start);
         if (!relevant) {
-            for (const auto& fix : fixtures_) {
-                if (fix.dmx_start_channel > 0 && fix.dmx_universe == universe) {
+            for (const auto& ch : channels_) {
+                if (ch.enabled && ch.dmx_start_channel > 0 && ch.dmx_universe == universe) {
                     relevant = true;
                     break;
                 }
@@ -595,64 +588,64 @@ void DmxRouter::dispatch_patch(uint16_t universe, const uint8_t* data, uint16_t 
         }
     }
 
-    // 2. Direct Fixture Patch Dispatch
-    for (uint8_t f = 0; f < 16; ++f) {
-        const auto& fix = fixtures_[f];
-        if (fix.dmx_start_channel == 0) continue; // Unpatched: inherits zone wash
-        if (fix.dmx_universe != universe) continue;
+    // 2. Direct Channel Patch Dispatch
+    for (uint8_t ch = 0; ch < 16; ++ch) {
+        const auto& c = channels_[ch];
+        if (!c.enabled || c.dmx_start_channel == 0) continue;
+        if (c.dmx_universe != universe) continue;
 
-        const size_t ch_offset = fix.dmx_start_channel - 1; // 0-indexed
+        const size_t ch_offset = c.dmx_start_channel - 1; // 0-indexed
         if (ch_offset >= length) continue;
 
-        auto& lf = assembled_frame_.fixtures[f];
-        const uint16_t pcount = std::min<uint16_t>(fix.num_pixels, MAX_PIXELS);
-        lf.pixel_count = pcount;
-        lf.timestamp_ms = now;
-        lf.opacity = 255;
-        lf.active = true;
+        const auto hw = channel_hardware(ch);
+        auto& lc = assembled_frame_.channels[ch];
+        lc.timestamp_ms = now;
+        lc.opacity = 255;
+        lc.active = true;
 
-        if (fix.dmx_mode == 0) {
-            // Mode 0: Fixture Wash
-            LightValue lv{0, 0, 0, 0};
-            uint16_t pwm_duties[4] = {0, 0, 0, 0};
+        if (hw.kind == ChannelKind::Pwm) {
+            // PWM channel: single dimmer slot
+            uint8_t val = data[ch_offset];
+            lc.pixels[0] = {val, val, val, 0};
+            lc.pwm = (static_cast<uint32_t>(val) * 4095) / 255;
+            lc.pixel_count = 1;
+        } else {
+            // Addressable channel
+            const uint16_t pcount = std::min<uint16_t>(c.pixel_count, MAX_PIXELS);
+            lc.pixel_count = pcount;
+            lc.pwm = 0;
 
-            if (fix.profile == FixtureProfile::PWM_Single) {
-                uint8_t val = data[ch_offset];
-                lv = {val, val, val, 0};
-                pwm_duties[0] = (static_cast<uint32_t>(val) * 4095) / 255;
-            } else if (fix.profile == FixtureProfile::PWM_RGB || fix.profile == FixtureProfile::WS2812) {
-                if (ch_offset + 2 < length) {
-                    lv = {data[ch_offset], data[ch_offset + 1], data[ch_offset + 2], 0};
-                }
-            } else if (fix.profile == FixtureProfile::PWM_RGBW || fix.profile == FixtureProfile::SK6812) {
-                if (ch_offset + 3 < length) {
-                    lv = {data[ch_offset], data[ch_offset + 1], data[ch_offset + 2], data[ch_offset + 3]};
-                }
-            }
-
-            for (uint16_t p = 0; p < pcount; ++p) {
-                lf.pixels[p] = lv;
-            }
-            for (uint8_t ch = 0; ch < 4; ++ch) {
-                lf.pwm[ch] = pwm_duties[ch];
-            }
-        } else if (fix.dmx_mode == 1) {
-            // Mode 1: Direct Pixel Map
-            const uint8_t ch_per_pixel = (fix.profile == FixtureProfile::SK6812 || fix.profile == FixtureProfile::PWM_RGBW) ? 4 : 3;
-
-            for (uint16_t p = 0; p < pcount; ++p) {
-                size_t px_ch = ch_offset + (p * ch_per_pixel);
-                if (px_ch + ch_per_pixel - 1 < length) {
-                    if (ch_per_pixel == 4) {
-                        lf.pixels[p] = {data[px_ch], data[px_ch + 1], data[px_ch + 2], data[px_ch + 3]};
-                    } else {
-                        lf.pixels[p] = {data[px_ch], data[px_ch + 1], data[px_ch + 2], 0};
+            if (c.dmx_mode == 0) {
+                // Mode 0: Wash
+                LightValue lv{0, 0, 0, 0};
+                if (c.addressable_type == AddressableType::SK6812) {
+                    if (ch_offset + 3 < length) {
+                        lv = {data[ch_offset], data[ch_offset + 1], data[ch_offset + 2], data[ch_offset + 3]};
                     }
                 } else {
-                    lf.pixels[p] = {0, 0, 0, 0};
+                    if (ch_offset + 2 < length) {
+                        lv = {data[ch_offset], data[ch_offset + 1], data[ch_offset + 2], 0};
+                    }
+                }
+                for (uint16_t p = 0; p < pcount; ++p) {
+                    lc.pixels[p] = lv;
+                }
+            } else if (c.dmx_mode == 1) {
+                // Mode 1: Direct Pixel Map
+                const uint8_t ch_per_pixel = (c.addressable_type == AddressableType::SK6812) ? 4 : 3;
+                for (uint16_t p = 0; p < pcount; ++p) {
+                    size_t px_ch = ch_offset + (p * ch_per_pixel);
+                    if (px_ch + ch_per_pixel - 1 < length) {
+                        if (ch_per_pixel == 4) {
+                            lc.pixels[p] = {data[px_ch], data[px_ch + 1], data[px_ch + 2], data[px_ch + 3]};
+                        } else {
+                            lc.pixels[p] = {data[px_ch], data[px_ch + 1], data[px_ch + 2], 0};
+                        }
+                    } else {
+                        lc.pixels[p] = {0, 0, 0, 0};
+                    }
                 }
             }
-            lf.pwm.fill(0);
         }
     }
 

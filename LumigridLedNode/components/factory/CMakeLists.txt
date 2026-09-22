@@ -6,6 +6,7 @@ idf_component_register(
         "DiagnosticLog.cpp"
     INCLUDE_DIRS
         "include"
+        "../../generated"
     REQUIRES
         output
         config
@@ -19,5 +20,7 @@ idf_component_register(
         api
         esp_wifi
         nvs_flash
+        control
         app_update
+        show
 )

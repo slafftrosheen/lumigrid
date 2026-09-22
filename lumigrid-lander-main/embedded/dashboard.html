@@ -1,0 +1,2254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="description" content="LumiGrid OS Node Controller - Configure, operate, and monitor your lighting node in real-time.">
+    <title>LumiGrid OS — Node Controller</title>
+    <style>
+        /* ═══════════════════════════════════════════════════════
+           LUMIGRID OS — DESIGN SYSTEM (Dark Glassmorphism)
+           ═══════════════════════════════════════════════════════ */
+        :root {
+            --bg: #05060f;
+            --bg-subtle: #0a0b18;
+            --surface: rgba(14, 15, 28, 0.78);
+            --surface-elevated: rgba(22, 24, 42, 0.88);
+            --surface-hover: rgba(32, 35, 55, 0.92);
+            --surface-active: rgba(42, 46, 68, 0.95);
+            --border: rgba(255, 255, 255, 0.08);
+            --border-subtle: rgba(255, 255, 255, 0.04);
+            --border-focus: rgba(129, 140, 248, 0.5);
+            --text: #eef0f6;
+            --text-secondary: #a0a4b8;
+            --text-muted: #6b7084;
+            --primary: #6366f1;
+            --primary-dim: #4f46e5;
+            --primary-soft: rgba(99, 102, 241, 0.14);
+            --primary-glow: rgba(99, 102, 241, 0.35);
+            --accent: #34d399;
+            --accent-soft: rgba(52, 211, 153, 0.14);
+            --accent-glow: rgba(52, 211, 153, 0.3);
+            --danger: #f87171;
+            --danger-bg: rgba(127, 29, 29, 0.35);
+            --danger-glow: rgba(248, 113, 113, 0.3);
+            --warning: #fbbf24;
+            --warning-soft: rgba(251, 191, 36, 0.15);
+            --radius-sm: 8px;
+            --radius: 12px;
+            --radius-lg: 16px;
+            --radius-xl: 20px;
+            --radius-full: 999px;
+            --font: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, system-ui, sans-serif;
+            --ease: cubic-bezier(0.4, 0, 0.2, 1);
+            --transition: 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        /* ── Reset & Base ── */
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: var(--font);
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.5;
+            min-height: 100vh;
+            -webkit-font-smoothing: antialiased;
+            overflow-x: hidden;
+        }
+        body::after {
+            content: '';
+            position: fixed; inset: 0;
+            background:
+                radial-gradient(ellipse 80% 50% at 10% 35%, rgba(99,102,241,.08), transparent 60%),
+                radial-gradient(ellipse 60% 70% at 90% 20%, rgba(52,211,153,.06), transparent 50%),
+                radial-gradient(ellipse 70% 60% at 50% 90%, rgba(129,140,248,.05), transparent 60%);
+            pointer-events: none; z-index: -1;
+        }
+
+        /* ── Typography ── */
+        h1, h2, h3, h4, h5 { font-weight: 650; letter-spacing: -0.02em; line-height: 1.25; }
+        h2 { font-size: 1.15rem; }
+        h3 { font-size: 1.3rem; }
+        h4 { font-size: 0.95rem; }
+        h5 { font-size: 0.82rem; font-weight: 700; color: var(--text-secondary); }
+        .eyebrow {
+            color: #a5b4fc; font-size: 0.68rem; font-weight: 800;
+            letter-spacing: 0.15em; text-transform: uppercase;
+        }
+        .muted { color: var(--text-muted); font-size: 0.85rem; }
+        .help { color: var(--text-muted); font-size: 0.75rem; line-height: 1.4; }
+
+        /* ── Form Controls ── */
+        input, select, button { font-family: inherit; }
+        input, select {
+            font-size: 0.88rem; border-radius: var(--radius-sm);
+            border: 1px solid var(--border);
+            background: rgba(5, 6, 15, 0.6);
+            color: var(--text); padding: 0.55rem 0.75rem;
+            width: 100%; transition: border-color var(--transition), box-shadow var(--transition);
+        }
+        input:focus, select:focus {
+            outline: none; border-color: var(--primary);
+            box-shadow: 0 0 0 3px var(--primary-soft);
+            background: rgba(8, 10, 22, 0.8);
+        }
+        input::placeholder { color: var(--text-muted); }
+        select { cursor: pointer; }
+        select option { background: #0c0e1e; color: var(--text); }
+
+        /* Switch row */
+        .switch-row { display: flex; align-items: center; justify-content: space-between; gap: 0.8rem; padding: 0.4rem 0; font-size: 0.82rem; cursor: pointer; }
+        .switch-row input[type="checkbox"] {
+            appearance: none; -webkit-appearance: none;
+            width: 2.6rem; height: 1.4rem;
+            border-radius: var(--radius-full);
+            background: rgba(255,255,255,0.1);
+            border: 1px solid rgba(255,255,255,0.15);
+            cursor: pointer; position: relative; flex-shrink: 0;
+            transition: background var(--transition), border-color var(--transition);
+        }
+        .switch-row input[type="checkbox"]::after {
+            content: ''; position: absolute; top: 2px; left: 2px;
+            width: calc(1.4rem - 6px); height: calc(1.4rem - 6px);
+            border-radius: 50%; background: white;
+            transition: transform var(--transition);
+        }
+        .switch-row input[type="checkbox"]:checked {
+            background: var(--primary); border-color: var(--primary);
+        }
+        .switch-row input[type="checkbox"]:checked::after {
+            transform: translateX(1.2rem);
+        }
+
+        /* Range sliders */
+        input[type="range"] {
+            appearance: none; -webkit-appearance: none;
+            height: 5px; border-radius: 3px; background: rgba(255,255,255,0.12);
+            border: none; outline: none; cursor: pointer; padding: 0;
+        }
+        input[type="range"]::-webkit-slider-thumb {
+            appearance: none; -webkit-appearance: none;
+            width: 16px; height: 16px; border-radius: 50%;
+            background: white; box-shadow: 0 1px 4px rgba(0,0,0,0.4), 0 0 0 2px var(--primary);
+            cursor: pointer; transition: transform var(--transition);
+        }
+        input[type="range"]::-webkit-slider-thumb:hover { transform: scale(1.15); }
+
+        /* Buttons */
+        button {
+            font-size: 0.82rem; font-weight: 600;
+            border-radius: var(--radius-sm); padding: 0.55rem 0.9rem;
+            border: 1px solid var(--border);
+            color: var(--text); background: rgba(255,255,255,0.06);
+            cursor: pointer; transition: all var(--transition);
+            display: inline-flex; align-items: center; justify-content: center; gap: 0.4rem;
+        }
+        button:hover { background: rgba(255,255,255,0.12); border-color: rgba(255,255,255,0.15); }
+        button:active { transform: scale(0.97); }
+        .button-primary {
+            border-color: transparent;
+            background: linear-gradient(135deg, #6366f1, #4f46e5);
+            box-shadow: 0 2px 8px rgba(99,102,241,0.3); font-weight: 700;
+        }
+        .button-primary:hover { filter: brightness(1.12); box-shadow: 0 4px 16px rgba(99,102,241,0.45); }
+        .button-secondary { background: rgba(255,255,255,0.05); }
+        .button-danger {
+            color: #fecaca; border-color: rgba(248,113,113,0.35);
+            background: var(--danger-bg);
+        }
+        .button-danger:hover { background: rgba(185, 28, 28, 0.6); }
+
+        /* ── Auth Screen ── */
+        #experience-auth {
+            display: grid; place-items: center; min-height: 100vh; padding: 1.5rem;
+            position: relative; overflow: hidden;
+        }
+        #experience-auth[hidden], #product-app[hidden] { display: none; }
+        .experience-login {
+            position: relative; width: min(26rem, 100%);
+            padding: 2.5rem 2rem 2rem; border-radius: var(--radius-xl);
+            background: rgba(10, 12, 24, 0.9); backdrop-filter: blur(24px);
+            border: 1px solid rgba(255,255,255,0.09);
+            box-shadow: 0 2rem 5rem rgba(0,0,0,0.6);
+        }
+        .experience-login h1 {
+            font-size: clamp(1.8rem, 6vw, 2.4rem); letter-spacing: -0.04em; margin: 0.25rem 0 0.5rem;
+            background: linear-gradient(135deg, var(--text) 0%, #a5b4fc 50%, var(--accent) 100%);
+            -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
+        }
+
+        /* ── App Shell ── */
+        #product-app { padding: 1.25rem; max-width: 92rem; margin: 0 auto; }
+        .app-shell { display: grid; gap: 1rem; }
+        .app-header {
+            display: flex; flex-direction: column; gap: 0.75rem;
+            padding: 1rem 1.25rem; border-radius: var(--radius-lg);
+            background: rgba(10, 12, 24, 0.85); backdrop-filter: blur(16px);
+            border: 1px solid var(--border);
+            box-shadow: 0 4px 16px rgba(0,0,0,0.25);
+        }
+        .header-top {
+            display: flex; flex-wrap: wrap; justify-content: space-between;
+            align-items: center; gap: 0.75rem;
+        }
+        .brand { display: flex; align-items: center; gap: 0.75rem; min-width: 0; }
+        .brand-mark {
+            width: 2.5rem; height: 2.5rem; display: grid; place-items: center;
+            border-radius: 0.7rem; background: linear-gradient(135deg, #818cf8, #34d399);
+            box-shadow: 0 4px 12px rgba(99,102,241,0.35); flex-shrink: 0;
+        }
+        .online-pill {
+            display: inline-flex; align-items: center; gap: 0.35rem;
+            font-size: 0.7rem; color: #bbf7d0; font-weight: 600;
+        }
+        .online-pill::before {
+            content: ""; width: 0.45rem; height: 0.45rem; border-radius: 50%;
+            background: #34d399; box-shadow: 0 0 6px #34d399;
+        }
+        .telemetry-pill {
+            display: inline-flex; align-items: center; gap: 0.35rem;
+            padding: 0.2rem 0.55rem; border-radius: var(--radius-full);
+            background: rgba(255,255,255,0.06); border: 1px solid var(--border-subtle);
+            font-size: 0.68rem; font-weight: 600; font-variant-numeric: tabular-nums;
+        }
+        .telemetry-pill.accent { color: var(--accent); border-color: rgba(52,211,153,0.3); }
+        .telemetry-pill.primary { color: #a5b4fc; border-color: rgba(129,140,248,0.3); }
+        .header-actions { display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap; }
+
+        /* Header mini ribbon preview */
+        #live-preview-ribbon {
+            width: 100%; height: 6px; border-radius: 3px;
+            background: rgba(0,0,0,0.4); border: 1px solid rgba(255,255,255,0.06);
+            image-rendering: pixelated; display: block;
+        }
+
+        /* ── Navigation Rail ── */
+        .nav-rail {
+            display: flex; flex-wrap: wrap; gap: 0.35rem; padding: 0.35rem;
+            background: rgba(10, 12, 24, 0.7); border: 1px solid var(--border);
+            border-radius: var(--radius);
+        }
+        .nav-rail button {
+            border: 0; background: transparent; color: var(--text-muted);
+            border-radius: 0.6rem; padding: 0.55rem 0.85rem; font-size: 0.82rem; font-weight: 600;
+        }
+        .nav-rail button svg { width: 16px; height: 16px; opacity: 0.6; }
+        .nav-rail button:hover { color: var(--text-secondary); background: rgba(255,255,255,0.04); }
+        .nav-rail button.active {
+            color: white; background: rgba(129,140,248,0.18);
+            box-shadow: inset 0 0 0 1px rgba(165,180,252,0.25);
+        }
+        .nav-rail button.active svg { opacity: 1; }
+
+        /* ── Page Views ── */
+        .product-page { display: none; animation: fadeIn 0.25s var(--ease) both; }
+        .product-page.active { display: block; }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(6px); }
+            to   { opacity: 1; transform: none; }
+        }
+        .page-heading {
+            display: flex; justify-content: space-between; align-items: flex-end;
+            gap: 1rem; margin: 0.5rem 0 1rem; flex-wrap: wrap;
+        }
+
+        /* ── Cards & Grid ── */
+        .product-card {
+            padding: 1.25rem; border-radius: var(--radius-lg);
+            border: 1px solid var(--border); background: var(--surface);
+            backdrop-filter: blur(12px);
+            box-shadow: 0 2px 8px rgba(0,0,0,0.12), inset 0 0 0 0.5px rgba(255,255,255,0.03);
+            transition: border-color var(--transition);
+        }
+        .product-card:hover { border-color: rgba(255,255,255,0.12); }
+        .overview-grid { display: grid; grid-template-columns: 1.2fr 0.8fr; gap: 1rem; }
+        .settings-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr)); gap: 1rem; }
+        .stat-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.55rem; margin-top: 0.85rem; }
+        .stat-box {
+            padding: 0.65rem; border-radius: var(--radius-sm);
+            background: rgba(0,0,0,0.25); border: 1px solid var(--border-subtle);
+        }
+        .stat-box span {
+            display: block; color: var(--text-muted); font-size: 0.65rem;
+            text-transform: uppercase; letter-spacing: 0.08em; font-weight: 700;
+        }
+        .stat-box strong { font-size: 0.95rem; font-variant-numeric: tabular-nums; }
+
+        /* Power meter bar */
+        .power-meter {
+            height: 8px; border-radius: 4px; background: rgba(255,255,255,0.08);
+            margin: 0.5rem 0; overflow: hidden; position: relative;
+        }
+        .power-fill {
+            height: 100%; border-radius: 4px; background: var(--accent);
+            transition: width 0.3s ease, background 0.3s ease;
+        }
+        .power-fill.warning { background: var(--warning); }
+        .power-fill.danger { background: var(--danger); }
+
+        /* ── Live Visualizer Canvas ── */
+        .visualizer-container {
+            background: #020308; border: 1px solid var(--border);
+            border-radius: var(--radius-lg); padding: 1rem; position: relative;
+            box-shadow: inset 0 0 40px rgba(0,0,0,0.8);
+            display: flex; flex-direction: column; gap: 0.75rem;
+        }
+        .visualizer-toolbar {
+            display: flex; justify-content: space-between; align-items: center;
+            flex-wrap: wrap; gap: 0.5rem;
+        }
+        #visualizer-canvas {
+            width: 100%; height: auto; min-height: 220px;
+            border-radius: var(--radius-sm); background: #010206;
+            cursor: crosshair; display: block;
+        }
+        .canvas-tooltip {
+            position: absolute; pointer-events: none; opacity: 0;
+            background: rgba(15, 23, 42, 0.95); backdrop-filter: blur(8px);
+            border: 1px solid var(--border); border-radius: var(--radius-sm);
+            padding: 0.4rem 0.65rem; font-size: 0.72rem; color: white;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.4); z-index: 10;
+            transition: opacity 0.15s ease;
+        }
+
+        /* ── Fixture & DMX Patcher Table ── */
+        .patcher-scroll {
+            overflow-x: auto; border-radius: var(--radius);
+            border: 1px solid var(--border); background: rgba(5,6,15,0.4);
+        }
+        .patcher-table {
+            width: 100%; border-collapse: collapse; font-size: 0.8rem;
+        }
+        .patcher-table th {
+            background: rgba(14, 16, 32, 0.95); color: var(--text-secondary);
+            font-weight: 700; text-align: left; padding: 0.65rem 0.75rem;
+            border-bottom: 1px solid var(--border); white-space: nowrap;
+        }
+        .patcher-table td {
+            padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border-subtle);
+            vertical-align: middle; white-space: nowrap;
+        }
+        .patcher-table tr:hover td { background: rgba(255,255,255,0.02); }
+        .patcher-table input, .patcher-table select {
+            min-height: 2rem; padding: 0.25rem 0.5rem; font-size: 0.78rem;
+        }
+        .badge {
+            display: inline-flex; align-items: center; padding: 0.15rem 0.45rem;
+            border-radius: var(--radius-sm); font-size: 0.68rem; font-weight: 700;
+        }
+        .badge-wash { background: rgba(99,102,241,0.18); color: #c7d2fe; }
+        .badge-pixel { background: rgba(52,211,153,0.18); color: #a7f3d0; }
+
+        /* ── Scene Designer ── */
+        .scene-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr)); gap: 1rem; }
+        .scene-card {
+            display: grid; gap: 0.75rem; border-top: 3px solid var(--scene-color, var(--primary));
+            transition: transform var(--transition), box-shadow var(--transition);
+        }
+        .scene-card:hover {
+            transform: translateY(-2px); box-shadow: 0 8px 24px rgba(0,0,0,0.3);
+        }
+        .scene-card .scene-actions { display: flex; gap: 0.5rem; margin-top: auto; }
+        .scene-card .scene-actions button { flex: 1; }
+        .range-row {
+            display: grid; grid-template-columns: minmax(7rem, 1fr) minmax(8rem, 2fr) minmax(3.2rem, auto);
+            gap: 0.65rem; align-items: center; margin-top: 0.65rem;
+        }
+        .range-row label { font-size: 0.75rem; font-weight: 700; color: var(--text-secondary); }
+        .range-row output { color: var(--accent); font-variant-numeric: tabular-nums; text-align: right; font-weight: 600; font-size: 0.82rem; }
+        
+        input[type="range"] {
+            -webkit-appearance: none; appearance: none; width: 100%; height: 6px;
+            background: rgba(255,255,255,0.1); border-radius: 3px; outline: none;
+            transition: background 0.3s;
+        }
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none; appearance: none;
+            width: 16px; height: 16px; border-radius: 50%;
+            background: var(--primary); cursor: pointer;
+            box-shadow: 0 0 12px rgba(99,102,241,0.6);
+            transition: transform 0.15s cubic-bezier(0.4, 0, 0.2, 1), background 0.15s;
+        }
+        input[type="range"]::-moz-range-thumb {
+            width: 16px; height: 16px; border-radius: 50%; border: none;
+            background: var(--primary); cursor: pointer;
+            box-shadow: 0 0 12px rgba(99,102,241,0.6);
+            transition: transform 0.15s cubic-bezier(0.4, 0, 0.2, 1), background 0.15s;
+        }
+        input[type="range"]:active::-webkit-slider-thumb {
+            transform: scale(1.3); background: var(--accent);
+        }
+        input[type="range"]:active::-moz-range-thumb {
+            transform: scale(1.3); background: var(--accent);
+        }
+        .layer-box {
+            background: rgba(0,0,0,0.25); border: 1px solid var(--border-subtle);
+            border-radius: var(--radius); padding: 1rem; margin-top: 0.85rem;
+        }
+        .color-inputs { display: flex; align-items: center; gap: 0.65rem; flex-wrap: wrap; margin-top: 0.5rem; }
+        .color-swatch-btn {
+            display: inline-flex; align-items: center; gap: 0.4rem; padding: 0.3rem 0.6rem;
+            background: rgba(255,255,255,0.05); border-radius: var(--radius-sm); border: 1px solid var(--border);
+        }
+        .color-pip { width: 18px; height: 18px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.3); }
+
+        /* ── DMX Grid ── */
+        .dmx-matrix {
+            display: grid; grid-template-columns: repeat(auto-fill, minmax(1.8rem, 1fr));
+            gap: 3px; max-height: 460px; overflow-y: auto; padding: 0.5rem;
+            background: rgba(0,0,0,0.3); border-radius: var(--radius-sm); border: 1px solid var(--border-subtle);
+        }
+        .dmx-cell {
+            aspect-ratio: 1; border-radius: 3px; display: flex; flex-direction: column;
+            align-items: center; justify-content: center; font-size: 0.55rem;
+            font-variant-numeric: tabular-nums; cursor: pointer; transition: transform 0.1s;
+            border: 1px solid rgba(255,255,255,0.04);
+        }
+        .dmx-cell:hover { transform: scale(1.15); z-index: 2; border-color: var(--primary); }
+
+        /* ── Toast Notifications ── */
+        #experience-toast {
+            position: fixed; z-index: 999; right: 1.25rem; bottom: 1.25rem;
+            max-width: min(28rem, calc(100vw - 2.5rem)); padding: 0.85rem 1.15rem;
+            border-radius: var(--radius); background: rgba(15, 23, 42, 0.95);
+            backdrop-filter: blur(16px); border: 1px solid var(--border);
+            border-left: 3px solid var(--accent); color: white; font-size: 0.85rem; font-weight: 550;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.5); transform: translateY(calc(100% + 3rem));
+            opacity: 0; transition: transform 0.3s var(--ease), opacity 0.3s;
+        }
+        #experience-toast.show { transform: translateY(0); opacity: 1; }
+        #experience-toast.error { border-left-color: var(--danger); }
+
+        /* ── Responsive ── */
+        @media (max-width: 60rem) {
+            .overview-grid { grid-template-columns: 1fr; }
+            .patcher-table { font-size: 0.75rem; }
+        }
+        @media (max-width: 48rem) {
+            #product-app { padding: 0.65rem; }
+            .nav-rail {
+                position: fixed; bottom: 0; left: 0; right: 0; z-index: 50;
+                border-radius: var(--radius-lg) var(--radius-lg) 0 0; justify-content: space-around;
+                background: rgba(10, 12, 24, 0.95); backdrop-filter: blur(16px);
+                padding: 0.35rem 0.5rem calc(0.35rem + env(safe-area-inset-bottom, 0));
+                border-top: 1px solid var(--border);
+            }
+            .nav-rail button { flex-direction: column; gap: 0.15rem; padding: 0.4rem; font-size: 0.65rem; }
+            .app-shell { padding-bottom: calc(4.5rem + env(safe-area-inset-bottom, 0)); }
+        }
+    </style>
+    <script>
+        window.lg = window.lg || {
+            connect: function() { console.warn('LumiGrid scripts loading...'); }
+        };
+    </script>
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════════════
+     AUTHENTICATION SCREEN
+     ═══════════════════════════════════════════════════════ -->
+<section id="experience-auth" aria-labelledby="login-title">
+    <div class="experience-login">
+        <form onsubmit="lg.connect(); return false;">
+            <div style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1.25rem;">
+                <div class="brand-mark" style="width: 2rem; height: 2rem;">
+                    <svg width="18" height="18" viewBox="0 0 22 22" fill="none"><rect x="2" y="2" width="6" height="6" rx="1.5" fill="white"/><rect x="12" y="2" width="6" height="6" rx="1.5" fill="white" opacity=".6"/><rect x="2" y="12" width="6" height="6" rx="1.5" fill="white" opacity=".6"/><rect x="12" y="12" width="6" height="6" rx="1.5" fill="white"/></svg>
+                </div>
+                <p class="eyebrow">LumiGrid Node Operator</p>
+            </div>
+            <h1 id="login-title">Make light<br>feel alive.</h1>
+            <p class="muted" style="margin-bottom: 1.25rem;">Connect securely to monitor live LED strips, patch DMX universes, and orchestrate scenes.</p>
+            <label for="experience-token" style="display:block; font-size:0.75rem; font-weight:700; color:var(--text-secondary); margin-bottom:0.4rem;">Node Access Token <span style="font-weight:400; color:var(--text-muted);">(Default: lumigrid_admin)</span></label>
+            <input id="experience-token" type="password" autocomplete="current-password" placeholder="Enter operator or admin token" value="lumigrid_admin" required>
+            <button class="button-primary" type="submit" style="width: 100%; margin-top: 1.25rem; min-height: 2.5rem;">Connect to Node</button>
+        </form>
+    </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════
+     MAIN OPERATOR APP
+     ═══════════════════════════════════════════════════════ -->
+<main id="product-app" hidden>
+    <div class="app-shell">
+        
+        <!-- Header -->
+        <header class="app-header">
+            <div class="header-top">
+                <div class="brand">
+                    <div class="brand-mark" aria-hidden="true">
+                        <svg width="20" height="20" viewBox="0 0 22 22" fill="none"><rect x="2" y="2" width="6" height="6" rx="1.5" fill="white"/><rect x="12" y="2" width="6" height="6" rx="1.5" fill="white" opacity=".5"/><rect x="2" y="12" width="6" height="6" rx="1.5" fill="white" opacity=".5"/><rect x="12" y="12" width="6" height="6" rx="1.5" fill="white"/></svg>
+                    </div>
+                    <div>
+                        <div style="display:flex; align-items:center; gap:0.5rem;">
+                            <p class="eyebrow">LumiGrid OS</p>
+                            <span class="online-pill">Connected</span>
+                        </div>
+                        <h2 id="experience-node-name">LIGHTING NODE</h2>
+                    </div>
+                </div>
+
+                <div class="header-actions">
+                    <div class="telemetry-pill accent"><span id="header-fps">0</span> FPS</div>
+                    <div class="telemetry-pill primary"><span id="header-owner">ScenePlayback</span></div>
+                    <div class="telemetry-pill"><span id="header-power">0 mW</span></div>
+                    <button class="button-secondary" onclick="lg.refresh()" title="Reload data">Refresh</button>
+                    <button class="button-danger" onclick="lg.blackout()" title="Instant blackout">Blackout</button>
+                    <button class="button-secondary" onclick="lg.disconnect()" title="Log out">Disconnect</button>
+                </div>
+            </div>
+            <!-- Live Preview Ribbon -->
+            <canvas id="live-preview-ribbon" height="6" title="Live hardware activity stream"></canvas>
+        </header>
+
+        <!-- Navigation Rail -->
+        <nav id="nav-rail" class="nav-rail" aria-label="Main Navigation" style="justify-content: flex-start; gap: 0.5rem;">
+            <!-- Generated dynamically by initNavRail() -->
+        </nav>
+
+        <!-- ══════════════════════════════════════════════════════
+             PAGE: DASHBOARD
+             ══════════════════════════════════════════════════════ -->
+        <section id="page-dashboard" class="product-page active">
+            <div class="page-heading">
+                <div><p class="eyebrow">Operational Status</p><h3>Dashboard</h3></div>
+                <div style="display:flex; gap:0.5rem;">
+                    <button class="button-secondary" onclick="lg.nav('visualizer')">Open Live Visualizer →</button>
+                </div>
+            </div>
+
+            <div class="overview-grid">
+                <article class="product-card">
+                    <h4>Current Engine State</h4>
+                    <p id="dash-playing" class="muted" style="font-size:1.1rem; font-weight:600; color:#c7d2fe;">Loading scene...</p>
+                    <div class="stat-list">
+                        <div class="stat-box"><span>Control Owner</span><strong id="dash-owner-text">ScenePlayback</strong></div>
+                        <div class="stat-box"><span>Transition</span><strong id="dash-trans-text">Steady</strong></div>
+                        <div class="stat-box"><span>Stream Protocol</span><strong id="dash-proto-text">Ready</strong></div>
+                        <div class="stat-box"><span>Safety Fallback</span><strong id="dash-safety-text">Normal</strong></div>
+                    </div>
+                </article>
+
+                <article class="product-card">
+                    <h4>Power Consumption & Budget</h4>
+                    <div style="display:flex; justify-content:space-between; align-items:baseline; margin-top:0.25rem;">
+                        <span id="dash-power-est" style="font-size:1.4rem; font-weight:700; color:var(--accent);">0 mW</span>
+                        <span id="dash-power-max" class="help">Max Budget: 30,000 mW</span>
+                    </div>
+                    <div class="power-meter"><div id="dash-power-bar" class="power-fill" style="width: 15%;"></div></div>
+                    <p class="help">Quiescent idle load (5 mW/px) + active channel draw subject to post-render power limiting.</p>
+                </article>
+            </div>
+
+            <div style="margin-top: 1.25rem;">
+                <div class="page-heading">
+                    <div><p class="eyebrow">Quick Playback</p><h4>Stored Scenes</h4></div>
+                    <button class="button-secondary" onclick="lg.nav('scenes')">Manage Library →</button>
+                </div>
+                <div id="dash-quick-scenes" class="scene-grid"></div>
+            </div>
+        </section>
+
+        <!-- ══════════════════════════════════════════════════════
+             PAGE: LIVE VISUALIZER
+             ══════════════════════════════════════════════════════ -->
+        <section id="page-visualizer" class="product-page">
+            <div class="page-heading">
+                <div><p class="eyebrow">Hardware-Faithful Emulation</p><h3>Physical Sign Visualizer</h3></div>
+                <div style="display:flex; align-items:center; gap:0.5rem;">
+                    <button id="viz-mode-btn" class="button-secondary" onclick="lg.toggleVisualizerMode()">View: Physical Lanes (0-7)</button>
+                    <button class="button-secondary" onclick="lg.fitVisualizer()">Fit View</button>
+                </div>
+            </div>
+
+            <div class="visualizer-container">
+                <div class="visualizer-toolbar">
+                    <div style="display:flex; align-items:center; gap:0.75rem;">
+                        <div class="telemetry-pill accent"><span id="viz-fps">0</span> FPS</div>
+                        <div class="telemetry-pill primary"><span id="viz-packets">0</span> Packets Received</div>
+                        <div class="telemetry-pill"><span id="viz-pixels">0</span> Active Pixels</div>
+                    </div>
+                    <div style="display:flex; gap:0.5rem; align-items:center;">
+                        <label class="help" style="display:flex; align-items:center; gap:0.35rem; cursor:pointer;">
+                            <input type="checkbox" id="viz-glow-toggle" checked onchange="lg.redrawVisualizer()"> LED Bloom
+                        </label>
+                    </div>
+                </div>
+
+                <div style="position:relative; width:100%;">
+                    <canvas id="visualizer-canvas" width="1152" height="360"></canvas>
+                    <div id="pixel-tooltip" class="canvas-tooltip"></div>
+                </div>
+
+                <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:0.5rem; margin-top:0.25rem;">
+                    <p class="help">Hover over any LED pip to inspect its physical output lane, pixel index, mapped zone, and real-time color.</p>
+                    <span id="viz-hover-info" class="help" style="color:var(--text-secondary); font-family:monospace;">Hover over an LED</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- ══════════════════════════════════════════════════════
+             PAGE: SCENES LIBRARY
+             ══════════════════════════════════════════════════════ -->
+        <section id="page-scenes" class="product-page">
+            <div class="page-heading">
+                <div><p class="eyebrow">Lighting Cues</p><h3>Scene Library</h3></div>
+                <div style="display:flex; gap:0.5rem;">
+                    <button class="button-secondary" onclick="lg.refresh()">Refresh</button>
+                    <button class="button-primary" onclick="lg.createNewScene()">+ New Scene</button>
+                </div>
+            </div>
+            <div id="scene-library" class="scene-grid"></div>
+        </section>
+
+        <!-- ══════════════════════════════════════════════════════
+             PAGE: SCENE DESIGNER (3 Layers per Zone)
+             ══════════════════════════════════════════════════════ -->
+        <section id="page-scene-editor" class="product-page">
+            <div class="page-heading">
+                <div style="display:flex; align-items:center; gap:0.6rem;">
+                    <button class="button-secondary" onclick="lg.backToScenes()">← Scenes</button>
+                    <div><p class="eyebrow">Scene Designer</p><h3 id="scene-editor-title">Edit Scene</h3></div>
+                </div>
+                <div style="display:flex; gap:0.5rem;">
+                    <button class="button-secondary" onclick="lg.testSceneLive()">Test Live</button>
+                    <button class="button-primary" onclick="lg.saveScene()">Save Scene</button>
+                </div>
+            </div>
+
+            <article class="product-card">
+                <div class="settings-grid">
+                    <div>
+                        <label style="display:block; font-size:0.75rem; font-weight:700; color:var(--text-secondary); margin-bottom:0.35rem;">Scene Name</label>
+                        <input id="scene-name" maxlength="23" placeholder="e.g. Evening Amber Glow">
+                    </div>
+                    <div class="range-row">
+                        <label>Global Brightness</label>
+                        <input id="scene-brightness" type="range" min="0" max="100" oninput="lg.updateText('scene-brightness-out', this.value + '%')">
+                        <output id="scene-brightness-out">100%</output>
+                    </div>
+                    <div class="range-row">
+                        <label>Fade Time (ms)</label>
+                        <input id="scene-fade" type="range" min="0" max="5000" step="100" oninput="lg.updateText('scene-fade-out', (this.value/1000).toFixed(1) + ' s')">
+                        <output id="scene-fade-out">1.0 s</output>
+                    </div>
+                </div>
+            </article>
+
+            <!-- Zone Multi-Select & Layer Editor -->
+            <div id="scene-zones-editor" style="margin-top: 1.25rem;"></div>
+        </section>
+
+        <!-- ══════════════════════════════════════════════════════
+             PAGE: ZONES
+             ══════════════════════════════════════════════════════ -->
+        <section id="page-zones" class="product-page">
+            <div class="page-heading">
+                <div><p class="eyebrow">Physical Grouping</p><h3>Zones Architecture</h3></div>
+                <button class="button-secondary" onclick="lg.nav('patcher')">Patch Fixtures to Zones →</button>
+            </div>
+            <div id="zone-cards-grid" class="settings-grid"></div>
+        </section>
+
+        <!-- ══════════════════════════════════════════════════════
+             PAGE: FIXTURE & DMX PATCHER
+             ══════════════════════════════════════════════════════ -->
+        <section id="page-patcher" class="product-page">
+            <div class="page-heading">
+                <div><p class="eyebrow">Hardware & Universe Routing</p><h3>Fixture & DMX Patcher</h3></div>
+                <button class="button-primary" onclick="lg.saveHardwarePatch()">Save & Sync Hardware</button>
+            </div>
+
+            <!-- Protocol Settings -->
+            <article class="product-card" style="margin-bottom: 1.25rem;">
+                <h4>Live Protocol Settings (Art-Net & sACN E1.31)</h4>
+                <div class="settings-grid" style="margin-top: 0.85rem;">
+                    <div>
+                        <label class="switch-row">
+                            <span>Art-Net Receiver (UDP 6454)</span>
+                            <input id="proto-artnet" type="checkbox" checked>
+                        </label>
+                        <label class="switch-row">
+                            <span>sACN E1.31 Receiver (UDP 5568)</span>
+                            <input id="proto-sacn" type="checkbox" checked>
+                        </label>
+                    </div>
+                    <div>
+                        <label style="font-size:0.75rem; font-weight:700; color:var(--text-secondary); display:block; margin-bottom:0.3rem;">Base Universe</label>
+                        <input id="proto-universe-start" type="number" min="0" max="63999" value="0">
+                        <label style="font-size:0.75rem; font-weight:700; color:var(--text-secondary); display:block; margin:0.6rem 0 0.3rem;">Zone Wash Start Channel (1–512)</label>
+                        <input id="proto-zone-start-ch" type="number" min="1" max="512" value="1">
+                    </div>
+                    <div>
+                        <label style="font-size:0.75rem; font-weight:700; color:var(--text-secondary); display:block; margin-bottom:0.3rem;">Channel Merge Mode</label>
+                        <select id="proto-merge-mode">
+                            <option value="HTP">HTP (Highest Takes Precedence)</option>
+                            <option value="LTP">LTP (Latest Takes Precedence)</option>
+                        </select>
+                        <label style="font-size:0.75rem; font-weight:700; color:var(--text-secondary); display:block; margin:0.6rem 0 0.3rem;">Stream Timeout (ms)</label>
+                        <input id="proto-timeout" type="number" min="100" max="10000" step="100" value="2000">
+                    </div>
+                </div>
+            </article>
+
+            <!-- Fixtures Table -->
+            <article class="product-card">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.75rem;">
+                    <h4>Physical Fixtures Map (16 Channels)</h4>
+                    <span class="help">Start Ch = 0 inherits Zone Wash (3 ch R,G,B). Start Ch &gt; 0 enables Direct DMX Patching.</span>
+                </div>
+
+                <div class="patcher-scroll">
+                    <table class="patcher-table">
+                        <thead>
+                            <tr>
+                                <th>#</th>
+                                <th>Assigned Zone</th>
+                                <th>Profile Type</th>
+                                <th>Output Routing</th>
+                                <th>Pixels / Ch</th>
+                                <th>DMX Universe</th>
+                                <th>DMX Start Ch</th>
+                                <th>DMX Mode</th>
+                                <th>Max Bright</th>
+                                <th>Power (mW)</th>
+                            </tr>
+                        </thead>
+                        <tbody id="patcher-tbody">
+                            <!-- Populated dynamically by lg.renderPatcher() -->
+                        </tbody>
+                    </table>
+                </div>
+            </article>
+        </section>
+
+        <!-- ══════════════════════════════════════════════════════
+             PAGE: LIVE DMX MONITOR
+             ══════════════════════════════════════════════════════ -->
+        <section id="page-dmx" class="product-page">
+            <div class="page-heading">
+                <div><p class="eyebrow">Incoming Streams</p><h3>Live DMX 512 Channel Monitor</h3></div>
+                <div style="display:flex; align-items:center; gap:0.5rem;">
+                    <div class="telemetry-pill accent"><span id="dmx-stream-status">Waiting for data...</span></div>
+                </div>
+            </div>
+
+            <article class="product-card">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.75rem; flex-wrap:wrap; gap:0.5rem;">
+                    <div style="display:flex; gap:0.75rem; align-items:center;">
+                        <span class="help">Universe Channels 1–512:</span>
+                        <span id="dmx-hover-val" class="help" style="color:#a5b4fc; font-family:monospace;">Hover a cell</span>
+                    </div>
+                    <div style="display:flex; gap:0.35rem; align-items:center;">
+                        <span style="font-size:0.65rem; color:var(--text-muted);">0</span>
+                        <div style="width:40px; height:8px; border-radius:2px; background:linear-gradient(to right, #111, var(--primary), #fff);"></div>
+                        <span style="font-size:0.65rem; color:var(--text-muted);">255</span>
+                    </div>
+                </div>
+                <div id="dmx-matrix" class="dmx-matrix"></div>
+            </article>
+        </section>
+
+        <!-- ══════════════════════════════════════════════════════
+             PAGE: TIMELINE
+             ══════════════════════════════════════════════════════ -->
+        <section id="page-timeline" class="product-page">
+            <div class="page-heading">
+                <div><p class="eyebrow">Visual Beat Grid</p><h3>Timeline Sequencer</h3></div>
+                <button class="button-primary" onclick="lg.saveTimeline()">Save Timeline</button>
+            </div>
+            <article class="product-card">
+                <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:1rem;">
+                    <div style="display:flex; align-items:center; gap:0.75rem;">
+                        <strong style="font-size:0.85rem;">Tempo</strong>
+                        <input id="timeline-bpm" type="range" min="40" max="240" oninput="lg.setBpm(this.value)">
+                        <output id="timeline-bpm-output" style="font-weight:700; color:#c7d2fe;">120 BPM</output>
+                    </div>
+                    <label class="switch-row">
+                        <span>Play Timeline</span>
+                        <input id="timeline-enabled" type="checkbox" onchange="lg.setTimelineEnabled(this.checked)">
+                    </label>
+                </div>
+                <div id="timeline-palette" style="display:flex; gap:0.5rem; overflow-x:auto; margin-top:1rem; padding-bottom:0.3rem;"></div>
+            </article>
+            <article class="product-card" style="margin-top:1rem; overflow-x:auto;">
+                <div id="timeline-tracks" style="display:grid; gap:0.5rem;"></div>
+            </article>
+        </section>
+
+        <!-- ══════════════════════════════════════════════════════
+             PAGE: SCHEDULES
+             ══════════════════════════════════════════════════════ -->
+        <section id="page-schedules" class="product-page">
+            <div class="page-heading">
+                <div><p class="eyebrow">Calendar Automation</p><h3>Schedule Editor</h3></div>
+                <button class="button-primary" onclick="lg.saveSchedules()">Save Schedules</button>
+            </div>
+            <div id="schedules-grid" class="settings-grid"></div>
+        </section>
+
+        <!-- ══════════════════════════════════════════════════════
+             PAGE: DIAGNOSTICS & SYSTEM
+             ══════════════════════════════════════════════════════ -->
+        <section id="page-diagnostics" class="product-page">
+            <div class="page-heading">
+                <div><p class="eyebrow">Maintenance & Hardware</p><h3>Diagnostics & System</h3></div>
+            </div>
+            <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 1.25rem;">
+                <!-- Left Column: Operations -->
+                <div style="display:flex; flex-direction:column; gap:1.25rem;">
+                    <article class="product-card">
+                        <h4>Factory Output Testing</h4>
+                        <p class="help" style="margin-bottom:0.75rem;">Run hardware test routines on physical LED strips.</p>
+                        <button class="button-secondary" style="width:100%; margin-bottom:0.5rem" onclick="lg.runTestSequence('lane')">Test Strip Lanes (White Chase)</button>
+                        <button class="button-secondary" style="width:100%; margin-bottom:0.5rem" onclick="lg.runTestSequence('color')">Test Color Wash (Rainbow)</button>
+                        <button class="button-primary" style="width:100%; border: 1px solid var(--danger); color: var(--danger); background: rgba(239,68,68,0.1);" onclick="lg.runTestSequence('burn_in')">Burn-in Test (Full Power)</button>
+                    </article>
+
+                    <article class="product-card">
+                        <h4>Firmware OTA Update</h4>
+                        <p class="help" style="margin-bottom:0.75rem;">Upload a compiled .bin image to update node firmware.</p>
+                        <input type="file" id="ota-file" accept=".bin" style="margin-bottom:0.75rem;">
+                        <button class="button-primary" style="width:100%" onclick="lg.uploadOta()">Flash Firmware</button>
+                        <div id="ota-status" class="help" style="margin-top:0.5rem;"></div>
+                    </article>
+
+                    <article class="product-card">
+                        <h4>Backup & Recovery</h4>
+                        <p class="help" style="margin-bottom:0.75rem;">Export or restore device configurations and scenes.</p>
+                        <button class="button-secondary" style="width:100%; margin-bottom:0.75rem" onclick="lg.downloadBackup()">Export Config JSON</button>
+                        <input type="file" id="restore-file" accept=".json" style="margin-bottom:0.75rem;">
+                        <button class="button-primary" style="width:100%" onclick="lg.uploadRestore()">Restore From JSON</button>
+                    </article>
+                </div>
+
+                <!-- Right Column: Telemetry & Logs -->
+                <article class="product-card" style="display:flex; flex-direction:column; padding:0;">
+                    <div style="display:flex; border-bottom: 1px solid var(--border); background:rgba(0,0,0,0.2); border-radius: var(--radius) var(--radius) 0 0;">
+                        <button id="tab-health" class="button-secondary" style="border:none; border-radius:var(--radius) 0 0 0; flex:1; background:var(--surface-2);" onclick="lg.switchDiagTab('health')">Health Metrics</button>
+                        <button id="tab-logs" class="button-secondary" style="border:none; border-radius:0; border-left:1px solid var(--border); flex:1; background:transparent;" onclick="lg.switchDiagTab('logs')">System Logs</button>
+                        <button id="tab-audit" class="button-secondary" style="border:none; border-radius:0 var(--radius) 0 0; border-left:1px solid var(--border); flex:1; background:transparent;" onclick="lg.switchDiagTab('audit')">Audit Trail</button>
+                    </div>
+                    
+                    <div id="panel-health" style="padding:1.25rem; display:flex; flex-direction:column;">
+                        <div style="display:flex; justify-content:space-between; margin-bottom:1rem; align-items:center;">
+                            <h4 style="margin:0;">Live Health Telemetry</h4>
+                            <button class="button-secondary" style="font-size:0.7rem; padding:0.25rem 0.6rem;" onclick="lg.loadCommissioning()">Refresh Health</button>
+                        </div>
+                        <div id="health-metrics-grid" style="display:grid; grid-template-columns:1fr 1fr; gap:1rem;">
+                            <div class="empty-state">Loading metrics...</div>
+                        </div>
+                    </div>
+
+                    <div id="panel-logs" style="padding:1.25rem; display:none; flex-direction:column; height:100%;">
+                        <div style="display:flex; justify-content:space-between; margin-bottom:1rem; align-items:center;">
+                            <h4 style="margin:0;">Node Diagnostic Stream</h4>
+                            <button class="button-secondary" style="font-size:0.7rem; padding:0.25rem 0.6rem;" onclick="lg.loadLogs()">Stream Latest</button>
+                        </div>
+                        <pre id="sys-logs-viewer" style="background:rgba(5,6,15,0.9); padding:1rem; border-radius:8px; font-size:0.75rem; font-family:monospace; color:#a5b4fc; border:1px solid var(--border-subtle); overflow-y:auto; flex:1; min-height:300px; max-height:500px; margin:0; white-space:pre-wrap; word-wrap:break-word;"></pre>
+                    </div>
+
+                    <div id="panel-audit" style="padding:1.25rem; display:none; flex-direction:column; height:100%;">
+                        <div style="display:flex; justify-content:space-between; margin-bottom:1rem; align-items:center;">
+                            <h4 style="margin:0;">Security & Config Audit</h4>
+                            <button class="button-secondary" style="font-size:0.7rem; padding:0.25rem 0.6rem;" onclick="lg.loadAudit()">Fetch Trail</button>
+                        </div>
+                        <div class="patcher-scroll" style="flex:1;">
+                            <table class="patcher-table">
+                                <thead>
+                                    <tr>
+                                        <th>Timestamp</th>
+                                        <th>Role</th>
+                                        <th>Event Type</th>
+                                        <th>Details</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="audit-tbody">
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </article>
+            </div>
+        </section>
+
+    </div>
+</main>
+
+<div id="experience-toast" role="status" aria-live="polite"></div>
+
+<!-- ═══════════════════════════════════════════════════════
+     CLIENT JAVASCRIPT ENGINE
+     ═══════════════════════════════════════════════════════ -->
+<script>
+window.lg = (() => {
+    // ── Default Effects Catalog ──
+    const fallbackEffects = [
+        {id:'solid',label:'Steady color',description:'A constant, even wash of color.',hasParameter:false},
+        {id:'breathe',label:'Smooth pulse',description:'Gently fades between soft glow and full brightness.',hasParameter:true,parameterLabel:'Minimum glow',parameterUnit:'%',parameterMin:1,parameterMax:100,parameterDefault:4},
+        {id:'chase',label:'Moving comet',description:'A bright comet travels along the strip.',hasParameter:true,parameterLabel:'Tail length',parameterUnit:'pixels',parameterMin:1,parameterMax:12,parameterDefault:3},
+        {id:'sweep',label:'Color sweep',description:'Builds color across the strip from end to end.',hasParameter:false},
+        {id:'reveal',label:'Soft reveal',description:'Fades the lane in for a polished sign-on.',hasParameter:true,parameterLabel:'Fade length',parameterUnit:'%',parameterMin:10,parameterMax:90,parameterDefault:25},
+        {id:'sparkle',label:'Random twinkle',description:'Crisp white twinkles over the base color.',hasParameter:true,parameterLabel:'Twinkles',parameterUnit:'per lane',parameterMin:1,parameterMax:16,parameterDefault:2},
+        {id:'gradient',label:'Flowing glow',description:'Moves a soft wave of light along the strip.',hasParameter:true,parameterLabel:'Wave contrast',parameterUnit:'%',parameterMin:1,parameterMax:100,parameterDefault:100},
+        {id:'strobe',label:'Beat strobe',description:'Flashes the lane with adjustable on-time.',hasParameter:true,parameterLabel:'Flash time',parameterUnit:'%',parameterMin:5,parameterMax:95,parameterDefault:50},
+        {id:'fire',label:'Living flame',description:'Flickering organic flame texture.',hasParameter:true,parameterLabel:'Flame height',parameterUnit:'%',parameterMin:20,parameterMax:100,parameterDefault:70},
+        {id:'aurora',label:'Aurora glow',description:'Gentle shifting spectrum across strip.',hasParameter:true,parameterLabel:'Hue shift',parameterUnit:'deg',parameterMin:1,parameterMax:360,parameterDefault:120},
+        {id:'colorwave',label:'Color wave',description:'Smooth sine wave color interpolation.',hasParameter:true,parameterLabel:'Wave length',parameterUnit:'px',parameterMin:10,parameterMax:255,parameterDefault:50},
+        {id:'staticpulse',label:'Static pulse',description:'Dimmer pulse for ambiance & main lights.',hasParameter:true,parameterLabel:'Min dim',parameterUnit:'%',parameterMin:0,parameterMax:100,parameterDefault:20}
+    ];
+
+    const palettes = [
+        { id: 0, name: "Solid (Primary → Secondary)" },
+        { id: 1, name: "Rainbow Spectrum" },
+        { id: 2, name: "Ocean Breeze" },
+        { id: 3, name: "Lava Glow" },
+        { id: 4, name: "Forest Canopy" },
+        { id: 5, name: "Sunset Horizon" }
+    ];
+
+    const fixtureProfiles = [
+        { id: 0, name: "Unused / None" },
+        { id: 1, name: "WS2812 (Addr RGB)" },
+        { id: 2, name: "SK6812 (Addr RGBW)" },
+        { id: 3, name: "PWM Single Dimmer" },
+        { id: 4, name: "PWM RGB Strip" },
+        { id: 5, name: "PWM RGBW Strip" }
+    ];
+
+    // ── Application State ──
+    const state = {
+        token: '',
+        effects: fallbackEffects,
+        presets: [],
+        sequence: null,
+        schedules: null,
+        config: null,
+        status: null,
+        health: null,
+        editing: null,
+        activeTimelineStep: { track: 0, step: 0 },
+        targetZones: [true, false, false, false, false, false, false, false],
+        activeTab: 'dashboard',
+        visualizerMode: 'lanes', // 'lanes' | 'zones'
+        dmxData: new Uint8Array(512),
+        // Live stream buffer (8 lanes × 144 pixels × 3 RGB = 3456 bytes)
+        liveBuffer: new Uint8Array(8 * 144 * 3),
+        liveFrameCount: 0,
+        lastFpsTimestamp: performance.now(),
+        currentFps: 0,
+        totalPackets: 0,
+        dirty: false
+    };
+
+    const byId = id => document.getElementById(id);
+    const clamp = (val, min, max) => Math.max(min, Math.min(max, Number(val) || 0));
+    const esc = str => String(str ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    const clone = obj => JSON.parse(JSON.stringify(obj));
+
+    function toast(message, error=false) {
+        const el = byId('experience-toast');
+        if (!el) return;
+        el.textContent = message;
+        el.className = (error ? 'error ' : '') + 'show';
+        clearTimeout(toast.timer);
+        toast.timer = setTimeout(() => { el.className = ''; }, 3500);
+    }
+
+    async function api(path, method='GET', body) {
+        const headers = { Authorization: 'Bearer ' + state.token };
+        if (body !== undefined) headers['Content-Type'] = 'application/json';
+        const res = await fetch(path, { method, headers, body: body !== undefined ? JSON.stringify(body) : undefined });
+        if (!res.ok) {
+            let msg = `Request failed (${res.status})`;
+            try { msg = (await res.json()).error || msg; } catch (_) {}
+            throw new Error(msg);
+        }
+        return res.json();
+    }
+
+    function effectMeta(id) {
+        return state.effects.find(e => e.id === id) || state.effects[0];
+    }
+    function colorToHex(col) {
+        if (!col) return '#ffffff';
+        const r = clamp(col.r, 0, 255).toString(16).padStart(2, '0');
+        const g = clamp(col.g, 0, 255).toString(16).padStart(2, '0');
+        const b = clamp(col.b, 0, 255).toString(16).padStart(2, '0');
+        return `#${r}${g}${b}`;
+    }
+    function hexToRgb(hex) {
+        const c = String(hex).replace('#', '');
+        return {
+            r: parseInt(c.slice(0, 2), 16) || 0,
+            g: parseInt(c.slice(2, 4), 16) || 0,
+            b: parseInt(c.slice(4, 6), 16) || 0
+        };
+    }
+    function msToSpeed(ms) { return Math.round(100 - (Math.log(clamp(ms,10,60000) / 10) / Math.log(6000)) * 99); }
+    function speedToMs(val) { return Math.round(10 * Math.pow(6000, (100 - clamp(val,1,100)) / 99)); }
+    function speedLabel(val) { return val > 75 ? 'Fast' : val > 45 ? 'Balanced' : 'Slow'; }
+
+    // ── WebSocket Integration ──
+    let ws = null;
+    function initWebSocket() {
+        if (ws) { ws.close(); ws = null; }
+        const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        ws = new WebSocket(`${proto}//${location.host}/ws`);
+        ws.binaryType = 'arraybuffer';
+        ws.onmessage = (event) => {
+            if (event.data instanceof ArrayBuffer) {
+                const arr = new Uint8Array(event.data);
+                // Handle 0x01 or 76 ('L') preview packet
+                if (arr.length > 1 && (arr[0] === 1 || arr[0] === 76)) {
+                    const rawRgb = arr.subarray(1);
+                    state.liveBuffer.set(rawRgb.subarray(0, state.liveBuffer.length));
+                    state.liveFrameCount++;
+                    state.totalPackets++;
+                    state.dirty = true;
+                }
+            } else if (typeof event.data === 'string') {
+                try {
+                    const payload = JSON.parse(event.data);
+                    if (payload.free_heap !== undefined || payload.uptime_s !== undefined) {
+                        state.health = { ...state.health, ...payload };
+                        const stats = byId('health-stats');
+                        if (stats) {
+                            stats.textContent = `Uptime: ${state.health.uptime_s || 0}s\nFree Heap: ${state.health.free_heap || 0} bytes\nMin Free Heap: ${state.health.min_free_heap || 0} bytes\nFirmware Version: 2.1.0\nChip Revision: ESP32-S3`;
+                        }
+                    } else {
+                        state.status = { ...state.status, ...payload };
+                    }
+                    if (payload.dmx && Array.isArray(payload.dmx)) {
+                        for (let i = 0; i < Math.min(payload.dmx.length, 512); ++i) {
+                            state.dmxData[i] = payload.dmx[i];
+                        }
+                    }
+                    updateTelemetryUI();
+                } catch (_) {}
+            }
+        };
+        ws.onclose = () => {
+            if (state.token) setTimeout(initWebSocket, 2000);
+        };
+    }
+
+    // ── Animation & Render Loop (Decoupled 60fps) ──
+    function startAnimationLoop() {
+        const renderLoop = (timestamp) => {
+            // Update FPS calculation
+            if (timestamp - state.lastFpsTimestamp >= 1000) {
+                state.currentFps = state.liveFrameCount;
+                state.liveFrameCount = 0;
+                state.lastFpsTimestamp = timestamp;
+                const fpsEl = byId('header-fps');
+                const vizFpsEl = byId('viz-fps');
+                const vizPacketsEl = byId('viz-packets');
+                if (fpsEl) fpsEl.textContent = state.currentFps;
+                if (vizFpsEl) vizFpsEl.textContent = state.currentFps;
+                if (vizPacketsEl) vizPacketsEl.textContent = state.totalPackets;
+            }
+
+            if (state.dirty) {
+                drawLiveRibbon();
+                drawVisualizerCanvas();
+                state.dirty = false;
+            }
+            requestAnimationFrame(renderLoop);
+        };
+        requestAnimationFrame(renderLoop);
+    }
+
+    // Header Mini Ribbon
+    function drawLiveRibbon() {
+        const canvas = byId('live-preview-ribbon');
+        if (!canvas) return;
+        const ctx = canvas.getContext('2d');
+        const numLanes = 8;
+        const pixelsPerLane = 144;
+        const totalPixels = numLanes * pixelsPerLane;
+        if (canvas.width !== totalPixels) canvas.width = totalPixels;
+
+        const imgData = ctx.createImageData(totalPixels, 1);
+        for (let i = 0; i < totalPixels; i++) {
+            imgData.data[i*4]     = state.liveBuffer[i*3];
+            imgData.data[i*4 + 1] = state.liveBuffer[i*3 + 1];
+            imgData.data[i*4 + 2] = state.liveBuffer[i*3 + 2];
+            imgData.data[i*4 + 3] = 255;
+        }
+        ctx.putImageData(imgData, 0, 0);
+        ctx.drawImage(canvas, 0, 0, totalPixels, 1, 0, 0, totalPixels, canvas.height);
+    }
+
+    // Main 2D Physical Visualizer
+    function drawVisualizerCanvas() {
+        const canvas = byId('visualizer-canvas');
+        if (!canvas || state.activeTab !== 'visualizer') return;
+        const ctx = canvas.getContext('2d');
+        const glowEnabled = byId('viz-glow-toggle')?.checked ?? true;
+
+        const w = canvas.width;
+        const h = canvas.height;
+        ctx.fillStyle = '#020308';
+        ctx.fillRect(0, 0, w, h);
+
+        const lanes = 8;
+        const pixels = 144;
+        const laneH = h / lanes;
+        const pipRadius = Math.max(1.8, (w / pixels) * 0.35);
+
+        // Count active non-black pixels
+        let activePx = 0;
+
+        for (let l = 0; l < lanes; ++l) {
+            const laneY = l * laneH + laneH / 2;
+
+            // Lane baseline track
+            ctx.fillStyle = 'rgba(255,255,255,0.03)';
+            ctx.fillRect(0, l * laneH, w, 1);
+
+            // Lane label
+            ctx.fillStyle = 'rgba(255,255,255,0.2)';
+            ctx.font = '10px Inter, monospace';
+            ctx.fillText(`Lane ${l}`, 8, laneY - pipRadius - 4);
+
+            for (let p = 0; p < pixels; ++p) {
+                const idx = (l * pixels + p) * 3;
+                const r = state.liveBuffer[idx];
+                const g = state.liveBuffer[idx + 1];
+                const b = state.liveBuffer[idx + 2];
+
+                if (r > 5 || g > 5 || b > 5) activePx++;
+
+                const x = (p + 0.5) * (w / pixels);
+
+                // LED Diffuse Bloom
+                if (glowEnabled && (r > 40 || g > 40 || b > 40)) {
+                    const lum = (r + g + b) / 3;
+                    const glowRad = pipRadius * (1 + (lum / 255) * 2.5);
+                    const grad = ctx.createRadialGradient(x, laneY, 0, x, laneY, glowRad);
+                    grad.addColorStop(0, `rgba(${r},${g},${b},0.6)`);
+                    grad.addColorStop(1, `rgba(${r},${g},${b},0)`);
+                    ctx.fillStyle = grad;
+                    ctx.beginPath();
+                    ctx.arc(x, laneY, glowRad, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+
+                // LED Core Pip
+                ctx.fillStyle = (r === 0 && g === 0 && b === 0) ? '#080a14' : `rgb(${r},${g},${b})`;
+                ctx.beginPath();
+                ctx.arc(x, laneY, pipRadius, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+
+        const vizPixelsEl = byId('viz-pixels');
+        if (vizPixelsEl) vizPixelsEl.textContent = activePx;
+    }
+
+    function setupCanvasInteractions() {
+        const canvas = byId('visualizer-canvas');
+        const tooltip = byId('pixel-tooltip');
+        const hoverInfo = byId('viz-hover-info');
+        if (!canvas || !tooltip) return;
+
+        canvas.addEventListener('mousemove', (e) => {
+            const rect = canvas.getBoundingClientRect();
+            const mouseX = e.clientX - rect.left;
+            const mouseY = e.clientY - rect.top;
+
+            const lanes = 8;
+            const pixels = 144;
+            const scaleX = canvas.width / rect.width;
+            const scaleY = canvas.height / rect.height;
+
+            const pxX = mouseX * scaleX;
+            const pxY = mouseY * scaleY;
+
+            const laneH = canvas.height / lanes;
+            const lane = Math.floor(pxY / laneH);
+            const pixel = Math.floor((pxX / canvas.width) * pixels);
+
+            if (lane >= 0 && lane < lanes && pixel >= 0 && pixel < pixels) {
+                const idx = (lane * pixels + pixel) * 3;
+                const r = state.liveBuffer[idx];
+                const g = state.liveBuffer[idx + 1];
+                const b = state.liveBuffer[idx + 2];
+                const hex = colorToHex({r,g,b});
+
+                // Find assigned fixture & zone
+                let fixName = 'Unpatched';
+                let zoneName = 'None';
+                if (state.config && state.config.fixtures) {
+                    for (let f = 0; f < 16; ++f) {
+                        const fix = state.config.fixtures[f];
+                        if (fix && fix.physicalOutputIndex[0] === lane && pixel < fix.numPixels) {
+                            fixName = `Fixture ${f+1}`;
+                            const z = state.config.zones?.[fix.zoneId];
+                            zoneName = z?.name || `Zone ${fix.zoneId + 1}`;
+                            break;
+                        }
+                    }
+                }
+
+                tooltip.style.opacity = '1';
+                tooltip.style.left = `${mouseX + 12}px`;
+                tooltip.style.top = `${mouseY - 24}px`;
+                tooltip.innerHTML = `
+                    <div style="display:flex; align-items:center; gap:0.4rem;">
+                        <span style="width:10px; height:10px; border-radius:2px; background:${hex}; border:1px solid #fff;"></span>
+                        <strong>Lane ${lane} : Px ${pixel}</strong>
+                    </div>
+                    <div style="color:var(--text-muted); margin-top:2px;">${esc(zoneName)} (${esc(fixName)}) · ${hex.toUpperCase()}</div>
+                `;
+
+                if (hoverInfo) {
+                    hoverInfo.textContent = `Lane ${lane} · Pixel ${pixel} · ${zoneName} · RGB(${r},${g},${b})`;
+                }
+            } else {
+                tooltip.style.opacity = '0';
+            }
+        });
+
+        canvas.addEventListener('mouseleave', () => {
+            tooltip.style.opacity = '0';
+            if (hoverInfo) hoverInfo.textContent = 'Hover over an LED';
+        });
+    }
+
+    // ── Auth & Connection ──
+    async function connect() {
+        const tokenInput = byId('experience-token');
+        state.token = tokenInput ? tokenInput.value.trim() : '';
+        if (!state.token) return toast('Enter node token.', true);
+        try {
+            await refresh();
+            byId('experience-auth').hidden = true;
+            byId('product-app').hidden = false;
+            initWebSocket();
+            startAnimationLoop();
+            setupCanvasInteractions();
+            nav('dashboard', document.querySelector('[data-page=dashboard]'));
+            toast('Connected to LumiGrid node.');
+        } catch (e) {
+            toast(`Connection error: ${e.message}`, true);
+        }
+    }
+
+    function disconnect() {
+        state.token = '';
+        if (ws) { ws.close(); ws = null; }
+        byId('product-app').hidden = true;
+        byId('experience-auth').hidden = false;
+    }
+
+    // ── Data Sync ──
+    async function refresh() {
+        const effects = await api('/api/v1/effects').catch(() => fallbackEffects);
+        const presets = await api('/api/v1/presets').catch(() => []);
+        const status = await api('/api/v1/status').catch(() => ({}));
+        const sequence = await api('/api/v1/sequence').catch(() => ({}));
+        const config = await api('/api/v1/config').catch(() => ({}));
+        const health = await api('/api/v1/health').catch(() => ({}));
+        const schedules = await api('/api/v1/schedules').catch(() => []);
+
+        state.effects = Array.isArray(effects) && effects.length ? effects : fallbackEffects;
+        state.presets = (Array.isArray(presets) ? presets : []).map(p => {
+            const sc = {...p};
+            sc.zones = Array.from({length:8}, (_, z) => ({
+                layers: Array.from({length:3}, (_, l) => ({
+                    effect: 'solid', blendMode: 'normal',
+                    primaryColor: {r:255,g:255,b:255}, secondaryColor: {r:0,g:0,b:0},
+                    speedMs: 2000, fxParam: 0, paletteId: 0, opacity: 255, enabled: l === 0,
+                    ...(sc.zones?.[z]?.layers?.[l] || {})
+                }))
+            }));
+            sc.globalBrightness = clamp(sc.globalBrightness ?? 255, 0, 255);
+            sc.transitionMs = clamp(sc.transitionMs ?? 1000, 0, 10000);
+            return sc;
+        });
+
+        state.status = status;
+        state.sequence = sequence;
+        state.config = config;
+        state.health = health;
+        
+        let validScheds = Array.isArray(schedules) ? schedules : [];
+        while (validScheds.length < 8) validScheds.push({ enabled: false, hour: 0, minute: 0, daysOfWeek: 0, action: 'preset', presetIndex: 0 });
+        state.schedules = validScheds.slice(0, 8);
+
+        byId('experience-node-name').textContent = (config.deviceName || 'LIGHTING NODE').toUpperCase();
+        updateTelemetryUI();
+        renderDashboard();
+        renderScenes();
+        renderZones();
+        renderPatcher();
+        renderDmxGrid();
+        renderTimeline();
+        renderSchedules();
+    }
+
+    function updateTelemetryUI() {
+        const st = state.status;
+        const ownerEl = byId('header-owner');
+        const ownerTextEl = byId('dash-owner-text');
+        const powerEl = byId('header-power');
+        const powerEstEl = byId('dash-power-est');
+        const powerBar = byId('dash-power-bar');
+
+        let owner = 'ScenePlayback';
+        if (st?.controlSource !== undefined) {
+            owner = st.controlSource === 2 ? 'LiveDmx' :
+                    st.controlSource === 1 ? 'Factory' :
+                    st.controlSource === 6 ? 'Fallback' : 'ScenePlayback';
+        }
+        if (ownerEl) ownerEl.textContent = owner;
+        if (ownerTextEl) ownerTextEl.textContent = owner;
+
+        const estMw = st?.estimatedMilliwatts ?? 0;
+        const maxMw = state.config?.maxPowerMw || 30000;
+        const pct = Math.min(100, Math.round((estMw / maxMw) * 100));
+
+        if (powerEl) powerEl.textContent = `${estMw} mW`;
+        if (powerEstEl) powerEstEl.textContent = `${estMw} mW`;
+        if (powerBar) {
+            powerBar.style.width = `${pct}%`;
+            powerBar.className = 'power-fill' + (pct > 90 ? ' danger' : pct > 75 ? ' warning' : '');
+        }
+
+        const transEl = byId('dash-trans-text');
+        if (transEl) transEl.textContent = st?.transitioning ? 'Blending' : 'Steady';
+    }
+
+    // ── Navigation ──
+    function nav(page, btn) {
+        state.activeTab = page;
+        document.querySelectorAll('.product-page').forEach(p => p.classList.remove('active'));
+        byId(`page-${page}`)?.classList.add('active');
+        document.querySelectorAll('.nav-rail button').forEach(b => b.classList.remove('active'));
+        if (btn) btn.classList.add('active');
+        else document.querySelector(`[data-page="${page}"]`)?.classList.add('active');
+
+        if (page === 'visualizer') {
+            state.dirty = true;
+            fitVisualizer();
+        } else if (page === 'dmx') {
+            renderDmxGrid();
+        } else if (page === 'diagnostics') {
+            loadCommissioning();
+        }
+    }
+
+    // ── Dashboard View ──
+    function renderDashboard() {
+        const activeIdx = state.status?.activePreset;
+        const activeScene = state.presets.find(p => Number(p.index) === Number(activeIdx));
+        const playingEl = byId('dash-playing');
+        if (playingEl) {
+            playingEl.textContent = activeScene?.name || (activeIdx !== undefined ? `Scene ${activeIdx + 1}` : 'No Scene Active');
+        }
+
+        const quickGrid = byId('dash-quick-scenes');
+        if (quickGrid) {
+            quickGrid.innerHTML = state.presets.map(scene => `
+                <article class="product-card scene-card" style="--scene-color:${colorToHex(scene.zones[0]?.layers[0]?.primaryColor)}">
+                    <div>
+                        <span class="badge badge-wash">Preset ${Number(scene.index) + 1}</span>
+                        <h4 style="margin:0.4rem 0 0.2rem;">${esc(scene.name || 'Untitled')}</h4>
+                        <p class="help">${Math.round(scene.globalBrightness * 100 / 255)}% · ${(scene.transitionMs/1000).toFixed(1)}s</p>
+                    </div>
+                    <div class="scene-actions">
+                        <button class="button-primary" onclick="lg.playScene(${Number(scene.index)})">Activate</button>
+                        <button class="button-secondary" onclick="lg.editScene(${Number(scene.index)})">Edit</button>
+                    </div>
+                </article>
+            `).join('');
+        }
+    }
+
+    function sceneName(idx) {
+        return state.presets.find(p => Number(p.index) === Number(idx))?.name || `Scene ${Number(idx) + 1}`;
+    }
+
+    async function playScene(idx) {
+        try {
+            await api(
+                '/api/v1/activate',
+                'POST',
+                { preset: idx }
+            );
+
+            /*
+             * HTTP 202 means the runtime accepted the request.
+             * Do not fake activePreset locally.
+             * Status/WebSocket telemetry remains authoritative.
+             */
+            toast(
+                `${sceneName(idx)} accepted. Waiting for node state.`
+            );
+        } catch (error) {
+            toast(error.message, true);
+        }
+    }
+
+    async function blackout() {
+        try {
+            await api('/api/v1/factory/abort', 'POST');
+            toast('Emergency blackout applied.');
+        } catch (e) { toast(e.message, true); }
+    }
+
+    // ── Scenes Library & Designer ──
+    function renderScenes() {
+        const lib = byId('scene-library');
+        if (!lib) return;
+        const validPresets = state.presets.filter(p => p.name && p.name.trim() !== '');
+        lib.innerHTML = validPresets.map(scene => `
+            <article class="product-card scene-card" style="--scene-color:${colorToHex(scene.zones[0]?.layers[0]?.primaryColor)}; display:flex; flex-direction:column; justify-content:space-between;">
+                <div>
+                    <div style="display:flex; justify-content:space-between; align-items:flex-start;">
+                        <span class="badge badge-wash" style="margin-bottom:0.4rem;">● ${esc(effectMeta(scene.zones[0]?.layers[0]?.effect).label)}</span>
+                        <span class="help" style="font-size:0.65rem;">Slot ${Number(scene.index)}</span>
+                    </div>
+                    <h4 style="margin:0 0 0.2rem;">${esc(scene.name || 'Untitled scene')}</h4>
+                    <p class="help">${Math.round(scene.globalBrightness * 100 / 255)}% Brightness · ${(scene.transitionMs/1000).toFixed(1)}s Transition</p>
+                    <p class="help" style="margin-top:0.5rem; font-style:italic;">${esc(effectMeta(scene.zones[0]?.layers[0]?.effect).description)}</p>
+                </div>
+                <div class="scene-actions" style="margin-top:1rem; display:grid; grid-template-columns:1fr 1fr; gap:0.4rem;">
+                    <button class="button-primary" onclick="lg.playScene(${Number(scene.index)})">Play</button>
+                    <button class="button-secondary" onclick="lg.editScene(${Number(scene.index)})">Edit</button>
+                    <button class="button-secondary" style="font-size:0.7rem; padding:0.25rem;" onclick="lg.duplicateScene(${Number(scene.index)})">Duplicate</button>
+                    <button class="button-secondary" style="font-size:0.7rem; padding:0.25rem; color:var(--danger);" onclick="lg.clearScene(${Number(scene.index)})">Clear</button>
+                </div>
+            </article>
+        `).join('') || '<div class="empty-state">No scenes stored. Create a new scene to begin.</div>';
+    }
+
+    function createNewScene() {
+        let idx = -1;
+        for(let i=0; i<32; i++) {
+            if (!state.presets.some(p => Number(p.index) === i && p.name && p.name.trim() !== '')) {
+                idx = i;
+                break;
+            }
+        }
+        if (idx === -1) return toast('All 32 scene slots are full.', true);
+        
+        state.editing = {
+            index: idx,
+            name: 'New Scene',
+            globalBrightness: 255,
+            transitionMs: 1000,
+            zones: Array.from({length:8}, (_, z) => ({
+                layers: Array.from({length:3}, (_, l) => ({
+                    effect: 'solid', blendMode: 'normal',
+                    primaryColor: {r:255,g:255,b:255}, secondaryColor: {r:0,g:0,b:0},
+                    speedMs: 2000, fxParam: 0, paletteId: 0, opacity: 255, enabled: l === 0
+                }))
+            }))
+        };
+        state.targetZones = [true, false, false, false, false, false, false, false];
+        nav('scene-editor');
+        renderSceneEditor();
+    }
+
+    async function duplicateScene(idx) {
+        const existing = state.presets.find(p => Number(p.index) === Number(idx));
+        if (!existing) return toast('Scene not found', true);
+        
+        let newIdx = -1;
+        for(let i=0; i<32; i++) {
+            if (!state.presets.some(p => Number(p.index) === i && p.name && p.name.trim() !== '')) {
+                newIdx = i;
+                break;
+            }
+        }
+        if (newIdx === -1) return toast('All 32 scene slots are full.', true);
+
+        const cloneScene = clone(existing);
+        cloneScene.index = newIdx;
+        cloneScene.name = (cloneScene.name || 'Untitled') + ' (Copy)';
+        try {
+            await api('/api/v1/presets', 'PUT', cloneScene);
+            toast('Scene duplicated successfully.');
+            await refresh();
+        } catch (e) { toast(e.message, true); }
+    }
+
+    async function clearScene(idx) {
+        if(!confirm('Are you sure you want to clear this scene?')) return;
+        try {
+            await api('/api/v1/presets', 'PUT', { index: idx, name: "" }); // Empty name clears it
+            toast('Scene cleared.');
+            await refresh();
+        } catch (e) { toast(e.message, true); }
+    }
+
+    function editScene(idx) {
+        const existing = state.presets.find(p => Number(p.index) === Number(idx));
+        if (!existing) return toast('Scene not found', true);
+        state.editing = clone(existing);
+        state.targetZones = [true, false, false, false, false, false, false, false];
+        nav('scene-editor');
+        renderSceneEditor();
+    }
+
+    function backToScenes() { nav('scenes'); }
+
+    function toggleTargetZone(z) {
+        readSceneEditor();
+        state.targetZones[z] = !state.targetZones[z];
+        if (!state.targetZones.includes(true)) state.targetZones[z] = true;
+        renderSceneEditor();
+    }
+
+    function selectAllTargetZones(all) {
+        readSceneEditor();
+        state.targetZones = state.targetZones.map(() => all);
+        if (!all) state.targetZones[0] = true;
+        renderSceneEditor();
+    }
+
+    function renderSceneEditor() {
+        const scene = state.editing;
+        if (!scene) return;
+        byId('scene-editor-title').textContent = scene.name || 'Untitled Scene';
+        byId('scene-name').value = scene.name || '';
+        byId('scene-brightness').value = Math.round(scene.globalBrightness * 100 / 255);
+        byId('scene-brightness-out').textContent = `${byId('scene-brightness').value}%`;
+        byId('scene-fade').value = scene.transitionMs;
+        byId('scene-fade-out').textContent = `${(scene.transitionMs/1000).toFixed(1)} s`;
+
+        let firstZ = state.targetZones.indexOf(true);
+        if (firstZ === -1) { firstZ = 0; state.targetZones[0] = true; }
+
+        const zoneChips = `
+            <div class="product-card" style="margin-bottom:1rem;">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.65rem;">
+                    <h5>Target Zones</h5>
+                    <div style="display:flex; gap:0.35rem;">
+                        <button class="button-secondary" style="font-size:0.7rem; padding:0.25rem 0.5rem;" onclick="lg.selectAllTargetZones(true)">Select All</button>
+                        <button class="button-secondary" style="font-size:0.7rem; padding:0.25rem 0.5rem;" onclick="lg.selectAllTargetZones(false)">Clear</button>
+                    </div>
+                </div>
+                <div style="display:flex; gap:0.4rem; flex-wrap:wrap;">
+                    ${[0,1,2,3,4,5,6,7].map(z => {
+                        const name = state.config?.zones?.[z]?.name || `Zone ${z+1}`;
+                        const sel = state.targetZones[z];
+                        return `<button class="${sel ? 'button-primary' : 'button-secondary'}" style="font-size:0.75rem; padding:0.4rem 0.75rem;" onclick="lg.toggleTargetZone(${z})">${sel ? '✓ ' : ''}${esc(name)}</button>`;
+                    }).join('')}
+                </div>
+            </div>
+        `;
+
+        const layersHtml = [0,1,2].map(l => {
+            const layer = scene.zones[firstZ].layers[l];
+            const meta = effectMeta(layer.effect);
+            const param = clamp(layer.fxParam || meta.parameterDefault || 0, meta.parameterMin || 0, meta.parameterMax || 255);
+            const hexPrimary = colorToHex(layer.primaryColor);
+            const hexSecondary = colorToHex(layer.secondaryColor);
+
+            return `
+                <div class="layer-box" style="background: linear-gradient(135deg, ${hexPrimary}1a, ${hexSecondary}0d), rgba(255,255,255,0.03); border-left: 4px solid ${hexPrimary}; margin-bottom: 1rem; padding: 1.25rem; border-radius: 8px; border-top: 1px solid rgba(255,255,255,0.05); border-right: 1px solid rgba(255,255,255,0.05); border-bottom: 1px solid rgba(255,255,255,0.05); transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1), background 0.3s;" onmouseenter="this.style.transform='translateX(6px)'" onmouseleave="this.style.transform='translateX(0)'">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 0.75rem;">
+                        <div style="display:flex; align-items:center; gap:0.5rem;">
+                            <span class="badge ${layer.enabled ? 'badge-pixel' : 'badge-wash'}" style="font-size:0.7rem;">Layer ${l+1}</span>
+                            <strong style="font-size:1.1rem; color:var(--text-primary);">${layer.enabled ? esc(meta.label) : 'Disabled'}</strong>
+                        </div>
+                        <label class="switch-row" style="padding:0;">
+                            <span>Active</span>
+                            <input id="l${l}-enabled" type="checkbox" ${layer.enabled ? 'checked' : ''} onchange="lg.changeLayerEnabled(${l}, this.checked)">
+                        </label>
+                    </div>
+
+                    <div class="settings-grid" style="grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); margin-bottom: 1.5rem;">
+                        <div>
+                            <label style="font-size:0.75rem; font-weight:700; color:var(--text-secondary); display:block; margin-bottom:0.4rem;">Effect Algorithm</label>
+                            <select id="l${l}-effect" onchange="lg.changeLayerEffect(${l}, this.value)" style="width:100%;">
+                                ${state.effects.map(e => `<option value="${esc(e.id)}" ${e.id === layer.effect ? 'selected' : ''}>${esc(e.label)}</option>`).join('')}
+                            </select>
+                        </div>
+                        <div>
+                            <label style="font-size:0.75rem; font-weight:700; color:var(--text-secondary); display:block; margin-bottom:0.4rem;">Color Palette</label>
+                            <select id="l${l}-palette" style="width:100%;">
+                                ${palettes.map(p => `<option value="${p.id}" ${p.id === (layer.paletteId || 0) ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}
+                            </select>
+                        </div>
+                        <div>
+                            <label style="font-size:0.75rem; font-weight:700; color:var(--text-secondary); display:block; margin-bottom:0.4rem;">Blend Mode</label>
+                            <select id="l${l}-blend" style="width:100%;">
+                                <option value="normal" ${layer.blendMode === 'normal' ? 'selected' : ''}>Normal (Alpha Over)</option>
+                                <option value="add" ${layer.blendMode === 'add' ? 'selected' : ''}>Add (Linear Dodge)</option>
+                                <option value="multiply" ${layer.blendMode === 'multiply' ? 'selected' : ''}>Multiply</option>
+                                <option value="screen" ${layer.blendMode === 'screen' ? 'selected' : ''}>Screen</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="color-inputs" style="display:flex; gap:1rem; margin-bottom:1.5rem;">
+                        <div class="color-swatch-btn" style="display:flex; align-items:center; gap:0.75rem; background:rgba(0,0,0,0.25); padding:0.6rem 0.75rem; border-radius:8px; flex:1; border: 1px solid rgba(255,255,255,0.03);">
+                            <input type="color" id="l${l}-pcolor" value="${hexPrimary}" style="width:36px; height:36px; padding:0; border:2px solid rgba(255,255,255,0.2); cursor:pointer; background:none; border-radius:50%; box-shadow: 0 0 10px ${hexPrimary}40;">
+                            <div style="display:flex; flex-direction:column; gap:0.15rem;">
+                                <span style="font-size:0.75rem; font-weight:700; color:var(--text-primary);">Primary</span>
+                                <span style="font-size:0.65rem; color:var(--text-muted); font-family:monospace;">${hexPrimary.toUpperCase()}</span>
+                            </div>
+                        </div>
+                        <div class="color-swatch-btn" style="display:flex; align-items:center; gap:0.75rem; background:rgba(0,0,0,0.25); padding:0.6rem 0.75rem; border-radius:8px; flex:1; border: 1px solid rgba(255,255,255,0.03);">
+                            <input type="color" id="l${l}-scolor" value="${hexSecondary}" style="width:36px; height:36px; padding:0; border:2px solid rgba(255,255,255,0.2); cursor:pointer; background:none; border-radius:50%; box-shadow: 0 0 10px ${hexSecondary}40;">
+                            <div style="display:flex; flex-direction:column; gap:0.15rem;">
+                                <span style="font-size:0.75rem; font-weight:700; color:var(--text-primary);">Secondary</span>
+                                <span style="font-size:0.65rem; color:var(--text-muted); font-family:monospace;">${hexSecondary.toUpperCase()}</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="range-row">
+                        <label>Layer Opacity</label>
+                        <input id="l${l}-opacity" type="range" min="0" max="100" value="${Math.round(layer.opacity * 100 / 255)}" oninput="lg.updateText('l${l}-opacity-out', this.value + '%')">
+                        <output id="l${l}-opacity-out">${Math.round(layer.opacity * 100 / 255)}%</output>
+                    </div>
+
+                    <div class="range-row">
+                        <label>Effect Speed</label>
+                        <input id="l${l}-speed" type="range" min="1" max="100" value="${msToSpeed(layer.speedMs)}" oninput="lg.updateText('l${l}-speed-out', lg.speedLabel(this.value))">
+                        <output id="l${l}-speed-out">${speedLabel(msToSpeed(layer.speedMs))}</output>
+                    </div>
+
+                    ${meta.hasParameter ? `
+                    <div class="range-row">
+                        <label>${esc(meta.parameterLabel)}</label>
+                        <input id="l${l}-param" type="range" min="${meta.parameterMin}" max="${meta.parameterMax}" value="${param}" oninput="lg.updateText('l${l}-param-out', this.value + ' ${esc(meta.parameterUnit)}')">
+                        <output id="l${l}-param-out">${param} ${esc(meta.parameterUnit)}</output>
+                    </div>` : ''}
+                </div>
+            `;
+        }).join('');
+
+        byId('scene-zones-editor').innerHTML = zoneChips + layersHtml;
+    }
+
+    function readSceneEditor() {
+        const scene = state.editing;
+        if (!scene || !byId('scene-name')) return;
+        scene.name = byId('scene-name').value.trim();
+        scene.globalBrightness = Math.round(clamp(byId('scene-brightness').value,0,100) * 255 / 100);
+        scene.transitionMs = clamp(byId('scene-fade').value, 0, 10000);
+
+        const newLayers = [0,1,2].map(l => {
+            const eff = byId(`l${l}-effect`)?.value || 'solid';
+            const meta = effectMeta(eff);
+            const phex = byId(`l${l}-pcolor`)?.value || '#ffffff';
+            const shex = byId(`l${l}-scolor`)?.value || '#000000';
+            return {
+                effect: eff,
+                blendMode: byId(`l${l}-blend`)?.value || 'normal',
+                paletteId: Number(byId(`l${l}-palette`)?.value || 0),
+                primaryColor: hexToRgb(phex),
+                secondaryColor: hexToRgb(shex),
+                speedMs: speedToMs(byId(`l${l}-speed`)?.value ?? 50),
+                opacity: Math.round(clamp(byId(`l${l}-opacity`)?.value ?? 100, 0, 100) * 255 / 100),
+                enabled: Boolean(byId(`l${l}-enabled`)?.checked),
+                fxParam: meta.hasParameter ? clamp(byId(`l${l}-param`)?.value ?? meta.parameterDefault, meta.parameterMin, meta.parameterMax) : 0
+            };
+        });
+
+        scene.zones.forEach((zone, z) => {
+            if (state.targetZones[z]) {
+                zone.layers = clone(newLayers);
+            }
+        });
+    }
+
+    function changeLayerEffect(l, val) {
+        readSceneEditor();
+        const meta = effectMeta(val);
+        state.targetZones.forEach((sel, z) => {
+            if (sel) {
+                state.editing.zones[z].layers[l].effect = val;
+                state.editing.zones[z].layers[l].fxParam = meta.parameterDefault || 0;
+            }
+        });
+        renderSceneEditor();
+    }
+
+    function changeLayerEnabled(l, val) {
+        readSceneEditor();
+        state.targetZones.forEach((sel, z) => {
+            if (sel) state.editing.zones[z].layers[l].enabled = val;
+        });
+        renderSceneEditor();
+    }
+
+    async function saveScene() {
+        readSceneEditor();
+        if (!state.editing.name) return toast('Name required', true);
+        try {
+            await api('/api/v1/presets', 'PUT', state.editing);
+            await refresh();
+            toast('Scene saved successfully.');
+            backToScenes();
+        } catch (e) { toast(e.message, true); }
+    }
+
+    async function testSceneLive() {
+        readSceneEditor();
+        try {
+            await api('/api/v1/presets', 'PUT', state.editing);
+            await api('/api/v1/activate', 'POST', { preset: state.editing.index });
+            toast('Scene update accepted. Waiting for node state.');
+        } catch (e) { toast(e.message, true); }
+    }
+
+    // ── Zones View ──
+    function renderZones() {
+        const grid = byId('zone-cards-grid');
+        if (!grid || !state.config) return;
+        grid.innerHTML = Array.from({length:8}, (_, z) => {
+            const zone = state.config.zones?.[z] || { name: `Zone ${z+1}`, role: 'Unassigned' };
+            const fixtures = [];
+            let totalPx = 0;
+            for (let f = 0; f < 16; ++f) {
+                const fix = state.config.fixtures?.[f];
+                if (fix && fix.zoneId === z && fix.profile > 0) {
+                    fixtures.push(`Fixture ${f+1} (Lane ${fix.physicalOutputIndex[0]}, ${fix.numPixels} px)`);
+                    totalPx += fix.numPixels;
+                }
+            }
+            return `
+                <article class="product-card">
+                    <div style="display:flex; justify-content:space-between; align-items:center;">
+                        <span class="badge badge-wash">Zone ${z+1}</span>
+                        <span class="help">${totalPx} total px</span>
+                    </div>
+                    <h4 style="margin:0.5rem 0 0.2rem;">${esc(zone.name || `Zone ${z+1}`)}</h4>
+                    <p class="muted" style="font-size:0.75rem;">Role: <strong>${esc(zone.role || 'Unassigned')}</strong></p>
+                    <div class="stat-list" style="margin-top:0.75rem;">
+                        ${fixtures.length ? fixtures.map(f => `<div class="stat-box" style="grid-column:span 2;"><span>Output</span><strong>${esc(f)}</strong></div>`).join('') : '<div class="stat-box" style="grid-column:span 2;"><span class="help">No fixtures mapped</span></div>'}
+                    </div>
+                </article>
+            `;
+        }).join('');
+    }
+
+    // ── Fixture & DMX Patcher ──
+    function renderPatcher() {
+        if (!state.config) return;
+        // Populate Protocol fields
+        const proto = state.config.protocol || {};
+        const artEl = byId('proto-artnet');
+        const sacnEl = byId('proto-sacn');
+        const uStartEl = byId('proto-universe-start');
+        const zStartEl = byId('proto-zone-start-ch');
+        const mergeEl = byId('proto-merge-mode');
+        const toEl = byId('proto-timeout');
+
+        if (artEl) artEl.checked = proto.artnetEnabled ?? true;
+        if (sacnEl) sacnEl.checked = proto.sacnEnabled ?? true;
+        if (uStartEl) uStartEl.value = proto.universeStart ?? 0;
+        if (zStartEl) zStartEl.value = proto.zoneStartChannel ?? 1;
+        if (mergeEl) mergeEl.value = proto.mergeMode || 'HTP';
+        if (toEl) toEl.value = proto.streamTimeoutMs ?? 2000;
+
+        // Populate Fixtures Table
+        const tbody = byId('patcher-tbody');
+        if (!tbody) return;
+
+        tbody.innerHTML = Array.from({length:16}, (_, i) => {
+            const f = state.config.fixtures?.[i] || {
+                zoneId: 0, profile: 1, physicalOutputIndex: [i % 8,0,0,0], numPixels: 60,
+                dmxUniverse: 0, dmxStartChannel: 0, dmxMode: 0, maxBrightness: 255, maxMilliwatts: 15000
+            };
+
+            return `
+                <tr>
+                    <td style="font-weight:700; color:#a5b4fc;">F${i+1}</td>
+                    <td>
+                        <select id="fix-zone-${i}">
+                            ${[0,1,2,3,4,5,6,7].map(z => `<option value="${z}" ${f.zoneId === z ? 'selected' : ''}>${esc(state.config.zones?.[z]?.name || `Zone ${z+1}`)}</option>`).join('')}
+                        </select>
+                    </td>
+                    <td>
+                        <select id="fix-prof-${i}">
+                            ${fixtureProfiles.map(p => `<option value="${p.id}" ${f.profile === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}
+                        </select>
+                    </td>
+                    <td>
+                        <input id="fix-out-${i}" type="number" min="0" max="15" value="${f.physicalOutputIndex[0]}" style="width:4.5rem;">
+                    </td>
+                    <td>
+                        <input id="fix-len-${i}" type="number" min="1" max="1024" value="${f.numPixels}" style="width:5rem;">
+                    </td>
+                    <td>
+                        <input id="fix-uni-${i}" type="number" min="0" max="63999" value="${f.dmxUniverse ?? 0}" style="width:5rem;">
+                    </td>
+                    <td>
+                        <input id="fix-ch-${i}" type="number" min="0" max="512" value="${f.dmxStartChannel ?? 0}" style="width:5rem;" title="0 = Auto Zone Wash">
+                    </td>
+                    <td>
+                        <select id="fix-mode-${i}">
+                            <option value="0" ${f.dmxMode === 0 ? 'selected' : ''}>0: Wash</option>
+                            <option value="1" ${f.dmxMode === 1 ? 'selected' : ''}>1: Pixel Map</option>
+                        </select>
+                    </td>
+                    <td>
+                        <input id="fix-bright-${i}" type="number" min="0" max="255" value="${f.maxBrightness ?? 255}" style="width:4.5rem;">
+                    </td>
+                    <td>
+                        <input id="fix-mw-${i}" type="number" min="0" max="60000" step="500" value="${f.maxMilliwatts ?? 0}" style="width:5.5rem;">
+                    </td>
+                </tr>
+            `;
+        }).join('');
+    }
+
+    async function saveHardwarePatch() {
+        try {
+            const updated = clone(state.config);
+            updated.protocol = {
+                artnetEnabled: byId('proto-artnet')?.checked ?? true,
+                sacnEnabled: byId('proto-sacn')?.checked ?? true,
+                universeStart: Number(byId('proto-universe-start')?.value || 0),
+                zoneStartChannel: Number(byId('proto-zone-start-ch')?.value || 1),
+                mergeMode: byId('proto-merge-mode')?.value || 'HTP',
+                streamTimeoutMs: Number(byId('proto-timeout')?.value || 2000),
+                liveStreamLayer: 2
+            };
+
+            for (let i = 0; i < 16; ++i) {
+                const f = updated.fixtures[i] || {};
+                f.zoneId = Number(byId(`fix-zone-${i}`)?.value || 0);
+                f.profile = Number(byId(`fix-prof-${i}`)?.value || 0);
+                f.physicalOutputIndex = [Number(byId(`fix-out-${i}`)?.value || 0), 0, 0, 0];
+                f.numPixels = Number(byId(`fix-len-${i}`)?.value || 60);
+                f.dmxUniverse = Number(byId(`fix-uni-${i}`)?.value || 0);
+                f.dmxStartChannel = Number(byId(`fix-ch-${i}`)?.value || 0);
+                f.dmxMode = Number(byId(`fix-mode-${i}`)?.value || 0);
+                f.maxBrightness = Number(byId(`fix-bright-${i}`)?.value || 255);
+                f.maxMilliwatts = Number(byId(`fix-mw-${i}`)?.value || 0);
+            }
+
+            await api('/api/v1/config', 'PUT', updated);
+            state.config = updated;
+            toast('Hardware & DMX patch saved. Node reloaded.');
+            refresh();
+        } catch (e) { toast(e.message, true); }
+    }
+
+    // ── DMX Grid ──
+    function renderDmxGrid() {
+        const matrix = byId('dmx-matrix');
+        const hoverVal = byId('dmx-hover-val');
+        if (!matrix) return;
+
+        let html = '';
+        for (let i = 0; i < 512; ++i) {
+            const val = state.dmxData[i] || 0;
+            const norm = val / 255;
+            const bg = norm > 0 ? `rgba(99,102,241,${0.2 + norm * 0.8})` : 'rgba(255,255,255,0.03)';
+            const txtCol = norm > 0.6 ? '#fff' : 'rgba(255,255,255,0.4)';
+            html += `<div class="dmx-cell" style="background:${bg}; color:${txtCol};" onmouseenter="lg.hoverDmxCell(${i+1}, ${val})"><span>${i+1}</span><strong>${val}</strong></div>`;
+        }
+        matrix.innerHTML = html;
+    }
+
+    function hoverDmxCell(ch, val) {
+        const hoverVal = byId('dmx-hover-val');
+        if (hoverVal) hoverVal.textContent = `Channel ${ch} : Value ${val} (${Math.round(val*100/255)}%)`;
+    }
+
+    // ── Visualizer Controls ──
+    function toggleVisualizerMode() {
+        state.visualizerMode = state.visualizerMode === 'lanes' ? 'zones' : 'lanes';
+        const btn = byId('viz-mode-btn');
+        if (btn) btn.textContent = `View: ${state.visualizerMode === 'lanes' ? 'Physical Lanes (0-7)' : 'Zone Architecture'}`;
+        state.dirty = true;
+    }
+
+    function fitVisualizer() {
+        const canvas = byId('visualizer-canvas');
+        if (!canvas) return;
+        canvas.width = canvas.parentElement.clientWidth || 1152;
+        canvas.height = 360;
+        state.dirty = true;
+    }
+
+    function redrawVisualizer() {
+        state.dirty = true;
+    }
+
+    // ── Timeline Editor ──
+    function renderTimeline() {
+        if (!state.sequence) return;
+        byId('timeline-bpm').value = clamp(state.sequence.bpm, 40, 240);
+        byId('timeline-bpm-output').textContent = `${state.sequence.bpm} BPM`;
+        byId('timeline-enabled').checked = state.sequence.enabled;
+
+        const activeTrk = state.activeTimelineStep.track;
+        const activeStp = state.activeTimelineStep.step;
+        const activeStepObj = state.sequence.tracks[activeTrk]?.steps[activeStp];
+
+        const validPresets = state.presets.filter(p => p.name && p.name.trim() !== '');
+        
+        let paletteHtml = `<div style="margin-bottom:0.75rem; color:var(--text-secondary); font-size:0.75rem; font-weight:600;">Assign Preset to Track ${activeTrk+1}, Step ${activeStp+1}</div>`;
+        paletteHtml += `<div style="display:flex; gap:0.5rem; overflow-x:auto; padding-bottom:0.5rem;">`;
+        paletteHtml += validPresets.map(p => `
+            <button class="button-secondary" style="font-size:0.75rem; padding:0.35rem 0.65rem;" onclick="lg.assignTimelinePreset(${Number(p.index)})">
+                ● ${esc(p.name)}
+            </button>
+        `).join('');
+        paletteHtml += `</div>`;
+
+        if (activeStepObj) {
+            paletteHtml += `
+            <div style="display:flex; align-items:center; gap:1rem; margin-top:0.75rem; background:rgba(0,0,0,0.2); padding:0.75rem; border-radius:8px; border:1px solid rgba(255,255,255,0.05);">
+                <div class="range-row" style="margin-top:0; flex:1; max-width:400px;">
+                    <label>Step Duration (Beats)</label>
+                    <input type="range" min="1" max="64" value="${activeStepObj.lengthBeats}" oninput="lg.updateText('timeline-len-out', this.value); lg.setTimelineStepLength(this.value);">
+                    <output id="timeline-len-out">${activeStepObj.lengthBeats}</output>
+                </div>
+            </div>`;
+        }
+        
+        byId('timeline-palette').innerHTML = paletteHtml;
+
+        byId('timeline-tracks').innerHTML = state.sequence.tracks.map((track, trackIdx) => {
+            const zName = state.config?.zones?.[trackIdx]?.name || `Zone ${trackIdx + 1}`;
+            return `
+                <div style="display:flex; align-items:center; gap:0.75rem; background:rgba(0,0,0,0.25); padding:0.5rem; border-radius:8px; border:1px solid var(--border-subtle);">
+                    <div style="width:110px; font-weight:700; font-size:0.8rem; color:${trackIdx === activeTrk ? 'var(--primary)' : 'inherit'};">${esc(zName)}</div>
+                    <div style="display:flex; gap:4px; flex:1; overflow-x:auto; align-items:center;">
+                        ${track.steps.map((step, stepIdx) => {
+                            const isActive = (trackIdx === activeTrk && stepIdx === activeStp);
+                            const preset = validPresets.find(p => Number(p.index) === step.presetIndex);
+                            const hexColor = preset ? colorToHex(preset.zones[0]?.layers[0]?.primaryColor) : '#444';
+                            const widthPx = Math.max(28, step.lengthBeats * 14); // 14px per beat
+                            return `
+                                <div onclick="lg.selectTimelineStep(${trackIdx}, ${stepIdx})" style="width:${widthPx}px; height:36px; border-radius:4px; background:${isActive ? hexColor : hexColor+'40'}; border: 2px solid ${isActive ? '#fff' : 'transparent'}; display:flex; align-items:center; justify-content:center; font-size:0.65rem; font-weight:700; color:#fff; cursor:pointer; transition:all 0.2s; box-shadow:${isActive ? '0 0 10px '+hexColor+'80' : 'none'}; flex-shrink:0;" title="Step ${stepIdx+1}: ${preset ? esc(preset.name) : 'Slot '+step.presetIndex} (${step.lengthBeats} beats)">
+                                    ${stepIdx+1}
+                                </div>
+                            `;
+                        }).join('')}
+                        <div style="display:flex; gap:4px; margin-left:8px;">
+                            ${track.steps.length < 16 ? `<button class="button-secondary" style="padding:0; width:28px; height:28px; border-radius:50%; font-size:1rem;" onclick="lg.addTimelineStep(${trackIdx})">+</button>` : ''}
+                            ${track.steps.length > 1 ? `<button class="button-secondary" style="padding:0; width:28px; height:28px; border-radius:50%; font-size:1rem; color:var(--danger);" onclick="lg.removeTimelineStep(${trackIdx})">−</button>` : ''}
+                        </div>
+                    </div>
+                </div>
+            `;
+        }).join('');
+    }
+
+    function selectTimelineStep(track, step) {
+        state.activeTimelineStep = { track, step };
+        renderTimeline();
+    }
+
+    function assignTimelinePreset(presetIdx) {
+        if (!state.sequence) return;
+        const { track, step } = state.activeTimelineStep;
+        if (state.sequence.tracks[track] && state.sequence.tracks[track].steps[step]) {
+            state.sequence.tracks[track].steps[step].presetIndex = presetIdx;
+            renderTimeline();
+        }
+    }
+
+    function setTimelineStepLength(beats) {
+        if (!state.sequence) return;
+        const { track, step } = state.activeTimelineStep;
+        if (state.sequence.tracks[track] && state.sequence.tracks[track].steps[step]) {
+            state.sequence.tracks[track].steps[step].lengthBeats = clamp(beats, 1, 64);
+            renderTimeline();
+        }
+    }
+
+    function addTimelineStep(trackIdx) {
+        if (!state.sequence) return;
+        const track = state.sequence.tracks[trackIdx];
+        if (track && track.steps.length < 16) {
+            track.steps.push({ presetIndex: 0, lengthBeats: 4 });
+            state.activeTimelineStep = { track: trackIdx, step: track.steps.length - 1 };
+            renderTimeline();
+        }
+    }
+
+    function removeTimelineStep(trackIdx) {
+        if (!state.sequence) return;
+        const track = state.sequence.tracks[trackIdx];
+        if (track && track.steps.length > 1) {
+            track.steps.pop();
+            if (state.activeTimelineStep.track === trackIdx && state.activeTimelineStep.step >= track.steps.length) {
+                state.activeTimelineStep.step = track.steps.length - 1;
+            }
+            renderTimeline();
+        }
+    }
+
+    function setBpm(val) {
+        if (!state.sequence) return;
+        state.sequence.bpm = clamp(val, 40, 240);
+        byId('timeline-bpm-output').textContent = `${state.sequence.bpm} BPM`;
+    }
+
+    function setTimelineEnabled(en) {
+        if (!state.sequence) return;
+        state.sequence.enabled = en;
+    }
+
+    async function saveTimeline() {
+        try {
+            await api('/api/v1/sequence', 'PUT', state.sequence);
+            toast('Timeline sequencer saved.');
+        } catch (e) { toast(e.message, true); }
+    }
+
+    // ── Schedules Editor ──
+    function renderSchedules() {
+        const container = byId('schedules-grid');
+        if (!container || !state.schedules) return;
+        
+        const validPresets = state.presets.filter(p => p.name && p.name.trim() !== '');
+
+        container.innerHTML = state.schedules.map((sched, idx) => {
+            const h = String(sched.hour || 0).padStart(2, '0');
+            const m = String(sched.minute || 0).padStart(2, '0');
+            const mask = sched.daysOfWeek || 0;
+            const days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].map((d, i) => {
+                const checked = (mask & (1 << i)) ? 'checked' : '';
+                return `<label style="display:inline-flex; align-items:center; gap:0.25rem; font-size:0.7rem; color:var(--text-secondary);"><input type="checkbox" id="sched-${idx}-day-${i}" ${checked}> ${d}</label>`;
+            }).join('');
+            
+            return `
+                <article class="product-card" style="display:flex; flex-direction:column; gap:0.75rem; border-top: 3px solid ${sched.enabled ? 'var(--primary)' : 'rgba(255,255,255,0.1)'}; transition:all 0.3s;">
+                    <div style="display:flex; justify-content:space-between; align-items:center;">
+                        <h4 style="margin:0;">Schedule Slot ${idx+1}</h4>
+                        <label class="switch-row" style="padding:0;">
+                            <span>Active</span>
+                            <input type="checkbox" id="sched-${idx}-en" ${sched.enabled ? 'checked' : ''} onchange="this.closest('article').style.borderTopColor = this.checked ? 'var(--primary)' : 'rgba(255,255,255,0.1)';">
+                        </label>
+                    </div>
+                    <div style="display:flex; gap:0.5rem;">
+                        <input type="time" id="sched-${idx}-time" value="${h}:${m}" style="flex:1;">
+                    </div>
+                    <div style="display:flex; gap:0.65rem; flex-wrap:wrap; margin:0.25rem 0; background:rgba(0,0,0,0.25); padding:0.6rem; border-radius:6px; border:1px solid rgba(255,255,255,0.05);">
+                        ${days}
+                    </div>
+                    <div>
+                        <label style="font-size:0.75rem; font-weight:700; color:var(--text-secondary); display:block; margin-bottom:0.3rem;">Action Type</label>
+                        <select id="sched-${idx}-action" style="width:100%; margin-bottom:0.6rem;" onchange="document.getElementById('sched-${idx}-preset-wrap').style.display = this.value === 'preset' ? 'block' : 'none'">
+                            <option value="preset" ${sched.action === 'preset' ? 'selected' : ''}>Activate Scene (Preset)</option>
+                            <option value="sequence" ${sched.action === 'sequence' ? 'selected' : ''}>Start Timeline Sequence</option>
+                        </select>
+                        <div id="sched-${idx}-preset-wrap" style="display:${sched.action === 'sequence' ? 'none' : 'block'};">
+                            <label style="font-size:0.75rem; font-weight:700; color:var(--text-secondary); display:block; margin-bottom:0.3rem;">Target Scene</label>
+                            <select id="sched-${idx}-preset" style="width:100%;">
+                                ${validPresets.map(p => `<option value="${p.index}" ${p.index === sched.presetIndex ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}
+                            </select>
+                        </div>
+                    </div>
+                </article>
+            `;
+        }).join('');
+    }
+
+    async function saveSchedules() {
+        try {
+            const updated = clone(state.schedules);
+            for (let i = 0; i < 8; i++) {
+                if (!updated[i]) updated[i] = { enabled: false, hour: 0, minute: 0, daysOfWeek: 0, action: 'preset', presetIndex: 0 };
+                const timeStr = byId(`sched-${i}-time`)?.value || "00:00";
+                const [hh, mm] = timeStr.split(':').map(Number);
+                updated[i].enabled = byId(`sched-${i}-en`)?.checked || false;
+                updated[i].hour = hh || 0;
+                updated[i].minute = mm || 0;
+                
+                let mask = 0;
+                for (let d = 0; d < 7; d++) {
+                    if (byId(`sched-${i}-day-${d}`)?.checked) mask |= (1 << d);
+                }
+                updated[i].daysOfWeek = mask;
+                updated[i].action = byId(`sched-${i}-action`)?.value || 'preset';
+                updated[i].presetIndex = Number(byId(`sched-${i}-preset`)?.value || 0);
+            }
+            await api('/api/v1/schedules', 'PUT', updated);
+            toast('Calendar schedules saved.');
+            state.schedules = updated;
+        } catch (e) { toast(e.message, true); }
+    }
+
+    // ── Diagnostics & OTA ──
+    async function loadCommissioning() {
+        try {
+            const health = await api('/api/v1/health');
+            const grid = byId('health-metrics-grid');
+            if (grid) {
+                const h = health || {};
+                const uptime = h.uptime_s || 0;
+                const hh = Math.floor(uptime / 3600);
+                const mm = Math.floor((uptime % 3600) / 60);
+                const ss = uptime % 60;
+                const upStr = `${hh}h ${mm}m ${ss}s`;
+                
+                const free = Math.round((h.free_heap || 0) / 1024);
+                const minFree = Math.round((h.min_free_heap || 0) / 1024);
+                const rssi = h.rssi || -100;
+                
+                grid.innerHTML = `
+                    <div style="background:rgba(0,0,0,0.2); padding:0.8rem; border-radius:6px;">
+                        <div style="font-size:0.7rem; color:var(--text-secondary); margin-bottom:0.25rem;">System Uptime</div>
+                        <div style="font-size:1.1rem; font-weight:700;">${upStr}</div>
+                    </div>
+                    <div style="background:rgba(0,0,0,0.2); padding:0.8rem; border-radius:6px;">
+                        <div style="font-size:0.7rem; color:var(--text-secondary); margin-bottom:0.25rem;">Wi-Fi Signal</div>
+                        <div style="font-size:1.1rem; font-weight:700; color:${rssi > -60 ? 'var(--primary)' : rssi > -80 ? 'orange' : 'var(--danger)'};">${rssi} dBm</div>
+                    </div>
+                    <div style="background:rgba(0,0,0,0.2); padding:0.8rem; border-radius:6px;">
+                        <div style="font-size:0.7rem; color:var(--text-secondary); margin-bottom:0.25rem;">Free Heap</div>
+                        <div style="font-size:1.1rem; font-weight:700;">${free} KB</div>
+                    </div>
+                    <div style="background:rgba(0,0,0,0.2); padding:0.8rem; border-radius:6px;">
+                        <div style="font-size:0.7rem; color:var(--text-secondary); margin-bottom:0.25rem;">Min Free Heap (Lifetime)</div>
+                        <div style="font-size:1.1rem; font-weight:700;">${minFree} KB</div>
+                    </div>
+                    <div style="background:rgba(0,0,0,0.2); padding:0.8rem; border-radius:6px; grid-column:span 2;">
+                        <div style="font-size:0.7rem; color:var(--text-secondary); margin-bottom:0.25rem;">DMX Drops</div>
+                        <div style="font-size:1.1rem; font-weight:700;">${h.dmx_drops || 0}</div>
+                    </div>
+                `;
+            }
+        } catch (e) { toast(e.message, true); }
+    }
+
+    function switchDiagTab(tab) {
+        ['health','logs','audit'].forEach(t => {
+            const panel = byId('panel-'+t);
+            const btn = byId('tab-'+t);
+            if(panel) panel.style.display = t === tab ? 'flex' : 'none';
+            if(btn) btn.style.background = t === tab ? 'var(--surface-2)' : 'transparent';
+        });
+        if (tab === 'logs') loadLogs();
+        if (tab === 'audit') loadAudit();
+    }
+
+    async function loadLogs() {
+        try {
+            const viewer = byId('sys-logs-viewer');
+            if (viewer) viewer.textContent = "Loading logs...";
+            const res = await api('/api/v1/logs');
+            if (viewer) {
+                if (Array.isArray(res)) {
+                    viewer.textContent = res.join('\n') || 'No logs available.';
+                } else if (typeof res === 'object' && res.logs) {
+                    viewer.textContent = Array.isArray(res.logs) ? res.logs.join('\n') : String(res.logs);
+                } else {
+                    viewer.textContent = String(res) || 'No logs available.';
+                }
+                viewer.scrollTop = viewer.scrollHeight;
+            }
+        } catch(e) {
+            const viewer = byId('sys-logs-viewer');
+            if (viewer) viewer.textContent = `Error fetching logs: ${e.message}`;
+        }
+    }
+
+    async function loadAudit() {
+        try {
+            const tbody = byId('audit-tbody');
+            if (tbody) tbody.innerHTML = `<tr><td colspan="4" style="text-align:center;">Loading audit trail...</td></tr>`;
+            const res = await api('/api/v1/audit');
+            if (tbody) {
+                const events = Array.isArray(res) ? res : (res.events || []);
+                tbody.innerHTML = events.map(ev => `
+                    <tr>
+                        <td style="font-family:monospace; color:var(--text-muted);">${ev.timestamp || '-'}</td>
+                        <td><span class="badge badge-wash">${esc(ev.role || 'System')}</span></td>
+                        <td>${esc(ev.type || 'Unknown')}</td>
+                        <td style="color:var(--text-secondary);">${esc(ev.message || '')}</td>
+                    </tr>
+                `).join('') || `<tr><td colspan="4" style="text-align:center;">No audit events found.</td></tr>`;
+            }
+        } catch(e) { toast(e.message, true); }
+    }
+
+    async function runTestSequence(type) {
+        try {
+            if (type === 'lane') {
+                await api('/api/v1/factory/effect', 'POST', { effect: 'pixel_chase', durationMs: 5000 });
+                toast('Running lane chase test sequence...');
+            } else if (type === 'burn_in') {
+                await api('/api/v1/factory/effect', 'POST', { effect: 'solid', durationMs: 3600000 });
+                toast('Running full power burn-in test...');
+            } else {
+                await api('/api/v1/factory/effect', 'POST', { effect: 'rainbow', durationMs: 5000 });
+                toast('Running color wash test sequence...');
+            }
+        } catch (e) { toast(e.message, true); }
+    }
+
+    async function uploadOta() {
+        const fileInput = byId('ota-file');
+        const file = fileInput?.files[0];
+        if (!file) return toast('Select a .bin file first.', true);
+
+        const statusEl = byId('ota-status');
+        statusEl.textContent = 'Uploading firmware... please wait.';
+        try {
+            const res = await fetch('/api/v1/ota', {
+                method: 'POST',
+                headers: { Authorization: 'Bearer ' + state.token },
+                body: file
+            });
+            if (!res.ok) throw new Error(`Upload failed (${res.statusText})`);
+            statusEl.textContent = 'Upload successful! Rebooting node...';
+            toast('OTA Flash successful. Node restarting.');
+            setTimeout(() => location.reload(), 6000);
+        } catch (e) {
+            statusEl.textContent = 'Error: ' + e.message;
+            toast(e.message, true);
+        }
+    }
+
+    async function downloadBackup() {
+        try {
+            const res = await fetch('/api/v1/backup', { headers: { Authorization: 'Bearer ' + state.token } });
+            if (!res.ok) throw new Error('Backup download failed');
+            const blob = await res.blob();
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url; a.download = 'lumigrid_config.json';
+            a.click(); URL.revokeObjectURL(url);
+            toast('Configuration backup downloaded.');
+        } catch (e) { toast(e.message, true); }
+    }
+
+    async function uploadRestore() {
+        const fileInput = byId('restore-file');
+        const file = fileInput?.files[0];
+        if (!file) return toast('Select a .json file first.', true);
+        try {
+            const txt = await file.text();
+            await api('/api/v1/restore', 'POST', JSON.parse(txt));
+            toast('Restore successful. Rebooting node...');
+            setTimeout(() => location.reload(), 4000);
+        } catch (e) { toast(e.message, true); }
+    }
+
+    function updateText(id, txt) {
+        const el = byId(id);
+        if (el) el.textContent = txt;
+    }
+
+    return {
+        connect, disconnect, refresh, nav, playScene, blackout,
+        editScene, backToScenes, saveScene, testSceneLive, toggleTargetZone, selectAllTargetZones,
+        createNewScene, duplicateScene, clearScene,
+        changeLayerEffect, changeLayerEnabled, speedLabel, updateText,
+        saveHardwarePatch, renderPatcher, hoverDmxCell, toggleVisualizerMode, fitVisualizer, redrawVisualizer,
+        setBpm, setTimelineEnabled, saveTimeline, selectTimelineStep, assignTimelinePreset, setTimelineStepLength, addTimelineStep, removeTimelineStep,
+        saveSchedules,
+        loadCommissioning, switchDiagTab, loadLogs, loadAudit, runTestSequence, uploadOta, downloadBackup, uploadRestore
+    };
+})();
+</script>
+</body>
+</html>

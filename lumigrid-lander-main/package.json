@@ -13,7 +13,8 @@
     "test": "playwright test",
     "test:ui": "playwright test --ui",
     "test:unit": "vitest run --passWithNoTests",
-    "sync:tokens": "node scripts/sync-tokens.mjs"
+    "sync:tokens": "node scripts/sync-tokens.mjs",
+    "build:embedded": "node scripts/build-embedded.mjs"
   },
   "engines": {
     "node": ">=20.0.0"

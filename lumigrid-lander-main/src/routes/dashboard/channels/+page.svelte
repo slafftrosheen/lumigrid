@@ -1,252 +1,1555 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
-  import { getChannelConfig, setPixels, getState, setBrightness, setPower } from '$lib/api/node';
-  import type { ChannelConfig } from '$lib/api/node';
+  import { onMount } from 'svelte';
+  import { getChannels, testChannel, type HardwareChannel } from '$lib/api/channels';
+  import { getDeviceConfig, saveDeviceConfig, type DeviceConfig, type ChannelConfig, type ChannelGroup } from '$lib/api/config';
+  import { postFactoryPwm } from '$lib/api/factory';
+  import { getSelectedNodeIp } from '$lib/auth/storage';
+  import { nodeStore } from '$lib/state/nodeStore';
 
-  // ── Feature 3: PWM Channel Live Control ──────────────────────────────────────
-
-  const CHANNEL_TYPES = ['Off', 'PWM (Dumb)', 'CCT (2ch)', 'RGB (3ch)', 'RGBW (4ch)'];
-
-  let nodeIp  = $state('');
-  let config  = $state<ChannelConfig | null>(null);
+  let nodeIp = $state('');
+  let channels = $state<HardwareChannel[]>([]);
+  let config = $state<DeviceConfig | null>(null);
   let loading = $state(true);
-  let error   = $state('');
+  let error = $state('');
+  let toast = $state('');
+  let testingChannel = $state<number | null>(null);
+  let loadGen = 0;
 
-  // Per-channel value (0-255 brightness for PWM/CCT, or RGB object)
-  let channelValues = $state<number[]>(Array(8).fill(128));
-  let masterBri     = $state(255);
-  let masterOn      = $state(true);
-  let dirty         = $state(false);
-  let sending       = $state(false);
-  let lastSent      = $state(0);
+  // Selected channel for configuration modal
+  let selectedChannel = $state<HardwareChannel | null>(null);
+  let editForm = $state<{
+    enabled: boolean;
+    name: string;
+    addressableType: 'WS2812' | 'SK6812';
+    pixelCount: number;
+    pixelOrder: 'RGB' | 'GRB' | 'RGBW' | 'GRBW';
+    maxBrightness: number;
+    gammaCorrection: boolean;
+    powerLimitW: number;
+    dmxUniverse: number;
+    dmxStartChannel: number;
+    dmxMode: number;
+    groupBits: boolean[];
+    pwmLevel: number; // 0..100%
+  }>({
+    enabled: false,
+    name: '',
+    addressableType: 'WS2812',
+    pixelCount: 0,
+    pixelOrder: 'GRB',
+    maxBrightness: 255,
+    gammaCorrection: true,
+    powerLimitW: 0,
+    dmxUniverse: 0,
+    dmxStartChannel: 0,
+    dmxMode: 0,
+    groupBits: [false, false, false, false, false, false, false, false],
+    pwmLevel: 0,
+  });
+  let savingChannel = $state(false);
 
-  // Colour for RGB channels: {r,g,b}
-  let channelRGB = $state<{r:number;g:number;b:number}[]>(
-    Array(8).fill(null).map(() => ({ r: 255, g: 255, b: 255 }))
-  );
+  // Split channels into the two immutable hardware banks
+  const addressableChannels = $derived.by(() => {
+    return channels.filter(c => c.index < 8);
+  });
 
-  async function loadConfig() {
-    loading = true;
-    error   = '';
-    try {
-      config = await getChannelConfig(nodeIp);
-      const st = await getState(nodeIp);
-      masterBri = st.bri;
-      masterOn  = st.on;
-    } catch (e) {
-      error = String(e);
+  const pwmChannels = $derived.by(() => {
+    return channels.filter(c => c.index >= 8 && c.index < 16);
+  });
+
+  const addressableActiveCount = $derived.by(() => {
+    return addressableChannels.filter(c => c.enabled).length;
+  });
+
+  const pwmActiveCount = $derived.by(() => {
+    return pwmChannels.filter(c => c.enabled).length;
+  });
+
+  // Local tracking of PWM duty for live sliders (0..100%)
+  let pwmLevels = $state<Record<number, number>>({
+    8: 0, 9: 0, 10: 0, 11: 0, 12: 0, 13: 0, 14: 0, 15: 0
+  });
+  const pwmLastSentAt: Record<number, number> = {};
+  const pwmSendTimers: Record<number, ReturnType<typeof setTimeout> | undefined> = {};
+  const PWM_SEND_INTERVAL_MS = 50; // 20 Hz max while dragging
+
+
+  function toastMsg(msg: string) {
+    toast = msg;
+    setTimeout(() => { if (toast === msg) toast = ''; }, 2800);
+  }
+
+  async function loadData(targetIp = nodeIp, gen = loadGen) {
+    if (!targetIp) {
+      channels = [];
+      config = null;
+      loading = false;
+      return;
     }
-    loading = false;
+    loading = true;
+    error = '';
+    try {
+      const [chList, cfg] = await Promise.all([
+        getChannels(targetIp),
+        getDeviceConfig(targetIp).catch(() => null),
+      ]);
+      if (gen !== loadGen) return;
+      channels = chList;
+      config = cfg;
+    } catch (e) {
+      if (gen !== loadGen) return;
+      error = String(e);
+    } finally {
+      if (gen === loadGen) loading = false;
+    }
+  }
+
+  async function runIdentify(ch: HardwareChannel, e?: MouseEvent) {
+    if (e) e.stopPropagation();
+    if (!nodeIp || testingChannel !== null) return;
+    testingChannel = ch.index;
+    try {
+      await testChannel(nodeIp, ch.index, 'identify', 3000);
+      toastMsg(`Testing ${ch.port}…`);
+    } catch (err) {
+      toastMsg(`Test failed: ${String(err)}`);
+    } finally {
+      setTimeout(() => {
+        if (testingChannel === ch.index) testingChannel = null;
+      }, 3000);
+    }
+  }
+
+  async function sendPwmLevel(ch: HardwareChannel, percent: number) {
+    if (!nodeIp) return;
+    const clamped = Math.max(0, Math.min(100, percent));
+    const duty12 = Math.round((clamped / 100) * 4095);
+    pwmLastSentAt[ch.index] = Date.now();
+    try {
+      await postFactoryPwm(nodeIp, ch.hardwareId, duty12, 10000);
+    } catch (err) {
+      console.error('Failed to set PWM duty:', err);
+    }
+  }
+
+  function handlePwmSliderInput(ch: HardwareChannel, percent: number) {
+    pwmLevels[ch.index] = percent;
+    if (!nodeIp) return;
+
+    const elapsed = Date.now() - (pwmLastSentAt[ch.index] ?? 0);
+    if (elapsed >= PWM_SEND_INTERVAL_MS) {
+      if (pwmSendTimers[ch.index]) {
+        clearTimeout(pwmSendTimers[ch.index]);
+        pwmSendTimers[ch.index] = undefined;
+      }
+      void sendPwmLevel(ch, percent);
+      return;
+    }
+
+    if (pwmSendTimers[ch.index]) clearTimeout(pwmSendTimers[ch.index]);
+    pwmSendTimers[ch.index] = setTimeout(() => {
+      pwmSendTimers[ch.index] = undefined;
+      void sendPwmLevel(ch, pwmLevels[ch.index] ?? percent);
+    }, PWM_SEND_INTERVAL_MS - elapsed);
+  }
+
+  function handlePwmSliderCommit(ch: HardwareChannel, percent: number) {
+    pwmLevels[ch.index] = percent;
+    if (pwmSendTimers[ch.index]) {
+      clearTimeout(pwmSendTimers[ch.index]);
+      pwmSendTimers[ch.index] = undefined;
+    }
+    // Always send the final released value, even when the drag was throttled.
+    void sendPwmLevel(ch, percent);
+  }
+
+  function openConfigModal(ch: HardwareChannel) {
+    selectedChannel = ch;
+    const gBits = [false, false, false, false, false, false, false, false];
+    if (config?.groups) {
+      for (let g = 0; g < 8; g++) {
+        const mask = config.groups[g]?.channelMask ?? 0;
+        if ((mask & (1 << ch.index)) !== 0) {
+          gBits[g] = true;
+        }
+      }
+    }
+
+    editForm = {
+      enabled: ch.enabled,
+      name: ch.name || '',
+      addressableType: ch.addressable?.type ?? 'WS2812',
+      pixelCount: ch.addressable?.pixels ?? 0,
+      pixelOrder: ch.addressable?.pixelOrder ?? 'GRB',
+      maxBrightness: ch.maxBrightness ?? 255,
+      gammaCorrection: ch.gammaCorrection ?? true,
+      powerLimitW: ch.maxMilliwatts ? Math.round(ch.maxMilliwatts / 1000) : 0,
+      dmxUniverse: ch.dmxUniverse ?? 0,
+      dmxStartChannel: ch.dmxStartChannel ?? 0,
+      dmxMode: ch.dmxMode || 0,
+      groupBits: gBits,
+      pwmLevel: pwmLevels[ch.index] ?? 0,
+    };
+  }
+
+  function closeConfigModal() {
+    selectedChannel = null;
+  }
+
+  async function saveChannelConfig() {
+    if (!selectedChannel || !nodeIp || !config) return;
+    savingChannel = true;
+    try {
+      // Ensure config.channels array has 16 items
+      if (!config.channels || config.channels.length < 16) {
+        config.channels = Array.from({ length: 16 }, (_, i) => ({
+          name: '',
+          enabled: false,
+          addressableType: 0,
+          pixelOrder: 1,
+          pixelCount: 0,
+          maxBrightness: 255,
+          gammaCorrection: true,
+          maxMilliwatts: 0,
+          dmxUniverse: 0,
+          dmxStartChannel: 0,
+          dmxMode: 0,
+        }));
+      }
+
+      // Map string pixel order to enum value
+      const pixelOrderMap: Record<string, number> = { RGB: 0, GRB: 1, RGBW: 2, GRBW: 3 };
+      const orderNum = pixelOrderMap[editForm.pixelOrder] ?? 1;
+      const typeNum = editForm.addressableType === 'SK6812' ? 1 : 0;
+
+      const idx = selectedChannel.index;
+      const pixelCount = idx < 8
+        ? Math.max(0, Math.min(1024, Math.trunc(editForm.pixelCount || 0)))
+        : 0;
+
+      if (idx < 8 && editForm.enabled && pixelCount < 1) {
+        toastMsg(`Set a pixel count before enabling ${selectedChannel.port}`);
+        savingChannel = false;
+        return;
+      }
+
+      config.channels[idx] = {
+        name: editForm.name.slice(0, 23),
+        enabled: editForm.enabled,
+        addressableType: typeNum,
+        pixelOrder: orderNum,
+        pixelCount,
+        maxBrightness: Math.max(0, Math.min(255, editForm.maxBrightness)),
+        gammaCorrection: editForm.gammaCorrection,
+        maxMilliwatts: Math.max(0, editForm.powerLimitW * 1000),
+        dmxUniverse: Math.max(0, Math.min(63999, Math.trunc(editForm.dmxUniverse || 0))),
+        dmxStartChannel: Math.max(0, Math.min(512, Math.trunc(editForm.dmxStartChannel || 0))),
+        dmxMode: editForm.dmxMode,
+      };
+
+      // Ensure config.groups array has 8 items
+      if (!config.groups || config.groups.length < 8) {
+        config.groups = Array.from({ length: 8 }, (_, i) => ({
+          name: `Group ${i + 1}`,
+          channelMask: 0,
+          role: 0,
+          enabled: false,
+        }));
+      }
+
+      // Update group masks
+      for (let g = 0; g < 8; g++) {
+        let mask = config.groups[g].channelMask;
+        if (editForm.groupBits[g]) {
+          mask |= (1 << idx);
+        } else {
+          mask &= ~(1 << idx);
+        }
+        config.groups[g].channelMask = mask;
+        config.groups[g].enabled = mask !== 0;
+      }
+
+      await saveDeviceConfig(nodeIp, config);
+      toastMsg(`Channel ${selectedChannel.port} saved`);
+      closeConfigModal();
+      await loadData(nodeIp, loadGen);
+    } catch (err) {
+      toastMsg(`Save error: ${String(err)}`);
+    } finally {
+      savingChannel = false;
+    }
   }
 
   onMount(() => {
-    nodeIp = localStorage.getItem('lg_node_ip') ?? '';
-    if (nodeIp) loadConfig();
-    else loading = false;
-  });
-
-  // Rate-limited send: max once per 66 ms (≈15 Hz) on slider change
-  async function sendChannels() {
-    if (sending || Date.now() - lastSent < 66) return;
-    sending = true;
-    lastSent = Date.now();
-    dirty = false;
-    try {
-      const pixels: Array<[number, [number, number, number, number]]> = [];
-      if (!config) {
-        // No config: treat all channels as PWM
-        for (let i = 0; i < 8; i++) {
-          const v = channelValues[i];
-          pixels.push([i, [v, v, v, v]]);
-        }
-      } else {
-        let pixelIdx = 0;
-        let ch = 0;
-        while (ch < 8) {
-          const type = config.channelType[ch] ?? 1;
-          const v    = channelValues[ch];
-          const rgb  = channelRGB[ch];
-          switch (type) {
-            case 0: { pixels.push([pixelIdx, [0, 0, 0, 0]]); ch++; pixelIdx++; break; }
-            case 1: { pixels.push([pixelIdx, [v, v, v, v]]);  ch++; pixelIdx++; break; }
-            case 2: {
-              // CCT: R = warm (ch), G = cool (ch+1)
-              const warm = channelValues[ch] ?? 128;
-              const cool = ch + 1 < 8 ? (channelValues[ch + 1] ?? 128) : 0;
-              pixels.push([pixelIdx, [warm, cool, 0, 0]]);
-              ch += 2; pixelIdx++; break;
-            }
-            case 3: { pixels.push([pixelIdx, [rgb.r, rgb.g, rgb.b, 0]]); ch += 3; pixelIdx++; break; }
-            case 4: { pixels.push([pixelIdx, [rgb.r, rgb.g, rgb.b, v]]); ch += 4; pixelIdx++; break; }
-            default: { ch++; pixelIdx++; break; }
-          }
-        }
+    const unsub = nodeStore.subscribe(state => {
+      const targetIp = state.nodeIp || getSelectedNodeIp();
+      if (targetIp !== nodeIp) {
+        nodeIp = targetIp;
+        loadGen++;
+        channels = [];
+        config = null;
+        loading = !!nodeIp;
+        error = '';
+        if (nodeIp) loadData(nodeIp, loadGen);
       }
-      await setPixels(nodeIp, pixels);
-    } catch (e) {
-      error = String(e);
-    }
-    sending = false;
-    if (dirty) sendChannels();
-  }
-
-  function onSliderChange() { dirty = true; sendChannels(); }
-
-  function channelLabel(ch: number): string {
-    return config?.channelLabel?.[ch] ?? `LED ${ch}`;
-  }
-  function channelType(ch: number): number {
-    return config?.channelType?.[ch] ?? 1;
-  }
-
-  // Which channels are "primary" (first of a group)?
-  function isPrimary(ch: number): boolean {
-    let c = 0;
-    while (c < ch) {
-      const t = channelType(c);
-      c += t === 2 ? 2 : t === 3 ? 3 : t === 4 ? 4 : 1;
-    }
-    return c === ch;
-  }
+    });
+    return unsub;
+  });
 </script>
 
-<svelte:head>
-  <title>Channel Control — LumiGrid</title>
-</svelte:head>
+<svelte:head><title>Channels — LumiGrid</title></svelte:head>
 
 <div class="page">
+  {#if toast}
+    <div class="toast">{toast}</div>
+  {/if}
+
   <header class="page-header">
     <div>
-      <h1>PWM Channel Control</h1>
-      <p class="sub">{nodeIp ? `Node: ${nodeIp}` : 'No node selected'} · {config ? `${config.pwmFrequency} Hz` : ''}</p>
+      <div class="title-row">
+        <h1>Hardware Outputs</h1>
+        <span class="board-badge">8 Addressable · 8 PWM</span>
+      </div>
+      <p class="sub">
+        {nodeIp ? `Node: ${nodeIp}` : 'No node selected'}
+        · Physical controller outputs · configure exactly what is connected
+      </p>
     </div>
-    <div class="head-actions">
-      <button class="action-btn" onclick={() => setPower(nodeIp, !masterOn).then(loadConfig)}>
-        {masterOn ? '⏻ Off' : '⏻ On'}
-      </button>
-      <button class="action-btn" onclick={loadConfig}>↺</button>
+    <div class="header-actions">
+      <button class="action-btn" onclick={() => loadData()} disabled={loading}>↺ Refresh</button>
     </div>
   </header>
 
   {#if !nodeIp}
-    <div class="empty">Select a node in the sidebar to control its PWM channels.</div>
+    <div class="empty">Select an active node in the header or fleet list to inspect its physical connectors.</div>
+
   {:else if loading}
-    <div class="loading"><div class="spinner"></div>Loading…</div>
+    <div class="loading"><div class="spinner"></div>Loading 16-channel hardware topology…</div>
+
   {:else if error}
-    <div class="err-box">{error}</div>
-  {:else}
-    <!-- Master brightness -->
-    <div class="master-card">
-      <div class="master-label">
-        <span>Master Brightness</span>
-        <span class="master-val">{masterBri}</span>
-      </div>
-      <input
-        type="range" min="0" max="255"
-        bind:value={masterBri}
-        class="master-range"
-        oninput={() => { setBrightness(nodeIp, masterBri); }}
-      />
+    <div class="err-box">
+      <strong>Failed to load channels:</strong> {error}
+      <br><small>Ensure the selected node is online and reachable, then refresh.</small>
     </div>
 
-    <!-- Channel sliders -->
-    <div class="channel-grid">
-      {#each {length: 8} as _, ch}
-        {@const type = channelType(ch)}
-        {@const primary = isPrimary(ch)}
-        <div class="channel-card" class:secondary={!primary} class:off-type={type === 0}>
-          <div class="ch-header">
-            <span class="ch-index">CH{ch}</span>
-            <span class="ch-name">{channelLabel(ch)}</span>
-            <span class="ch-type-badge">{CHANNEL_TYPES[type] ?? 'Unknown'}</span>
-          </div>
+  {:else}
+    <!-- BANK 1: ADDRESSABLE CHANNELS (A1–A8) -->
+    <section class="bank-section">
+      <div class="bank-header">
+        <div class="bank-title-group">
+          <span class="bank-dot addr"></span>
+          <h2>ADDRESSABLE OUTPUTS</h2>
+          <span class="bank-count">{addressableActiveCount} / 8 active</span>
+        </div>
+        <span class="bank-hint">Digital LED strips · WS2812 / SK6812</span>
+      </div>
 
-          {#if type === 0}
-            <div class="ch-off">Channel disabled</div>
-          {:else if type === 1 || type === 2}
-            <!-- PWM / CCT brightness slider -->
-            <div class="slider-row">
-              <div class="slider-track" style:background={`linear-gradient(to right, #ff2d55 ${channelValues[ch]/255*100}%, rgba(255,255,255,.08) 0)`}>
-                <input
-                  type="range" min="0" max="255"
-                  bind:value={channelValues[ch]}
-                  oninput={onSliderChange}
-                  class="ch-range"
-                />
-              </div>
-              <span class="ch-val">{channelValues[ch]}</span>
+      <div class="connector-grid">
+        {#each addressableChannels as ch (ch.index)}
+          {@const isTesting = testingChannel === ch.index}
+          {@const statusText = !ch.configured ? 'UNUSED' : ch.enabled ? 'ACTIVE' : 'DISABLED'}
+          {@const statusClass = !ch.configured ? 'unused' : ch.enabled ? 'online' : 'disabled'}
+          <div
+            class="connector-card addr"
+            class:is-active={ch.enabled}
+            class:is-testing={isTesting}
+            onclick={() => openConfigModal(ch)}
+            role="button"
+            tabindex="0"
+            onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') openConfigModal(ch); }}
+          >
+            <div class="card-top">
+              <span class="port-id">{ch.port}</span>
+              <span class="status-pill {statusClass}">{statusText}</span>
             </div>
-          {:else if type === 3 || type === 4}
-            <!-- RGB colour picker -->
-          <div class="rgb-row">
-              {#each ['r','g','b'] as c}
-                <div class="rgb-col">
-                  <label class="rgb-label" for={`rgb-${ch}-${c}`}>{c.toUpperCase()}</label>
+
+            <div class="card-body">
+              <div class="ch-name" title={ch.name || 'Unassigned'}>
+                {ch.name || 'Unassigned'}
+              </div>
+              <div class="ch-meta">
+                {#if ch.configured && ch.addressable}
+                  <span class="strip-type">{ch.addressable.type}</span>
+                  <span class="pixel-count">{ch.addressable.pixels} px</span>
+                {:else}
+                  <span class="setup-hint">Setup connector</span>
+                {/if}
+              </div>
+            </div>
+
+            <div class="card-footer">
+              <span class="hw-spec">Addressable data output</span>
+              <button
+                class="test-btn"
+                class:flashing={isTesting}
+                onclick={(e) => runIdentify(ch, e)}
+                disabled={isTesting}
+                title="Flash strip red/green/blue/white for physical identification"
+              >
+                {isTesting ? 'FLASHING…' : 'IDENTIFY'}
+              </button>
+            </div>
+          </div>
+        {/each}
+      </div>
+    </section>
+
+    <!-- BANK 2: PWM CHANNELS (P1–P8) -->
+    <section class="bank-section">
+      <div class="bank-header">
+        <div class="bank-title-group">
+          <span class="bank-dot pwm"></span>
+          <h2>PWM CHANNELS</h2>
+          <span class="bank-count">{pwmActiveCount} / 8 active</span>
+        </div>
+        <span class="bank-hint">Independent 12-bit dimmer outputs</span>
+      </div>
+
+      <div class="connector-grid">
+        {#each pwmChannels as ch (ch.index)}
+          {@const isTesting = testingChannel === ch.index}
+          {@const statusText = !ch.configured ? 'UNUSED' : ch.enabled ? 'ACTIVE' : 'DISABLED'}
+          {@const statusClass = !ch.configured ? 'unused' : ch.enabled ? 'online' : 'disabled'}
+          {@const level = pwmLevels[ch.index] ?? 0}
+          <div
+            class="connector-card pwm"
+            class:is-active={ch.enabled}
+            class:is-testing={isTesting}
+            onclick={() => openConfigModal(ch)}
+            role="button"
+            tabindex="0"
+            onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') openConfigModal(ch); }}
+          >
+            <div class="card-top">
+              <span class="port-id pwm">{ch.port}</span>
+              <span class="status-pill {statusClass}">{statusText}</span>
+            </div>
+
+            <div class="card-body">
+              <div class="ch-name" title={ch.name || 'Unassigned'}>
+                {ch.name || '—'}
+              </div>
+
+              {#if ch.configured || ch.enabled}
+                <div class="slider-block" onclick={(e) => e.stopPropagation()} role="presentation">
+                  <div class="slider-info">
+                    <span class="slider-label">Dimmer</span>
+                    <span class="slider-val">{level}%</span>
+                  </div>
                   <input
-                    id={`rgb-${ch}-${c}`}
-                    type="range" min="0" max="255"
-                    bind:value={channelRGB[ch][c as 'r'|'g'|'b']}
-                    oninput={onSliderChange}
-                    class="rgb-range"
-                    style:accent-color={c === 'r' ? '#ff453a' : c === 'g' ? '#34c759' : '#0a84ff'}
+                    type="range"
+                    min="0"
+                    max="100"
+                    value={level}
+                    oninput={(e) => handlePwmSliderInput(ch, Number((e.target as HTMLInputElement).value))}
+                    onchange={(e) => handlePwmSliderCommit(ch, Number((e.target as HTMLInputElement).value))}
+                    class="pwm-slider"
                   />
-                  <span class="rgb-val">{channelRGB[ch][c as 'r'|'g'|'b']}</span>
+                  <div class="pwm-bar-track">
+                    <div class="pwm-bar-fill" style:width={`${level}%`}></div>
+                  </div>
                 </div>
-              {/each}
-              {#if type === 4}
-                <div class="rgb-col">
-                  <label class="rgb-label" for={`rgb-${ch}-w`}>W</label>
-                  <input id={`rgb-${ch}-w`} type="range" min="0" max="255" bind:value={channelValues[ch]} oninput={onSliderChange} class="rgb-range" style:accent-color="#fff" />
-                  <span class="rgb-val">{channelValues[ch]}</span>
+              {:else}
+                <div class="ch-meta">
+                  <span class="setup-hint">Setup dimmer</span>
                 </div>
               {/if}
             </div>
-            <!-- Preview swatch -->
-            <div class="swatch" style:background={`rgb(${channelRGB[ch].r},${channelRGB[ch].g},${channelRGB[ch].b})`}></div>
-          {/if}
+
+            <div class="card-footer">
+              <span class="hw-spec">12-bit PWM output</span>
+              <button
+                class="test-btn"
+                class:flashing={isTesting}
+                onclick={(e) => runIdentify(ch, e)}
+                disabled={isTesting}
+                title="Step PWM duty cycle (0% -> 25% -> 50% -> 100% -> 0%)"
+              >
+                {isTesting ? 'TESTING…' : 'TEST'}
+              </button>
+            </div>
+          </div>
+        {/each}
+      </div>
+    </section>
+  {/if}
+
+  <!-- CHANNEL CONFIGURATION MODAL -->
+  {#if selectedChannel}
+    <div class="modal-backdrop" onclick={closeConfigModal} role="presentation">
+      <div
+        class="modal-content"
+        onclick={(e) => e.stopPropagation()}
+        onkeydown={(e) => { if (e.key === 'Escape') closeConfigModal(); }}
+        role="dialog"
+        tabindex="-1"
+        aria-modal="true"
+        aria-labelledby="modal-title"
+      >
+        <div class="modal-header">
+          <div>
+            <div class="modal-pretitle">
+              {selectedChannel.kind === 'addressable' ? 'Addressable Output' : 'PWM Dimmer Output'}
+            </div>
+            <h2 id="modal-title" class="modal-title">
+              <span class="modal-port-badge" class:pwm={selectedChannel.kind === 'pwm'}>
+                {selectedChannel.port}
+              </span>
+              {editForm.name || `Channel ${selectedChannel.port}`}
+            </h2>
+          </div>
+          <button class="modal-close-btn" onclick={closeConfigModal} aria-label="Close modal">✕</button>
         </div>
-      {/each}
+
+        <div class="modal-body">
+          <!-- Status & Basic Information -->
+          <div class="form-row">
+            <label class="form-field toggle-field">
+              <span class="field-label">Channel Status</span>
+              <div class="toggle-wrap">
+                <input type="checkbox" bind:checked={editForm.enabled} />
+                <span class="toggle-text">{editForm.enabled ? 'Enabled' : 'Disabled'}</span>
+              </div>
+            </label>
+
+            <label class="form-field flex-2">
+              <span class="field-label">Channel Name</span>
+              <input
+                type="text"
+                maxlength="23"
+                placeholder="e.g. Front Logo, Window, Shelf"
+                bind:value={editForm.name}
+                class="text-input"
+              />
+            </label>
+          </div>
+
+          <!-- Kind-specific configuration -->
+          {#if selectedChannel.kind === 'addressable'}
+            <div class="section-divider">
+              <span>LED Strip Parameters</span>
+            </div>
+
+            <div class="form-row">
+              <label class="form-field">
+                <span class="field-label">Strip Type</span>
+                <select bind:value={editForm.addressableType} class="select-input">
+                  <option value="WS2812">WS2812 / WS2811 (RGB)</option>
+                  <option value="SK6812">SK6812 (RGBW)</option>
+                </select>
+              </label>
+
+              <label class="form-field">
+                <span class="field-label">Pixel Count</span>
+                <input
+                  type="number"
+                  min="0"
+                  max="1024"
+                  placeholder="0 = unconfigured"
+                  bind:value={editForm.pixelCount}
+                  class="text-input"
+                />
+                <span class="input-hint">Set the connected strip length. 0 keeps this port unconfigured.</span>
+              </label>
+
+              <label class="form-field">
+                <span class="field-label">Pixel Color Order</span>
+                <select bind:value={editForm.pixelOrder} class="select-input">
+                  <option value="GRB">GRB (Standard WS2812)</option>
+                  <option value="RGB">RGB</option>
+                  <option value="GRBW">GRBW (SK6812)</option>
+                  <option value="RGBW">RGBW</option>
+                </select>
+              </label>
+            </div>
+          {:else}
+            <div class="section-divider">
+              <span>Dimmer Parameters</span>
+            </div>
+
+            <div class="form-row">
+              <label class="form-field">
+                <span class="field-label">Gamma Correction</span>
+                <div class="toggle-wrap">
+                  <input type="checkbox" bind:checked={editForm.gammaCorrection} />
+                  <span class="toggle-text">{editForm.gammaCorrection ? 'On (Perceptual)' : 'Off (Linear)'}</span>
+                </div>
+              </label>
+
+              <label class="form-field flex-2">
+                <span class="field-label">Live Dimmer Level ({editForm.pwmLevel}%)</span>
+                <input
+                  type="range"
+                  min="0"
+                  max="100"
+                  bind:value={editForm.pwmLevel}
+                  oninput={() => handlePwmSliderChange(selectedChannel!, editForm.pwmLevel)}
+                  class="pwm-slider"
+                />
+              </label>
+            </div>
+          {/if}
+
+          <!-- Limits & Calibration -->
+          <div class="section-divider">
+            <span>Power & Limits</span>
+          </div>
+
+          <div class="form-row">
+            <label class="form-field">
+              <span class="field-label">Max Brightness ({Math.round((editForm.maxBrightness / 255) * 100)}%)</span>
+              <input
+                type="range"
+                min="0"
+                max="255"
+                bind:value={editForm.maxBrightness}
+                class="range-slider"
+              />
+            </label>
+
+            <label class="form-field">
+              <span class="field-label">Power Limit (Watts)</span>
+              <input
+                type="number"
+                min="0"
+                max="300"
+                placeholder="0 = unlimited"
+                bind:value={editForm.powerLimitW}
+                class="text-input"
+              />
+              <span class="input-hint">{editForm.powerLimitW > 0 ? `${editForm.powerLimitW * 1000} mW cap` : 'No power cap'}</span>
+            </label>
+          </div>
+
+          <!-- DMX Patching -->
+          <div class="section-divider">
+            <span>DMX Patching</span>
+          </div>
+
+          <div class="form-row">
+            <label class="form-field">
+              <span class="field-label">DMX Universe</span>
+              <input
+                type="number"
+                min="0"
+                max="63999"
+                bind:value={editForm.dmxUniverse}
+                class="text-input"
+              />
+            </label>
+
+            <label class="form-field">
+              <span class="field-label">{selectedChannel.kind === 'pwm' ? 'DMX Channel' : 'DMX Start Channel'}</span>
+              <input
+                type="number"
+                min="0"
+                max="512"
+                bind:value={editForm.dmxStartChannel}
+                class="text-input"
+              />
+              <span class="input-hint">0 = unpatched</span>
+            </label>
+
+            {#if selectedChannel.kind === 'addressable'}
+              <label class="form-field">
+                <span class="field-label">DMX Mode</span>
+                <select bind:value={editForm.dmxMode} class="select-input">
+                  <option value={0}>Wash (3/4 slots total)</option>
+                  <option value={1}>Direct Pixels (Per-pixel RGB/W)</option>
+                </select>
+              </label>
+            {/if}
+          </div>
+
+          <!-- Group Memberships -->
+          <div class="section-divider">
+            <span>Group Memberships</span>
+          </div>
+
+          <p class="group-hint">Select which groups contain this channel for bulk control:</p>
+          <div class="group-grid">
+            {#each Array(8) as _, g}
+              {@const grpName = config?.groups?.[g]?.name || `Group ${g + 1}`}
+              <label class="group-checkbox-card" class:checked={editForm.groupBits[g]}>
+                <input
+                  type="checkbox"
+                  bind:checked={editForm.groupBits[g]}
+                />
+                <span class="grp-label">{grpName}</span>
+              </label>
+            {/each}
+          </div>
+
+          <!-- Fixed physical identity -->
+          <div class="section-divider">
+            <span>Connector Identity</span>
+          </div>
+
+          <div class="hw-readout">
+            <div class="hw-item">
+              <span class="hw-k">Physical Port</span>
+              <span class="hw-v">{selectedChannel.port}</span>
+            </div>
+            <div class="hw-item">
+              <span class="hw-k">Output Type</span>
+              <span class="hw-v">{selectedChannel.kind === 'addressable' ? 'Addressable LED' : 'PWM Dimmer'}</span>
+            </div>
+            <div class="hw-item">
+              <span class="hw-k">Controller Mapping</span>
+              <span class="hw-v">Fixed · not editable</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="modal-footer">
+          <button
+            class="action-btn test-action"
+            onclick={() => runIdentify(selectedChannel!)}
+            disabled={testingChannel !== null}
+          >
+            {testingChannel === selectedChannel.index ? 'TESTING…' : selectedChannel.kind === 'addressable' ? 'IDENTIFY' : 'TEST'}
+          </button>
+          <div class="modal-right-btns">
+            <button class="action-btn cancel-btn" onclick={closeConfigModal}>Cancel</button>
+            <button class="primary-btn" onclick={saveChannelConfig} disabled={savingChannel}>
+              {savingChannel ? 'Saving…' : 'Save Channel'}
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   {/if}
 </div>
 
 <style>
-  .page { max-width: 900px; }
-  .page-header { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 1.5rem; gap: 1rem; flex-wrap: wrap; }
-  h1 { margin: 0; font-size: 1.6rem; font-weight: 700; color: #f5f5f7; }
-  .sub { margin: .25rem 0 0; color: #a1a1a6; font-size: .85rem; }
-  .head-actions { display: flex; gap: .5rem; }
-  .action-btn { background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.12); border-radius: 999px; color: #f5f5f7; padding: .5rem 1rem; cursor: pointer; font-size: .85rem; transition: background .2s; }
-  .action-btn:hover { background: rgba(255,255,255,.14); }
-  .loading { display: flex; align-items: center; gap: .75rem; color: #a1a1a6; padding: 3rem; justify-content: center; }
-  .spinner { width: 18px; height: 18px; border: 2px solid rgba(255,255,255,.1); border-top-color: #ff2d55; border-radius: 50%; animation: spin .8s linear infinite; }
-  @keyframes spin { to { transform: rotate(360deg); } }
-  .empty { color: #a1a1a6; padding: 3rem; text-align: center; }
-  .err-box { background: rgba(255,69,58,.12); border: 1px solid rgba(255,69,58,.3); border-radius: 12px; color: #ff453a; padding: 1rem; font-size: .85rem; font-family: monospace; }
+  .bank-section {
+    position: relative;
+    overflow: hidden;
+    background: linear-gradient(180deg, rgba(29,29,31,.72), rgba(18,18,20,.74));
+    border: 1px solid var(--dash-border);
+    border-radius: var(--dash-radius-xl);
+    padding: 1rem;
+    box-shadow: var(--dash-shadow);
+  }
+  .bank-section::before {
+    content: "";
+    position: absolute;
+    inset: 0 0 auto;
+    height: 1px;
+    background: linear-gradient(90deg, rgba(var(--dash-accent-rgb),.55), transparent 42%);
+    pointer-events: none;
+  }
+  .bank-section + .bank-section::before {
+    background: linear-gradient(90deg, color-mix(in oklab, var(--dash-warm) 60%, transparent), transparent 42%);
+  }
+  .connector-card {
+    isolation: isolate;
+    min-height: 172px;
+    background: linear-gradient(180deg, rgba(255,255,255,.038), rgba(255,255,255,.018));
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.035);
+    transition: transform .18s var(--ease-out), border-color .18s ease, background .18s ease, box-shadow .18s ease;
+  }
+  .connector-card::before {
+    content: "";
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: 3px;
+    border-radius: inherit;
+    opacity: .35;
+    background: var(--dash-accent);
+    pointer-events: none;
+  }
+  .connector-card.pwm::before { background: var(--dash-warm); }
+  @media (hover:hover) {
+    .connector-card:hover {
+      transform: translateY(-2px);
+      box-shadow: var(--dash-shadow-hover), inset 0 1px 0 rgba(255,255,255,.05);
+      background: linear-gradient(180deg, rgba(255,255,255,.055), rgba(255,255,255,.024));
+    }
+    .connector-card.addr:hover { border-color: rgba(var(--dash-accent-rgb),.32); }
+    .connector-card.pwm:hover { border-color: color-mix(in oklab, var(--dash-warm) 38%, transparent); }
+  }
+  .connector-card:focus-visible {
+    outline: 2px solid var(--dash-accent);
+    outline-offset: 3px;
+  }
+  .connector-card.pwm:focus-visible { outline-color: var(--dash-warm); }
+  .ch-name {
+    min-height: 1.35rem;
+    color: var(--dash-text);
+  }
+  .connector-card:not(.is-active) .ch-name { color: #8e8e93; }
+  .setup-hint {
+    display: inline-flex;
+    align-items: center;
+    gap: .35rem;
+  }
+  .setup-hint::before { content: "+"; font-weight: 800; color: currentColor; }
+  .hw-spec { opacity: .7; }
+  .card-footer { border-top: 1px solid rgba(255,255,255,.055); padding-top: .7rem; }
 
-  /* Master */
-  .master-card { background: rgba(29,29,31,.72); border: 1px solid rgba(255,255,255,.08); border-radius: 16px; padding: 1rem 1.25rem; margin-bottom: 1.25rem; }
-  .master-label { display: flex; justify-content: space-between; margin-bottom: .5rem; color: #f5f5f7; font-weight: 600; font-size: .9rem; }
-  .master-val { color: #a1a1a6; font-family: monospace; }
-  .master-range { width: 100%; accent-color: #ff2d55; height: 4px; }
+  .page {
+    max-width: 1180px;
+    margin: 0 auto;
+  }
 
-  /* Channel grid */
-  .channel-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 1rem; }
-  .channel-card { background: rgba(29,29,31,.72); border: 1px solid rgba(255,255,255,.08); border-radius: 16px; padding: 1rem; display: flex; flex-direction: column; gap: .6rem; }
-  .channel-card.off-type { opacity: .45; }
-  .ch-header { display: flex; align-items: center; gap: .4rem; flex-wrap: wrap; }
-  .ch-index { font-size: .65rem; font-weight: 700; color: #a1a1a6; background: rgba(255,255,255,.06); padding: .1rem .35rem; border-radius: 4px; font-family: monospace; }
-  .ch-name { flex: 1; font-size: .85rem; font-weight: 600; color: #f5f5f7; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .ch-type-badge { font-size: .65rem; color: #ff9500; background: rgba(255,149,0,.12); padding: .1rem .4rem; border-radius: 999px; white-space: nowrap; }
-  .ch-off { color: #a1a1a6; font-size: .78rem; text-align: center; padding: .5rem 0; }
-  .slider-row { display: flex; align-items: center; gap: .5rem; }
-  .slider-track { flex: 1; border-radius: 999px; height: 6px; position: relative; }
-  .ch-range { width: 100%; accent-color: #ff2d55; }
-  .ch-val { min-width: 2.5ch; font-family: monospace; font-size: .8rem; color: #f5f5f7; text-align: right; }
-  .rgb-row { display: flex; flex-direction: column; gap: .3rem; }
-  .rgb-col { display: flex; align-items: center; gap: .4rem; }
-  .rgb-label { width: 1.2rem; font-size: .72rem; font-weight: 700; color: #a1a1a6; text-align: right; }
-  .rgb-range { flex: 1; height: 4px; }
-  .rgb-val { min-width: 2.5ch; font-family: monospace; font-size: .72rem; color: #a1a1a6; }
-  .swatch { width: 100%; height: 24px; border-radius: 8px; border: 1px solid rgba(255,255,255,.1); }
+  .page-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    margin-bottom: 2rem;
+    gap: 1rem;
+    flex-wrap: wrap;
+  }
+
+  .title-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+  }
+
+  h1 {
+    margin: 0;
+    font-size: 1.75rem;
+    font-weight: 700;
+    color: #f5f5f7;
+    letter-spacing: -0.02em;
+  }
+
+  .board-badge {
+    font-size: 0.7rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #30d158;
+    background: rgba(48, 209, 88, 0.12);
+    border: 1px solid rgba(48, 209, 88, 0.25);
+    padding: 0.2rem 0.6rem;
+    border-radius: 999px;
+  }
+
+  .sub {
+    margin: 0.35rem 0 0;
+    color: #86868b;
+    font-size: 0.88rem;
+  }
+
+  .action-btn {
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 999px;
+    color: #f5f5f7;
+    padding: 0.5rem 1.1rem;
+    cursor: pointer;
+    font-size: 0.85rem;
+    font-weight: 500;
+    transition: all 0.15s ease;
+  }
+
+  .action-btn:hover {
+    background: rgba(255, 255, 255, 0.15);
+    border-color: rgba(255, 255, 255, 0.25);
+  }
+
+  .action-btn:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+
+  .primary-btn {
+    background: var(--dash-accent);
+    border: 1px solid var(--dash-accent-hover);
+    border-radius: 999px;
+    color: #ffffff;
+    padding: 0.5rem 1.4rem;
+    cursor: pointer;
+    font-size: 0.85rem;
+    font-weight: 600;
+    transition: all 0.15s ease;
+  }
+
+  .primary-btn:hover {
+    background: var(--dash-accent-hover);
+  }
+
+  .primary-btn:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+
+  .toast {
+    position: fixed;
+    top: 1.5rem;
+    right: 2rem;
+    background: rgba(29, 29, 31, 0.95);
+    backdrop-filter: blur(20px);
+    border: 1px solid rgba(var(--dash-accent-rgb), 0.4);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+    color: #f5f5f7;
+    padding: 0.75rem 1.25rem;
+    border-radius: 12px;
+    font-size: 0.88rem;
+    font-weight: 500;
+    z-index: 2000;
+  }
+
+  .loading {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    color: #86868b;
+    padding: 4rem;
+    justify-content: center;
+    font-size: 0.95rem;
+  }
+
+  .spinner {
+    width: 20px;
+    height: 20px;
+    border: 2px solid rgba(255, 255, 255, 0.1);
+    border-top-color: var(--dash-accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+
+  .empty {
+    color: #86868b;
+    padding: 4rem 2rem;
+    text-align: center;
+    font-size: 0.95rem;
+  }
+
+  .err-box {
+    background: rgba(255, 69, 58, 0.1);
+    border: 1px solid rgba(255, 69, 58, 0.25);
+    border-radius: 14px;
+    color: #ff453a;
+    padding: 1.25rem 1.5rem;
+    font-size: 0.9rem;
+    line-height: 1.6;
+    margin-bottom: 2rem;
+  }
+
+  /* Hardware Banks */
+  .bank-section {
+    position: relative;
+    overflow: hidden;
+    background: linear-gradient(180deg, rgba(29,29,31,.76), rgba(16,16,18,.76));
+    backdrop-filter: blur(18px);
+    -webkit-backdrop-filter: blur(18px);
+    border: 1px solid var(--dash-border);
+    border-radius: var(--dash-radius-xl);
+    padding: 1.35rem;
+    margin-bottom: 1.25rem;
+    box-shadow: var(--dash-shadow);
+  }
+
+  .bank-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 1.25rem;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+  }
+
+  .bank-title-group {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+  }
+
+  .bank-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+  }
+
+  .bank-dot.addr {
+    background: var(--dash-accent);
+    box-shadow: 0 0 10px rgba(var(--dash-accent-rgb), 0.6);
+  }
+
+  .bank-dot.pwm {
+    background: #ff9f0a;
+    box-shadow: 0 0 10px rgba(255, 159, 10, 0.6);
+  }
+
+  h2 {
+    margin: 0;
+    font-size: 1.15rem;
+    font-weight: 700;
+    color: #f5f5f7;
+    letter-spacing: -0.01em;
+  }
+
+  .bank-count {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: #a1a1a6;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    padding: 0.2rem 0.6rem;
+    border-radius: 999px;
+  }
+
+  .bank-hint {
+    font-size: 0.8rem;
+    color: #86868b;
+  }
+
+  /* Connector Grid */
+  .connector-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+    gap: 1rem;
+  }
+
+  .connector-card {
+    isolation: isolate;
+    min-height: 172px;
+    background: linear-gradient(180deg, rgba(255,255,255,.04), rgba(255,255,255,.018));
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: var(--dash-radius-md);
+    padding: 1.1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.85rem;
+    cursor: pointer;
+    transition: transform .18s var(--ease-out), border-color .18s ease, background .18s ease, box-shadow .18s ease;
+    position: relative;
+    user-select: none;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.035);
+  }
+
+  .connector-card:hover {
+    background: linear-gradient(180deg, rgba(255,255,255,.06), rgba(255,255,255,.026));
+    border-color: rgba(255, 255, 255, 0.18);
+    transform: translateY(-2px);
+    box-shadow: var(--dash-shadow-hover), inset 0 1px 0 rgba(255,255,255,.05);
+  }
+  .connector-card:focus-visible {
+    outline: 2px solid var(--dash-accent);
+    outline-offset: 3px;
+  }
+  .connector-card.pwm:focus-visible { outline-color: var(--dash-warm); }
+
+  .connector-card.is-active.addr {
+    border-color: rgba(var(--dash-accent-rgb), 0.35);
+    background: rgba(var(--dash-accent-rgb), 0.04);
+  }
+
+  .connector-card.is-active.pwm {
+    border-color: rgba(255, 159, 10, 0.35);
+    background: rgba(255, 159, 10, 0.04);
+  }
+
+  .connector-card.is-testing {
+    animation: cardPulse 0.5s ease infinite alternate;
+  }
+
+  @keyframes cardPulse {
+    from { border-color: rgba(255, 255, 255, 0.2); }
+    to { border-color: var(--dash-accent); box-shadow: 0 0 16px rgba(var(--dash-accent-rgb), 0.4); }
+  }
+
+  .card-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .port-id {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 1.1rem;
+    font-weight: 800;
+    color: var(--dash-accent);
+    letter-spacing: -0.02em;
+  }
+
+  .port-id.pwm {
+    color: #ff9f0a;
+  }
+
+  .status-pill {
+    font-size: 0.65rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    padding: 0.15rem 0.5rem;
+    border-radius: 999px;
+    text-transform: uppercase;
+  }
+
+  .status-pill.online {
+    background: rgba(48, 209, 88, 0.15);
+    color: #30d158;
+    border: 1px solid rgba(48, 209, 88, 0.3);
+  }
+
+  .status-pill.disabled {
+    background: rgba(255, 159, 10, 0.12);
+    color: #ff9f0a;
+    border: 1px solid rgba(255, 159, 10, 0.25);
+  }
+
+  .status-pill.unused {
+    background: rgba(255, 255, 255, 0.06);
+    color: #636366;
+    border: 1px solid rgba(255, 255, 255, 0.06);
+  }
+
+  .card-body {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+  }
+
+  .ch-name {
+    min-height: 1.35rem;
+    font-size: 0.92rem;
+    font-weight: 600;
+    color: #f5f5f7;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .ch-meta {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.78rem;
+  }
+
+  .strip-type {
+    background: rgba(255, 255, 255, 0.07);
+    color: #e5e5ea;
+    padding: 0.1rem 0.45rem;
+    border-radius: 4px;
+    font-weight: 500;
+  }
+
+  .pixel-count {
+    color: #86868b;
+    font-family: monospace;
+  }
+
+  .setup-hint {
+    color: #7c7c80;
+    font-size: 0.8rem;
+    font-style: normal;
+    display: inline-flex;
+    align-items: center;
+    gap: .35rem;
+  }
+  .setup-hint::before {
+    content: "+";
+    color: currentColor;
+    font-weight: 800;
+  }
+
+  .slider-block {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    margin-top: 0.2rem;
+  }
+
+  .slider-info {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.75rem;
+  }
+
+  .slider-label {
+    color: #86868b;
+  }
+
+  .slider-val {
+    color: #f5f5f7;
+    font-family: monospace;
+    font-weight: 600;
+  }
+
+  .pwm-slider {
+    width: 100%;
+    accent-color: #ff9f0a;
+    cursor: pointer;
+  }
+
+  .pwm-bar-track {
+    height: 3px;
+    background: rgba(255, 255, 255, 0.06);
+    border-radius: 999px;
+    overflow: hidden;
+  }
+
+  .pwm-bar-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #ff9f0a, #ff453a);
+    transition: width 0.08s ease;
+  }
+
+  .card-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding-top: 0.6rem;
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+  }
+
+  .hw-spec {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 0.68rem;
+    color: #86868b;
+  }
+
+  .test-btn {
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    color: #e5e5ea;
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    padding: 0.25rem 0.65rem;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+
+  .test-btn:hover {
+    background: rgba(255, 255, 255, 0.18);
+    color: #ffffff;
+    border-color: rgba(255, 255, 255, 0.25);
+  }
+
+  .test-btn.flashing {
+    background: #ff2d55;
+    color: #ffffff;
+    border-color: #ff375f;
+    animation: flash 0.3s alternate infinite;
+  }
+
+  @keyframes flash {
+    from { opacity: 1; }
+    to { opacity: 0.4; }
+  }
+
+  /* Modal */
+  .modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.75);
+    backdrop-filter: blur(12px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1500;
+    padding: 1rem;
+  }
+
+  .modal-content {
+    background: var(--dash-surface-strong);
+    backdrop-filter: blur(24px);
+    -webkit-backdrop-filter: blur(24px);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: var(--dash-radius-xl);
+    width: 100%;
+    max-width: 680px;
+    max-height: 90vh;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 24px 64px rgba(0, 0, 0, 0.8);
+  }
+
+  .modal-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    padding: 1.5rem 1.75rem 1rem;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  }
+
+  .modal-pretitle {
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #86868b;
+    margin-bottom: 0.25rem;
+  }
+
+  .modal-title {
+    margin: 0;
+    font-size: 1.35rem;
+    font-weight: 700;
+    color: #f5f5f7;
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+  }
+
+  .modal-port-badge {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 0.95rem;
+    font-weight: 800;
+    color: var(--dash-accent);
+    background: rgba(var(--dash-accent-rgb), 0.12);
+    border: 1px solid rgba(var(--dash-accent-rgb), 0.3);
+    padding: 0.15rem 0.55rem;
+    border-radius: 6px;
+  }
+
+  .modal-port-badge.pwm {
+    color: #ff9f0a;
+    background: rgba(255, 159, 10, 0.12);
+    border-color: rgba(255, 159, 10, 0.3);
+  }
+
+  .modal-close-btn {
+    background: rgba(255, 255, 255, 0.08);
+    border: none;
+    border-radius: 50%;
+    width: 32px;
+    height: 32px;
+    color: #a1a1a6;
+    cursor: pointer;
+    font-size: 0.9rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.15s ease;
+  }
+
+  .modal-close-btn:hover {
+    background: rgba(255, 255, 255, 0.15);
+    color: #f5f5f7;
+  }
+
+  .modal-body {
+    padding: 1.5rem 1.75rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1.2rem;
+  }
+
+  .section-divider {
+    display: flex;
+    align-items: center;
+    font-size: 0.78rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #86868b;
+    margin-top: 0.5rem;
+  }
+
+  .section-divider::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: rgba(255, 255, 255, 0.08);
+    margin-left: 0.75rem;
+  }
+
+  .form-row {
+    display: flex;
+    gap: 1rem;
+    flex-wrap: wrap;
+  }
+
+  .form-field {
+    flex: 1;
+    min-width: 160px;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+  }
+
+  .form-field.flex-2 {
+    flex: 2;
+  }
+
+  .field-label {
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: #a1a1a6;
+  }
+
+  .input-hint {
+    font-size: 0.7rem;
+    color: #636366;
+  }
+
+  .text-input, .select-input {
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 8px;
+    padding: 0.6rem 0.8rem;
+    color: #f5f5f7;
+    font-size: 0.88rem;
+    transition: border-color .15s ease, box-shadow .15s ease;
+  }
+
+  .text-input:focus-visible, .select-input:focus-visible {
+    border-color: var(--dash-accent);
+    box-shadow: 0 0 0 3px rgba(var(--dash-accent-rgb),.12);
+  }
+
+  .select-input option {
+    background: #1c1c1e;
+    color: #f5f5f7;
+  }
+
+  .toggle-field {
+    justify-content: center;
+  }
+
+  .toggle-wrap {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-top: 0.2rem;
+  }
+
+  .toggle-text {
+    font-size: 0.88rem;
+    color: #f5f5f7;
+  }
+
+  .range-slider {
+    accent-color: var(--dash-accent);
+    cursor: pointer;
+  }
+
+  .group-hint {
+    margin: 0;
+    font-size: 0.8rem;
+    color: #86868b;
+  }
+
+  .group-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+    gap: 0.5rem;
+  }
+
+  .group-checkbox-card {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.5rem 0.75rem;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 0.82rem;
+    color: #a1a1a6;
+    transition: all 0.15s ease;
+  }
+
+  .group-checkbox-card.checked {
+    background: rgba(var(--dash-accent-rgb), 0.1);
+    border-color: rgba(var(--dash-accent-rgb), 0.35);
+    color: #f5f5f7;
+  }
+
+  .group-checkbox-card input[type="checkbox"] {
+    accent-color: var(--dash-accent);
+  }
+
+  .grp-label {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .hw-readout {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 0.6rem;
+    background: rgba(0, 0, 0, 0.25);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 10px;
+    padding: 0.75rem 1rem;
+  }
+
+  .hw-item {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+  }
+
+  .hw-k {
+    font-size: 0.68rem;
+    color: #636366;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .hw-v {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: #e5e5ea;
+  }
+
+  .modal-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 1.25rem 1.75rem;
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+    background: rgba(0, 0, 0, 0.15);
+  }
+
+  .modal-right-btns {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+  }
+
+  .test-action {
+    background: rgba(255, 255, 255, 0.06);
+    border-color: rgba(255, 255, 255, 0.12);
+  }
+
+  .cancel-btn {
+    background: transparent;
+    border-color: rgba(255, 255, 255, 0.12);
+  }
+
+  @media (max-width: 720px) {
+    .page-header { margin-bottom: 1.25rem; }
+    .page-header .action-btn { width: 100%; }
+    .bank-section { padding: 1rem; }
+    .bank-header { align-items: flex-start; }
+    .bank-hint { width: 100%; }
+    .connector-grid { grid-template-columns: 1fr; }
+    .connector-card { min-height: 150px; }
+    .modal-backdrop {
+      padding: 0;
+      align-items: flex-end;
+    }
+    .modal-content {
+      max-width: none;
+      max-height: 92dvh;
+      border-radius: 22px 22px 0 0;
+      border-bottom: 0;
+    }
+    .modal-header { padding: 1.15rem 1rem .9rem; }
+    .modal-body { padding: 1rem; }
+    .modal-footer { padding: .9rem 1rem calc(.9rem + env(safe-area-inset-bottom)); }
+    .form-row { flex-direction: column; gap: .8rem; }
+    .form-field { min-width: 0; }
+    .group-grid { grid-template-columns: 1fr 1fr; }
+  }
+
 </style>

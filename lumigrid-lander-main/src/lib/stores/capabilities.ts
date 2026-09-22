@@ -1,6 +1,7 @@
 import { writable } from 'svelte/store';
+import { getCapabilities, type CapabilitiesManifest } from '../api/node';
 
-export type Caps = {
+export interface Caps {
   device: string;
   maker: string;
   fw: string;
@@ -14,21 +15,61 @@ export type Caps = {
     blend_control: boolean;
     web_app: boolean;
     failsafe_resume: boolean;
+    sacn?: boolean;
+    artnet?: boolean;
+    ota?: boolean;
+    factory?: boolean;
+    scene_motion?: boolean;
+    cue_lists?: boolean;
+    transition_engine_v2?: boolean;
   };
-};
+}
 
+export const capabilities = writable<CapabilitiesManifest | null>(null);
 export const caps = writable<Caps | null>(null);
 export const capsError = writable<string | null>(null);
 
-export async function loadCaps(url = '/api/capabilities') {
+export async function loadCaps(ipOrUrl: string = ''): Promise<void> {
   try {
-    const response = await fetch(url, { mode: 'cors' });
-    if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
-    const data: Caps = await response.json();
-    caps.set(data);
+    let manifest: CapabilitiesManifest;
+    if (ipOrUrl.startsWith('http://') || ipOrUrl.startsWith('https://') || ipOrUrl.startsWith('/')) {
+      const response = await fetch(ipOrUrl, { mode: 'cors' });
+      if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+      manifest = await response.json();
+    } else {
+      manifest = await getCapabilities(ipOrUrl);
+    }
+
+    capabilities.set(manifest);
+    // Project into legacy Caps structure for UI backward compatibility
+    caps.set({
+      device: manifest.node.model,
+      maker: manifest.node.family,
+      fw: manifest.node.firmware,
+      features: {
+        zones: manifest.limits.zones > 0,
+        scenes: manifest.limits.presets > 0,
+        schedule: manifest.limits.timelineSteps > 0,
+        sync: manifest.features.sync,
+        pixels: manifest.features.addressable,
+        white_pwm: manifest.features.pwm,
+        blend_control: true,
+        web_app: true,
+        failsafe_resume: true,
+        sacn: manifest.features.sacn,
+        artnet: manifest.features.artnet,
+        ota: manifest.features.ota,
+        factory: manifest.features.factory,
+        scene_motion: manifest.features.sceneMotion ?? false,
+        cue_lists: manifest.features.cueLists ?? false,
+        transition_engine_v2: manifest.features.transitionEngineV2 ?? false,
+      },
+    });
     capsError.set(null);
-  } catch (error: any) {
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    capabilities.set(null);
     caps.set(null);
-    capsError.set(`Capabilities unavailable: ${error.message}`);
+    capsError.set(`Capabilities unavailable: ${message}`);
   }
 }

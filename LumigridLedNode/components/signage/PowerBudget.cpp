@@ -1,5 +1,6 @@
 // components/signage/PowerBudget.cpp
 #include "PowerBudget.hpp"
+#include "ChannelHardware.hpp"
 #include "esp_timer.h"
 #include <algorithm>
 
@@ -33,80 +34,70 @@ uint32_t PowerBudget::enforce(RenderFrame& frame, const DeviceConfig& cfg, uint3
     uint32_t total_active_mw = 0;
     bool throttled = false;
 
-    // 2. Per-fixture power calculation and local fixture limit enforcement
-    for (uint8_t f = 0; f < 16; ++f) {
-        const FixtureConfig& fix = cfg.fixtures[f];
-        bool is_pwm = (fix.profile == FixtureProfile::PWM_Single ||
-                       fix.profile == FixtureProfile::PWM_RGB ||
-                       fix.profile == FixtureProfile::PWM_RGBW);
-        if (fix.num_pixels == 0 && !is_pwm) continue;
+    // 2. Per-channel power calculation and local channel limit enforcement
+    for (uint8_t ch = 0; ch < kChannelCount; ++ch) {
+        const ChannelConfig& ccfg = cfg.channels[ch];
+        if (!ccfg.enabled) continue;
 
-        FixtureFrame& ff = frame.fixtures[f];
+        const auto hw = channel_hardware(ch);
+        ChannelFrame& cf = frame.channels[ch];
 
-        uint32_t fixture_idle_mw = 0;
-        uint32_t fixture_active_mw = 0;
+        uint32_t channel_idle_mw = 0;
+        uint32_t channel_active_mw = 0;
 
-        if (!is_pwm) {
-            uint16_t pcount = std::min<uint16_t>(fix.num_pixels, MAX_PIXELS);
-            fixture_idle_mw = static_cast<uint32_t>(pcount) * kPixelIdleMw;
+        if (hw.kind == ChannelKind::Addressable) {
+            uint16_t pcount = std::min<uint16_t>(ccfg.pixel_count, MAX_PIXELS);
+            channel_idle_mw = static_cast<uint32_t>(pcount) * kPixelIdleMw;
             for (uint16_t p = 0; p < pcount; ++p) {
-                const LightValue& lv = ff.pixels[p];
+                const LightValue& lv = cf.pixels[p];
                 uint32_t sum = uint32_t(lv.r) + lv.g + lv.b + lv.w;
-                fixture_active_mw += (sum * kPixelActiveMw) / 765;
+                channel_active_mw += (sum * kPixelActiveMw) / 765;
             }
 
-            // Enforce local fixture limit if configured
-            if (fix.max_milliwatts > 0) {
-                uint32_t fixture_total = fixture_idle_mw + fixture_active_mw;
-                if (fixture_total > fix.max_milliwatts) {
+            // Enforce local channel limit if configured
+            if (ccfg.max_milliwatts > 0) {
+                uint32_t channel_total = channel_idle_mw + channel_active_mw;
+                if (channel_total > ccfg.max_milliwatts) {
                     throttled = true;
-                    if (fix.max_milliwatts <= fixture_idle_mw) {
+                    if (ccfg.max_milliwatts <= channel_idle_mw) {
                         for (uint16_t p = 0; p < pcount; ++p) {
-                            ff.pixels[p] = {0, 0, 0, 0};
+                            cf.pixels[p] = {0, 0, 0, 0};
                         }
-                        fixture_active_mw = 0;
-                    } else if (fixture_active_mw > 0) {
-                        uint32_t allowed_active = fix.max_milliwatts - fixture_idle_mw;
-                        uint8_t local_scale = static_cast<uint8_t>((uint64_t(allowed_active) * 255) / fixture_active_mw);
+                        channel_active_mw = 0;
+                    } else if (channel_active_mw > 0) {
+                        uint32_t allowed_active = ccfg.max_milliwatts - channel_idle_mw;
+                        uint8_t local_scale = static_cast<uint8_t>((uint64_t(allowed_active) * 255) / channel_active_mw);
                         for (uint16_t p = 0; p < pcount; ++p) {
-                            LightValue& lv = ff.pixels[p];
+                            LightValue& lv = cf.pixels[p];
                             lv.r = static_cast<uint8_t>((uint16_t(lv.r) * local_scale) / 255);
                             lv.g = static_cast<uint8_t>((uint16_t(lv.g) * local_scale) / 255);
                             lv.b = static_cast<uint8_t>((uint16_t(lv.b) * local_scale) / 255);
                             lv.w = static_cast<uint8_t>((uint16_t(lv.w) * local_scale) / 255);
                         }
-                        fixture_active_mw = (fixture_active_mw * local_scale) / 255;
+                        channel_active_mw = (channel_active_mw * local_scale) / 255;
                     }
                 }
             }
         } else {
-            // PWM fixtures have negligible quiescent consumption
-            uint8_t num_channels = 1;
-            if (fix.profile == FixtureProfile::PWM_RGB) num_channels = 3;
-            else if (fix.profile == FixtureProfile::PWM_RGBW) num_channels = 4;
+            // PWM channels have negligible quiescent consumption; single dimmer channel
+            channel_active_mw = (uint32_t(cf.pwm) * kPwmChannelMaxMw) / 4095;
 
-            for (uint8_t ch = 0; ch < num_channels; ++ch) {
-                fixture_active_mw += (uint32_t(ff.pwm[ch]) * kPwmChannelMaxMw) / 4095;
-            }
-
-            // Enforce local fixture limit if configured
-            if (fix.max_milliwatts > 0 && fixture_active_mw > fix.max_milliwatts && fixture_active_mw > 0) {
+            // Enforce local channel limit if configured
+            if (ccfg.max_milliwatts > 0 && channel_active_mw > ccfg.max_milliwatts && channel_active_mw > 0) {
                 throttled = true;
-                uint8_t local_scale = static_cast<uint8_t>((uint64_t(fix.max_milliwatts) * 255) / fixture_active_mw);
-                for (uint8_t ch = 0; ch < num_channels; ++ch) {
-                    ff.pwm[ch] = static_cast<uint16_t>((uint32_t(ff.pwm[ch]) * local_scale) / 255);
-                }
-                LightValue& lv = ff.pixels[0];
+                uint8_t local_scale = static_cast<uint8_t>((uint64_t(ccfg.max_milliwatts) * 255) / channel_active_mw);
+                cf.pwm = static_cast<uint16_t>((uint32_t(cf.pwm) * local_scale) / 255);
+                LightValue& lv = cf.pixels[0];
                 lv.r = static_cast<uint8_t>((uint16_t(lv.r) * local_scale) / 255);
                 lv.g = static_cast<uint8_t>((uint16_t(lv.g) * local_scale) / 255);
                 lv.b = static_cast<uint8_t>((uint16_t(lv.b) * local_scale) / 255);
                 lv.w = static_cast<uint8_t>((uint16_t(lv.w) * local_scale) / 255);
-                fixture_active_mw = (fixture_active_mw * local_scale) / 255;
+                channel_active_mw = (channel_active_mw * local_scale) / 255;
             }
         }
 
-        total_idle_mw += fixture_idle_mw;
-        total_active_mw += fixture_active_mw;
+        total_idle_mw += channel_idle_mw;
+        total_active_mw += channel_active_mw;
     }
 
     const uint32_t total_mw = total_idle_mw + total_active_mw;
@@ -132,28 +123,25 @@ uint32_t PowerBudget::enforce(RenderFrame& frame, const DeviceConfig& cfg, uint3
     const uint16_t final_scale = (uint16_t(ss_factor) * power_scale) / 255;
 
     if (final_scale < 255) {
-        for (uint8_t f = 0; f < 16; ++f) {
-            FixtureFrame& ff = frame.fixtures[f];
-            const FixtureConfig& fix = cfg.fixtures[f];
-            bool is_pwm = (fix.profile == FixtureProfile::PWM_Single ||
-                           fix.profile == FixtureProfile::PWM_RGB ||
-                           fix.profile == FixtureProfile::PWM_RGBW);
-            if (fix.num_pixels == 0 && !is_pwm) continue;
+        for (uint8_t ch = 0; ch < kChannelCount; ++ch) {
+            const ChannelConfig& ccfg = cfg.channels[ch];
+            if (!ccfg.enabled) continue;
 
-            if (!is_pwm) {
-                uint16_t pcount = std::min<uint16_t>(fix.num_pixels, MAX_PIXELS);
+            const auto hw = channel_hardware(ch);
+            ChannelFrame& cf = frame.channels[ch];
+
+            if (hw.kind == ChannelKind::Addressable) {
+                uint16_t pcount = std::min<uint16_t>(ccfg.pixel_count, MAX_PIXELS);
                 for (uint16_t p = 0; p < pcount; ++p) {
-                    LightValue& lv = ff.pixels[p];
+                    LightValue& lv = cf.pixels[p];
                     lv.r = static_cast<uint8_t>((uint16_t(lv.r) * final_scale) / 255);
                     lv.g = static_cast<uint8_t>((uint16_t(lv.g) * final_scale) / 255);
                     lv.b = static_cast<uint8_t>((uint16_t(lv.b) * final_scale) / 255);
                     lv.w = static_cast<uint8_t>((uint16_t(lv.w) * final_scale) / 255);
                 }
             } else {
-                for (uint8_t ch = 0; ch < 4; ++ch) {
-                    ff.pwm[ch] = static_cast<uint16_t>((uint32_t(ff.pwm[ch]) * final_scale) / 255);
-                }
-                LightValue& lv = ff.pixels[0];
+                cf.pwm = static_cast<uint16_t>((uint32_t(cf.pwm) * final_scale) / 255);
+                LightValue& lv = cf.pixels[0];
                 lv.r = static_cast<uint8_t>((uint16_t(lv.r) * final_scale) / 255);
                 lv.g = static_cast<uint8_t>((uint16_t(lv.g) * final_scale) / 255);
                 lv.b = static_cast<uint8_t>((uint16_t(lv.b) * final_scale) / 255);

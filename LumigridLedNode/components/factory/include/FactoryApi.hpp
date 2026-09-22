@@ -3,7 +3,12 @@
 #include "esp_err.h"
 #include "esp_http_server.h"
 #include "FactoryRunner.hpp"
+#include "CommandReceipt.hpp"
+#include "JobManager.hpp"
+#include "NodeIdentity.hpp"
 #include <atomic>
+
+struct cJSON;
 
 // Forward declarations for signage components
 namespace lg {
@@ -23,6 +28,79 @@ struct StartupDiagnostics {
     int failing_error = 0;
 };
 
+struct RuntimeHealthSnapshot {
+    static constexpr int kSchemaVersion = 2;
+    static constexpr size_t kMaxUniverses = 16;
+
+    struct System {
+        uint32_t uptime_s = 0;
+        uint32_t free_heap = 0;
+        uint32_t min_free_heap = 0;
+        int reset_reason = 0;
+        float fps = 0.0f;
+    } system;
+
+    struct Network {
+        int wifi_rssi = 0;
+    } network;
+
+    struct Nvs {
+        int used_entries = 0;
+        int free_entries = 0;
+    } nvs;
+
+    struct Config {
+        bool valid = true;
+        uint32_t error_count = 0;
+        const char* first_error = "";
+        const char* persistence_state = "Unknown";
+        bool primary_valid = false;
+        bool backup_valid = false;
+    } config;
+
+    struct Startup {
+        const char* state = "Booting";
+        const char* stage = "None";
+        const char* failing_stage = "None";
+        int failing_error = 0;
+    } startup;
+
+    struct Output {
+        const char* state = "Healthy";
+        bool fault = false;
+        uint32_t fault_events = 0;
+        uint32_t failed_commits = 0;
+        int last_error = 0;
+        bool estop_latched = false;
+        bool runtime_estop = false;
+        int control_source = 0;
+        uint8_t live_objects = 0;
+        uint32_t current_power_mw = 0;
+        uint32_t throttling_events = 0;
+        uint16_t active_preset = 0;
+        bool watchdog_fallback = false;
+    } output;
+
+    struct Dmx {
+        uint32_t sources_active = 0;
+        uint32_t universes_active = 0;
+        uint32_t sources_dropped = 0;
+        uint32_t packets_accepted = 0;
+        uint32_t packets_rejected_seq = 0;
+        uint32_t packets_ignored_unpatched = 0;
+        uint32_t submission_failures = 0;
+        uint16_t configured_universes[kMaxUniverses] = {};
+        size_t universe_count = 0;
+    } dmx;
+
+    struct Sync {
+        uint32_t packet_loss = 0;
+    } sync;
+
+    void collect(class FactoryApi* api);
+    cJSON* to_json() const;
+};
+
 class FactoryApi {
 public:
     explicit FactoryApi(FactoryRunner& runner);
@@ -34,7 +112,8 @@ public:
                     LightingRuntime* signage = nullptr,
                     Scheduler* scheduler = nullptr,
                     NodeSync* node_sync = nullptr,
-                    DmxRouter* dmx_router = nullptr);
+                    DmxRouter* dmx_router = nullptr,
+                    class CueRunner* cue_runner = nullptr);
     void stop();
 
     void set_diagnostics_provider(std::function<StartupDiagnostics()> provider) {
@@ -50,6 +129,7 @@ public:
     Scheduler* scheduler() { return scheduler_; }
     NodeSync* node_sync() { return node_sync_; }
     DmxRouter* dmx_router() { return dmx_router_; }
+    class CueRunner* cue_runner() { return cue_runner_; }
 
     void notify_status_async();
 
@@ -57,17 +137,28 @@ public:
     static void ws_broadcast_preview_work(void* arg);
     static esp_err_t serve_dashboard(httpd_req_t* request);
 
+    CommandJournal& command_journal() { return command_journal_; }
+    JobManager& job_manager() { return job_manager_; }
+    uint32_t next_ws_seq() { return ws_seq_.fetch_add(1, std::memory_order_relaxed); }
+    const NodeIdentity& identity() const { return identity_; }
+    void set_identity(const NodeIdentity& id) { identity_ = id; }
+
     FactoryRunner& runner_;
     ConfigStore* config_ = nullptr;
     LightingRuntime* signage_ = nullptr;
     Scheduler* scheduler_ = nullptr;
     NodeSync* node_sync_ = nullptr;
     DmxRouter* dmx_router_ = nullptr;
+    class CueRunner* cue_runner_ = nullptr;
     std::function<StartupDiagnostics()> diagnostics_provider_{};
     httpd_handle_t signage_server_ = nullptr;
     httpd_handle_t factory_server_ = nullptr;
     size_t max_open_sockets_ = 0;
     std::atomic<bool> preview_pending_{false};
+    CommandJournal command_journal_{};
+    JobManager job_manager_{};
+    std::atomic<uint32_t> ws_seq_{1};
+    NodeIdentity identity_{};
 };
 
 } // namespace lg

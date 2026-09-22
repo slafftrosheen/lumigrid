@@ -567,6 +567,88 @@ def test_latched_estop_semantics():
     assert sim.render_frame() == "scene"
     print("[PASS] Latched E-Stop state machine & mandatory blackout frame tests passed.")
 
+def test_lg022_curves_and_automation():
+    import json
+    from pathlib import Path
+
+    fixture_path = Path(__file__).resolve().parent.parent / "test" / "fixtures" / "curve_vectors.json"
+    assert fixture_path.exists(), f"Curve fixture not found at {fixture_path}"
+    vectors = json.loads(fixture_path.read_text(encoding="utf-8"))
+
+    def smoothstep_q15(t):
+        if t >= 32768: return 32768
+        x = t
+        x2 = (x * x) >> 15
+        x3 = (x2 * x) >> 15
+        return min(32768, 3 * x2 - 2 * x3)
+
+    def apply_curve_q15(curve, t):
+        if t >= 32768: return 32768
+        if curve == "linear": return t
+        if curve == "easeIn": return (t * t) >> 15
+        if curve == "easeOut":
+            inv = 32768 - t
+            inv2 = (inv * inv) >> 15
+            return 32768 - inv2
+        if curve == "easeInOut": return smoothstep_q15(t)
+        if curve == "step": return 0 if t < 16384 else 32768
+        return t
+
+    pts = vectors["input_t_q15"]
+    for c in ["linear", "easeIn", "easeOut", "easeInOut", "step"]:
+        expected = vectors["curves"][c]["output_q15"]
+        for p, exp in zip(pts, expected):
+            actual = apply_curve_q15(c, p)
+            assert actual == exp, f"Curve {c} mismatch at {p}: {actual} != {exp}"
+
+    # Automation track sampling
+    def sample_track(points, period_ms, loop, elapsed_ms, curve="linear"):
+        period = period_ms or 5000
+        elapsed_in_period = (elapsed_ms % period) if loop else min(elapsed_ms, period)
+        pos_norm = (elapsed_in_period * 65535) // period
+
+        count = len(points)
+        if pos_norm <= points[0][0]:
+            if not loop or points[-1][0] <= points[0][0]:
+                return points[0][1]
+            wrap_span = (65535 - points[-1][0]) + points[0][0]
+            if wrap_span == 0: return points[0][1]
+            offset = (65535 - points[-1][0]) + pos_norm
+            t_q15 = (offset * 32768) // wrap_span
+            curved_t = apply_curve_q15(curve, t_q15)
+            return points[-1][1] + (((points[0][1] - points[-1][1]) * curved_t) >> 15)
+
+        if pos_norm >= points[-1][0]:
+            if not loop or points[-1][0] >= 65535:
+                return points[-1][1]
+            wrap_span = (65535 - points[-1][0]) + points[0][0]
+            if wrap_span == 0: return points[0][1]
+            offset = pos_norm - points[-1][0]
+            t_q15 = (offset * 32768) // wrap_span
+            curved_t = apply_curve_q15(curve, t_q15)
+            return points[-1][1] + (((points[0][1] - points[-1][1]) * curved_t) >> 15)
+
+        for i in range(count - 1):
+            if points[i][0] <= pos_norm <= points[i + 1][0]:
+                span = points[i + 1][0] - points[i][0]
+                if span == 0: return points[i][1]
+                offset = pos_norm - points[i][0]
+                t_q15 = (offset * 32768) // span
+                curved_t = apply_curve_q15(curve, t_q15)
+                return points[i][1] + (((points[i + 1][1] - points[i][1]) * curved_t) >> 15)
+        return points[-1][1]
+
+    pts2 = [(0, 0), (65535, 65535)]
+    assert sample_track(pts2, 1000, False, 0) == 0
+    assert 32700 <= sample_track(pts2, 1000, False, 500) <= 32800
+    assert sample_track(pts2, 1000, False, 1000) == 65535
+
+    pts_loop = [(10000, 10000), (50000, 50000)]
+    val_wrap = sample_track(pts_loop, 1000, True, 0)
+    assert 10000 <= val_wrap <= 50000
+
+    print("[PASS] LG-022 Q15 curves & automation track math tests passed.")
+
 if __name__ == "__main__":
     test_compositor()
     test_power_enforce()
@@ -583,5 +665,6 @@ if __name__ == "__main__":
     test_artnet_port_address_decoding()
     test_fixture_vs_zone_control_arbitration()
     test_latched_estop_semantics()
+    test_lg022_curves_and_automation()
     print("ALL RUNTIME CORRECTNESS TESTS PASSED SUCCESSFULLY.")
 

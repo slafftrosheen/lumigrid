@@ -11,10 +11,12 @@
 #include "ArtnetDiscovery.hpp"
 #include "SacnReceiver.hpp"
 #include "DmxRouter.hpp"
+#include "CueRunner.hpp"
 #include "MqttService.hpp"
 #include "FactoryRunner.hpp"
 #include "FactoryApi.hpp"
 #include "esp_err.h"
+#include <atomic>
 
 namespace lg {
 
@@ -122,6 +124,7 @@ public:
 
     OutputController& output() { return output_; }
     LightingRuntime& lighting() { return lighting_; }
+    CueRunner& cue_runner() { return cue_runner_; }
     FactoryRunner& factory_runner() { return factory_runner_; }
     DmxRouter& dmx_router() { return dmx_router_; }
     ConfigStore& config() { return config_; }
@@ -140,6 +143,7 @@ private:
     ArtnetDiscovery artnet_;
     SacnReceiver sacn_;
     LightingRuntime lighting_;
+    CueRunner cue_runner_;
     DmxRouter dmx_router_;
     ClockDiscipline clock_;
     Scheduler scheduler_;
@@ -161,7 +165,10 @@ private:
 
     RuntimeLifecycle lifecycle_state_ = RuntimeLifecycle::Constructed;
     bool services_started_ = false;
-    SemaphoreHandle_t net_ready_sem_ = nullptr;
+    // Semaphore signalled by the WiFi callback when network is ready.
+    // Declared atomic so the event-loop task always observes the correct
+    // pointer with acquire/release ordering (no data race with creator task).
+    std::atomic<SemaphoreHandle_t> net_ready_sem_{nullptr};
 
     bool safe_mode_ = false;
     StartupState startup_state_ = StartupState::Booting;

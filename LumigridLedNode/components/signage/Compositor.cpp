@@ -89,9 +89,7 @@ void Compositor::blend(
     for (uint16_t i = 0; i < pcount; ++i) {
         dest.pixels[i] = blend_light(dest.pixels[i], src.pixels[i], mode, opacity);
     }
-    for (uint8_t ch = 0; ch < 4; ++ch) {
-        dest.pwm[ch] = blend_pwm(dest.pwm[ch], src.pwm[ch], mode, opacity);
-    }
+    dest.pwm = blend_pwm(dest.pwm, src.pwm, mode, opacity);
 }
 
 } // namespace lg

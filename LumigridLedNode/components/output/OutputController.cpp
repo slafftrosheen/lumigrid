@@ -40,98 +40,42 @@ esp_err_t OutputController::reconfigure(const DeviceConfig& cfg) {
 
     const bool pwm_ok = pwm_available_.load(std::memory_order_acquire);
 
-    // 0. Physical Output PWM Availability Validation
-    for (uint8_t p = 0; p < 16; ++p) {
-        const PhysicalOutput& phys = cfg.physical_outputs[p];
-        if (phys.enabled && phys.type == OutputType::PWM) {
-            if (!pwm_ok) {
-                ESP_LOGE("output", "Reconfigure validation: physical_output[%u] is enabled PWM, but PCA9685 driver is unavailable", p);
+    // 0. PWM Availability Validation
+    if (!pwm_ok) {
+        for (uint8_t ch = 8; ch < 16; ++ch) {
+            if (cfg.channels[ch].enabled) {
+                ESP_LOGE("output", "Reconfigure validation: channel[%u] (P%u) is enabled, but PCA9685 driver is unavailable", ch, ch - 7);
                 unlock();
                 return ESP_ERR_NOT_FOUND;
             }
         }
     }
 
-    // 1. Transactional Candidate Validation (Batch 7 Item 5)
-    uint16_t rmt_lanes_claimed = 0;
-    uint16_t pwm_channels_claimed = 0;
-
-    for (uint8_t f = 0; f < 16; ++f) {
-        const FixtureConfig& fix = cfg.fixtures[f];
-        const bool is_addressable = (fix.profile == FixtureProfile::WS2812 || fix.profile == FixtureProfile::SK6812);
-        const bool is_pwm = (fix.profile == FixtureProfile::PWM_Single ||
-                             fix.profile == FixtureProfile::PWM_RGB ||
-                             fix.profile == FixtureProfile::PWM_RGBW);
-
-        if (is_addressable && fix.num_pixels > 0) {
-            if (fix.num_pixels > MAX_PIXELS) {
-                ESP_LOGE("output", "Reconfigure validation: fixture[%u] num_pixels (%u) > MAX_PIXELS", f, fix.num_pixels);
-                unlock();
-                return ESP_ERR_INVALID_ARG;
-            }
-            uint8_t p_idx = fix.physical_output_index[0];
-            if (p_idx >= 16) {
-                ESP_LOGE("output", "Reconfigure validation: fixture[%u] physical_output_index[0] (%u) >= 16", f, p_idx);
-                unlock();
-                return ESP_ERR_INVALID_ARG;
-            }
-            const PhysicalOutput& phys = cfg.physical_outputs[p_idx];
-            if (!phys.enabled || phys.type != OutputType::RMT || phys.hardware_id >= AddressableDriver::kLanes) {
-                ESP_LOGE("output", "Reconfigure validation: fixture[%u] invalid RMT physical output at slot %u", f, p_idx);
-                unlock();
-                return ESP_ERR_INVALID_ARG;
-            }
-            if (rmt_lanes_claimed & (1U << phys.hardware_id)) {
-                ESP_LOGE("output", "Reconfigure validation: RMT lane %u aliased across fixtures", phys.hardware_id);
-                unlock();
-                return ESP_ERR_INVALID_ARG;
-            }
-            rmt_lanes_claimed |= (1U << phys.hardware_id);
-        } else if (is_pwm) {
-            if (!pwm_ok) {
-                ESP_LOGE("output", "Reconfigure validation: fixture[%u] requires PWM, but PCA9685 driver is unavailable", f);
-                unlock();
-                return ESP_ERR_NOT_FOUND;
-            }
-            uint8_t pwm_chans = (fix.profile == FixtureProfile::PWM_Single) ? 1 :
-                                (fix.profile == FixtureProfile::PWM_RGB ? 3 : 4);
-            for (uint8_t ch = 0; ch < pwm_chans; ++ch) {
-                uint8_t p_idx = fix.physical_output_index[ch];
-                if (p_idx >= 16) {
-                    ESP_LOGE("output", "Reconfigure validation: fixture[%u] physical_output_index[%u] (%u) >= 16", f, ch, p_idx);
-                    unlock();
-                    return ESP_ERR_INVALID_ARG;
-                }
-                const PhysicalOutput& phys = cfg.physical_outputs[p_idx];
-                if (!phys.enabled || phys.type != OutputType::PWM || phys.hardware_id >= Pca9685Driver::kChannels) {
-                    ESP_LOGE("output", "Reconfigure validation: fixture[%u] invalid PWM physical output at slot %u", f, p_idx);
-                    unlock();
-                    return ESP_ERR_INVALID_ARG;
-                }
-                if (pwm_channels_claimed & (1U << phys.hardware_id)) {
-                    ESP_LOGE("output", "Reconfigure validation: PWM channel %u aliased across fixtures", phys.hardware_id);
-                    unlock();
-                    return ESP_ERR_INVALID_ARG;
-                }
-                pwm_channels_claimed |= (1U << phys.hardware_id);
-            }
+    // 1. Validate addressable channels
+    for (uint8_t ch = 0; ch < 8; ++ch) {
+        const ChannelConfig& ccfg = cfg.channels[ch];
+        if (ccfg.enabled && ccfg.pixel_count > MAX_PIXELS) {
+            ESP_LOGE("output", "Reconfigure validation: channel[%u] pixel_count (%u) > MAX_PIXELS", ch, ccfg.pixel_count);
+            unlock();
+            return ESP_ERR_INVALID_ARG;
         }
     }
 
-    // 2. Hardware Configuration: Option A topology (Addressable fixture uses physical_output_index[0])
-    for (uint8_t f = 0; f < 16; ++f) {
-        const FixtureConfig& fix = cfg.fixtures[f];
-        if (fix.num_pixels == 0) continue;
-        bool is_addressable = (fix.profile == FixtureProfile::WS2812 || fix.profile == FixtureProfile::SK6812);
-        if (!is_addressable) continue;
+    // 2. Hardware Configuration: Addressable channels (RMT lanes A1..A8)
+    for (uint8_t ch = 0; ch < 8; ++ch) {
+        const ChannelConfig& ccfg = cfg.channels[ch];
+        if (!ccfg.enabled || ccfg.pixel_count == 0) {
+            pixels_.clear_lane(ch);
+            continue;
+        }
 
-        uint8_t p_idx = fix.physical_output_index[0];
-        const PhysicalOutput& phys = cfg.physical_outputs[p_idx];
-        uint8_t gpio = board::kAledPins[phys.hardware_id];
+        uint8_t gpio = board::kAledPins[ch];
+        FixtureProfile prof = (ccfg.addressable_type == AddressableType::SK6812) ? FixtureProfile::SK6812 : FixtureProfile::WS2812;
 
-        esp_err_t err = pixels_.configure_lane(phys.hardware_id, gpio, fix.profile, fix.pixel_order, fix.num_pixels);
+        esp_err_t err = pixels_.configure_lane(ch, gpio, prof, ccfg.pixel_order, ccfg.pixel_count);
         if (err != ESP_OK) {
-            ESP_LOGE("output", "Failed to configure lane %u: %s. Rolling back all lanes and entering safe blackout!", phys.hardware_id, esp_err_to_name(err));
+            ESP_LOGE("output", "Failed to configure lane %u (GPIO %u): %s. Rolling back all lanes and entering safe blackout!",
+                     ch, gpio, esp_err_to_name(err));
             topology_valid_.store(false, std::memory_order_release);
             output_enabled_.store(false, std::memory_order_release);
             for (uint8_t l = 0; l < OutputCapabilities::kRmtLanes; ++l) {
@@ -144,9 +88,24 @@ esp_err_t OutputController::reconfigure(const DeviceConfig& cfg) {
         }
     }
 
+    // 3. Hardware Configuration: PWM channels (PCA9685 channels P1..P8)
+    if (pwm_ok) {
+        esp_err_t pwm_clr = pwm_.clear();
+        if (pwm_clr != ESP_OK) {
+            ESP_LOGW("output", "PWM clear after reconfigure failed: %s (non-fatal, channels may retain stale state)", esp_err_to_name(pwm_clr));
+        }
+        for (uint8_t ch = 8; ch < 16; ++ch) {
+            const ChannelConfig& ccfg = cfg.channels[ch];
+            if (ccfg.enabled) {
+                ESP_LOGI("output", "Channel[%u] (P%u) -> PCA9685 channel %u", ch, ch - 7, ch - 8);
+            }
+        }
+    }
+
     topology_valid_.store(true, std::memory_order_release);
     unlock();
     return ESP_OK;
+
 }
 
 esp_err_t OutputController::blackout_locked() {
@@ -243,6 +202,34 @@ esp_err_t OutputTransaction::abort() {
 }
 
 esp_err_t OutputController::try_commit_locked() {
+    static uint32_t s_commit_count = 0;
+    static uint32_t s_last_log_ms = 0;
+    s_commit_count++;
+    
+    uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+    if (now - s_last_log_ms >= 1000) {
+        s_last_log_ms = now;
+        uint32_t non_zero_pixels = 0;
+        uint32_t non_zero_bytes = 0;
+        uint32_t pixel_count = 0;
+        auto& buf = pixels_.buffer();
+        for (uint8_t l = 0; l < 8; ++l) {
+            for (uint16_t p = 0; p < 144; ++p) {
+                pixel_count++;
+                if (buf[l][p].r > 0 || buf[l][p].g > 0 || buf[l][p].b > 0) {
+                    non_zero_pixels++;
+                    non_zero_bytes += (buf[l][p].r > 0 ? 1 : 0) + (buf[l][p].g > 0 ? 1 : 0) + (buf[l][p].b > 0 ? 1 : 0);
+                }
+            }
+        }
+        bool enabled = output_enabled_.load(std::memory_order_acquire);
+        bool estop = estop_latched_.load(std::memory_order_acquire);
+        bool valid = topology_valid_.load(std::memory_order_acquire);
+        ESP_LOGI("output_diag", "OUTPUT frame=%lu enabled=%d lanes=8 pixels=%lu nonZeroPx=%lu nonZeroBytes=%lu estop=%d valid=%d",
+                 s_commit_count, enabled, pixel_count, non_zero_pixels, non_zero_bytes, estop, valid);
+    }
+
+
     if (estop_latched_.load(std::memory_order_acquire) ||
         !output_enabled_.load(std::memory_order_acquire) ||
         !topology_valid_.load(std::memory_order_acquire)) {

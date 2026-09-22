@@ -17,16 +17,15 @@ void FixtureMapper::map(
                          fixture.profile == FixtureProfile::PWM_RGB ||
                          fixture.profile == FixtureProfile::PWM_RGBW);
     if (is_pwm) {
-        ColorPipeline::to_pwm(src.pixels[0], src.pwm[0], fixture, global_brightness, dest.pwm);
+        std::array<uint16_t, 4> duties{};
+        ColorPipeline::to_pwm(src.pixels[0], src.pwm, fixture, global_brightness, duties);
+        dest.pwm = duties[0];
         // Zero out addressable representation to guarantee LightValue single source of truth
         for (uint16_t i = 0; i < pcount; ++i) {
             dest.pixels[i] = LightValue{0, 0, 0, 0};
         }
     } else {
-        dest.pwm[0] = 0;
-        dest.pwm[1] = 0;
-        dest.pwm[2] = 0;
-        dest.pwm[3] = 0;
+        dest.pwm = 0;
         for (uint16_t i = 0; i < pcount; ++i) {
             dest.pixels[i] = ColorPipeline::to_addressable(src.pixels[i], fixture, global_brightness);
         }

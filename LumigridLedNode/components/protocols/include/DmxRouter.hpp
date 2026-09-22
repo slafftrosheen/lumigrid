@@ -184,7 +184,7 @@ private:
     LightingRuntime& lighting_;
     mutable std::mutex frame_mutex_;
     ProtocolConfig protocol_cfg_{};
-    std::array<FixtureConfig, 16> fixtures_{};
+    std::array<ChannelConfig, 16> channels_{};
 
     std::atomic<uint32_t> dropped_sources_count_{0};
     std::atomic<uint32_t> packets_accepted_{0};

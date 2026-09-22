@@ -1,0 +1,116 @@
+/**
+ * Isolated compatibility module for legacy device surfaces (/json/*, /animations.json, /edit, /update).
+ *
+ * All canonical dashboard features should use /api/v1/* via node.ts.
+ * Legacy endpoints are isolated here to keep the rest of the application clean.
+ */
+
+import { apiFetch, apiJson, getApiToken } from './transport';
+import type {
+  AnimationBlock,
+  ApiNode,
+  ChannelConfig,
+  NodeInfo,
+  NodeState,
+  NodeStatus,
+} from './node';
+
+export function getInfo(ip: string): Promise<NodeInfo> {
+  return apiJson<NodeInfo>(ip, '/json/info');
+}
+
+export function getState(ip: string): Promise<NodeState> {
+  return apiJson<NodeState>(ip, '/json/state');
+}
+
+export function getNodes(ip: string): Promise<{ nodes: ApiNode[] }> {
+  return apiJson<{ nodes: ApiNode[] }>(ip, '/json/nodes');
+}
+
+export async function getChannelConfig(ip: string): Promise<ChannelConfig | null> {
+  try {
+    const cfg = await apiJson<{ um?: { Lumigrid_PCA9685?: ChannelConfig } }>(ip, '/json/cfg');
+    return cfg?.um?.Lumigrid_PCA9685 ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Read /animations.json from LED Node Storage. Returns null if not found. */
+export async function getSchedule(ip: string): Promise<AnimationBlock[] | null> {
+  try {
+    const res = await apiFetch(ip, '/animations.json');
+    if (!res.ok) return null;
+    const j = await res.json() as { animations?: AnimationBlock[] };
+    return j.animations ?? [];
+  } catch {
+    return null;
+  }
+}
+
+// ── Write endpoints ────────────────────────────────────────────────────────────
+
+export function setState(ip: string, state: Partial<NodeState> | Record<string, unknown>): Promise<NodeState> {
+  return apiJson<NodeState>(ip, '/json/state', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(state),
+  });
+}
+
+export function applyPreset(ip: string, presetId: number): Promise<NodeState> {
+  return setState(ip, { ps: presetId });
+}
+
+export function setBrightness(ip: string, bri: number): Promise<NodeState> {
+  return setState(ip, { bri: Math.max(0, Math.min(255, bri)) });
+}
+
+export function setPower(ip: string, on: boolean): Promise<NodeState> {
+  return setState(ip, { on });
+}
+
+export function emergencyOff(ip: string): Promise<NodeState> {
+  return setState(ip, { Lumigrid_PCA9685: { emergencyOff: true } } as Record<string, unknown>);
+}
+
+/** Set an individual pixel's RGBW color in segment 0. */
+export function setPixelColor(ip: string, pixelIdx: number, r: number, g: number, b: number, w = 0): Promise<NodeState> {
+  return setState(ip, { seg: [{ id: 0, i: [pixelIdx, [r, g, b, w]] }] });
+}
+
+/** Set multiple pixels at once in segment 0. */
+export function setPixels(ip: string, pixels: Array<[number, [number, number, number, number]]>): Promise<NodeState> {
+  const i: unknown[] = [];
+  for (const [idx, [r, g, b, w]] of pixels) i.push(idx, [r, g, b, w]);
+  return setState(ip, { seg: [{ id: 0, i }] });
+}
+
+// ── Filesystem ─────────────────────────────────────────────────────────────────
+
+/** Upload a text file to LED Node Storage via /edit endpoint. */
+export async function uploadFile(ip: string, filename: string, content: string): Promise<void> {
+  const form = new FormData();
+  form.append('data', new Blob([content], { type: 'application/json' }), filename);
+  const res = await apiFetch(ip, '/edit', { method: 'POST', body: form });
+  if (!res.ok) throw new Error(`Upload failed: HTTP ${res.status}`);
+}
+
+/** Save animations schedule to /animations.json on LED Node Storage. */
+export async function saveSchedule(ip: string, blocks: AnimationBlock[]): Promise<void> {
+  const json = JSON.stringify({ animations: blocks }, null, 2);
+  return uploadFile(ip, 'animations.json', json);
+}
+
+// ── Status snapshot ───────────────────────────────────────────────────────────
+
+/** Fetch info + state for a node and measure latency. Returns NodeStatus. */
+export async function getNodeStatus(ip: string): Promise<NodeStatus> {
+  const t0 = performance.now();
+  try {
+    const [info, state] = await Promise.all([getInfo(ip), getState(ip)]);
+    return { ip, info, state, error: null, latency: Math.round(performance.now() - t0) };
+  } catch (e) {
+    return { ip, info: null, state: null, error: String(e), latency: Math.round(performance.now() - t0) };
+  }
+}

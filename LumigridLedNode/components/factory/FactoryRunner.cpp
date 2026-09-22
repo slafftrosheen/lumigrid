@@ -1,6 +1,7 @@
 // components/factory/FactoryRunner.cpp
 #include "FactoryRunner.hpp"
 #include "FactoryApp.hpp"
+#include "ChannelHardware.hpp"
 
 #include "esp_err.h"
 #include "esp_check.h"
@@ -35,7 +36,6 @@ uint32_t now_ms() {
 }
 
 uint8_t clamp_brightness(uint8_t brightness) {
-    // Intentionally capped for early board bring-up.
     return std::min<uint8_t>(brightness, 96);
 }
 
@@ -43,7 +43,6 @@ uint32_t clamp_duration(uint32_t duration_ms) {
     if (duration_ms == 0) {
         return LG_FACTORY_MAX_TEST_MS;
     }
-
     return std::min(duration_ms, LG_FACTORY_MAX_TEST_MS);
 }
 
@@ -56,6 +55,24 @@ FactoryRunner::FactoryRunner(ControlSourceManager& source_manager, OutputControl
 
 FactoryRunner::~FactoryRunner() {
     stop();
+    // Destruction is terminal: if bounded stop timed out, wait for the
+    // cooperative task ACK before deleting the semaphore it uses.
+    if (task_handle_) {
+        if (shutdown_sem_) {
+            xSemaphoreTake(shutdown_sem_, portMAX_DELAY);
+        }
+        task_handle_ = nullptr;
+        controller_.blackout();
+        if (status_mutex_) {
+            vSemaphoreDelete(status_mutex_);
+            status_mutex_ = nullptr;
+        }
+        if (queue_) {
+            vQueueDelete(queue_);
+            queue_ = nullptr;
+        }
+        lifecycle_state_.store(LifecycleState::Stopped, std::memory_order_release);
+    }
     if (shutdown_sem_) {
         vSemaphoreDelete(shutdown_sem_);
         shutdown_sem_ = nullptr;
@@ -64,7 +81,13 @@ FactoryRunner::~FactoryRunner() {
 
 esp_err_t FactoryRunner::start() {
     LifecycleState current = lifecycle_state_.load(std::memory_order_acquire);
-    if (current == LifecycleState::Running || current == LifecycleState::Starting) {
+    if (current == LifecycleState::Running ||
+        current == LifecycleState::Starting ||
+        current == LifecycleState::Stopping) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (current == LifecycleState::Faulted && task_handle_ != nullptr) {
+        ESP_LOGW("FactoryRunner", "start() rejected: previous factory task has not terminated");
         return ESP_ERR_INVALID_STATE;
     }
     lifecycle_state_.store(LifecycleState::Starting, std::memory_order_release);
@@ -74,7 +97,6 @@ esp_err_t FactoryRunner::start() {
         shutdown_sem_ = xSemaphoreCreateBinary();
     }
 
-    // Stage 1: Queue allocation (Batch 8 Item 5)
     queue_ = xQueueCreate(kQueueDepth, sizeof(FactoryCommand));
     if (queue_ == nullptr) {
         lifecycle_state_.store(LifecycleState::Faulted, std::memory_order_release);
@@ -82,7 +104,6 @@ esp_err_t FactoryRunner::start() {
         return ESP_ERR_NO_MEM;
     }
 
-    // Stage 2: Status mutex allocation
     status_mutex_ = xSemaphoreCreateMutex();
     if (status_mutex_ == nullptr) {
         vQueueDelete(queue_);
@@ -94,15 +115,14 @@ esp_err_t FactoryRunner::start() {
 
     status_.active_effect = FactoryEffect::SafeBlackout;
     status_.brightness = LG_FACTORY_DEFAULT_BRIGHTNESS;
-    status_.auto_loop = false; // Disabled by default to prevent flicker with LightingRuntime
+    status_.auto_loop = false;
     status_.outputs_enabled = false;
     status_.test_active = false;
 
-    // Stage 3: Task creation
     const BaseType_t created = xTaskCreatePinnedToCore(
         task_entry,
         "lg_factory",
-        6144,
+        8192,
         this,
         5,
         &task_handle_,
@@ -140,13 +160,16 @@ void FactoryRunner::stop() {
         if (!ack) {
             ESP_LOGE("FactoryRunner", "Shutdown ACK timeout! Factory task did not exit cleanly within 1000ms");
             lifecycle_state_.store(LifecycleState::Faulted, std::memory_order_release);
-            // Do not delete shared mutex or queue while task is running to avoid UAF
             return;
         }
         task_handle_ = nullptr;
     }
 
     blackout();
+    if (pending_command_id_ != 0 && journal_) {
+        journal_->failed(pending_command_id_, ESP_ERR_INVALID_STATE);
+        pending_command_id_ = 0;
+    }
     if (status_mutex_) {
         vSemaphoreDelete(status_mutex_);
         status_mutex_ = nullptr;
@@ -160,29 +183,31 @@ void FactoryRunner::stop() {
 
 bool FactoryRunner::enqueue(const FactoryCommand& command) {
     if (queue_ == nullptr) return false;
-
-    if (xQueueSend(queue_, &command, 0) == pdPASS) {
-        return true;
-    }
-
+    if (xQueueSend(queue_, &command, 0) == pdPASS) return true;
     if (status_mutex_ != nullptr &&
         xSemaphoreTake(status_mutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
         ++status_.command_rejections;
         xSemaphoreGive(status_mutex_);
     }
-
     return false;
+}
+
+bool FactoryRunner::test_channel(uint8_t channel, const char* mode, uint32_t duration_ms) {
+    if (channel >= kChannelCount) return false;
+    FactoryCommand cmd;
+    cmd.type = FactoryCommandType::ChannelTest;
+    cmd.lane_or_channel = channel;
+    cmd.duration_ms = (duration_ms == 0) ? 3000 : duration_ms;
+    return enqueue(cmd);
 }
 
 FactoryStatus FactoryRunner::status() const {
     FactoryStatus copy{};
-
     if (status_mutex_ != nullptr &&
         xSemaphoreTake(status_mutex_, pdMS_TO_TICKS(20)) == pdTRUE) {
         copy = status_;
         xSemaphoreGive(status_mutex_);
     }
-
     return copy;
 }
 
@@ -193,14 +218,12 @@ void FactoryRunner::task_entry(void* argument) {
 void FactoryRunner::blackout() {
     source_manager_.release(ControlSource::Factory);
     controller_.blackout();
-
     xSemaphoreTake(status_mutex_, portMAX_DELAY);
     status_.active_effect = FactoryEffect::SafeBlackout;
     status_.outputs_enabled = false;
     status_.test_active = false;
     status_.effect_duration_ms = 0;
     xSemaphoreGive(status_mutex_);
-
     if (status_callback_) status_callback_();
 }
 
@@ -209,7 +232,6 @@ void FactoryRunner::start_effect(FactoryEffect effect,
                                  uint8_t brightness,
                                  uint32_t started_ms) {
     source_manager_.acquire(ControlSource::Factory);
-
     xSemaphoreTake(status_mutex_, portMAX_DELAY);
     status_.active_effect = effect;
     status_.effect_started_ms = started_ms;
@@ -218,7 +240,6 @@ void FactoryRunner::start_effect(FactoryEffect effect,
     status_.outputs_enabled = true;
     status_.test_active = effect != FactoryEffect::SafeBlackout;
     xSemaphoreGive(status_mutex_);
-
     if (status_callback_) status_callback_();
 }
 
@@ -226,16 +247,13 @@ void FactoryRunner::set_stream_frame(const StreamFramePayload& payload,
                                      uint8_t brightness,
                                      uint32_t duration_ms) {
     const uint32_t current_ms = now_ms();
-    // Establish ownership before marking outputs_enabled (Batch 8 Item 6)
     source_manager_.acquire(ControlSource::Factory);
-
     xSemaphoreTake(status_mutex_, portMAX_DELAY);
     stream_frame_.stream = payload;
     stream_frame_.brightness = brightness;
     stream_active_ = true;
     stream_last_ms_ = current_ms;
     direct_test_active_ = false;
-
     status_.auto_loop = false;
     status_.active_effect = FactoryEffect::SafeBlackout;
     status_.effect_started_ms = current_ms;
@@ -244,12 +262,21 @@ void FactoryRunner::set_stream_frame(const StreamFramePayload& payload,
     status_.outputs_enabled = true;
     status_.test_active = true;
     xSemaphoreGive(status_mutex_);
-
     if (status_callback_) status_callback_();
 }
 
 void FactoryRunner::apply_command(const FactoryCommand& command,
                                   uint32_t current_ms) {
+    if (command.command_id != 0) {
+        if (pending_command_id_ != 0 && pending_command_id_ != command.command_id && journal_) {
+            journal_->superseded(pending_command_id_);
+        }
+        pending_command_id_ = command.command_id;
+        if (journal_) {
+            journal_->applying(pending_command_id_);
+        }
+    }
+
     switch (command.type) {
         case FactoryCommandType::Abort:
             direct_test_active_ = false;
@@ -258,8 +285,11 @@ void FactoryRunner::apply_command(const FactoryCommand& command,
             status_.auto_loop = false;
             xSemaphoreGive(status_mutex_);
             blackout();
+            if (pending_command_id_ != 0 && journal_) {
+                journal_->applied(pending_command_id_);
+                pending_command_id_ = 0;
+            }
             return;
-
         case FactoryCommandType::SetAutoLoop:
             direct_test_active_ = false;
             if (command.enabled) {
@@ -270,46 +300,35 @@ void FactoryRunner::apply_command(const FactoryCommand& command,
                 status_.effect_started_ms = current_ms;
                 status_.effect_duration_ms = kLoopEffectDurationMs;
                 xSemaphoreGive(status_mutex_);
-                start_effect(
-                    kLoopEffects[0],
-                    kLoopEffectDurationMs,
-                    LG_FACTORY_DEFAULT_BRIGHTNESS,
-                    current_ms
-                );
+                start_effect(kLoopEffects[0], kLoopEffectDurationMs,
+                             LG_FACTORY_DEFAULT_BRIGHTNESS, current_ms);
             } else {
                 xSemaphoreTake(status_mutex_, portMAX_DELAY);
                 status_.auto_loop = false;
                 xSemaphoreGive(status_mutex_);
                 blackout();
+                if (pending_command_id_ != 0 && journal_) {
+                    journal_->applied(pending_command_id_);
+                    pending_command_id_ = 0;
+                }
             }
             if (status_callback_) status_callback_();
             return;
-
         case FactoryCommandType::SelectEffect:
             direct_test_active_ = false;
-
             xSemaphoreTake(status_mutex_, portMAX_DELAY);
             stream_active_ = false;
             status_.auto_loop = false;
             xSemaphoreGive(status_mutex_);
-
             if (status_callback_) status_callback_();
-
-            start_effect(
-                command.effect,
-                command.duration_ms,
-                command.brightness,
-                current_ms
-            );
+            start_effect(command.effect, command.duration_ms, command.brightness, current_ms);
             return;
-
         case FactoryCommandType::PixelLaneSolid:
         case FactoryCommandType::PwmChannelLevel:
+        case FactoryCommandType::ChannelTest:
             source_manager_.acquire(ControlSource::Factory);
-
             direct_test_ = command;
             direct_test_active_ = true;
-
             xSemaphoreTake(status_mutex_, portMAX_DELAY);
             stream_active_ = false;
             status_.auto_loop = false;
@@ -320,7 +339,6 @@ void FactoryRunner::apply_command(const FactoryCommand& command,
             status_.outputs_enabled = true;
             status_.test_active = true;
             xSemaphoreGive(status_mutex_);
-
             if (status_callback_) status_callback_();
             return;
         case FactoryCommandType::StreamFrame:
@@ -334,37 +352,25 @@ void FactoryRunner::task() {
     uint32_t loop_started_ms = now_ms();
     uint32_t blackout_started_ms = 0;
     bool between_loop_effects = false;
-
     blackout();
-
-    // Kick off the first loop effect immediately at boot.
     if (status().auto_loop) {
         source_manager_.acquire(ControlSource::Factory);
-        start_effect(
-            kLoopEffects[loop_index],
-            kLoopEffectDurationMs,
-            LG_FACTORY_DEFAULT_BRIGHTNESS,
-            now_ms()
-        );
+        start_effect(kLoopEffects[loop_index], kLoopEffectDurationMs,
+                     LG_FACTORY_DEFAULT_BRIGHTNESS, now_ms());
         loop_started_ms = now_ms();
     }
-
     TickType_t xLastWakeTime = xTaskGetTickCount();
     while (!shutting_down_.load(std::memory_order_acquire)) {
         const uint32_t current_ms = now_ms();
-
         FactoryCommand command;
         while (xQueueReceive(queue_, &command, 0) == pdPASS) {
             apply_command(command, current_ms);
             loop_started_ms = current_ms;
         }
-
-        // --- Stream frames take priority over all other test modes ---
         bool is_streaming = false;
         StreamFramePayload local_stream{};
         uint32_t local_stream_last_ms = 0;
         uint8_t local_stream_brightness = 0;
-
         xSemaphoreTake(status_mutex_, portMAX_DELAY);
         if (stream_active_) {
             is_streaming = true;
@@ -373,163 +379,152 @@ void FactoryRunner::task() {
             local_stream_brightness = stream_frame_.brightness;
         }
         xSemaphoreGive(status_mutex_);
-
         if (is_streaming) {
-            source_manager_.acquire(ControlSource::Factory, 1000); // Factory ownership only!
-
+            source_manager_.acquire(ControlSource::Factory, 1000);
             const uint8_t b = local_stream_brightness;
-
             controller_.lock();
             for (uint8_t lane = 0; lane < 8; ++lane) {
-                controller_.pixels().fill(
-                    lane,
+                controller_.pixels().fill(lane,
                     static_cast<uint8_t>((uint16_t(local_stream.lane_rgb[lane][0]) * b) / 255),
                     static_cast<uint8_t>((uint16_t(local_stream.lane_rgb[lane][1]) * b) / 255),
-                    static_cast<uint8_t>((uint16_t(local_stream.lane_rgb[lane][2]) * b) / 255)
-                );
-
-                const uint16_t duty =
-                    static_cast<uint16_t>(
-                        (uint32_t(local_stream.lane_rgb[lane][0] +
-                                  local_stream.lane_rgb[lane][1] +
-                                  local_stream.lane_rgb[lane][2]) * 4095) / (255 * 3)
-                    );
-
+                    static_cast<uint8_t>((uint16_t(local_stream.lane_rgb[lane][2]) * b) / 255));
+                const uint16_t duty = static_cast<uint16_t>(
+                    (uint32_t(local_stream.lane_rgb[lane][0] + local_stream.lane_rgb[lane][1] + local_stream.lane_rgb[lane][2]) * 4095) / (255 * 3));
                 controller_.pwm().set(lane, duty);
             }
-
             esp_err_t commit_err = controller_.try_commit_locked();
             controller_.unlock();
-
             if (commit_err != ESP_OK) {
+                if (pending_command_id_ != 0 && journal_) {
+                    journal_->failed(pending_command_id_, commit_err);
+                    pending_command_id_ = 0;
+                }
                 blackout();
                 vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(kFramePeriodMs));
                 continue;
             }
-
+            if (pending_command_id_ != 0 && journal_) {
+                journal_->applied(pending_command_id_);
+                pending_command_id_ = 0;
+            }
             if (current_ms - local_stream_last_ms > 1000) {
                 xSemaphoreTake(status_mutex_, portMAX_DELAY);
                 stream_active_ = false;
                 xSemaphoreGive(status_mutex_);
                 blackout();
             }
-
             vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(kFramePeriodMs));
             continue;
         }
-
-        // --- Non-streaming paths: snapshot status once per frame ---
         const FactoryStatus current = status();
-
         if (direct_test_active_) {
             const uint32_t elapsed = current_ms - current.effect_started_ms;
-
             controller_.lock();
             controller_.pixels().clear();
             controller_.pwm().set_all(0);
-
             if (direct_test_.type == FactoryCommandType::PixelLaneSolid) {
                 const uint8_t b = current.brightness;
-
-                controller_.pixels().fill(
-                    direct_test_.lane_or_channel,
+                controller_.pixels().fill(direct_test_.lane_or_channel,
                     static_cast<uint8_t>((uint16_t(direct_test_.red) * b) / 255),
                     static_cast<uint8_t>((uint16_t(direct_test_.green) * b) / 255),
-                    static_cast<uint8_t>((uint16_t(direct_test_.blue) * b) / 255)
-                );
+                    static_cast<uint8_t>((uint16_t(direct_test_.blue) * b) / 255));
             }
-
             if (direct_test_.type == FactoryCommandType::PwmChannelLevel) {
-                controller_.pwm().set(
-                    direct_test_.lane_or_channel,
-                    direct_test_.pwm_duty
-                );
+                controller_.pwm().set(direct_test_.lane_or_channel, direct_test_.pwm_duty);
             }
-
+            if (direct_test_.type == FactoryCommandType::ChannelTest) {
+                const uint8_t ch = direct_test_.lane_or_channel;
+                const ChannelHardwareDescriptor hw = channel_hardware(ch);
+                if (hw.kind == ChannelKind::Addressable) {
+                    // red green blue white black
+                    const uint32_t step = (elapsed / 400) % 5;
+                    uint8_t r = 0, g = 0, b = 0;
+                    if (step == 0) r = 255;
+                    else if (step == 1) g = 255;
+                    else if (step == 2) b = 255;
+                    else if (step == 3) { r = 255; g = 255; b = 255; }
+                    controller_.pixels().fill(hw.hardware_id, r, g, b);
+                } else {
+                    // 0% 25% 50% 100% 0%
+                    const uint32_t step = (elapsed / 400) % 5;
+                    uint16_t duty = 0;
+                    if (step == 1) duty = 1024;
+                    else if (step == 2) duty = 2048;
+                    else if (step == 3) duty = 4095;
+                    controller_.pwm().set(hw.hardware_id, duty);
+                }
+            }
             esp_err_t commit_err = controller_.try_commit_locked();
             controller_.unlock();
-
             if (commit_err != ESP_OK) {
+                if (pending_command_id_ != 0 && journal_) {
+                    journal_->failed(pending_command_id_, commit_err);
+                    pending_command_id_ = 0;
+                }
                 blackout();
                 vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(kFramePeriodMs));
                 continue;
             }
-
+            if (pending_command_id_ != 0 && journal_) {
+                journal_->applied(pending_command_id_);
+                pending_command_id_ = 0;
+            }
             if (elapsed >= current.effect_duration_ms) {
                 direct_test_active_ = false;
                 blackout();
             }
-
             vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(kFramePeriodMs));
             continue;
         }
-
         if (current.auto_loop) {
             if (between_loop_effects) {
                 if (current_ms - blackout_started_ms >= kInterEffectBlackoutMs) {
                     between_loop_effects = false;
-                    loop_index = (loop_index + 1) %
-                        (sizeof(kLoopEffects) / sizeof(kLoopEffects[0]));
-
-                    start_effect(
-                        kLoopEffects[loop_index],
-                        kLoopEffectDurationMs,
-                        LG_FACTORY_DEFAULT_BRIGHTNESS,
-                        current_ms
-                    );
-
+                    loop_index = (loop_index + 1) % (sizeof(kLoopEffects) / sizeof(kLoopEffects[0]));
+                    start_effect(kLoopEffects[loop_index], kLoopEffectDurationMs,
+                                 LG_FACTORY_DEFAULT_BRIGHTNESS, current_ms);
                     loop_started_ms = current_ms;
                 }
-
                 vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(kFramePeriodMs));
                 continue;
             }
-
             if (current_ms - loop_started_ms >= kLoopEffectDurationMs) {
                 source_manager_.release(ControlSource::Factory);
                 between_loop_effects = true;
                 blackout_started_ms = current_ms;
-
                 if (status_callback_) status_callback_();
                 vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(kFramePeriodMs));
                 continue;
             }
-        } else if (current.test_active &&
-                   current_ms - current.effect_started_ms >=
-                   current.effect_duration_ms) {
+        } else if (current.test_active && current_ms - current.effect_started_ms >= current.effect_duration_ms) {
             blackout();
             vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(kFramePeriodMs));
             continue;
         }
-
         if (current.test_active) {
             const uint32_t elapsed = current_ms - current.effect_started_ms;
-
             controller_.lock();
-            render_effect(
-                current.active_effect,
-                controller_,
-                elapsed,
-                current.brightness
-            );
-
+            render_effect(current.active_effect, controller_, elapsed, current.brightness);
             esp_err_t commit_err = controller_.try_commit_locked();
             controller_.unlock();
-
             if (commit_err != ESP_OK) {
+                if (pending_command_id_ != 0 && journal_) {
+                    journal_->failed(pending_command_id_, commit_err);
+                    pending_command_id_ = 0;
+                }
                 blackout();
                 vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(kFramePeriodMs));
                 continue;
             }
+            if (pending_command_id_ != 0 && journal_) {
+                journal_->applied(pending_command_id_);
+                pending_command_id_ = 0;
+            }
         }
-
         vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(kFramePeriodMs));
     }
-
     blackout();
-    if (shutdown_sem_) {
-        xSemaphoreGive(shutdown_sem_);
-    }
+    if (shutdown_sem_) xSemaphoreGive(shutdown_sem_);
     vTaskDelete(NULL);
 }
 

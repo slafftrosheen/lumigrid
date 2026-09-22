@@ -1,302 +1,513 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { getSchedule, saveSchedule } from '$lib/api/node';
-  import type { AnimationBlock } from '$lib/api/node';
+  import { getCalendarSchedule, saveCalendarSchedule, getPresets } from '$lib/api/node';
+  import type { CalendarEntry, CalendarSchedule, ScenePreset } from '$lib/api/node';
+  import { getSelectedNodeIp } from '$lib/auth/storage';
+  import { nodeStore } from '$lib/state/nodeStore';
 
-  // ── Feature 1: Visual Schedule Builder ───────────────────────────────────────
-
-  let nodeIp  = $state('');
-  let blocks  = $state<AnimationBlock[]>([]);
+  let nodeIp = $state('');
   let loading = $state(true);
-  let saving  = $state(false);
-  let saved   = $state(false);
-  let error   = $state('');
+  let saving = $state(false);
+  let error = $state('');
+  let toast = $state('');
 
-  // Edit modal state
-  let editing     = $state<AnimationBlock | null>(null);
-  let editIndex   = $state(-1);
-  let showModal   = $state(false);
+  let schedule = $state<CalendarSchedule | null>(null);
+  let presets = $state<ScenePreset[]>([]);
+  let selectedIdx = $state(0);
 
-  // Form fields
-  let fId       = $state('');
-  let fFile     = $state('');
-  let fStart    = $state('08:00');
-  let fDuration = $state(120);
-  let fPreset   = $state(1);
+  const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const DAY_FULL = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  const ENTRY_COUNT = 8;
 
-  onMount(async () => {
-    nodeIp = localStorage.getItem('lg_node_ip') ?? '';
-    if (nodeIp) {
-      try {
-        const s = await getSchedule(nodeIp);
-        blocks = s ?? [];
-      } catch (e) {
-        error = String(e);
+  function defaultEntry(index: number): CalendarEntry {
+    return { index, hour: 8, minute: 0, daysOfWeek: 0x7F, action: 'preset', presetIndex: 0, enabled: false };
+  }
+
+  function defaultSchedule(): CalendarSchedule {
+    return { entries: Array.from({ length: ENTRY_COUNT }, (_, i) => defaultEntry(i)) };
+  }
+
+  let editEntry = $derived(schedule?.entries[selectedIdx] ?? null);
+
+  let loadGen = 0;
+
+  async function load(targetIp = nodeIp, gen = loadGen) {
+    if (!targetIp) {
+      schedule = null;
+      presets = [];
+      loading = false;
+      return;
+    }
+    loading = true;
+    error = '';
+    try {
+      const [s, p] = await Promise.all([
+        getCalendarSchedule(targetIp).catch(() => null),
+        getPresets(targetIp).catch(() => [] as ScenePreset[]),
+      ]);
+      if (gen !== loadGen) return;
+      if (s && s.entries) {
+        while (s.entries.length < ENTRY_COUNT) s.entries.push(defaultEntry(s.entries.length));
+        schedule = s;
+      } else {
+        schedule = defaultSchedule();
+      }
+      presets = p;
+    } catch (e) {
+      if (gen !== loadGen) return;
+      error = String(e);
+    } finally {
+      if (gen === loadGen) {
+        loading = false;
       }
     }
-    loading = false;
-  });
-
-  function openNew() {
-    editIndex = -1;
-    fId       = `block_${Date.now()}`;
-    fFile     = '';
-    fStart    = '08:00';
-    fDuration = 120;
-    fPreset   = 1;
-    showModal = true;
   }
 
-  function openEdit(idx: number) {
-    const b = blocks[idx];
-    editIndex = idx;
-    fId       = b.id;
-    fFile     = b.file;
-    fStart    = b.start_time;
-    fDuration = b.duration_minutes;
-    fPreset   = b.fallback_preset;
-    showModal = true;
-  }
-
-  function saveBlock() {
-    const block: AnimationBlock = {
-      id:               fId.trim() || `block_${Date.now()}`,
-      file:             fFile.trim(),
-      start_time:       fStart,
-      duration_minutes: Math.max(1, Math.min(1440, fDuration)),
-      fallback_preset:  Math.max(1, Math.min(250, fPreset))
-    };
-    if (editIndex >= 0) {
-      blocks = blocks.map((b, i) => i === editIndex ? block : b);
-    } else {
-      blocks = [...blocks, block];
-    }
-    blocks = [...blocks].sort((a, b) => a.start_time.localeCompare(b.start_time));
-    showModal = false;
-  }
-
-  function deleteBlock(idx: number) {
-    blocks = blocks.filter((_, i) => i !== idx);
-  }
-
-  async function persist() {
-    saving = true; error = '';
+  async function save() {
+    if (!schedule || saving) return;
+    saving = true;
+    error = '';
     try {
-      await saveSchedule(nodeIp, blocks);
-      saved = true;
-      setTimeout(() => { saved = false; }, 3000);
+      await saveCalendarSchedule(nodeIp, schedule);
+      toast = 'Schedule saved';
+      setTimeout(() => (toast = ''), 2000);
     } catch (e) {
       error = String(e);
     }
     saving = false;
   }
 
-  // Timeline helpers
-  function timeToMin(t: string): number {
-    const [h, m] = t.split(':').map(Number);
-    return h * 60 + m;
+  function dayBit(day: number): number {
+    return 1 << day;
   }
-  function minToTime(m: number): string {
-    return `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
-  }
-  function pct(t: string): number { return (timeToMin(t) / 1440) * 100; }
-  function barWidth(b: AnimationBlock): number { return Math.min(b.duration_minutes / 1440 * 100, 100 - pct(b.start_time)); }
 
-  const HOURS = Array.from({length: 25}, (_, i) => i);
-  const PALETTE = ['#ff2d55','#ff9500','#00d4ff','#34c759','#5856d6','#ff6b30','#ff3b30','#30d158'];
+  function isDayActive(entry: CalendarEntry, day: number): boolean {
+    return (entry.daysOfWeek & dayBit(day)) !== 0;
+  }
+
+  function toggleDay(entry: CalendarEntry, day: number) {
+    entry.daysOfWeek ^= dayBit(day);
+  }
+
+  function setTime(entry: CalendarEntry, hhmm: string) {
+    const [h, m] = hhmm.split(':').map(Number);
+    entry.hour = h;
+    entry.minute = m;
+  }
+
+  function timeStr(entry: CalendarEntry): string {
+    return `${String(entry.hour).padStart(2, '0')}:${String(entry.minute).padStart(2, '0')}`;
+  }
+
+  function presetName(idx: number): string {
+    const p = presets.find(pr => pr.index === idx);
+    return p ? p.name : `Scene ${idx + 1}`;
+  }
+
+  function daySummary(entry: CalendarEntry): string {
+    const active = DAYS.filter((_, i) => isDayActive(entry, i));
+    if (active.length === 7) return 'Every day';
+    if (active.length === 0) return 'No days';
+    if (active.length <= 3) return active.join(', ');
+    return `${active.length} days`;
+  }
+
+  onMount(() => {
+    const unsub = nodeStore.subscribe(state => {
+      const targetIp = state.nodeIp || getSelectedNodeIp();
+      if (targetIp !== nodeIp) {
+        nodeIp = targetIp;
+        loadGen++;
+        if (nodeIp) {
+          schedule = null;
+          presets = [];
+          loading = true;
+          load(nodeIp, loadGen);
+        } else {
+          schedule = null;
+          presets = [];
+          loading = false;
+          error = '';
+        }
+      }
+    });
+    return unsub;
+  });
 </script>
 
-<svelte:head>
-  <title>Schedule Builder — LumiGrid</title>
-</svelte:head>
+<svelte:head><title>Schedule — LumiGrid</title></svelte:head>
 
-<div class="page">
-  <header class="page-header">
-    <div>
-      <h1>Schedule Builder</h1>
-      <p class="sub">{nodeIp || 'No node selected'} · {blocks.length} block{blocks.length !== 1 ? 's' : ''}</p>
-    </div>
-    <div class="head-btns">
-      <button class="ghost-btn" onclick={openNew}>+ Add Block</button>
-      <button class="save-btn" onclick={persist} disabled={saving || !nodeIp}>
-        {saving ? 'Saving…' : saved ? '✓ Saved' : 'Save to Node'}
-      </button>
-    </div>
-  </header>
-
-  {#if error}<div class="err-box">{error}</div>{/if}
-
-  {#if loading}
-    <div class="loading"><div class="spinner"></div>Loading schedule…</div>
-  {:else if !nodeIp}
-    <div class="empty">Select a node in the sidebar to load and edit its schedule.</div>
-  {:else}
-    <!-- 24-hour timeline -->
-    <div class="timeline-card">
-      <h2>24-Hour Timeline</h2>
-      <div class="timeline">
-        <!-- Hour markers -->
-        <div class="hour-track">
-          {#each HOURS as h}
-            <div class="hour-mark" style:left={`${(h/24)*100}%`}>
-              <div class="hour-line"></div>
-              {#if h % 3 === 0}<span class="hour-label">{h}:00</span>{/if}
-            </div>
-          {/each}
-        </div>
-        <!-- Blocks -->
-        <div class="block-lane">
-          {#each blocks as b, i}
-            <button
-              class="timeline-block"
-              style:left={`${pct(b.start_time)}%`}
-              style:width={`${barWidth(b)}%`}
-              style:background={PALETTE[i % PALETTE.length]}
-              onclick={() => openEdit(i)}
-              title={`${b.start_time} — ${minToTime(timeToMin(b.start_time) + b.duration_minutes)}\n${b.file}`}
-            >
-              <span class="tb-label">{b.file || b.id}</span>
-            </button>
-          {/each}
-          {#if !blocks.length}
-            <div class="timeline-empty">No blocks — click "+ Add Block" to create one</div>
-          {/if}
-        </div>
+{#if !nodeIp}
+  <p class="loading">No node selected. Add a node IP in the sidebar.</p>
+{:else if loading}
+  <p class="loading">Loading schedule…</p>
+{:else if schedule}
+  <div class="sched-root">
+    <header class="sched-header">
+      <div>
+        <h2>Schedule</h2>
+        <p class="sched-sub">{ENTRY_COUNT} time-based rules · {schedule.entries.filter(e => e.enabled).length} active</p>
       </div>
-    </div>
+      <button class="btn-save" onclick={save} disabled={saving}>
+        {saving ? 'Saving…' : 'Save'}
+      </button>
+    </header>
 
-    <!-- Block list -->
-    <div class="block-list">
-      {#each blocks as b, i}
-        <div class="block-row">
-          <div class="block-color" style:background={PALETTE[i % PALETTE.length]}></div>
-          <div class="block-info">
-            <span class="block-id">{b.id}</span>
-            <span class="block-file">{b.file || '—'}</span>
-          </div>
-          <div class="block-time">
-            <span>{b.start_time}</span>
-            <span class="arrow">→</span>
-            <span>{minToTime(timeToMin(b.start_time) + b.duration_minutes)}</span>
-            <span class="dur">({b.duration_minutes} min)</span>
-          </div>
-          <div class="block-preset">Preset #{b.fallback_preset}</div>
-          <div class="block-actions">
-            <button class="edit-btn" onclick={() => openEdit(i)}>Edit</button>
-            <button class="del-btn" onclick={() => deleteBlock(i)}>×</button>
-          </div>
-        </div>
+    <div class="week-grid">
+      <div class="week-header-row">
+        <span class="week-time-col">Time</span>
+        {#each DAYS as day}
+          <span class="week-day-col">{day}</span>
+        {/each}
+        <span class="week-action-col">Action</span>
+      </div>
+      {#each schedule.entries as entry, i}
+        <button
+          class="week-row"
+          class:disabled={!entry.enabled}
+          class:selected={selectedIdx === i}
+          aria-pressed={selectedIdx === i}
+          onclick={() => selectedIdx = i}
+          type="button"
+        >
+          <span class="week-time">{timeStr(entry)}</span>
+          {#each DAYS as _, dayIdx}
+            <span class="week-cell">
+              {#if isDayActive(entry, dayIdx)}
+                <span class="week-dot" class:active={entry.enabled}></span>
+              {:else}
+                <span class="week-dot"></span>
+              {/if}
+            </span>
+          {/each}
+          <span class="week-action-label">
+            {#if entry.action === 'sequence'}
+              <span class="action-badge seq">TIMELINE</span>
+            {:else}
+              <span class="action-badge preset">{presetName(entry.presetIndex)}</span>
+            {/if}
+          </span>
+        </button>
       {/each}
     </div>
-  {/if}
-</div>
 
-<!-- Edit modal -->
-{#if showModal}
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <div
-    class="modal-overlay"
-    onclick={(e) => e.target === e.currentTarget && (showModal = false)}
-    onkeydown={(e) => e.key === 'Escape' && (showModal = false)}
-    role="dialog"
-    aria-modal="true"
-    aria-label="Edit schedule block"
-    tabindex="-1"
-  >
-    <div class="modal">
-      <h2>{editIndex >= 0 ? 'Edit Block' : 'New Block'}</h2>
+    {#if editEntry}
+      <section class="entry-editor">
+        <div class="editor-top">
+          <h3>Rule {selectedIdx + 1}</h3>
+          <label class="inline-toggle">
+            <input type="checkbox" bind:checked={editEntry.enabled} />
+            <span>Enabled</span>
+          </label>
+        </div>
 
-      <label class="field">
-        <span>ID</span>
-        <input type="text" bind:value={fId} placeholder="morning_greeting" />
-      </label>
-      <label class="field">
-        <span>File on Node Storage</span>
-        <input type="text" bind:value={fFile} placeholder="greeting.gif" />
-      </label>
-      <label class="field">
-        <span>Start time</span>
-        <input type="time" bind:value={fStart} />
-      </label>
-      <label class="field">
-        <span>Duration (minutes)</span>
-        <input type="number" min="1" max="1440" bind:value={fDuration} />
-      </label>
-      <label class="field">
-        <span>Fallback preset #</span>
-        <input type="number" min="1" max="250" bind:value={fPreset} />
-      </label>
-      <p class="field-hint">
-        Ends at: <strong>{minToTime(timeToMin(fStart) + fDuration)}</strong>
-      </p>
+        <div class="editor-grid">
+          <label class="field">
+            <span>Time</span>
+            <input type="time" value={timeStr(editEntry)}
+              onchange={(e) => setTime(editEntry, (e.target as HTMLInputElement).value)} />
+          </label>
 
-      <div class="modal-btns">
-        <button class="ghost-btn" onclick={() => showModal = false}>Cancel</button>
-        <button class="save-btn" onclick={saveBlock}>
-          {editIndex >= 0 ? 'Update' : 'Add Block'}
-        </button>
-      </div>
-    </div>
+          <label class="field">
+            <span>Action</span>
+            <select bind:value={editEntry.action}>
+              <option value="preset">Activate Scene</option>
+              <option value="sequence">Start Timeline</option>
+            </select>
+          </label>
+
+          {#if editEntry.action === 'preset'}
+            <label class="field">
+              <span>Scene</span>
+              <select bind:value={editEntry.presetIndex}>
+                {#each Array(32) as _, i}
+                  <option value={i}>{presetName(i)}</option>
+                {/each}
+              </select>
+            </label>
+          {/if}
+        </div>
+
+        <div class="days-section">
+          <span class="field-label">Active Days</span>
+          <div class="day-toggles">
+            {#each DAYS as day, idx}
+              <button
+                class="day-btn"
+                class:active={isDayActive(editEntry, idx)}
+                aria-pressed={isDayActive(editEntry, idx)}
+                onclick={() => toggleDay(editEntry, idx)}
+                title={DAY_FULL[idx]}
+              >
+                {day}
+              </button>
+            {/each}
+          </div>
+          <p class="days-summary">{daySummary(editEntry)}</p>
+        </div>
+
+        <div class="quick-days">
+          <button class="quick-btn" onclick={() => editEntry.daysOfWeek = 0x7F}>Every day</button>
+          <button class="quick-btn" onclick={() => editEntry.daysOfWeek = 0x3E}>Weekdays</button>
+          <button class="quick-btn" onclick={() => editEntry.daysOfWeek = 0x41}>Weekends</button>
+          <button class="quick-btn" onclick={() => editEntry.daysOfWeek = 0}>Clear</button>
+        </div>
+      </section>
+    {/if}
+
+    {#if toast}
+      <div class="toast">{toast}</div>
+    {/if}
+    {#if error}
+      <div class="error-bar">{error}</div>
+    {/if}
   </div>
 {/if}
 
 <style>
-  .page { max-width: 960px; }
-  .page-header { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 1.5rem; gap: 1rem; flex-wrap: wrap; }
-  h1 { margin: 0; font-size: 1.6rem; font-weight: 700; color: #f5f5f7; }
-  .sub { margin: .25rem 0 0; color: #a1a1a6; font-size: .85rem; }
-  .head-btns { display: flex; gap: .6rem; }
-  .ghost-btn { background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.14); border-radius: 999px; color: #f5f5f7; padding: .55rem 1.1rem; cursor: pointer; font-size: .88rem; transition: background .2s; }
-  .ghost-btn:hover { background: rgba(255,255,255,.14); }
-  .save-btn { background: rgba(255,45,85,.88); border: none; border-radius: 999px; color: #fff; font-weight: 600; padding: .55rem 1.25rem; cursor: pointer; font-size: .88rem; transition: background .2s, box-shadow .2s; box-shadow: 0 4px 14px rgba(255,45,85,.4); }
-  .save-btn:hover:not(:disabled) { background: #ff3b30; box-shadow: 0 6px 20px rgba(255,45,85,.55); }
-  .save-btn:disabled { opacity: .5; cursor: default; }
-  .err-box { background: rgba(255,69,58,.12); border: 1px solid rgba(255,69,58,.3); border-radius: 12px; color: #ff453a; padding: .9rem 1rem; font-size: .85rem; margin-bottom: 1rem; }
-  .loading { display: flex; align-items: center; gap: .75rem; color: #a1a1a6; padding: 3rem; justify-content: center; }
-  .spinner { width: 18px; height: 18px; border: 2px solid rgba(255,255,255,.1); border-top-color: #ff2d55; border-radius: 50%; animation: spin .8s linear infinite; }
-  @keyframes spin { to { transform: rotate(360deg); } }
-  .empty { color: #a1a1a6; padding: 3rem; text-align: center; }
+  .sched-root {
+    width: 100%;
+    max-width: 1120px;
+    margin: 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+    position: relative;
+    color: var(--dash-text);
+  }
+  .loading { color: #a1a1a6; padding: 2rem; }
 
-  /* Timeline */
-  .timeline-card { background: rgba(29,29,31,.72); border: 1px solid rgba(255,255,255,.08); border-radius: 18px; padding: 1.25rem; margin-bottom: 1rem; overflow: hidden; }
-  h2 { margin: 0 0 1rem; font-size: .95rem; font-weight: 600; color: #f5f5f7; }
-  .timeline { position: relative; }
-  .hour-track { position: relative; height: 28px; margin-bottom: .25rem; }
-  .hour-mark { position: absolute; top: 0; }
-  .hour-line { width: 1px; height: 8px; background: rgba(255,255,255,.12); }
-  .hour-label { font-size: .62rem; color: #a1a1a6; white-space: nowrap; transform: translateX(-50%); display: block; margin-top: 2px; }
-  .block-lane { position: relative; height: 40px; background: rgba(255,255,255,.03); border-radius: 8px; overflow: hidden; }
-  .timeline-block { position: absolute; top: 4px; height: 32px; border: none; border-radius: 6px; cursor: pointer; overflow: hidden; min-width: 4px; display: flex; align-items: center; padding: 0 .35rem; transition: filter .15s, transform .15s; }
-  .timeline-block:hover { filter: brightness(1.2); transform: scaleY(1.05); }
-  .tb-label { font-size: .68rem; font-weight: 600; color: #fff; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; pointer-events: none; }
-  .timeline-empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #a1a1a6; font-size: .82rem; }
+  .sched-header {
+    position: sticky;
+    top: 0;
+    z-index: 18;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: .85rem 1rem;
+    background: rgba(22,22,24,.90);
+    backdrop-filter: blur(22px);
+    -webkit-backdrop-filter: blur(22px);
+    border: 1px solid var(--dash-border);
+    border-radius: var(--dash-radius-lg);
+    box-shadow: var(--dash-shadow);
+  }
+  .sched-header h2 { margin: 0; font-size: 1.15rem; font-weight: 700; }
+  .sched-sub { margin: .2rem 0 0; font-size: .82rem; color: #a1a1a6; }
 
-  /* Block list */
-  .block-list { display: flex; flex-direction: column; gap: .5rem; }
-  .block-row { display: flex; align-items: center; gap: .75rem; background: rgba(29,29,31,.72); border: 1px solid rgba(255,255,255,.08); border-radius: 14px; padding: .75rem 1rem; flex-wrap: wrap; }
-  .block-color { width: 10px; height: 36px; border-radius: 4px; flex-shrink: 0; }
-  .block-info { display: flex; flex-direction: column; flex: 1; min-width: 100px; }
-  .block-id { font-size: .78rem; font-weight: 600; color: #f5f5f7; }
-  .block-file { font-size: .72rem; color: #a1a1a6; font-family: monospace; }
-  .block-time { display: flex; align-items: center; gap: .35rem; font-size: .8rem; color: #f5f5f7; font-family: monospace; }
-  .arrow { color: #a1a1a6; }
-  .dur { color: #a1a1a6; font-size: .72rem; }
-  .block-preset { font-size: .78rem; color: #ff9500; background: rgba(255,149,0,.10); padding: .2rem .5rem; border-radius: 999px; white-space: nowrap; }
-  .block-actions { display: flex; gap: .35rem; margin-left: auto; }
-  .edit-btn { background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.10); border-radius: 7px; color: #f5f5f7; font-size: .75rem; padding: .25rem .6rem; cursor: pointer; }
-  .edit-btn:hover { background: rgba(255,255,255,.14); }
-  .del-btn { background: rgba(255,69,58,.12); border: 1px solid rgba(255,69,58,.25); border-radius: 7px; color: #ff453a; font-size: .9rem; padding: .15rem .5rem; cursor: pointer; }
-  .del-btn:hover { background: rgba(255,69,58,.25); }
+  .btn-save {
+    background: rgba(255,45,85,.88); color: #fff; border: none;
+    border-radius: 10px; padding: .5rem 1.25rem; font-size: .88rem;
+    font-weight: 600; cursor: pointer; transition: background .2s, opacity .2s;
+  }
+  .btn-save:hover:not(:disabled) { background: #ff3b30; }
+  .btn-save:disabled { opacity: .5; cursor: default; }
 
-  /* Modal */
-  .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.65); backdrop-filter: blur(8px); display: flex; align-items: center; justify-content: center; z-index: 100; }
-  .modal { background: rgba(25,25,28,.97); border: 1px solid rgba(255,255,255,.12); border-radius: 22px; padding: 2rem; width: min(420px, 92vw); display: flex; flex-direction: column; gap: .85rem; box-shadow: 0 24px 64px rgba(0,0,0,.7); }
-  .modal h2 { margin: 0; font-size: 1.15rem; font-weight: 700; color: #f5f5f7; }
+  .week-grid {
+    background: linear-gradient(180deg, rgba(29,29,31,.74), rgba(18,18,20,.74));
+    box-shadow: var(--dash-shadow);
+    border: 1px solid rgba(255,255,255,.08);
+    border-radius: var(--dash-radius-lg);
+    overflow: hidden;
+  }
+  .week-header-row {
+    display: grid;
+    grid-template-columns: 72px repeat(7, 1fr) 72px;
+    padding: .5rem .75rem;
+    border-bottom: 1px solid rgba(255,255,255,.06);
+  }
+  .week-header-row span {
+    font-size: .68rem;
+    font-weight: 600;
+    color: #a1a1a6;
+    text-align: center;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+  }
+  .week-time-col { text-align: left !important; }
+  .week-action-col { text-align: right !important; }
+
+  .week-row {
+    width: 100%;
+    border: none;
+    background: transparent;
+    text-align: left;
+    display: grid;
+    grid-template-columns: 72px repeat(7, 1fr) 72px;
+    padding: .5rem .75rem;
+    align-items: center;
+    cursor: pointer;
+    border-bottom: 1px solid rgba(255,255,255,.03);
+    transition: background .12s;
+  }
+  .week-row:last-child { border-bottom: none; }
+  .week-row:hover { background: rgba(255,255,255,.03); }
+  .week-row.selected {
+    background: linear-gradient(90deg, rgba(var(--dash-accent-rgb),.14), rgba(var(--dash-accent-rgb),.05));
+    box-shadow: inset 3px 0 0 var(--dash-accent);
+  }
+  .week-row.disabled { opacity: .35; }
+
+  .week-time {
+    font-size: .85rem;
+    font-weight: 600;
+    font-family: monospace;
+    color: #f5f5f7;
+  }
+  .week-cell { text-align: center; }
+  .week-dot {
+    display: inline-block;
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: rgba(255,255,255,.10);
+    transition: background .15s;
+  }
+  .week-dot.active { background: #30d158; }
+
+  .week-action-label { text-align: right; }
+  .action-badge {
+    font-size: .68rem;
+    font-weight: 700;
+    padding: .15rem .45rem;
+    border-radius: 6px;
+    white-space: nowrap;
+  }
+  .action-badge.preset {
+    display: inline-block;
+    max-width: 90px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    background: rgba(var(--dash-accent-rgb),.12);
+    color: var(--dash-accent);
+    border: 1px solid rgba(var(--dash-accent-rgb),.22);
+  }
+  .action-badge.seq {
+    background: color-mix(in oklab, var(--dash-warm) 13%, transparent);
+    color: var(--dash-warm);
+    border: 1px solid color-mix(in oklab, var(--dash-warm) 28%, transparent);
+  }
+
+  .entry-editor {
+    background: linear-gradient(180deg, rgba(29,29,31,.82), rgba(18,18,20,.78));
+    box-shadow: var(--dash-shadow);
+    border: 1px solid rgba(255,255,255,.08);
+    border-radius: var(--dash-radius-lg);
+    padding: 1.25rem;
+  }
+  .editor-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 1rem;
+  }
+  .editor-top h3 { margin: 0; font-size: .95rem; font-weight: 600; }
+
+  .inline-toggle {
+    display: flex; align-items: center; gap: .35rem;
+    font-size: .82rem; color: #a1a1a6; cursor: pointer;
+  }
+  .inline-toggle input[type="checkbox"] { accent-color: var(--dash-accent); width: 15px; height: 15px; }
+
+  .editor-grid {
+    display: flex;
+    gap: 1.25rem;
+    flex-wrap: wrap;
+    margin-bottom: 1rem;
+  }
   .field { display: flex; flex-direction: column; gap: .3rem; }
-  .field span { font-size: .78rem; font-weight: 600; color: #a1a1a6; text-transform: uppercase; letter-spacing: .05em; }
-  .field input { background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.12); border-radius: 10px; color: #f5f5f7; font-size: .9rem; padding: .55rem .75rem; }
-  .field input:focus { outline: none; border-color: #ff2d55; box-shadow: 0 0 0 2px rgba(255,45,85,.2); }
-  .field-hint { margin: -.3rem 0 0; font-size: .8rem; color: #a1a1a6; }
-  .field-hint strong { color: #f5f5f7; }
-  .modal-btns { display: flex; gap: .6rem; justify-content: flex-end; margin-top: .5rem; }
+  .field span, .field-label {
+    font-size: .72rem; font-weight: 600; color: #a1a1a6;
+    text-transform: uppercase; letter-spacing: .04em;
+  }
+  .field select, .field input[type="time"] {
+    background: rgba(255,255,255,.06);
+    border: 1px solid rgba(255,255,255,.12);
+    border-radius: 8px;
+    color: #f5f5f7;
+    font-size: .88rem;
+    padding: .45rem .6rem;
+    min-width: 130px;
+    font-family: monospace;
+  }
+  .field select:focus-visible, .field input:focus-visible { border-color: var(--dash-accent); box-shadow: 0 0 0 3px rgba(var(--dash-accent-rgb),.12); }
+
+  .days-section { margin-bottom: .75rem; }
+  .field-label { display: block; margin-bottom: .5rem; }
+
+  .day-toggles {
+    display: flex;
+    gap: .4rem;
+    flex-wrap: wrap;
+  }
+  .day-btn {
+    background: rgba(255,255,255,.05);
+    border: 1px solid rgba(255,255,255,.10);
+    border-radius: 8px;
+    color: #a1a1a6;
+    font-size: .82rem;
+    font-weight: 500;
+    padding: .4rem .75rem;
+    cursor: pointer;
+    transition: background .15s, color .15s, border-color .15s;
+  }
+  .day-btn:hover { background: rgba(255,255,255,.08); color: #f5f5f7; }
+  .day-btn.active {
+    background: rgba(48,209,88,.15);
+    border-color: rgba(48,209,88,.4);
+    color: #30d158;
+    font-weight: 600;
+  }
+
+  .days-summary {
+    margin: .5rem 0 0;
+    font-size: .78rem;
+    color: #a1a1a6;
+  }
+
+  .quick-days {
+    display: flex;
+    gap: .4rem;
+    flex-wrap: wrap;
+  }
+  .quick-btn {
+    background: rgba(255,255,255,.04);
+    border: 1px solid rgba(255,255,255,.06);
+    border-radius: 6px;
+    color: #a1a1a6;
+    font-size: .72rem;
+    padding: .25rem .6rem;
+    cursor: pointer;
+    transition: background .15s, color .15s;
+  }
+  .quick-btn:hover { background: rgba(255,255,255,.08); color: #f5f5f7; }
+
+  .toast {
+    position: fixed; bottom: 1.5rem; right: 1.5rem;
+    background: rgba(48,209,88,.92); color: #fff;
+    padding: .6rem 1.25rem; border-radius: 10px;
+    font-size: .88rem; font-weight: 600;
+    box-shadow: 0 4px 16px rgba(0,0,0,.4);
+    animation: toast-in .25s ease-out;
+  }
+  .error-bar {
+    position: fixed; bottom: 1.5rem; left: 50%; transform: translateX(-50%);
+    background: rgba(255,69,58,.92); color: #fff;
+    padding: .6rem 1.25rem; border-radius: 10px;
+    font-size: .85rem; max-width: 90vw;
+    box-shadow: 0 4px 16px rgba(0,0,0,.4);
+  }
+  @keyframes toast-in {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  @media (max-width: 768px) {
+    .sched-header { position: static; align-items: flex-start; gap: .8rem; flex-wrap: wrap; }
+    .sched-header .btn-save { width: 100%; }
+    .week-grid { overflow-x: auto; }
+    .week-header-row, .week-row { min-width: 720px; }
+    .editor-grid { flex-direction: column; gap: .85rem; }
+    .field select, .field input[type="time"] { width: 100%; min-width: 0; }
+  }
+
 </style>
