@@ -71,8 +71,10 @@ export interface NodeIdentity {
 }
 
 export interface CapabilitiesLimits {
+  channels?: number;
   pixelLanes: number;
   pwmChannels: number;
+  groups?: number;
   zones: number;
   layersPerZone: number;
   presets: number;
@@ -86,6 +88,7 @@ export interface CapabilitiesLimits {
 export interface CapabilitiesFeatures {
   addressable: boolean;
   pwm: boolean;
+  manualControl?: boolean;
   artnet: boolean;
   sacn: boolean;
   sync: boolean;

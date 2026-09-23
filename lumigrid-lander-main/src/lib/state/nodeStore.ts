@@ -93,6 +93,11 @@ export interface NodeLiveStatus {
     pixels?: number;
     level?: number;
   }>;
+  manual?: {
+    active: boolean;
+    channelMask: number;
+    leaseRemainingMs: number;
+  };
 }
 
 export interface DashboardNodeState {
@@ -411,6 +416,7 @@ export function connect(nodeIp = getSelectedNodeIp()): void {
         const s2Timeline = s2State?.timeline;
         const s2Automation = s2State?.automation;
         const s2Cue = s2State?.cue;
+        const s2Manual = s2State?.manual ?? (json.manual && typeof json.manual === 'object' ? (json.manual as Record<string, any>) : undefined);
 
         const nodeIdStr = typeof json.nodeId === 'string' ? json.nodeId : undefined;
         if (nodeIdStr && latestState.nodeIp) {
@@ -468,6 +474,13 @@ export function connect(nodeIp = getSelectedNodeIp()): void {
             timeline: s2Timeline !== undefined ? s2Timeline : current.status?.timeline,
             automation: s2Automation !== undefined ? s2Automation : current.status?.automation,
             cue: s2Cue !== undefined ? s2Cue : current.status?.cue,
+            manual: s2Manual
+              ? {
+                  active: Boolean(s2Manual.active),
+                  channelMask: Number(s2Manual.channelMask ?? 0),
+                  leaseRemainingMs: Number(s2Manual.leaseRemainingMs ?? 0),
+                }
+              : current.status?.manual,
             channels: Array.isArray(json.channels) ? json.channels : current.status?.channels,
           },
           lastSeen: now,

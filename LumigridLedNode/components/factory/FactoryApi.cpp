@@ -22,6 +22,7 @@
 #include "Capabilities.hpp"
 #include "CueRunner.hpp"
 #include <inttypes.h>
+#include <cmath>
 
 #include "cJSON.h"
 #include "cjson_helpers.hpp"
@@ -1700,13 +1701,46 @@ esp_err_t put_device_config(httpd_req_t* request) {
     VALIDATE_STRING("siteLabel", sizeof(cfg.site_label), cfg.site_label);
     VALIDATE_STRING("groupLabel", sizeof(cfg.group_label), cfg.group_label);
 
-    VALIDATE_U8("activePreset", 0, kMaxPresets - 1, cfg.active_preset_index);
-    VALIDATE_U8("fallbackPreset", 0, kMaxPresets - 1, cfg.fallback_preset_index);
+    const cJSON* ap = cJSON_GetObjectItemCaseSensitive(root, "activePreset");
+    if (!ap) ap = cJSON_GetObjectItemCaseSensitive(root, "activePresetIndex");
+    if (ap) {
+        if (!cJSON_IsNumber(ap) || ap->valuedouble < 0 || ap->valuedouble > (kMaxPresets - 1)) {
+            cJSON_Delete(root);
+            return send_error(request, "400 Bad Request", "invalid_field_activePreset");
+        }
+        cfg.active_preset_index = static_cast<uint8_t>(ap->valueint);
+    }
+
+    const cJSON* fp = cJSON_GetObjectItemCaseSensitive(root, "fallbackPreset");
+    if (!fp) fp = cJSON_GetObjectItemCaseSensitive(root, "fallbackPresetIndex");
+    if (fp) {
+        if (!cJSON_IsNumber(fp) || fp->valuedouble < 0 || fp->valuedouble > (kMaxPresets - 1)) {
+            cJSON_Delete(root);
+            return send_error(request, "400 Bad Request", "invalid_field_fallbackPreset");
+        }
+        cfg.fallback_preset_index = static_cast<uint8_t>(fp->valueint);
+    }
+
     VALIDATE_U16("watchdogTimeoutS", 0, 3600, cfg.watchdog_timeout_s);
     VALIDATE_U16("maxPowerMw", 0, 60000, cfg.max_power_mw);
     VALIDATE_U16("softStartMs", 0, 5000, cfg.soft_start_ms);
 
+    const cJSON* gm = cJSON_GetObjectItemCaseSensitive(root, "gamma");
+    if (!gm) gm = cJSON_GetObjectItemCaseSensitive(root, "gammaX10");
+    if (gm) {
+        if (!cJSON_IsNumber(gm)) {
+            cJSON_Delete(root);
+            return send_error(request, "400 Bad Request", "invalid_field_gamma");
+        }
+        if (gm->valuedouble >= 10.0 && gm->valuedouble <= 30.0) {
+            cfg.gamma_x10 = static_cast<uint8_t>(gm->valueint);
+        } else if (gm->valuedouble >= 1.0 && gm->valuedouble <= 3.0) {
+            cfg.gamma_x10 = static_cast<uint8_t>(std::round(gm->valuedouble * 10.0));
+        }
+    }
+
     const cJSON* ss = cJSON_GetObjectItemCaseSensitive(root, "softStart");
+    if (!ss) ss = cJSON_GetObjectItemCaseSensitive(root, "softStartEnabled");
     if (ss) {
         if (!cJSON_IsBool(ss)) {
             cJSON_Delete(root);
@@ -1982,6 +2016,20 @@ esp_err_t post_channel_test(httpd_req_t* request) {
     return send_json(request, test_resp, "202 Accepted");
 }
 
+static const char* control_source_name(ControlSource src) {
+    switch (src) {
+        case ControlSource::EStop: return "EStop";
+        case ControlSource::Factory: return "Factory";
+        case ControlSource::LiveDmx: return "LiveDmx";
+        case ControlSource::ManualOverride: return "ManualOverride";
+        case ControlSource::Scheduler: return "Scheduler";
+        case ControlSource::ScenePlayback: return "ScenePlayback";
+        case ControlSource::Fallback: return "Fallback";
+        case ControlSource::Idle: return "Idle";
+        default: return "Unknown";
+    }
+}
+
 esp_err_t get_signage_status(httpd_req_t* request) {
     if (!api::authorize(request, api::ApiRole::Operator)) return ESP_OK;
 
@@ -2035,19 +2083,18 @@ esp_err_t get_signage_status(httpd_req_t* request) {
             api_ptr->signage()->controller().output_enabled()
         );
         
-        const char* owner = "Unknown";
-        switch (api_ptr->signage()->current_control_source()) {
-            case ControlSource::ScenePlayback: owner = "ScenePlayback"; break;
-            case ControlSource::Factory: owner = "Factory"; break;
-            case ControlSource::LiveDmx: owner = "LiveDmx"; break;
-            case ControlSource::ManualOverride: owner = "ManualOverride"; break;
-            case ControlSource::EStop: owner = "EStop"; break;
-            default: break;
-        }
+        const char* owner = control_source_name(api_ptr->signage()->current_control_source());
         cJSON_AddStringToObject(response, "controlOwner", owner);
         cJSON_AddNumberToObject(response, "frameCount", api_ptr->signage()->frame_count());
         cJSON_AddNumberToObject(response, "brightness", api_ptr->signage()->current_brightness());
         cJSON_AddBoolToObject(response, "testActive", api_ptr->runner().status().test_active);
+
+        ManualControlStatus man_st = api_ptr->signage()->manual_control_status();
+        cJSON* man_obj = cJSON_CreateObject();
+        cJSON_AddBoolToObject(man_obj, "active", man_st.active);
+        cJSON_AddNumberToObject(man_obj, "channelMask", man_st.channel_mask);
+        cJSON_AddNumberToObject(man_obj, "leaseRemainingMs", man_st.lease_remaining_ms);
+        cJSON_AddItemToObject(response, "manual", man_obj);
 
         // Encode DMX telemetry as a compact hex string instead of 512 individual
         // cJSON number objects (~41 KB heap) to prevent OOM on status polls.
@@ -2134,12 +2181,12 @@ esp_err_t get_capabilities(httpd_req_t* request) {
         dev_name = cfg.device_name;
     }
     NodeIdentity id = get_node_identity(dev_name);
-    char body[800];
+    char body[1024];
     snprintf(body, sizeof(body),
         "{\"schema\":%u,"
         "\"node\":{\"family\":\"%s\",\"model\":\"%s\",\"firmware\":\"%s\",\"hardwareRevision\":\"%s\"},"
-        "\"limits\":{\"pixelLanes\":%u,\"pwmChannels\":%u,\"zones\":%u,\"layersPerZone\":%u,\"presets\":%u,\"timelineSteps\":%u,\"cueLists\":%u,\"cuesPerList\":%u,\"automationTracks\":%u,\"automationPoints\":%u},"
-        "\"features\":{\"addressable\":%s,\"pwm\":%s,\"artnet\":%s,\"sacn\":%s,\"sync\":%s,\"mqtt\":%s,\"factory\":%s,\"ota\":%s,\"signedOta\":%s,\"backup\":%s,\"sceneMotion\":%s,\"cueLists\":%s,\"transitionEngineV2\":%s},"
+        "\"limits\":{\"channels\":16,\"groups\":8,\"pixelLanes\":%u,\"pwmChannels\":%u,\"zones\":%u,\"layersPerZone\":%u,\"presets\":%u,\"timelineSteps\":%u,\"cueLists\":%u,\"cuesPerList\":%u,\"automationTracks\":%u,\"automationPoints\":%u},"
+        "\"features\":{\"manualControl\":true,\"addressable\":%s,\"pwm\":%s,\"artnet\":%s,\"sacn\":%s,\"sync\":%s,\"mqtt\":%s,\"factory\":%s,\"ota\":%s,\"signedOta\":%s,\"backup\":%s,\"sceneMotion\":%s,\"cueLists\":%s,\"transitionEngineV2\":%s},"
         "\"protocols\":{\"httpApi\":%u,\"websocket\":%u,\"sync\":%u}}",
         CapabilitiesManifest::kSchema,
         id.family, id.model, id.fw_version, id.hw_revision,
@@ -2304,6 +2351,8 @@ void build_schema2_status_json(FactoryApi* api, char* response, size_t max_len) 
         api->config()->load_config(status_cfg);
     }
 
+    ControlSnapshot ctrl_snapshot = api->runner().control_sources().get_snapshot(now);
+
     char channels_buf[2048] = "[";
     size_t ch_pos = 1;
     for (uint8_t i = 0; i < kChannelCount; ++i) {
@@ -2315,7 +2364,8 @@ void build_schema2_status_json(FactoryApi* api, char* response, size_t max_len) 
             ? (ch_cfg.pixel_count > 0 || ch_cfg.enabled || ch_cfg.name[0] != '\0')
             : (ch_cfg.enabled || ch_cfg.name[0] != '\0');
         bool ch_enabled = ch_cfg.enabled;
-        const char* ch_owner = owner;
+        ControlSource ch_source = ctrl_snapshot.resolve_channel(i, now);
+        const char* ch_owner = control_source_name(ch_source);
         bool ch_fault = fault;
 
         char item[140];
@@ -2352,13 +2402,25 @@ void build_schema2_status_json(FactoryApi* api, char* response, size_t max_len) 
     channels_buf[ch_pos++] = ']';
     channels_buf[ch_pos] = '\0';
 
+    char manual_str[128] = "{\"active\":false,\"channelMask\":0,\"leaseRemainingMs\":0}";
+    if (api->signage()) {
+        ManualControlStatus man_st = api->signage()->manual_control_status();
+        snprintf(manual_str, sizeof(manual_str),
+            "{\"active\":%s,\"channelMask\":%u,\"leaseRemainingMs\":%" PRIu32 "}",
+            man_st.active ? "true" : "false",
+            man_st.channel_mask,
+            man_st.lease_remaining_ms);
+    }
+
     snprintf(response, max_len,
         "{\"schema\":2,\"seq\":%" PRIu32 ",\"nodeId\":\"%s\",\"uptimeMs\":%" PRIu32 ","
         "\"channels\":%s,"
+        "\"manual\":%s,"
         "\"state\":{"
           "\"runtime\":{\"effect\":\"%s\",\"brightness\":%u,\"testActive\":%s,\"autoLoop\":%s,\"controlOwner\":\"%s\",\"frameCount\":%" PRIu32 "},"
           "\"output\":{\"outputsEnabled\":%s,\"powerMw\":%" PRIu32 ",\"fault\":%s,\"faultCount\":%" PRIu32 "},"
           "\"scene\":{\"activePreset\":%u,\"requestedPreset\":%u,\"requestedGeneration\":%" PRIu32 ",\"appliedGeneration\":%" PRIu32 ",\"sceneApplyPending\":%s,\"transitioning\":%s},"
+          "\"manual\":%s,"
           "\"sync\":{\"role\":\"%s\",\"inSync\":%s},"
           "\"network\":{\"rssi\":%d},"
           "\"protocol\":{\"artnet\":{\"enabled\":true,\"sources\":%" PRIu32 ",\"packetsPerSecond\":%" PRIu32 ",\"lastPacketAgeMs\":%" PRIu32 "},"
@@ -2372,6 +2434,7 @@ void build_schema2_status_json(FactoryApi* api, char* response, size_t max_len) 
         "\"effect\":\"%s\",\"brightness\":%u,\"outputsEnabled\":%s,\"testActive\":%s,\"autoLoop\":%s,\"activePreset\":%u,\"appliedGeneration\":%" PRIu32 "}",
         seq, identity.id, now,
         channels_buf,
+        manual_str,
         effect_name(api->runner().status().active_effect), brightness,
         api->runner().status().test_active ? "true" : "false",
         api->runner().status().auto_loop ? "true" : "false",
@@ -2379,6 +2442,7 @@ void build_schema2_status_json(FactoryApi* api, char* response, size_t max_len) 
         outputs_enabled ? "true" : "false", power_mw, fault ? "true" : "false", fault_count,
         active_preset, requested_preset, req_gen, app_gen,
         scene_pending ? "true" : "false", transitioning ? "true" : "false",
+        manual_str,
         sync_role, in_sync ? "true" : "false",
         rssi,
         artnet_sources, artnet_pps, artnet_age_ms,
@@ -2498,6 +2562,151 @@ esp_err_t put_sequence(httpd_req_t* request) {
     char resp[96];
     snprintf(resp, sizeof(resp), "{\"saved\":true,\"accepted\":true,\"commandId\":%" PRIu32 "}", cmd_id);
     return send_json(request, resp);
+}
+
+esp_err_t put_manual(httpd_req_t* request) {
+    if (!api::authorize(request, api::ApiRole::Operator)) return ESP_OK;
+
+    FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+    if (!api_ptr->signage()) return send_error(request, "503 Service Unavailable", "signage_not_ready");
+
+    cJSON* root = nullptr;
+    if (read_json(request, &root) != ESP_OK) {
+        return send_error(request, "400 Bad Request", "invalid_json");
+    }
+
+    uint32_t lease_ms = 15000;
+    const cJSON* lease_j = cJSON_GetObjectItemCaseSensitive(root, "leaseMs");
+    if (lease_j && cJSON_IsNumber(lease_j)) {
+        int l = lease_j->valueint;
+        if (l < 1000) l = 1000;
+        if (l > 60000) l = 60000;
+        lease_ms = static_cast<uint32_t>(l);
+    }
+
+    const cJSON* channels_arr = cJSON_GetObjectItemCaseSensitive(root, "channels");
+    if (!channels_arr || !cJSON_IsArray(channels_arr)) {
+        cJSON_Delete(root);
+        return send_error(request, "400 Bad Request", "missing_channels_array");
+    }
+
+    int num_entries = cJSON_GetArraySize(channels_arr);
+    if (num_entries <= 0) {
+        cJSON_Delete(root);
+        return send_error(request, "400 Bad Request", "empty_channels_use_delete");
+    }
+    if (num_entries > 16) {
+        cJSON_Delete(root);
+        return send_error(request, "400 Bad Request", "too_many_channels");
+    }
+
+    DeviceConfig cfg = api_ptr->signage()->get_config_snapshot();
+    ManualOverrideFrame frame{};
+    bool index_seen[16] = {};
+
+    cJSON* ch_item = nullptr;
+    cJSON_ArrayForEach(ch_item, channels_arr) {
+        if (!cJSON_IsObject(ch_item)) {
+            cJSON_Delete(root);
+            return send_error(request, "400 Bad Request", "invalid_channel_item");
+        }
+
+        const cJSON* idx_j = cJSON_GetObjectItemCaseSensitive(ch_item, "index");
+        if (!idx_j || !cJSON_IsNumber(idx_j) || idx_j->valueint < 0 || idx_j->valueint > 15) {
+            cJSON_Delete(root);
+            return send_error(request, "400 Bad Request", "invalid_channel_index");
+        }
+
+        uint8_t ch_idx = static_cast<uint8_t>(idx_j->valueint);
+        if (index_seen[ch_idx]) {
+            cJSON_Delete(root);
+            return send_error(request, "400 Bad Request", "duplicate_channel_index");
+        }
+        index_seen[ch_idx] = true;
+
+        const auto& ch_cfg = cfg.channels[ch_idx];
+        auto hw = channel_hardware(ch_idx);
+
+        const bool is_configured = (hw.kind == ChannelKind::Addressable)
+            ? (ch_cfg.pixel_count > 0 || ch_cfg.enabled || ch_cfg.dmx_start_channel > 0 || ch_cfg.max_milliwatts > 0)
+            : (ch_cfg.enabled || ch_cfg.dmx_start_channel > 0 || ch_cfg.max_milliwatts > 0);
+
+        if (!is_configured || !ch_cfg.enabled) {
+            cJSON_Delete(root);
+            return send_error(request, "400 Bad Request", "channel_disabled_or_unconfigured");
+        }
+
+        if (hw.kind == ChannelKind::Addressable) {
+            if (cJSON_GetObjectItemCaseSensitive(ch_item, "pwm")) {
+                cJSON_Delete(root);
+                return send_error(request, "400 Bad Request", "pwm_not_allowed_on_addressable");
+            }
+
+            const cJSON* r_j = cJSON_GetObjectItemCaseSensitive(ch_item, "r");
+            const cJSON* g_j = cJSON_GetObjectItemCaseSensitive(ch_item, "g");
+            const cJSON* b_j = cJSON_GetObjectItemCaseSensitive(ch_item, "b");
+            const cJSON* br_j = cJSON_GetObjectItemCaseSensitive(ch_item, "brightness");
+
+            int r = (r_j && cJSON_IsNumber(r_j)) ? r_j->valueint : 0;
+            int g = (g_j && cJSON_IsNumber(g_j)) ? g_j->valueint : 0;
+            int b = (b_j && cJSON_IsNumber(b_j)) ? b_j->valueint : 0;
+            int br = (br_j && cJSON_IsNumber(br_j)) ? br_j->valueint : 255;
+
+            if (r < 0 || r > 255 || g < 0 || g > 255 || b < 0 || b > 255 || br < 0 || br > 255) {
+                cJSON_Delete(root);
+                return send_error(request, "400 Bad Request", "invalid_color_or_brightness_value");
+            }
+
+            frame.channels[ch_idx].active = true;
+            frame.channels[ch_idx].color.r = static_cast<uint8_t>(r);
+            frame.channels[ch_idx].color.g = static_cast<uint8_t>(g);
+            frame.channels[ch_idx].color.b = static_cast<uint8_t>(b);
+            frame.channels[ch_idx].color.w = 0;
+            frame.channels[ch_idx].brightness = static_cast<uint8_t>(br);
+        } else {
+            if (cJSON_GetObjectItemCaseSensitive(ch_item, "r") ||
+                cJSON_GetObjectItemCaseSensitive(ch_item, "g") ||
+                cJSON_GetObjectItemCaseSensitive(ch_item, "b") ||
+                cJSON_GetObjectItemCaseSensitive(ch_item, "brightness")) {
+                cJSON_Delete(root);
+                return send_error(request, "400 Bad Request", "color_not_allowed_on_pwm");
+            }
+
+            const cJSON* pwm_j = cJSON_GetObjectItemCaseSensitive(ch_item, "pwm");
+            if (!pwm_j || !cJSON_IsNumber(pwm_j) || pwm_j->valueint < 0 || pwm_j->valueint > 4095) {
+                cJSON_Delete(root);
+                return send_error(request, "400 Bad Request", "invalid_pwm_duty");
+            }
+
+            frame.channels[ch_idx].active = true;
+            frame.channels[ch_idx].pwm = static_cast<uint16_t>(pwm_j->valueint);
+        }
+    }
+
+    cJSON_Delete(root);
+
+    uint16_t channel_mask = 0;
+    for (uint8_t i = 0; i < 16; ++i) {
+        if (frame.channels[i].active) channel_mask |= (1U << i);
+    }
+
+    if (!api_ptr->signage()->submit_manual_override(frame, lease_ms)) {
+        return send_error(request, "500 Internal Server Error", "submit_manual_override_failed");
+    }
+
+    char resp[96];
+    snprintf(resp, sizeof(resp), "{\"accepted\":true,\"channelMask\":%u,\"leaseMs\":%" PRIu32 "}", channel_mask, lease_ms);
+    return send_json(request, resp);
+}
+
+esp_err_t delete_manual(httpd_req_t* request) {
+    if (!api::authorize(request, api::ApiRole::Operator)) return ESP_OK;
+
+    FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+    if (!api_ptr->signage()) return send_error(request, "503 Service Unavailable", "signage_not_ready");
+
+    api_ptr->signage()->clear_manual_override();
+    return send_json(request, "{\"released\":true}");
 }
 
 esp_err_t get_effects(httpd_req_t* request) {
@@ -3475,6 +3684,8 @@ esp_err_t FactoryApi::start(
         { .uri = "/api/v1/config",            .method = HTTP_GET,  .handler = get_device_config, .user_ctx = this },
         { .uri = "/api/v1/config",            .method = HTTP_PUT,  .handler = put_device_config, .user_ctx = this },
         { .uri = "/api/v1/status",            .method = HTTP_GET,  .handler = get_signage_status, .user_ctx = this },
+        { .uri = "/api/v1/manual",            .method = HTTP_PUT,   .handler = put_manual,        .user_ctx = this },
+        { .uri = "/api/v1/manual",            .method = HTTP_DELETE,.handler = delete_manual,     .user_ctx = this },
         { .uri = "/api/v1/effects",           .method = HTTP_GET,  .handler = get_effects,        .user_ctx = this },
         { .uri = "/api/v1/health",            .method = HTTP_GET,  .handler = get_health,         .user_ctx = this },
         { .uri = "/api/v1/logs",              .method = HTTP_GET,  .handler = get_logs,           .user_ctx = this },

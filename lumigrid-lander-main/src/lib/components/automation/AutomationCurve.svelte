@@ -24,6 +24,12 @@
     readOnly = false,
     color = '#ff2d55',
     onChange = (_points: AutomationPoint[]) => {},
+  }: {
+    track?: AutomationTrack;
+    elapsedMs?: number;
+    readOnly?: boolean;
+    color?: string;
+    onChange?: (points: AutomationPoint[]) => void;
   } = $props();
 
   let svgElement: SVGSVGElement | null = $state(null);

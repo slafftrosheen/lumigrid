@@ -18,10 +18,12 @@ The operator interface is organized into five primary destinations, visually sep
 
 ### Operate
 1. **Overview:** System status, confidence layer, and quick actions.
-2. **Scenes:** Scene Studio (Editor for zones, layers, effects).
-3. **Timeline:** Visual step sequencer.
-4. **Schedules:** Day/time calendar automation.
-5. **Devices:** Sync and network configuration.
+2. **Live:** Live Desk v1 operator surface (A1–A8 and P1–P8 live faders, RGB matrix, group targeting, 10 Hz throttle, 5s lease heartbeat, scene capture).
+3. **Channels:** Physical output (A1–A8 addressable and P1–P8 PWM) status, live control, and group assignment with Admin-only configuration persistence.
+4. **Scenes:** Scene Studio (motion, transitions, cue lists, effect parameters).
+5. **Timeline:** 16-channel visual step sequencer.
+6. **Schedules:** Day/time calendar automation.
+7. **Devices:** Sync and network configuration.
 
 ### Service
 - **Diagnostics & System:** Unified maintenance hub featuring live health telemetry, real-time node system logs, security/config audit trails, firmware OTA flashing, and backup/restore. Includes a dedicated section for Factory Output Testing (e.g., Burn-in, Lane Chase, Color Wash) time-bounded by the firmware.

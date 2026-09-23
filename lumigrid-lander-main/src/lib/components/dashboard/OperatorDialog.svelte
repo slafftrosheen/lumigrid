@@ -33,7 +33,7 @@
     oncancel?: () => void;
   }>();
 
-  let dialogEl: HTMLElement | null = null;
+  let dialogEl = $state<HTMLElement | null>(null);
 
   $effect(() => {
     if (!open || typeof document === 'undefined') return;
@@ -104,6 +104,8 @@
       if (event.target === event.currentTarget) cancel();
     }}
   >
+    <!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
+    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
     <form
       class="dialog-card"
       class:warning={tone === 'warning'}

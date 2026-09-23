@@ -36,5 +36,5 @@ Effect parameters include `label`, `description`, `parameter label`, `unit`, `mi
 
 ## Timelines & Scheduling
 
-The system includes a 16-step sequencer (timeline) across the 8 zones.
+The system includes a 16-step sequencer (timeline) across the 16 physical channels (A1–A8 addressable, P1–P8 PWM).
 Calendar-based scheduling allows automated preset and sequence activation based on days-of-week and minute-of-day.

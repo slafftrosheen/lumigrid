@@ -25,6 +25,10 @@
     }),
     trackIndex = 0,
     onDelete = () => {},
+  }: {
+    track?: AutomationTrackConfig;
+    trackIndex?: number;
+    onDelete?: () => void;
   } = $props();
 
   const TARGETS: { id: AutomationTarget; label: string }[] = [

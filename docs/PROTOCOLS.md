@@ -21,4 +21,4 @@ The LumiGrid sync protocol ensures coordinated playback across multiple nodes us
 
 The node accepts incoming DMX streams over Art-Net and sACN.
 - DMX source expiry is tracked actively.
-- Incoming DMX color data is injected across all 8 zones into a configurable layer (0-2).
+- Incoming DMX color data is injected across configured channels into a configurable layer (0-2).

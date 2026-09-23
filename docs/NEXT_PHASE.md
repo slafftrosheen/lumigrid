@@ -77,7 +77,7 @@ Firmware
 - Replace form-like editing with a visual beat grid.
 - Drag/resize/duplicate steps.
 - BPM-aware editing.
-- Multi-track/zone view.
+- Multi-track view (16 physical channels: A1–A8 and P1–P8).
 - Preview against the same scene model used by the device.
 
 ### 6. Diagnostics + Factory

@@ -203,6 +203,44 @@ describe('unified dashboard node live state and lifecycle', () => {
       expect(snap.status?.brightness).toBe(180);
     });
 
+    it('parses schema2 status frame with per-channel owner and manual override block', () => {
+      connect('192.168.1.50');
+      const ws = MockWebSocket.instances[0];
+      ws.triggerOpen();
+
+      const schema2Payload = {
+        schema: 2,
+        seq: 1,
+        nodeId: 'node-test-01',
+        uptimeMs: 12345,
+        channels: [
+          { index: 0, port: 'A1', configured: true, enabled: true, owner: 'ManualOverride', fault: false, brightness: 255, pixels: 60 },
+          { index: 1, port: 'A2', configured: true, enabled: true, owner: 'ScenePlayback', fault: false, brightness: 255, pixels: 60 },
+        ],
+        manual: {
+          active: true,
+          channelMask: 1,
+          leaseRemainingMs: 14200,
+        },
+        state: {
+          runtime: { effect: 'solid', brightness: 255, testActive: false, autoLoop: false, controlOwner: 'ManualOverride', frameCount: 100 },
+          output: { outputsEnabled: true, powerMw: 12000, fault: false, faultCount: 0 },
+          manual: { active: true, channelMask: 1, leaseRemainingMs: 14200 },
+        },
+      };
+
+      ws.triggerMessage(JSON.stringify(schema2Payload));
+
+      const snap = getNodeLiveSnapshot();
+      expect(snap.status?.channels?.[0]?.owner).toBe('ManualOverride');
+      expect(snap.status?.channels?.[1]?.owner).toBe('ScenePlayback');
+      expect(snap.status?.manual).toEqual({
+        active: true,
+        channelMask: 1,
+        leaseRemainingMs: 14200,
+      });
+    });
+
     it('ignores unrelated JSON objects without status fields', () => {
       connect('192.168.1.50');
       const ws = MockWebSocket.instances[0];

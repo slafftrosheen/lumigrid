@@ -141,6 +141,7 @@ void LightingRuntime::trigger_estop() {
     controller_.latch_estop();
     source_manager_.release(ControlSource::Factory);
     clear_live_frame();
+    clear_manual_override();
     controller_.blackout();
     ESP_LOGW(TAG, "EMERGENCY STOP TRIGGERED: Hardware output blacked out and latched");
 }
@@ -153,6 +154,64 @@ void LightingRuntime::clear_live_frame() {
     last_live_stream_ms_ = 0;
     source_manager_.release(ControlSource::LiveDmx);
     xSemaphoreGive(mutex_);
+}
+
+void LightingRuntime::clear_manual_override() {
+    if (!mutex_) return;
+    xSemaphoreTake(mutex_, portMAX_DELAY);
+    manual_active_ = {};
+    source_manager_.release(ControlSource::ManualOverride);
+    xSemaphoreGive(mutex_);
+}
+
+bool LightingRuntime::submit_manual_override(const ManualOverrideFrame& frame, uint32_t lease_ms) {
+    if (shutting_down_.load(std::memory_order_acquire) || !mutex_) return false;
+    if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(50)) != pdTRUE) return false;
+
+    // Allowed lease range: 1,000–60,000 ms (default 15,000 ms)
+    if (lease_ms < 1000) lease_ms = 1000;
+    if (lease_ms > 60000) lease_ms = 60000;
+
+    const uint32_t now = now_ms();
+    manual_active_ = frame;
+    manual_active_.timestamp_ms = now;
+    manual_active_.lease_ms = lease_ms;
+
+    uint16_t mask = 0;
+    for (uint8_t ch = 0; ch < 16; ++ch) {
+        if (manual_active_.channels[ch].active) {
+            mask |= (1U << ch);
+        }
+    }
+    manual_active_.channel_mask = mask;
+
+    if (mask == 0) {
+        source_manager_.release(ControlSource::ManualOverride);
+    } else {
+        source_manager_.acquire(ControlSource::ManualOverride, lease_ms, 0, 0, mask);
+    }
+
+    xSemaphoreGive(mutex_);
+    return true;
+}
+
+ManualControlStatus LightingRuntime::manual_control_status() const {
+    ManualControlStatus status{};
+    if (!mutex_) return status;
+
+    xSemaphoreTake(mutex_, portMAX_DELAY);
+    const uint32_t now = now_ms();
+    ControlSnapshot snap = const_cast<ControlSourceManager&>(source_manager_).get_snapshot(now);
+    const uint8_t idx = static_cast<uint8_t>(ControlSource::ManualOverride);
+    const auto& src_state = snap.states[idx];
+
+    if (src_state.active && (src_state.expires_ms == 0 || now < src_state.expires_ms) && src_state.channel_mask != 0) {
+        status.active = true;
+        status.channel_mask = src_state.channel_mask;
+        status.lease_remaining_ms = (src_state.expires_ms > now) ? (src_state.expires_ms - now) : 0;
+    }
+    xSemaphoreGive(mutex_);
+    return status;
 }
 
 void LightingRuntime::clear_estop() {
@@ -241,6 +300,11 @@ void LightingRuntime::render_frame(uint32_t current_ms) {
         if (!ch.active || ch.opacity == 0) return false;
         return current_ms - ch.timestamp_ms <= kLiveFrameFailsafeTimeoutMs;
     };
+    auto manual_channel_is_valid = [current_ms, this](uint8_t ch) -> bool {
+        if (ch >= 16 || !manual_active_.channels[ch].active) return false;
+        if (manual_active_.lease_ms == 0) return false;
+        return (current_ms - manual_active_.timestamp_ms <= manual_active_.lease_ms);
+    };
     RenderFrame& render_frame = current_render_frame_;
     for (auto& ch_frame : render_frame.channels) {
         ch_frame.pixels.fill(LightValue{0, 0, 0, 0});
@@ -268,6 +332,20 @@ void LightingRuntime::render_frame(uint32_t current_ms) {
                 }
             } else {
                 render_frame.channels[ch].pwm = ColorPipeline::to_pwm(live_src.pixels[0], live_src.pwm, channel_cfg, render_scene.global_brightness);
+            }
+        } else if (ch_owner == ControlSource::ManualOverride && manual_channel_is_valid(ch)) {
+            const auto& man_ch = manual_active_.channels[ch];
+            if (is_addressable) {
+                const LightValue pixel_val = ColorPipeline::to_addressable(man_ch.color, channel_cfg, man_ch.brightness);
+                for (uint16_t px = 0; px < num_pixels; ++px) {
+                    render_frame.channels[ch].pixels[px] = pixel_val;
+                }
+            } else {
+                const uint16_t pwm_val = ColorPipeline::to_pwm(LightValue{0, 0, 0, 0}, man_ch.pwm, channel_cfg, 255);
+                render_frame.channels[ch].pwm = pwm_val;
+                if (ch >= 8 && ch < 16) {
+                    last_pwm_duty_[ch - 8] = pwm_val;
+                }
             }
         } else {
             const ChannelContent& content = render_scene.channels[ch];
@@ -505,7 +583,7 @@ void LightingRuntime::reload_device_config() {
     ESP_LOGI(TAG, "Device config transactional reload applied successfully");
 }
 
-bool LightingRuntime::acquire_control(ControlSource source, uint32_t lease_ms, uint8_t zone_mask, uint8_t layer_mask) {
+bool LightingRuntime::acquire_control(ControlSource source, uint32_t lease_ms, uint8_t zone_mask, uint8_t layer_mask, uint16_t channel_mask, bool takeover) {
     if (source == ControlSource::EStop) {
         trigger_estop();
     }
@@ -513,7 +591,7 @@ bool LightingRuntime::acquire_control(ControlSource source, uint32_t lease_ms, u
         return false;
     }
     xSemaphoreTake(mutex_, portMAX_DELAY);
-    bool won = source_manager_.acquire(source, lease_ms, zone_mask, layer_mask);
+    bool won = source_manager_.acquire(source, lease_ms, zone_mask, layer_mask, channel_mask, takeover);
     xSemaphoreGive(mutex_);
     return won;
 }

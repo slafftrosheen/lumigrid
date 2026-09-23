@@ -11,6 +11,7 @@
 #include "PowerBudget.hpp"
 #include "SceneManager.hpp"
 #include "RenderTypes.hpp"
+#include "ManualControlTypes.hpp"
 
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -111,10 +112,20 @@ public:
     void activate_scene_direct(const SceneConfig& scene, bool immediate = false);
 
     /// Atomically submit a full live DMX frame from DmxRouter (returns false if rejected or unavailable)
+    /// Atomically submit a full live DMX frame from DmxRouter (returns false if rejected or unavailable)
     bool submit_live_frame(const LiveDmxFrame& frame);
 
     /// Authoritative clear of complete live frame state and ownership
     void clear_live_frame();
+
+    /// Submit a transient channel-scoped manual override frame with lease
+    bool submit_manual_override(const ManualOverrideFrame& frame, uint32_t lease_ms = 15000);
+
+    /// Clear transient manual override state and release ownership
+    void clear_manual_override();
+
+    /// Query current manual override status (active, channelMask, leaseRemainingMs)
+    ManualControlStatus manual_control_status() const;
 
     /// Safe ordered runtime task shutdown
     void stop();
@@ -151,7 +162,7 @@ public:
     void set_beat_period(uint16_t period_ms);
     void reload_device_config();
 
-    bool acquire_control(ControlSource source, uint32_t lease_ms = 0, uint8_t zone_mask = 0xFF, uint8_t layer_mask = 0x07);
+    bool acquire_control(ControlSource source, uint32_t lease_ms = 0, uint8_t zone_mask = 0xFF, uint8_t layer_mask = 0x07, uint16_t channel_mask = 0, bool takeover = false);
     void release_control(ControlSource source);
     ControlSource current_control_source() const;
 
@@ -277,6 +288,9 @@ private:
     LiveDmxFrame live_active_{};
     bool live_pending_dirty_{false};
     uint32_t last_live_stream_ms_ = 0;
+
+    // Transient Manual Override state
+    ManualOverrideFrame manual_active_{};
 
     RenderFrame current_render_frame_;
     FixtureFrame current_composited_zone_;

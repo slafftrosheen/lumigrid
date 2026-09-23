@@ -49,7 +49,7 @@
   let backupLoading = $state(false);
   let restoreLoading = $state(false);
   let restoreFile = $state<File | null>(null);
-  let restorePayload = $state<unknown | null>(null);
+  let restorePayload = $state<Record<string, unknown> | null>(null);
   let restoreConfirmOpen = $state(false);
 
   // OTA states

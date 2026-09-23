@@ -36,7 +36,7 @@
   let nodeIp   = $state('');
   let nodeList = $state<SavedNodeInfo[]>([]);
   let liveState = $state(getNodeLiveSnapshot());
-  let navListEl: HTMLUListElement | null = null;
+  let navListEl = $state<HTMLUListElement | null>(null);
   let mobileMoreOpen = $state(false);
 
   async function sha256(s: string): Promise<string> {
@@ -149,6 +149,7 @@
     { group: 'Create',   href: '/dashboard/cues',         icon: '⏯',  label: 'Cues' },
     { group: 'Create',   href: '/dashboard/timeline',     icon: '▤',  label: 'Timeline' },
     { group: 'Create',   href: '/dashboard/schedule',     icon: '◷',  label: 'Schedule' },
+    { group: 'Output',   href: '/dashboard/live',         icon: '⚡',  label: 'Live' },
     { group: 'Output',   href: '/dashboard/channels',     icon: '◈',  label: 'Channels' },
     { group: 'Output',   href: '/dashboard/visualizer',   icon: '▶',  label: 'Visualizer' },
     { group: 'Output',   href: '/dashboard/preview',      icon: '◉',  label: 'Preview' },
@@ -163,7 +164,7 @@
     '/dashboard',
     '/dashboard/scenes',
     '/dashboard/timeline',
-    '/dashboard/channels',
+    '/dashboard/live',
   ]);
   let visibleNavLinks = $derived(navLinks.filter(link => !link.adminOnly || isAdmin));
   let mobilePrimaryLinks = $derived(visibleNavLinks.filter(link => mobilePrimaryHrefs.has(link.href)));
@@ -336,7 +337,7 @@
         if (e.target === e.currentTarget) mobileMoreOpen = false;
       }}
     >
-      <section
+      <div
         id="mobile-more-sheet"
         class="mobile-more-sheet"
         role="dialog"
@@ -355,7 +356,6 @@
             onclick={() => (mobileMoreOpen = false)}
             type="button"
             aria-label="Close more tools"
-            autofocus
           >✕</button>
         </div>
         <div class="mobile-more-grid">
@@ -374,7 +374,7 @@
             </a>
           {/each}
         </div>
-      </section>
+      </div>
     </div>
   {/if}
 

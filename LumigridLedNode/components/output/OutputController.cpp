@@ -45,6 +45,8 @@ esp_err_t OutputController::reconfigure(const DeviceConfig& cfg) {
         for (uint8_t ch = 8; ch < 16; ++ch) {
             if (cfg.channels[ch].enabled) {
                 ESP_LOGE("output", "Reconfigure validation: channel[%u] (P%u) is enabled, but PCA9685 driver is unavailable", ch, ch - 7);
+                topology_valid_.store(false, std::memory_order_release);
+                output_enabled_.store(false, std::memory_order_release);
                 unlock();
                 return ESP_ERR_NOT_FOUND;
             }
@@ -56,6 +58,8 @@ esp_err_t OutputController::reconfigure(const DeviceConfig& cfg) {
         const ChannelConfig& ccfg = cfg.channels[ch];
         if (ccfg.enabled && ccfg.pixel_count > MAX_PIXELS) {
             ESP_LOGE("output", "Reconfigure validation: channel[%u] pixel_count (%u) > MAX_PIXELS", ch, ccfg.pixel_count);
+            topology_valid_.store(false, std::memory_order_release);
+            output_enabled_.store(false, std::memory_order_release);
             unlock();
             return ESP_ERR_INVALID_ARG;
         }

@@ -44,6 +44,8 @@ that has not completed initialization.
 | `GET` | `/api/v1/status` | Read signage playback state. |
 | `GET` | `/api/v1/channels` | Read all 16 physical output channels (A1–A8 and P1–P8). |
 | `POST` | `/api/v1/channel/test` | Test or identify a specific physical channel connector. |
+| `PUT` | `/api/v1/manual` | Apply live manual control override frame across 16 physical channels. |
+| `DELETE` | `/api/v1/manual` | Release live manual control override lease. |
 | `GET` | `/api/v1/presets` | List stored scene presets. |
 | `PUT` | `/api/v1/presets` | Save a scene preset in slot 0–31. |
 | `POST` | `/api/v1/activate` | Activate a preset. |
@@ -148,21 +150,81 @@ Scenes can also add one preset-wide finishing layer:
 `overlayEffect` is `none` or `strobe`. `overlaySpeedMs: 0` follows the
 sequencer beat; otherwise it is the flash period in milliseconds.
 
+### Live manual control (`/api/v1/manual`)
+
+Live Desk v1 (LG-024) introduces non-persistent, lease-bound manual override across all 16 physical channels (channels 0–7 addressable A1–A8, 8–15 PWM P1–P8).
+
+#### Apply manual control frame
+
+```http
+PUT /api/v1/manual
+Content-Type: application/json
+Authorization: ******
+```
+
+```json
+{
+  "channelMask": 65535,
+  "leaseDurationMs": 15000,
+  "channels": [
+    { "channel": 0, "r": 255, "g": 128, "b": 0, "brightness": 255, "white": 0, "pwm": 0 },
+    { "channel": 8, "r": 0, "g": 0, "b": 0, "brightness": 0, "white": 0, "pwm": 3072 }
+  ]
+}
+```
+
+- **Lease duration**: `1000` to `60000` ms (default: `15000` ms). Overrides automatically expire and fall back to the lower-priority source (CueRunner, Timeline, or active Preset) if heartbeats cease.
+- **Channel scoping**: `channelMask` is a 16-bit mask (bits 0–7: A1–A8; bits 8–15: P1–P8). Only channels set in `channelMask` are acquired or overridden. Unmasked channels remain in their background playback state.
+- **Snapshot replacement**: Active channels are updated atomically from the submitted snapshot.
+- **Safety pipeline**: Manual control commands pass through the identical `ColorPipeline`, `max_brightness`, per-channel limits, gamma calibration, global `PowerBudget`, and `OutputScheduler` transactions. Safety limits cannot be bypassed.
+- **Authorization**: Requires `Operator` or `Admin` role (`403 Forbidden` if unprivileged).
+- **Arbitration priority**:
+  1. `EmergencyStop` (highest)
+  2. `Factory` (bench/burn-in tests)
+  3. `LiveDmx` (Art-Net / sACN)
+  4. `ManualOverride` (Live Desk v1)
+  5. `CueRunner` (playlist/cue execution)
+  6. `Timeline` (step sequencer)
+  7. `SavedScene` (default background scene)
+
+Response:
+```json
+{
+  "accepted": true,
+  "channelMask": 65535,
+  "leaseDurationMs": 15000
+}
+```
+
+#### Release manual control
+
+```http
+DELETE /api/v1/manual
+Content-Type: application/json
+Authorization: ******
+```
+
+```json
+{
+  "channelMask": 65535
+}
+```
+
+Releases manual control ownership for the specified channels (or all 16 channels if omitted), returning them to background playback immediately without waiting for lease expiration.
+
 ### Timeline
 
-The timeline contains eight independently enabled zones with up to 16 ordered
-steps per zone. A step has `presetIndex` (0–31) and `lengthBeats` (1–64).
-`bpm` is constrained to 10–500 and `enabled` controls manual playback.
+The timeline contains 16 independently enabled tracks corresponding to the 16 physical output channels (A1–A8 addressable, P1–P8 PWM) with up to 16 ordered steps per track. A step has `presetIndex` (0–31) and `lengthBeats` (1–64). `bpm` is constrained to 10–500 and `enabled` controls manual playback.
 
 ### Device configuration
 
-`GET /api/v1/config` returns `deviceName`, `activePreset`, `fallbackPreset`,
-`watchdogTimeoutS`, `maxPowerMw`, `gamma`, `softStart`, `softStartMs`,
-`timezone`, `syncEnabled`, `syncRole`, and a `zones` array containing up to eight objects with `name` and `role` (e.g. `"Sign"`, `"Sign Element"`, `"Ambiance Light"`, `"Main Light"`, or `"Unassigned"`).
+`GET /api/v1/config` returns canonical node settings:
+- Node metadata: `deviceName`, `activePreset`, `fallbackPreset`, `watchdogTimeoutS`, `maxPowerMw`, `gamma`, `softStart`, `softStartMs`, `timezone`, `syncEnabled`, `syncRole`.
+- Physical outputs: `channels` array containing 16 channel objects (`id`, `name`, `type`, `pin`, `maxCurrentMa`, `length`, `groupMask`).
+- Groups: `groups` array containing up to 8 group objects (`id`, `name`, `channelMask`, `enabled`).
+- For legacy client compatibility, responses also provide `zones` and `ports` alias projections.
 
-`PUT /api/v1/config` accepts any supported subset. Limits are: preset indexes
-0–31, watchdog 0–3600 seconds, power 0–60000 mW, soft-start 0–5000 ms, and
-sync role 0–2.
+`PUT /api/v1/config` updates persisted node configuration. It accepts canonical fields or compatibility aliases, and validates 16-channel and 8-group structures. Persisted configuration writes require the `Admin` role (`403 Forbidden` for `Operator`). Limits are: preset indexes 0–31, watchdog 0–3600 seconds, power 0–60000 mW, soft-start 0–5000 ms, and sync role 0–2.
 
 ### Calendar automation
 
@@ -217,13 +279,16 @@ is still required to establish timing accuracy for a specific Wi-Fi layout.
 ### Protocol Configuration
 
 The node supports incoming DMX streams via Art-Net and sACN.
-`liveStreamLayer` in `protocol` configuration determines which layer (0–2, default: 2) incoming DMX color data is injected into across all 8 zones.
+`liveStreamLayer` in `protocol` configuration determines which layer (0–2, default: 2) incoming DMX color data is injected into across configured channels.
 
 ## Factory vs Signage Effects Boundary
 
 The system operates two separate effect engines:
-1. **Signage Effects (`/api/v1/effects`, `/api/v1/presets`)**: Production signage pipeline supporting multi-zone multi-layer blending (Solid, Breathe, Chase, Sweep, Reveal, Sparkle, Gradient, Fire, Aurora, ColorWave, StaticPulse).
+1. **Signage Effects (`/api/v1/effects`, `/api/v1/presets`)**: Production signage pipeline supporting multi-channel multi-layer blending (Solid, Breathe, Chase, Sweep, Reveal, Sparkle, Gradient, Fire, Aurora, ColorWave, StaticPulse).
 2. **Factory Effects (`/api/v1/factory/effect`)**: Hardware diagnostic test routines time-bounded by the firmware for factory quality control and wiring validation (`identity`, `pixel_chase`, `rainbow`, `white_walk`, `pwm_walk`, `pwm_fade`, `combined_pulse`, `burn_in`, `blackout`).
+
+> [!NOTE]
+> Operational live faders and interactive manual overrides must use `PUT /api/v1/manual` and `DELETE /api/v1/manual`. The `/api/v1/factory/*` endpoints are strictly reserved for manufacturing bench diagnostics and hardware validation tests.
 
 ## Factory endpoints
 

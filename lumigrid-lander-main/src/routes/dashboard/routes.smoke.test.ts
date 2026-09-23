@@ -18,6 +18,7 @@ import FactoryPage from './factory/+page.svelte';
 import PreviewPage from './preview/+page.svelte';
 import FirmwarePage from './firmware/+page.svelte';
 import CuesPage from './cues/+page.svelte';
+import LivePage from './live/+page.svelte';
 
 const routes = [
   { path: '/dashboard', component: DashboardPage, name: 'Dashboard Overview' },
@@ -25,6 +26,7 @@ const routes = [
   { path: '/dashboard/cues', component: CuesPage, name: 'Cues' },
   { path: '/dashboard/timeline', component: TimelinePage, name: 'Timeline' },
   { path: '/dashboard/schedule', component: SchedulePage, name: 'Schedule' },
+  { path: '/dashboard/live', component: LivePage, name: 'Live Desk' },
   { path: '/dashboard/channels', component: ChannelsPage, name: 'Channels' },
   { path: '/dashboard/thermal', component: ThermalPage, name: 'Thermal' },
   { path: '/dashboard/visualizer', component: VisualizerPage, name: 'Visualizer' },
@@ -41,6 +43,7 @@ const routeSourceFiles = [
   './cues/+page.svelte',
   './timeline/+page.svelte',
   './schedule/+page.svelte',
+  './live/+page.svelte',
   './channels/+page.svelte',
   './visualizer/+page.svelte',
   './preview/+page.svelte',
@@ -76,7 +79,7 @@ describe('dashboard routes smoke & contract tests', () => {
   let mockStorage: MockStorage;
 
   it('keeps the dashboard route registry complete and unique', () => {
-    expect(routes).toHaveLength(13);
+    expect(routes).toHaveLength(14);
     expect(new Set(routes.map(r => r.path)).size).toBe(routes.length);
     expect(routes.map(r => r.path)).toEqual(expect.arrayContaining([
       '/dashboard',
@@ -84,6 +87,7 @@ describe('dashboard routes smoke & contract tests', () => {
       '/dashboard/cues',
       '/dashboard/timeline',
       '/dashboard/schedule',
+      '/dashboard/live',
       '/dashboard/channels',
       '/dashboard/visualizer',
       '/dashboard/preview',
@@ -154,7 +158,7 @@ describe('dashboard routes smoke & contract tests', () => {
     vi.restoreAllMocks();
   });
 
-  describe('renders all 13 routes with no selected node', () => {
+  describe('renders all 14 routes with no selected node', () => {
     for (const r of routes) {
       it(`renders ${r.path} (${r.name}) cleanly without a selected node`, () => {
         setSelectedNodeIp('');
@@ -168,7 +172,7 @@ describe('dashboard routes smoke & contract tests', () => {
     }
   });
 
-  describe('renders all 13 routes when a node is selected', () => {
+  describe('renders all 14 routes when a node is selected', () => {
     for (const r of routes) {
       it(`renders ${r.path} (${r.name}) with selected node`, () => {
         setSelectedNodeIp('192.168.1.50');

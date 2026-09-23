@@ -9,6 +9,10 @@
     curve = $bindable<TransitionCurve>('easeInOut'),
     durationMs = $bindable<number>(500),
     canMorph = false,
+  }: {
+    curve?: TransitionCurve;
+    durationMs?: number;
+    canMorph?: boolean;
   } = $props();
 
   const previewPath = $derived.by(() => {

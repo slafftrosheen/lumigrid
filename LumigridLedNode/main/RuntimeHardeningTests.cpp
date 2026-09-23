@@ -286,11 +286,12 @@ bool test_dmx_source_isolation() {
     dev_cfg.protocol.merge_mode = MergeMode::HTP;
     dev_cfg.protocol.stream_timeout_ms = 500;
 
-    // Fixture 0 mapped to Universe 1, channel 1
-    dev_cfg.fixtures[0].num_pixels = 4;
-    dev_cfg.fixtures[0].dmx_universe = 1;
-    dev_cfg.fixtures[0].dmx_start_channel = 1;
-    dev_cfg.fixtures[0].dmx_mode = 0; // RGB
+    // Channel 0 mapped to Universe 1, channel 1
+    dev_cfg.channels[0].enabled = true;
+    dev_cfg.channels[0].pixel_count = 4;
+    dev_cfg.channels[0].dmx_universe = 1;
+    dev_cfg.channels[0].dmx_start_channel = 1;
+    dev_cfg.channels[0].dmx_mode = 0; // RGB
 
     DmxRouter router(runtime, dev_cfg);
 
@@ -370,9 +371,10 @@ bool test_dmx_sequence() {
     DeviceConfig dev_cfg{};
     dev_cfg.protocol.sacn_enabled = true;
     dev_cfg.protocol.universe_start = 1;
-    dev_cfg.fixtures[0].num_pixels = 4;
-    dev_cfg.fixtures[0].dmx_universe = 1;
-    dev_cfg.fixtures[0].dmx_start_channel = 1;
+    dev_cfg.channels[0].enabled = true;
+    dev_cfg.channels[0].pixel_count = 4;
+    dev_cfg.channels[0].dmx_universe = 1;
+    dev_cfg.channels[0].dmx_start_channel = 1;
 
     DmxRouter router(runtime, dev_cfg);
     DmxSourceId src{DmxSourceProtocol::Sacn, {1, 2, 3, 4}};
@@ -436,7 +438,7 @@ bool test_config_migration() {
     v1->fixtures[8].profile = FixtureProfile::WS2812;
     v1->fixtures[8].num_pixels = 300;
 
-    auto v2 = std::make_unique<DeviceConfig>();
+    auto v2 = std::make_unique<DeviceConfigV2>();
     uint32_t warning_count = 0;
     bool ok = ConfigStore::migrate_v1_to_v2(*v1, *v2, &warning_count);
 
@@ -460,6 +462,14 @@ bool test_config_migration() {
     // Warnings must be reported for non-ideal cases
     assert(warning_count >= 3);
 
+    // Now migrate v2 to v3 (DeviceConfig)
+    auto v3 = std::make_unique<DeviceConfig>();
+    uint32_t v3_warnings = 0;
+    bool v3_ok = ConfigStore::migrate_v2_to_v3(*v2, *v3, &v3_warnings);
+    assert(v3_ok);
+    assert(v3->schema_version == 3);
+    assert(std::strcmp(v3->device_name, "stage_rig_01") == 0);
+
     // Persist & reload verification
     ConfigStore cfg_store;
     cfg_store.init();
@@ -467,21 +477,16 @@ bool test_config_migration() {
     DeviceConfig original_cfg{};
     bool had_original = (cfg_store.load_config(original_cfg) == ESP_OK);
 
-    // Persist migrated v2
-    esp_err_t save_err = cfg_store.save_config(*v2);
+    // Persist migrated v3
+    esp_err_t save_err = cfg_store.save_config(*v3);
     assert(save_err == ESP_OK);
 
     // Reload and verify
     DeviceConfig reloaded{};
     esp_err_t load_err = cfg_store.load_config(reloaded);
     assert(load_err == ESP_OK);
-    assert(reloaded.schema_version == 2);
+    assert(reloaded.schema_version == 3);
     assert(std::strcmp(reloaded.device_name, "stage_rig_01") == 0);
-    assert(reloaded.fixtures[4].zone_id == 2);
-    assert(reloaded.fixtures[6].zone_id == 1);
-    assert(reloaded.fixtures[7].zone_id == 0);
-    assert(reloaded.fixtures[8].num_pixels == 0);
-    assert(reloaded.checksum == v2->checksum);
 
     // Restore original config
     if (had_original) {
@@ -593,11 +598,11 @@ bool test_batch4_dmx_timeout_clearing() {
     DeviceConfig dev_cfg{};
     dev_cfg.protocol.universe_start = 1;
     dev_cfg.protocol.stream_timeout_ms = 300;
-    dev_cfg.fixtures[0].num_pixels = 4;
-    dev_cfg.fixtures[0].dmx_universe = 1;
-    dev_cfg.fixtures[0].dmx_start_channel = 1;
-    dev_cfg.fixtures[0].dmx_mode = 0; // wash
-    dev_cfg.fixtures[0].profile = FixtureProfile::WS2812;
+    dev_cfg.channels[0].enabled = true;
+    dev_cfg.channels[0].pixel_count = 4;
+    dev_cfg.channels[0].dmx_universe = 1;
+    dev_cfg.channels[0].dmx_start_channel = 1;
+    dev_cfg.channels[0].dmx_mode = 0; // wash
 
     DmxRouter router(runtime, dev_cfg);
     DmxSourceId src{DmxSourceProtocol::ArtNet, {192, 168, 1, 20}};
@@ -668,8 +673,8 @@ bool test_batch4_config_validation() {
 
     // 2. Too many pixels rejected
     DeviceConfig bad_pixels = cfg;
-    bad_pixels.fixtures[0].profile = FixtureProfile::WS2812;
-    bad_pixels.fixtures[0].num_pixels = MAX_PIXELS + 1; // 257 > 256
+    bad_pixels.channels[0].enabled = true;
+    bad_pixels.channels[0].pixel_count = MAX_PIXELS + 1; // 257 > 256
     assert(ConfigStore::validate_config(bad_pixels, &res) == ESP_ERR_INVALID_ARG);
     assert(res.valid == false);
     assert(res.error_count >= 1);
@@ -677,27 +682,29 @@ bool test_batch4_config_validation() {
     // Verify save_config does NOT silently mutate bad_pixels
     ConfigStore store;
     store.init();
-    uint16_t orig_pixels = bad_pixels.fixtures[0].num_pixels;
+    uint16_t orig_pixels = bad_pixels.channels[0].pixel_count;
     esp_err_t save_err = store.save_config(bad_pixels);
     assert(save_err == ESP_ERR_INVALID_ARG);
-    assert(bad_pixels.fixtures[0].num_pixels == orig_pixels); // Not mutated!
+    assert(bad_pixels.channels[0].pixel_count == orig_pixels); // Not mutated!
 
-    // 3. Invalid physical output index rejected
-    DeviceConfig bad_output = cfg;
-    bad_output.fixtures[0].physical_output_index[0] = 16; // >= 16
-    assert(ConfigStore::validate_config(bad_output, &res) == ESP_ERR_INVALID_ARG);
+    // 3. Invalid DMX universe rejected
+    DeviceConfig bad_dmx_uni = cfg;
+    bad_dmx_uni.channels[0].enabled = true;
+    bad_dmx_uni.channels[0].dmx_start_channel = 1;
+    bad_dmx_uni.channels[0].dmx_universe = 64000; // > 63999
+    assert(ConfigStore::validate_config(bad_dmx_uni, &res) == ESP_ERR_INVALID_ARG);
 
     // 4. DMX overflow rejected (wash mode RGB needs 3 channels)
     DeviceConfig bad_dmx = cfg;
-    bad_dmx.fixtures[0].profile = FixtureProfile::WS2812;
-    bad_dmx.fixtures[0].dmx_start_channel = 511; // 511 + 3 - 1 = 513 > 512
-    bad_dmx.fixtures[0].dmx_mode = 0;
+    bad_dmx.channels[0].enabled = true;
+    bad_dmx.channels[0].dmx_start_channel = 511; // 511 + 3 - 1 = 513 > 512
+    bad_dmx.channels[0].dmx_mode = 0;
     assert(ConfigStore::validate_config(bad_dmx, &res) == ESP_ERR_INVALID_ARG);
 
-    // 5. Invalid zone_id rejected
-    DeviceConfig bad_zone = cfg;
-    bad_zone.fixtures[0].zone_id = 8; // >= 8
-    assert(ConfigStore::validate_config(bad_zone, &res) == ESP_ERR_INVALID_ARG);
+    // 5. Invalid protocol layer rejected
+    DeviceConfig bad_layer = cfg;
+    bad_layer.protocol.live_stream_layer = 3; // >= 3
+    assert(ConfigStore::validate_config(bad_layer, &res) == ESP_ERR_INVALID_ARG);
 
     // 6. Sane gamma range checked
     DeviceConfig bad_gamma = cfg;
@@ -932,10 +939,11 @@ bool test_batch5_patch_update_invalidation() {
 
     DeviceConfig cfg1{};
     cfg1.protocol.universe_start = 10; // Zone wash on 10
-    cfg1.fixtures[0].num_pixels = 4;
-    cfg1.fixtures[0].dmx_universe = 1; // Fixture 0 on Universe 1
-    cfg1.fixtures[0].dmx_start_channel = 1;
-    cfg1.fixtures[0].dmx_mode = 0;
+    cfg1.channels[0].enabled = true;
+    cfg1.channels[0].pixel_count = 4;
+    cfg1.channels[0].dmx_universe = 1; // Channel 0 on Universe 1
+    cfg1.channels[0].dmx_start_channel = 1;
+    cfg1.channels[0].dmx_mode = 0;
 
     DmxRouter router(runtime, cfg1);
     DmxSourceId src{DmxSourceProtocol::ArtNet, {192, 168, 1, 50}};
@@ -944,9 +952,9 @@ bool test_batch5_patch_update_invalidation() {
     router.process_frame(1, data.data(), data.size(), 100, src, 1);
     assert(router.get_stats().packets_accepted == 1);
 
-    // Update config to move fixture 0 from universe 1 to universe 2
+    // Update config to move channel 0 from universe 1 to universe 2
     DeviceConfig cfg2 = cfg1;
-    cfg2.fixtures[0].dmx_universe = 2;
+    cfg2.channels[0].dmx_universe = 2;
     router.update_config(cfg2);
 
     // Sending packet to universe 1 must now be ignored as unpatched!
@@ -1056,48 +1064,30 @@ bool test_batch5_dmx_span_validation() {
 bool test_batch5_output_mapping_validation() {
     ESP_LOGI(TAG, "Testing Batch 5 Test F: Output Mapping Validation...");
 
-    // 1. Invalid RMT hardware_id (>= 8)
-    DeviceConfig cfg_bad_rmt{};
-    cfg_bad_rmt.physical_outputs[0].enabled = true;
-    cfg_bad_rmt.physical_outputs[0].type = OutputType::RMT;
-    cfg_bad_rmt.physical_outputs[0].hardware_id = 8; // out of range [0..7]
-    ConfigStore::ConfigValidationResult res_rmt;
-    assert(ConfigStore::validate_config(cfg_bad_rmt, &res_rmt) != ESP_OK);
-    assert(res_rmt.error_count > 0);
+    // 1. Invalid pixel_count (> MAX_PIXELS)
+    DeviceConfig cfg_bad_pixels{};
+    cfg_bad_pixels.channels[0].enabled = true;
+    cfg_bad_pixels.channels[0].pixel_count = MAX_PIXELS + 1;
+    ConfigStore::ConfigValidationResult res_pix;
+    assert(ConfigStore::validate_config(cfg_bad_pixels, &res_pix) != ESP_OK);
+    assert(res_pix.error_count > 0);
 
-    // 2. Invalid PWM hardware_id (>= 8)
-    DeviceConfig cfg_bad_pwm{};
-    cfg_bad_pwm.physical_outputs[0].enabled = true;
-    cfg_bad_pwm.physical_outputs[0].type = OutputType::PWM;
-    cfg_bad_pwm.physical_outputs[0].hardware_id = 8; // out of range [0..7]
-    ConfigStore::ConfigValidationResult res_pwm;
-    assert(ConfigStore::validate_config(cfg_bad_pwm, &res_pwm) != ESP_OK);
-    assert(res_pwm.error_count > 0);
+    // 2. Invalid DMX universe (> 63999)
+    DeviceConfig cfg_bad_dmx{};
+    cfg_bad_dmx.channels[0].enabled = true;
+    cfg_bad_dmx.channels[0].dmx_start_channel = 1;
+    cfg_bad_dmx.channels[0].dmx_universe = 64000;
+    ConfigStore::ConfigValidationResult res_dmx;
+    assert(ConfigStore::validate_config(cfg_bad_dmx, &res_dmx) != ESP_OK);
+    assert(res_dmx.error_count > 0);
 
-    // 3. Unsupported output type (SPI)
-    DeviceConfig cfg_bad_spi{};
-    cfg_bad_spi.physical_outputs[0].enabled = true;
-    cfg_bad_spi.physical_outputs[0].type = OutputType::SPI;
-    ConfigStore::ConfigValidationResult res_spi;
-    assert(ConfigStore::validate_config(cfg_bad_spi, &res_spi) != ESP_OK);
-    assert(res_spi.error_count > 0);
-
-    // 4. Active fixture referencing disabled physical output
-    DeviceConfig cfg_disabled_phys{};
-    cfg_disabled_phys.physical_outputs[0].enabled = false;
-    cfg_disabled_phys.physical_outputs[0].type = OutputType::RMT;
-    cfg_disabled_phys.physical_outputs[0].hardware_id = 0;
-    cfg_disabled_phys.fixtures[0].profile = FixtureProfile::WS2812;
-    cfg_disabled_phys.fixtures[0].num_pixels = 10;
-    cfg_disabled_phys.fixtures[0].physical_output_index[0] = 0;
-    ConfigStore::ConfigValidationResult res_dis;
-    assert(ConfigStore::validate_config(cfg_disabled_phys, &res_dis) != ESP_OK);
-    assert(res_dis.error_count > 0);
-
-    // 5. OutputScheduler Pass 1 pre-validation
+    // 3. OutputScheduler Pass 1 pre-validation: enabled addressable channel with 0 pixels
+    DeviceConfig cfg_bad_sched{};
+    cfg_bad_sched.channels[0].enabled = true;
+    cfg_bad_sched.channels[0].pixel_count = 0;
     OutputController ctrl;
     RenderFrame frame{};
-    esp_err_t sched_err = OutputScheduler::schedule(frame, cfg_disabled_phys, ctrl);
+    esp_err_t sched_err = OutputScheduler::schedule(frame, cfg_bad_sched, ctrl);
     assert(sched_err == ESP_ERR_INVALID_ARG);
 
     ESP_LOGI(TAG, "[PASS] Batch 5 Test F passed.");
@@ -1166,20 +1156,13 @@ bool test_batch5_config_reload_transactional_safety() {
 bool test_batch6_unused_output_slots() {
     ESP_LOGI(TAG, "Testing Batch 6 Test A: Unused output slots...");
     auto cfg = std::make_unique<DeviceConfig>();
-    cfg->schema_version = 2;
-    cfg->physical_outputs[0].enabled = true;
-    cfg->physical_outputs[0].type = OutputType::RMT;
-    cfg->physical_outputs[0].hardware_id = 0;
-    cfg->physical_outputs[0].gpio_pin = 13;
-    cfg->fixtures[0].profile = FixtureProfile::WS2812;
-    cfg->fixtures[0].num_pixels = 10;
-    cfg->fixtures[0].physical_output_index[0] = 0;
+    cfg->schema_version = 3;
+    cfg->channels[0].enabled = true;
+    cfg->channels[0].pixel_count = 10;
 
     // Slot 5 is disabled but has arbitrary/garbage fields
-    cfg->physical_outputs[5].enabled = false;
-    cfg->physical_outputs[5].type = static_cast<OutputType>(99);
-    cfg->physical_outputs[5].hardware_id = 250;
-    cfg->physical_outputs[5].gpio_pin = 250;
+    cfg->channels[5].enabled = false;
+    cfg->channels[5].pixel_count = 5000;
 
     ConfigStore::ConfigValidationResult res;
     esp_err_t err = ConfigStore::validate_config(*cfg, &res);
@@ -1196,11 +1179,10 @@ bool test_batch6_unused_output_slots() {
 bool test_batch6_enabled_bad_output() {
     ESP_LOGI(TAG, "Testing Batch 6 Test B: Enabled bad output...");
     auto cfg = std::make_unique<DeviceConfig>();
-    cfg->schema_version = 2;
-    // Slot 1 is enabled with invalid hardware_id >= AddressableDriver::kLanes
-    cfg->physical_outputs[1].enabled = true;
-    cfg->physical_outputs[1].type = OutputType::RMT;
-    cfg->physical_outputs[1].hardware_id = AddressableDriver::kLanes + 2;
+    cfg->schema_version = 3;
+    // Channel 1 is enabled with invalid pixel_count > MAX_PIXELS
+    cfg->channels[1].enabled = true;
+    cfg->channels[1].pixel_count = MAX_PIXELS + 10;
 
     ConfigStore::ConfigValidationResult res;
     esp_err_t err = ConfigStore::validate_config(*cfg, &res);
@@ -1217,9 +1199,9 @@ bool test_batch6_enabled_bad_output() {
 bool test_batch6_unused_fixture() {
     ESP_LOGI(TAG, "Testing Batch 6 Test C: Unused fixture...");
     auto cfg = std::make_unique<DeviceConfig>();
-    cfg->schema_version = 2;
-    // Fixture 7 is default unused (num_pixels = 0, no enabled physical output)
-    assert(ConfigStore::is_fixture_configured(cfg->fixtures[7], *cfg) == false);
+    cfg->schema_version = 3;
+    // Default config has all channels disabled
+    assert(ConfigStore::has_configured_fixtures(*cfg) == false);
 
     ConfigStore::ConfigValidationResult res;
     esp_err_t err = ConfigStore::validate_config(*cfg, &res);
@@ -1236,15 +1218,11 @@ bool test_batch6_unused_fixture() {
 bool test_batch6_configured_fixture() {
     ESP_LOGI(TAG, "Testing Batch 6 Test D: Configured fixture...");
     auto cfg = std::make_unique<DeviceConfig>();
-    cfg->schema_version = 2;
-    cfg->physical_outputs[0].enabled = true;
-    cfg->physical_outputs[0].type = OutputType::RMT;
-    cfg->physical_outputs[0].hardware_id = 0;
-    cfg->fixtures[0].profile = FixtureProfile::WS2812;
-    cfg->fixtures[0].num_pixels = 30;
-    cfg->fixtures[0].physical_output_index[0] = 0;
+    cfg->schema_version = 3;
+    cfg->channels[0].enabled = true;
+    cfg->channels[0].pixel_count = 30;
 
-    assert(ConfigStore::is_fixture_configured(cfg->fixtures[0], *cfg) == true);
+    assert(ConfigStore::has_configured_fixtures(*cfg) == true);
     ConfigStore::ConfigValidationResult res;
     esp_err_t err = ConfigStore::validate_config(*cfg, &res);
     assert(err == ESP_OK);
@@ -1489,13 +1467,17 @@ bool test_batch6_config_migration() {
     v1->max_power_mw = 25000;
     v1->protocol.universe_start = 1;
 
-    auto v2 = std::make_unique<DeviceConfig>();
+    auto v2 = std::make_unique<DeviceConfigV2>();
     assert(ConfigStore::migrate_v1_to_v2(*v1, *v2) == true);
     assert(v2->schema_version == 2);
     assert(std::strcmp(v2->device_name, "Lumigrid-V1-Node") == 0);
 
+    auto v3 = std::make_unique<DeviceConfig>();
+    assert(ConfigStore::migrate_v2_to_v3(*v2, *v3) == true);
+    assert(v3->schema_version == 3);
+
     ConfigStore::ConfigValidationResult val_res;
-    esp_err_t val_err = ConfigStore::validate_config(*v2, &val_res);
+    esp_err_t val_err = ConfigStore::validate_config(*v3, &val_res);
     assert(val_err == ESP_OK);
     assert(val_res.valid == true);
 
@@ -1516,109 +1498,44 @@ bool test_batch7_topology_validation() {
     cfg->protocol.live_stream_layer = 2;
 
     for (int p = 0; p < 16; ++p) {
-        cfg->physical_outputs[p].enabled = false;
-        cfg->physical_outputs[p].type = OutputType::RMT;
-        cfg->physical_outputs[p].hardware_id = 255;
-    }
-    for (int f = 0; f < 16; ++f) {
-        cfg->fixtures[f].num_pixels = 0;
-        cfg->fixtures[f].dmx_start_channel = 0;
+        cfg->channels[p].enabled = false;
     }
 
-    // A. Unused physical output: disabled + garbage hardware_id -> valid
-    cfg->physical_outputs[15].enabled = false;
-    cfg->physical_outputs[15].hardware_id = 99;
+    // A. Unused channel: disabled + garbage pixel_count -> valid
+    cfg->channels[15].enabled = false;
+    cfg->channels[15].pixel_count = 5000;
     ConfigStore::ConfigValidationResult res;
     assert(ConfigStore::validate_config(*cfg, &res) == ESP_OK);
 
-    // B. Used physical output: enabled + invalid hardware_id -> invalid
-    cfg->physical_outputs[0].enabled = true;
-    cfg->physical_outputs[0].type = OutputType::RMT;
-    cfg->physical_outputs[0].hardware_id = MAX_RMT_LANES + 1;
+    // B. Used addressable channel: enabled + invalid pixel_count -> invalid
+    cfg->channels[0].enabled = true;
+    cfg->channels[0].pixel_count = MAX_PIXELS + 1;
     assert(ConfigStore::validate_config(*cfg, &res) != ESP_OK);
-    cfg->physical_outputs[0].hardware_id = 0; // Fix
-
-    // C. Addressable fixture uses ONLY physical_output_index[0] (Option A)
-    // Extra indices [1..3] with garbage do not fail validation
-    cfg->fixtures[0].profile = FixtureProfile::WS2812;
-    cfg->fixtures[0].num_pixels = 60;
-    cfg->fixtures[0].zone_id = 0;
-    cfg->fixtures[0].physical_output_index[0] = 0;
-    cfg->fixtures[0].physical_output_index[1] = 255; // Unused under Option A
-    cfg->fixtures[0].physical_output_index[2] = 255;
-    cfg->fixtures[0].physical_output_index[3] = 255;
+    cfg->channels[0].pixel_count = 60; // Fix
     assert(ConfigStore::validate_config(*cfg, &res) == ESP_OK);
 
-    // D. Two addressable fixtures -> same RMT lane -> reject aliasing!
-    cfg->physical_outputs[1].enabled = true;
-    cfg->physical_outputs[1].type = OutputType::RMT;
-    cfg->physical_outputs[1].hardware_id = 0; // Same RMT hardware lane 0!
-    cfg->fixtures[1].profile = FixtureProfile::WS2812;
-    cfg->fixtures[1].num_pixels = 30;
-    cfg->fixtures[1].zone_id = 0;
-    cfg->fixtures[1].physical_output_index[0] = 1;
+    // C. DMX start channel overflow -> invalid
+    cfg->channels[1].enabled = true;
+    cfg->channels[1].pixel_count = 10;
+    cfg->channels[1].dmx_start_channel = 510;
+    cfg->channels[1].dmx_mode = 0; // RGB needs 3 channels: 510 + 3 - 1 = 512 -> valid
+    assert(ConfigStore::validate_config(*cfg, &res) == ESP_OK);
+    cfg->channels[1].dmx_start_channel = 511; // 511 + 3 - 1 = 513 > 512 -> invalid
     assert(ConfigStore::validate_config(*cfg, &res) != ESP_OK);
-    cfg->physical_outputs[1].hardware_id = 1; // Distinct RMT lane 1 -> valid!
+    cfg->channels[1].dmx_start_channel = 1;
     assert(ConfigStore::validate_config(*cfg, &res) == ESP_OK);
 
-    // E. PWM RGB requires indices 0..2 (Option A)
-    cfg->physical_outputs[2].enabled = true;
-    cfg->physical_outputs[2].type = OutputType::PWM;
-    cfg->physical_outputs[2].hardware_id = 0;
-    cfg->physical_outputs[3].enabled = true;
-    cfg->physical_outputs[3].type = OutputType::PWM;
-    cfg->physical_outputs[3].hardware_id = 1;
-    cfg->physical_outputs[4].enabled = true;
-    cfg->physical_outputs[4].type = OutputType::PWM;
-    cfg->physical_outputs[4].hardware_id = 2;
-
-    cfg->fixtures[2].profile = FixtureProfile::PWM_RGB;
-    cfg->fixtures[2].zone_id = 1;
-    cfg->fixtures[2].physical_output_index[0] = 2;
-    cfg->fixtures[2].physical_output_index[1] = 3;
-    cfg->fixtures[2].physical_output_index[2] = 4;
-    cfg->fixtures[2].physical_output_index[3] = 255; // Unused for RGB
+    // D. PWM channel with valid DMX universe
+    cfg->channels[8].enabled = true;
+    cfg->channels[8].dmx_start_channel = 1;
+    cfg->channels[8].dmx_universe = 1;
     assert(ConfigStore::validate_config(*cfg, &res) == ESP_OK);
 
-    // F. Two PWM fixtures -> same PWM channel -> reject aliasing!
-    cfg->physical_outputs[5].enabled = true;
-    cfg->physical_outputs[5].type = OutputType::PWM;
-    cfg->physical_outputs[5].hardware_id = 0; // Aliased PWM channel 0!
-    cfg->fixtures[3].profile = FixtureProfile::PWM_Single;
-    cfg->fixtures[3].zone_id = 2;
-    cfg->fixtures[3].physical_output_index[0] = 5;
+    // E. Invalid DMX universe (> 63999) -> invalid
+    cfg->channels[8].dmx_universe = 64000;
     assert(ConfigStore::validate_config(*cfg, &res) != ESP_OK);
-    cfg->physical_outputs[5].hardware_id = 3; // Distinct PWM channel 3 -> valid!
+    cfg->channels[8].dmx_universe = 1;
     assert(ConfigStore::validate_config(*cfg, &res) == ESP_OK);
-
-    // G. PWM RGBW requires all 0..3 physical outputs
-    cfg->physical_outputs[6].enabled = true;
-    cfg->physical_outputs[6].type = OutputType::PWM;
-    cfg->physical_outputs[6].hardware_id = 4;
-    cfg->physical_outputs[7].enabled = true;
-    cfg->physical_outputs[7].type = OutputType::PWM;
-    cfg->physical_outputs[7].hardware_id = 5;
-    cfg->physical_outputs[8].enabled = true;
-    cfg->physical_outputs[8].type = OutputType::PWM;
-    cfg->physical_outputs[8].hardware_id = 6;
-    cfg->physical_outputs[9].enabled = false; // Disabled 4th channel!
-    cfg->physical_outputs[9].type = OutputType::PWM;
-    cfg->physical_outputs[9].hardware_id = 7;
-
-    cfg->fixtures[4].profile = FixtureProfile::PWM_RGBW;
-    cfg->fixtures[4].zone_id = 3;
-    cfg->fixtures[4].physical_output_index[0] = 6;
-    cfg->fixtures[4].physical_output_index[1] = 7;
-    cfg->fixtures[4].physical_output_index[2] = 8;
-    cfg->fixtures[4].physical_output_index[3] = 9;
-    assert(ConfigStore::validate_config(*cfg, &res) != ESP_OK); // Fails because slot 9 is disabled!
-    cfg->physical_outputs[9].enabled = true;
-    assert(ConfigStore::validate_config(*cfg, &res) == ESP_OK);
-
-    // H. Unsupported output type on enabled slot -> invalid
-    cfg->physical_outputs[10].enabled = true;
-    cfg->physical_outputs[10].type = static_cast<OutputType>(99);
-    assert(ConfigStore::validate_config(*cfg, &res) != ESP_OK);
 
     ESP_LOGI(TAG, "[PASS] Batch 7 Test A passed.");
     return true;
@@ -1689,11 +1606,11 @@ bool test_batch7_router_to_runtime_integration() {
     cfg->protocol.artnet_enabled = true;
     cfg->protocol.stream_timeout_ms = 500;
 
-    cfg->fixtures[0].profile = FixtureProfile::WS2812;
-    cfg->fixtures[0].num_pixels = 10;
-    cfg->fixtures[0].dmx_universe = 1;
-    cfg->fixtures[0].dmx_start_channel = 25; // Channels 25..54
-    cfg->fixtures[0].dmx_mode = 0; // Wash mode
+    cfg->channels[0].enabled = true;
+    cfg->channels[0].pixel_count = 10;
+    cfg->channels[0].dmx_universe = 1;
+    cfg->channels[0].dmx_start_channel = 25; // Channels 25..54
+    cfg->channels[0].dmx_mode = 0; // Wash mode
 
     DmxRouter router(runtime, *cfg);
 
@@ -2007,12 +1924,8 @@ bool test_batch8_output_transaction_and_fault_unification() {
 
     // Candidate reconfigure failure & topology validity policy (Requirement 15)
     DeviceConfig bad_cfg{};
-    bad_cfg.physical_outputs[0].type = OutputType::RMT;
-    bad_cfg.physical_outputs[0].gpio_pin = 13;
-    bad_cfg.physical_outputs[0].enabled = true;
-    bad_cfg.physical_outputs[1].type = OutputType::RMT;
-    bad_cfg.physical_outputs[1].gpio_pin = 13; // Duplicate GPIO pin conflict!
-    bad_cfg.physical_outputs[1].enabled = true;
+    bad_cfg.channels[0].enabled = true;
+    bad_cfg.channels[0].pixel_count = 5000; // > MAX_PIXELS (256)
 
     esp_err_t reconf_err = ctrl.reconfigure(bad_cfg);
     assert(reconf_err != ESP_OK);
@@ -2040,10 +1953,10 @@ bool test_batch8_dmx_ltp_same_ms_tie_and_expiry() {
     DeviceConfig cfg{};
     cfg.protocol.merge_mode = MergeMode::LTP;
     cfg.protocol.stream_timeout_ms = 500;
-    cfg.fixtures[0].profile = FixtureProfile::WS2812;
-    cfg.fixtures[0].num_pixels = 4;
-    cfg.fixtures[0].dmx_universe = 1;
-    cfg.fixtures[0].dmx_start_channel = 1;
+    cfg.channels[0].enabled = true;
+    cfg.channels[0].pixel_count = 4;
+    cfg.channels[0].dmx_universe = 1;
+    cfg.channels[0].dmx_start_channel = 1;
     router.update_config(cfg);
 
     // Simulate two distinct Art-Net sources arriving in the EXACT same millisecond
@@ -2095,10 +2008,10 @@ bool test_batch8_dmx_source_capacity_policy() {
 
     DeviceConfig cfg{};
     cfg.protocol.stream_timeout_ms = 1000;
-    cfg.fixtures[0].profile = FixtureProfile::WS2812;
-    cfg.fixtures[0].num_pixels = 4;
-    cfg.fixtures[0].dmx_universe = 1;
-    cfg.fixtures[0].dmx_start_channel = 1;
+    cfg.channels[0].enabled = true;
+    cfg.channels[0].pixel_count = 4;
+    cfg.channels[0].dmx_universe = 1;
+    cfg.channels[0].dmx_start_channel = 1;
     router.update_config(cfg);
 
     // Register 4 distinct sources
@@ -2141,10 +2054,10 @@ bool test_batch8_dmx_partial_expiration_both_directions_and_reuse() {
     cfg.protocol.merge_mode = MergeMode::HTP;
     cfg.protocol.stream_timeout_ms = 500;
     cfg.protocol.universe_start = 1;
-    cfg.fixtures[0].profile = FixtureProfile::WS2812;
-    cfg.fixtures[0].num_pixels = 4;
-    cfg.fixtures[0].dmx_universe = 1;
-    cfg.fixtures[0].dmx_start_channel = 1;
+    cfg.channels[0].enabled = true;
+    cfg.channels[0].pixel_count = 4;
+    cfg.channels[0].dmx_universe = 1;
+    cfg.channels[0].dmx_start_channel = 1;
     router.update_config(cfg);
 
     DmxSourceId srcA{DmxSourceProtocol::Sacn, {1, 0, 0, 0}};
@@ -2212,10 +2125,10 @@ bool test_batch8_dmx_partial_expiration_both_directions_and_reuse() {
     assert(runtime.current_control_source() == ControlSource::Idle);
 
     // ── Universe Slot Reuse Protection (Requirement 8) ──
-    cfg.fixtures[1].profile = FixtureProfile::WS2812;
-    cfg.fixtures[1].num_pixels = 4;
-    cfg.fixtures[1].dmx_universe = 2;
-    cfg.fixtures[1].dmx_start_channel = 1;
+    cfg.channels[1].enabled = true;
+    cfg.channels[1].pixel_count = 4;
+    cfg.channels[1].dmx_universe = 2;
+    cfg.channels[1].dmx_start_channel = 1;
     router.update_config(cfg);
 
     // Universe 1 active with distinct data
@@ -2266,15 +2179,15 @@ bool test_batch8_protocol_consistency_and_artnet_serialization() {
 
     DeviceConfig cfg{};
     cfg.protocol.universe_start = 1;
-    cfg.fixtures[0].profile = FixtureProfile::WS2812;
-    cfg.fixtures[0].num_pixels = 4;
-    cfg.fixtures[0].dmx_universe = 1;
-    cfg.fixtures[0].dmx_start_channel = 1;
+    cfg.channels[0].enabled = true;
+    cfg.channels[0].pixel_count = 4;
+    cfg.channels[0].dmx_universe = 1;
+    cfg.channels[0].dmx_start_channel = 1;
 
-    cfg.fixtures[1].profile = FixtureProfile::WS2812;
-    cfg.fixtures[1].num_pixels = 4;
-    cfg.fixtures[1].dmx_universe = 16;
-    cfg.fixtures[1].dmx_start_channel = 1;
+    cfg.channels[1].enabled = true;
+    cfg.channels[1].pixel_count = 4;
+    cfg.channels[1].dmx_universe = 16;
+    cfg.channels[1].dmx_start_channel = 1;
 
     router.update_config(cfg);
 
@@ -2480,12 +2393,9 @@ bool test_batch9_burnin_blockers() {
 
         DeviceConfig cfg{};
         // Setup 1 addressable fixture
-        cfg.fixtures[0].profile = FixtureProfile::WS2812;
-        cfg.fixtures[0].num_pixels = 30;
-        cfg.fixtures[0].physical_output_index[0] = 0;
-        cfg.physical_outputs[0].enabled = true;
-        cfg.physical_outputs[0].type = OutputType::RMT;
-        cfg.physical_outputs[0].hardware_id = 0;
+        cfg.channels[0].enabled = true;
+        cfg.channels[0].pixel_count = 30;
+        cfg.channels[0].addressable_type = AddressableType::WS2812;
 
         // Addressable-only configuration MUST SUCCEED even when PCA9685 is unavailable
         esp_err_t err = ctrl.reconfigure(cfg);
@@ -2493,12 +2403,7 @@ bool test_batch9_burnin_blockers() {
         assert(ctrl.is_topology_valid() == true);
 
         // Now configure a PWM fixture while PCA9685 is unavailable
-        cfg.fixtures[1].profile = FixtureProfile::PWM_Single;
-        cfg.fixtures[1].num_pixels = 1;
-        cfg.fixtures[1].physical_output_index[0] = 1;
-        cfg.physical_outputs[1].enabled = true;
-        cfg.physical_outputs[1].type = OutputType::PWM;
-        cfg.physical_outputs[1].hardware_id = 0;
+        cfg.channels[8].enabled = true;
 
         // MUST BE REJECTED with ESP_ERR_NOT_FOUND
         err = ctrl.reconfigure(cfg);
@@ -2921,6 +2826,141 @@ bool test_lg022_show_engine() {
     return true;
 }
 
+// ============================================================================
+// LG-024 Live Desk & Manual Override Hardening Tests
+// ============================================================================
+bool test_lg024_live_desk_and_manual_override() {
+    ESP_LOGI(TAG, "Testing LG-024 Live Desk & Manual Override...");
+
+    // 1. Channel-scoped ownership arbitration & preemption
+    {
+        ControlSourceManager csm;
+        csm.init();
+
+        const uint32_t t_base = 10000;
+        uint32_t now = t_base;
+
+        // Scene owns all 16 channels indefinitely
+        csm.acquire(ControlSource::ScenePlayback, 0, 0xFF, 0x07, 0xFFFF);
+        auto snap = csm.get_snapshot(now);
+        for (uint8_t ch = 0; ch < 16; ch++) {
+            assert(snap.resolve_channel(ch, now) == ControlSource::ScenePlayback);
+        }
+
+        // ManualOverride claims A1 only (channel 0, mask 0x0001) with 15s lease (expires at t_base + 15000)
+        csm.acquire(ControlSource::ManualOverride, 15000, 0x01, 0x01, 0x0001);
+        now = t_base + 1000;
+        snap = csm.get_snapshot(now);
+        assert(snap.resolve_channel(0, now) == ControlSource::ManualOverride);
+        for (uint8_t ch = 1; ch < 16; ch++) {
+            assert(snap.resolve_channel(ch, now) == ControlSource::ScenePlayback);
+        }
+
+        // LiveDmx claims A1 (channel 0, mask 0x0001) with 3s lease
+        csm.acquire(ControlSource::LiveDmx, 3000, 0x01, 0x01, 0x0001);
+        now = t_base + 2000;
+        snap = csm.get_snapshot(now);
+        assert(snap.resolve_channel(0, now) == ControlSource::LiveDmx);
+        for (uint8_t ch = 1; ch < 16; ch++) {
+            assert(snap.resolve_channel(ch, now) == ControlSource::ScenePlayback);
+        }
+
+        // Release LiveDmx before manual lease expires (manual lease alive until t_base + 15000)
+        csm.release(ControlSource::LiveDmx);
+        now = t_base + 3000;
+        snap = csm.get_snapshot(now);
+        assert(snap.resolve_channel(0, now) == ControlSource::ManualOverride);
+        for (uint8_t ch = 1; ch < 16; ch++) {
+            assert(snap.resolve_channel(ch, now) == ControlSource::ScenePlayback);
+        }
+
+        // Expire ManualOverride lease (advance time beyond t_base + 15000)
+        now = t_base + 16000;
+        snap = csm.get_snapshot(now);
+        assert(snap.resolve_channel(0, now) == ControlSource::ScenePlayback);
+        for (uint8_t ch = 1; ch < 16; ch++) {
+            assert(snap.resolve_channel(ch, now) == ControlSource::ScenePlayback);
+        }
+    }
+
+    // 2. Factory and E-Stop preemption over ManualOverride
+    {
+        ControlSourceManager csm;
+        csm.init();
+        uint32_t now = 5000;
+
+        csm.acquire(ControlSource::ManualOverride, 15000, 0xFF, 0x07, 0xFFFF);
+        assert(csm.resolve(0, 0, now) == ControlSource::ManualOverride);
+
+        // Factory preempts ManualOverride
+        csm.acquire(ControlSource::Factory, 5000, 0xFF, 0x07, 0xFFFF);
+        assert(csm.resolve(0, 0, now) == ControlSource::Factory);
+        assert(csm.get_snapshot(now).resolve_channel(0, now) == ControlSource::Factory);
+
+        // Releasing Factory restores ManualOverride
+        csm.release(ControlSource::Factory);
+        assert(csm.resolve(0, 0, now) == ControlSource::ManualOverride);
+        assert(csm.get_snapshot(now).resolve_channel(0, now) == ControlSource::ManualOverride);
+
+        // E-Stop preempts everything and latches
+        csm.acquire(ControlSource::EStop, 0, 0xFF, 0x07, 0xFFFF);
+        assert(csm.resolve(0, 0, now) == ControlSource::EStop);
+        assert(csm.get_snapshot(now).resolve_channel(0, now) == ControlSource::EStop);
+    }
+
+    // 3. LightingRuntime integration: submission, mixed frame, status, release, E-Stop
+    {
+        OutputController ctrl;
+        ConfigStore cfg_store;
+        ControlSourceManager csm;
+        csm.init();
+        LightingRuntime runtime(csm, ctrl, cfg_store);
+
+        // Submit mixed manual frame: A1 red @ 50% (brightness 128), P1 PWM 2048
+        ManualOverrideFrame frame{};
+        frame.channels[0].active = true;
+        frame.channels[0].color = LightValue(255, 0, 0, 0);
+        frame.channels[0].brightness = 128;
+
+        frame.channels[8].active = true;
+        frame.channels[8].pwm = 2048;
+
+        frame.channel_mask = (1 << 0) | (1 << 8); // 257
+
+        bool submitted = runtime.submit_manual_override(frame, 15000);
+        assert(submitted);
+
+        ManualControlStatus status = runtime.manual_control_status();
+        assert(status.active == true);
+        assert(status.channel_mask == 257);
+        assert(status.lease_remaining_ms > 0 && status.lease_remaining_ms <= 15000);
+
+        // Verify channel values in manual state
+        assert(frame.channels[0].color.r == 255);
+        assert(frame.channels[0].color.g == 0);
+        assert(frame.channels[0].color.b == 0);
+        assert(frame.channels[0].brightness == 128);
+        assert(frame.channels[8].pwm == 2048);
+
+        // Release / DELETE manual override clears transient state
+        runtime.clear_manual_override();
+        status = runtime.manual_control_status();
+        assert(status.active == false);
+        assert(status.channel_mask == 0);
+        assert(status.lease_remaining_ms == 0);
+
+        // E-Stop clears manual override and latches controller
+        runtime.submit_manual_override(frame, 15000);
+        assert(runtime.manual_control_status().active == true);
+        runtime.trigger_estop();
+        assert(runtime.manual_control_status().active == false);
+        assert(ctrl.is_estop_latched() == true);
+    }
+
+    ESP_LOGI(TAG, "[PASS] LG-024 Live Desk & Manual Override tests passed.");
+    return true;
+}
+
 } // namespace
 
 bool run_runtime_hardening_tests() {
@@ -2994,6 +3034,9 @@ bool run_runtime_hardening_tests() {
 
     // LG-022 Show Engine Tests
     all_ok &= test_lg022_show_engine();
+
+    // LG-024 Live Desk & Manual Override Tests
+    all_ok &= test_lg024_live_desk_and_manual_override();
 
     if (all_ok) {
         ESP_LOGI(TAG, "==================================================");

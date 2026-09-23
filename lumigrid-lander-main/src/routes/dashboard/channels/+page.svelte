@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { getChannels, testChannel, type HardwareChannel } from '$lib/api/channels';
   import { getDeviceConfig, saveDeviceConfig, type DeviceConfig, type ChannelConfig, type ChannelGroup } from '$lib/api/config';
-  import { postFactoryPwm } from '$lib/api/factory';
+  import { putManualState } from '$lib/api/manual';
   import { getSelectedNodeIp } from '$lib/auth/storage';
   import { nodeStore } from '$lib/state/nodeStore';
 
@@ -63,6 +63,46 @@
 
   const pwmActiveCount = $derived.by(() => {
     return pwmChannels.filter(c => c.enabled).length;
+  });
+
+  let isAdmin = $derived($nodeStore.dashboardRole === 'admin');
+
+  // Groups state
+  let editingGroup = $state<ChannelGroup | null>(null);
+  let editingGroupIdx = $state<number>(-1);
+  let groupForm = $state<{
+    name: string;
+    enabled: boolean;
+    channels: boolean[];
+  }>({
+    name: '',
+    enabled: false,
+    channels: Array(16).fill(false),
+  });
+  let savingGroup = $state(false);
+
+  const displayGroups = $derived.by(() => {
+    if (!config?.groups) return [];
+    return config.groups.slice(0, 8).map((grp, idx) => {
+      const mask = grp.channelMask ?? 0;
+      const memberChannels: string[] = [];
+      for (let i = 0; i < 16; i++) {
+        if ((mask & (1 << i)) !== 0) {
+          memberChannels.push(i < 8 ? `A${i + 1}` : `P${i - 7}`);
+        }
+      }
+      return {
+        ...grp,
+        index: idx,
+        name: grp.name || `Group ${idx + 1}`,
+        memberChannels,
+        memberCount: memberChannels.length,
+      };
+    });
+  });
+
+  const activeGroupCount = $derived.by(() => {
+    return displayGroups.filter(g => g.enabled).length;
   });
 
   // Local tracking of PWM duty for live sliders (0..100%)
@@ -126,7 +166,7 @@
     const duty12 = Math.round((clamped / 100) * 4095);
     pwmLastSentAt[ch.index] = Date.now();
     try {
-      await postFactoryPwm(nodeIp, ch.hardwareId, duty12, 10000);
+      await putManualState(nodeIp, [{ index: ch.index, pwm: duty12 }], 15_000);
     } catch (err) {
       console.error('Failed to set PWM duty:', err);
     }
@@ -197,6 +237,10 @@
   }
 
   async function saveChannelConfig() {
+    if (!isAdmin) {
+      toastMsg('Admin privileges required to modify channel configuration');
+      return;
+    }
     if (!selectedChannel || !nodeIp || !config) return;
     savingChannel = true;
     try {
@@ -277,6 +321,75 @@
       toastMsg(`Save error: ${String(err)}`);
     } finally {
       savingChannel = false;
+    }
+  }
+
+  function openGroupModal(idx: number) {
+    if (!isAdmin) {
+      toastMsg('Admin privileges required to edit groups');
+      return;
+    }
+    const grp = config?.groups?.[idx];
+    if (!grp) return;
+    editingGroupIdx = idx;
+    editingGroup = grp;
+
+    const mask = grp.channelMask ?? 0;
+    const chBools = Array.from({ length: 16 }, (_, i) => (mask & (1 << i)) !== 0);
+
+    groupForm = {
+      name: grp.name || `Group ${idx + 1}`,
+      enabled: grp.enabled,
+      channels: chBools,
+    };
+  }
+
+  function closeGroupModal() {
+    editingGroup = null;
+    editingGroupIdx = -1;
+  }
+
+  async function saveGroupConfig() {
+    if (!isAdmin) {
+      toastMsg('Admin privileges required to modify groups');
+      return;
+    }
+    if (!nodeIp || !config || editingGroupIdx < 0) return;
+    savingGroup = true;
+
+    try {
+      if (!config.groups || config.groups.length < 8) {
+        config.groups = Array.from({ length: 8 }, (_, i) => ({
+          name: `Group ${i + 1}`,
+          channelMask: 0,
+          role: 0,
+          enabled: false,
+        }));
+      }
+
+      let newMask = 0;
+      for (let i = 0; i < 16; i++) {
+        if (groupForm.channels[i]) {
+          newMask |= (1 << i);
+        }
+      }
+
+      const existingRole = config.groups[editingGroupIdx]?.role ?? 0;
+      config.groups[editingGroupIdx] = {
+        name: groupForm.name.slice(0, 31).trim() || `Group ${editingGroupIdx + 1}`,
+        channelMask: newMask,
+        role: existingRole,
+        enabled: groupForm.enabled && newMask > 0,
+      };
+
+      await saveDeviceConfig(nodeIp, config);
+      toastMsg(`Group "${config.groups[editingGroupIdx].name}" saved`);
+      closeGroupModal();
+      await loadData(nodeIp, loadGen);
+    } catch (err) {
+      toastMsg(`Save error: ${String(err)}`);
+    } finally {
+      savingGroup = false;
     }
   }
 
@@ -472,6 +585,70 @@
         {/each}
       </div>
     </section>
+
+    <!-- BANK 3: CHANNEL GROUPS (G1–G8) -->
+    <section class="bank-section groups-bank">
+      <div class="bank-header">
+        <div class="bank-title-group">
+          <span class="bank-dot grp-dot"></span>
+          <h2>CHANNEL GROUPS</h2>
+          <span class="bank-count">{activeGroupCount} / 8 active</span>
+        </div>
+        <span class="bank-hint">Logical target groups · Up to 8 groups</span>
+      </div>
+
+      <div class="connector-grid">
+        {#each displayGroups as grp (grp.index)}
+          <div
+            class="connector-card grp-connector-card"
+            class:is-active={grp.enabled}
+            class:is-admin-card={isAdmin}
+          >
+            <div class="card-top">
+              <span class="port-id grp-port-id">G{grp.index + 1}</span>
+              <span class="status-pill" class:online={grp.enabled} class:disabled={!grp.enabled}>
+                {grp.enabled ? 'ACTIVE' : 'DISABLED'}
+              </span>
+            </div>
+
+            <div class="card-body">
+              <div class="ch-name" title={grp.name}>
+                {grp.name}
+              </div>
+              <div class="grp-members-block">
+                <span class="grp-member-count-label">{grp.memberCount} channel{grp.memberCount === 1 ? '' : 's'}</span>
+                {#if grp.memberChannels.length > 0}
+                  <div class="grp-chips-flow">
+                    {#each grp.memberChannels as port}
+                      <span class="grp-port-tag" class:pwm-port-tag={port.startsWith('P')}>
+                        {port}
+                      </span>
+                    {/each}
+                  </div>
+                {:else}
+                  <span class="setup-hint">No channels assigned</span>
+                {/if}
+              </div>
+            </div>
+
+            <div class="card-footer">
+              <span class="hw-spec">Mask: 0x{grp.channelMask.toString(16).toUpperCase().padStart(4, '0')}</span>
+              {#if isAdmin}
+                <button
+                  type="button"
+                  class="action-btn grp-edit-action"
+                  onclick={(e) => { e.stopPropagation(); openGroupModal(grp.index); }}
+                >
+                  EDIT
+                </button>
+              {:else}
+                <span class="grp-operator-readonly">View only</span>
+              {/if}
+            </div>
+          </div>
+        {/each}
+      </div>
+    </section>
   {/if}
 
   <!-- CHANNEL CONFIGURATION MODAL -->
@@ -502,6 +679,12 @@
         </div>
 
         <div class="modal-body">
+          {#if !isAdmin}
+            <div class="readonly-banner">
+              <span>View-only mode · Admin role required to modify hardware configuration</span>
+            </div>
+          {/if}
+          <fieldset disabled={!isAdmin} class="modal-fieldset">
           <!-- Status & Basic Information -->
           <div class="form-row">
             <label class="form-field toggle-field">
@@ -586,7 +769,8 @@
                   min="0"
                   max="100"
                   bind:value={editForm.pwmLevel}
-                  oninput={() => handlePwmSliderChange(selectedChannel!, editForm.pwmLevel)}
+                  oninput={() => handlePwmSliderInput(selectedChannel!, editForm.pwmLevel)}
+                  onchange={() => handlePwmSliderCommit(selectedChannel!, editForm.pwmLevel)}
                   class="pwm-slider"
                 />
               </label>
@@ -704,6 +888,7 @@
               <span class="hw-v">Fixed · not editable</span>
             </div>
           </div>
+          </fieldset>
         </div>
 
         <div class="modal-footer">
@@ -716,8 +901,109 @@
           </button>
           <div class="modal-right-btns">
             <button class="action-btn cancel-btn" onclick={closeConfigModal}>Cancel</button>
-            <button class="primary-btn" onclick={saveChannelConfig} disabled={savingChannel}>
-              {savingChannel ? 'Saving…' : 'Save Channel'}
+            {#if isAdmin}
+              <button class="primary-btn" onclick={saveChannelConfig} disabled={savingChannel}>
+                {savingChannel ? 'Saving…' : 'Save Channel'}
+              </button>
+            {:else}
+              <span class="admin-only-notice">Admin required to save</span>
+            {/if}
+          </div>
+        </div>
+      </div>
+    </div>
+  {/if}
+
+  <!-- GROUP CONFIGURATION MODAL -->
+  {#if editingGroup && editingGroupIdx >= 0}
+    <div class="modal-backdrop" onclick={closeGroupModal} role="presentation">
+      <div
+        class="modal-content"
+        onclick={(e) => e.stopPropagation()}
+        onkeydown={(e) => { if (e.key === 'Escape') closeGroupModal(); }}
+        role="dialog"
+        tabindex="-1"
+        aria-modal="true"
+        aria-labelledby="grp-modal-title"
+      >
+        <div class="modal-header">
+          <div>
+            <div class="modal-pretitle">Channel Group Configuration</div>
+            <h2 id="grp-modal-title" class="modal-title">
+              <span class="modal-port-badge grp-badge">G{editingGroupIdx + 1}</span>
+              {groupForm.name}
+            </h2>
+          </div>
+          <button class="modal-close-btn" onclick={closeGroupModal} aria-label="Close modal">✕</button>
+        </div>
+
+        <div class="modal-body">
+          <div class="form-row">
+            <label class="form-field toggle-field">
+              <span class="field-label">Group Status</span>
+              <div class="toggle-wrap">
+                <input type="checkbox" bind:checked={groupForm.enabled} />
+                <span class="toggle-text">{groupForm.enabled ? 'Enabled' : 'Disabled'}</span>
+              </div>
+            </label>
+
+            <label class="form-field flex-2">
+              <span class="field-label">Group Name</span>
+              <input
+                type="text"
+                maxlength="31"
+                placeholder="e.g. Sign Face, Ambient"
+                bind:value={groupForm.name}
+                class="text-input"
+              />
+            </label>
+          </div>
+
+          <div class="section-divider">
+            <span>Channel Membership</span>
+          </div>
+
+          <!-- Addressable selection (A1..A8) -->
+          <div class="membership-group">
+            <span class="membership-heading">Addressable Channels (A1–A8)</span>
+            <div class="membership-list">
+              {#each Array(8) as _, i}
+                <label class="member-checkbox-wrap">
+                  <input
+                    type="checkbox"
+                    bind:checked={groupForm.channels[i]}
+                  />
+                  <span class="member-tag-a">A{i + 1}</span>
+                  <span class="member-subname">{channels[i]?.name || ''}</span>
+                </label>
+              {/each}
+            </div>
+          </div>
+
+          <!-- PWM selection (P1..P8) -->
+          <div class="membership-group">
+            <span class="membership-heading">PWM Channels (P1–P8)</span>
+            <div class="membership-list">
+              {#each Array(8) as _, i}
+                <label class="member-checkbox-wrap">
+                  <input
+                    type="checkbox"
+                    bind:checked={groupForm.channels[i + 8]}
+                  />
+                  <span class="member-tag-p">P{i + 1}</span>
+                  <span class="member-subname">{channels[i + 8]?.name || ''}</span>
+                </label>
+              {/each}
+            </div>
+          </div>
+        </div>
+
+        <div class="modal-footer">
+          <div></div>
+          <div class="modal-right-btns">
+            <button class="action-btn cancel-btn" onclick={closeGroupModal}>Cancel</button>
+            <button class="primary-btn" onclick={saveGroupConfig} disabled={savingGroup}>
+              {savingGroup ? 'Saving…' : 'Save Group'}
             </button>
           </div>
         </div>
@@ -1541,6 +1827,149 @@
   .cancel-btn {
     background: transparent;
     border-color: rgba(255, 255, 255, 0.12);
+  }
+
+  /* Group and Admin styles */
+  .grp-dot {
+    background: #d946ef;
+    box-shadow: 0 0 10px rgba(217, 70, 239, 0.4);
+  }
+
+  .grp-port-id {
+    color: #e879f9;
+  }
+
+  .grp-badge {
+    color: #e879f9;
+    background: rgba(217, 70, 239, 0.15);
+    border-color: rgba(217, 70, 239, 0.3);
+  }
+
+  .grp-members-block {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    margin-top: 0.25rem;
+  }
+
+  .grp-member-count-label {
+    font-size: 0.75rem;
+    color: #a1a1aa;
+    font-weight: 500;
+  }
+
+  .grp-chips-flow {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem;
+  }
+
+  .grp-port-tag {
+    font-size: 0.65rem;
+    font-family: ui-monospace, monospace;
+    font-weight: 700;
+    padding: 0.15rem 0.4rem;
+    border-radius: 4px;
+    background: rgba(217, 70, 239, 0.15);
+    color: #e879f9;
+    border: 1px solid rgba(217, 70, 239, 0.3);
+  }
+
+  .grp-port-tag.pwm-port-tag {
+    background: rgba(245, 158, 11, 0.15);
+    color: #fbbf24;
+    border-color: rgba(245, 158, 11, 0.3);
+  }
+
+  .grp-edit-action {
+    font-size: 0.75rem;
+    padding: 0.25rem 0.65rem;
+  }
+
+  .grp-operator-readonly,
+  .admin-only-notice {
+    font-size: 0.75rem;
+    color: #71717a;
+  }
+
+  .readonly-banner {
+    padding: 0.5rem 0.75rem;
+    background: rgba(245, 158, 11, 0.1);
+    border: 1px solid rgba(245, 158, 11, 0.25);
+    color: #fbbf24;
+    font-size: 0.8rem;
+    border-radius: 6px;
+  }
+
+  .modal-fieldset {
+    border: none;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 1.2rem;
+  }
+
+  .modal-fieldset:disabled {
+    opacity: 0.75;
+  }
+
+  /* Membership in Modal */
+  .membership-group {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    margin-top: 0.5rem;
+  }
+
+  .membership-heading {
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    color: #a1a1aa;
+    letter-spacing: 0.05em;
+  }
+
+  .membership-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+    gap: 0.4rem;
+  }
+
+  .member-checkbox-wrap {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.35rem 0.5rem;
+    border-radius: 4px;
+    background: rgba(0, 0, 0, 0.2);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    cursor: pointer;
+    font-size: 0.8rem;
+  }
+
+  .member-checkbox-wrap:hover {
+    background: rgba(255, 255, 255, 0.05);
+  }
+
+  .member-tag-a {
+    font-weight: 700;
+    font-family: ui-monospace, monospace;
+    color: #e879f9;
+  }
+
+  .member-tag-p {
+    font-weight: 700;
+    font-family: ui-monospace, monospace;
+    color: #fbbf24;
+  }
+
+  .member-subname {
+    font-size: 0.65rem;
+    color: #71717a;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   @media (max-width: 720px) {
