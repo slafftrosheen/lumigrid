@@ -19,9 +19,11 @@ import PreviewPage from './preview/+page.svelte';
 import FirmwarePage from './firmware/+page.svelte';
 import CuesPage from './cues/+page.svelte';
 import LivePage from './live/+page.svelte';
+import SyncPage from './sync/+page.svelte';
 
 const routes = [
   { path: '/dashboard', component: DashboardPage, name: 'Dashboard Overview' },
+  { path: '/dashboard/sync', component: SyncPage, name: 'Sync' },
   { path: '/dashboard/scenes', component: ScenesPage, name: 'Scenes' },
   { path: '/dashboard/cues', component: CuesPage, name: 'Cues' },
   { path: '/dashboard/timeline', component: TimelinePage, name: 'Timeline' },
@@ -39,6 +41,7 @@ const routes = [
 const routeSourceFiles = [
   './+layout.svelte',
   './+page.svelte',
+  './sync/+page.svelte',
   './scenes/+page.svelte',
   './cues/+page.svelte',
   './timeline/+page.svelte',
@@ -79,10 +82,11 @@ describe('dashboard routes smoke & contract tests', () => {
   let mockStorage: MockStorage;
 
   it('keeps the dashboard route registry complete and unique', () => {
-    expect(routes).toHaveLength(14);
+    expect(routes).toHaveLength(15);
     expect(new Set(routes.map(r => r.path)).size).toBe(routes.length);
     expect(routes.map(r => r.path)).toEqual(expect.arrayContaining([
       '/dashboard',
+      '/dashboard/sync',
       '/dashboard/scenes',
       '/dashboard/cues',
       '/dashboard/timeline',

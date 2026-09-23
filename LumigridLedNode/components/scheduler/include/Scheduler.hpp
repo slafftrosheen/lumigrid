@@ -38,6 +38,17 @@ public:
     void set_cue_runner(CueRunner* runner) { cue_runner_ = runner; }
     CueRunner* cue_runner() { return cue_runner_; }
 
+    struct SyncTimelineTransport {
+        bool active = false;
+        bool timeline_enabled = false;
+        uint16_t bpm = 120;
+        uint32_t updated_ms = 0;
+    };
+
+    void apply_sync_transport(bool timeline_enabled, uint16_t bpm, uint32_t now_ms);
+    void clear_sync_transport();
+    SyncTimelineTransport sync_transport() const;
+
 private:
     static void task_entry(void* arg);
     void task();
@@ -70,6 +81,9 @@ private:
     /// Signalled by the task just before it calls vTaskDelete.
     /// stop() waits on this to guarantee the task has exited before returning.
     SemaphoreHandle_t shutdown_sem_ = nullptr;
+
+    mutable portMUX_TYPE sync_transport_mutex_ = portMUX_INITIALIZER_UNLOCKED;
+    SyncTimelineTransport sync_transport_{};
 };
 
 } // namespace lg

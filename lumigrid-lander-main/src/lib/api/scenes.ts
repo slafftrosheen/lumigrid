@@ -49,6 +49,10 @@ export function getPresets(ip: string): Promise<ScenePreset[]> {
   return apiJson<ScenePreset[]>(ip, '/api/v1/presets');
 }
 
+export function getPreset(ip: string, index: number): Promise<ScenePreset> {
+  return apiJson<ScenePreset>(ip, `/api/v1/presets?index=${encodeURIComponent(index)}`);
+}
+
 export function savePreset(ip: string, preset: Partial<ScenePreset> & { index: number }): Promise<{ saved: true }> {
   return apiJson<{ saved: true }>(ip, '/api/v1/presets', {
     method: 'PUT',
@@ -318,6 +322,9 @@ export function computeZonePreviewColor(
   };
 }
 
-export function deletePreset(ip: string, index: number): Promise<{ saved: true }> {
-  return savePreset(ip, { index, name: '' });
+export function deletePreset(ip: string, index: number): Promise<{ deleted: boolean; index: number }> {
+  return apiJson<{ deleted: boolean; index: number }>(ip, `/api/v1/presets?index=${encodeURIComponent(index)}`, {
+    method: 'DELETE',
+  });
 }
+

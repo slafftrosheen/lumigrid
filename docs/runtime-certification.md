@@ -85,12 +85,31 @@ The software architecture and simulation boundaries are fully hardened. The runt
 
 ---
 
-## 4. Stop Condition Notice
+## 5. Multi-Node Fleet Sync & Show Hardware Test Matrix (LG-025)
 
-With the completion of Batch 8:
-- **No new effects** will be introduced.
-- **No new fixture profiles** will be added.
-- **No new network protocols** will be implemented.
-- **No UI expansion** will be performed.
+> **Hardware Requirements:** Minimum 2 physical nodes required; 3 physical nodes preferred.
+> **Timing Certification Gate:** Do NOT mark cluster timing accuracy certified until physical frame-to-frame offset is measured on physical oscilloscope/logic analyzer probes across multiple hardware nodes.
 
-Development focus is frozen on physical hardware bench validation and certification testing.
+| Test ID | Test Scenario | Hardware Setup | Verification Criteria | Status |
+| :--- | :--- | :--- | :--- | :---: |
+| **SYNC-HW-01** | Automatic Leader Election | 3 nodes in `auto` role | Exactly one node claims `activeRole = master`; lowest/highest MAC tie-breaker resolves deterministically without oscillation. | `[PENDING BENCH]` |
+| **SYNC-HW-02** | Explicit Master/Worker Hierarchy | 1 designated master, 2 workers | Master advertises leadership; workers lock clock and populate `masterAddress`. | `[PENDING BENCH]` |
+| **SYNC-HW-03** | Leader Loss & Failover | Disconnect leader power | Workers observe peer timeout (>3000 ms), clear transient timeline transport, and either elect a new leader (auto) or enter degraded standalone mode (worker). | `[PENDING BENCH]` |
+| **SYNC-HW-04** | Leader Recovery & Rejoin | Reconnect original leader | Cluster re-synchronizes; followers re-discipline clocks without reboot or watchdog trip. | `[PENDING BENCH]` |
+| **SYNC-HW-05** | Sync-Token Mismatch Isolation | Node C configured with wrong token | Node C receives zero sync packets, triggers no timeline transport, sends no ACK, and is isolated from cluster. | `[PENDING BENCH]` |
+| **SYNC-HW-06** | Clock Lock & Bounded Jitter | 3 nodes on managed Wi-Fi switch | Assert `clockLocked = true`, clock offset $< 5\text{ms}$, jitter $< 2\text{ms}$, and RTT $< 20\text{ms}$. | `[PENDING BENCH]` |
+| **SYNC-HW-07** | Scene Synchronization Accuracy | Trigger Scene on Leader | All follower nodes activate matching scene slot. Measure physical optical output start skew $< 15\text{ms}$. | `[PENDING BENCH]` |
+| **SYNC-HW-08** | Timeline Transport Coherence | Start Timeline (120 BPM) on Leader | Follower scheduler tasks execute local sequences against synchronized clock. Measure beat phase alignment across nodes. | `[PENDING BENCH]` |
+| **SYNC-HW-09** | Show Content Drift Detection | Alter Scene 3 on Node B | Sync Studio identifies `DRIFT` on Node B; Leader and Node A remain `MATCHED`. | `[PENDING BENCH]` |
+| **SYNC-HW-10** | Show Deployment & Parity Repair | Deploy Show from Node A to Node B | Show assets transferred sequentially, verified via `/api/v1/show-manifest`, and Node B transitions from `DRIFT` to `MATCHED`. | `[PENDING BENCH]` |
+| **SYNC-HW-11** | Exact Mirror Pruning | Target has extra scenes / cues | Exact mirror purge removes orphaned target assets without affecting network or hardware config. | `[PENDING BENCH]` |
+| **SYNC-HW-12** | Firmware / Protocol Mismatch | Node with differing schema | Node reports `INCOMPATIBLE` rather than content drift. Cluster blocks synchronized execution. | `[PENDING BENCH]` |
+
+---
+
+## 6. Stop Condition Notice
+
+With the completion of LG-024 (Live Desk Hardening) and LG-025 (Fleet Sync Studio & Show Deployment v1):
+- **Architecture is frozen** across firmware services, state machines, and API contracts.
+- **No new feature families** will be introduced before physical hardware validation.
+- Timing certification requires completion of the bench test matrices above on physical LumiGrid LED Node hardware.

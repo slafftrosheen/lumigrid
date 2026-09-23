@@ -116,4 +116,31 @@ describe('Live Desk & Channel Group contracts', () => {
       expect(channelsSource).toMatch(/\{#if isAdmin\}[\s\S]{0,250}Save Channel/);
     });
   });
+
+  describe('LG-024 Live Desk hardening contracts', () => {
+    it('verifies +page.svelte delegates manual lifecycle to ManualSession and eliminates buildFullSnapshot', () => {
+      const liveDeskSource = readSource('./+page.svelte');
+
+      // Must import ManualSession
+      expect(liveDeskSource).toMatch(/import\s*\{\s*ManualSession/);
+
+      // Must NOT contain the old full-snapshot builder that caused channel leakage
+      expect(liveDeskSource).not.toMatch(/function\s+buildFullSnapshot\s*\(/);
+
+      // Must separate selectedIndices from controlledIndices
+      expect(liveDeskSource).toMatch(/let\s+controlledIndices\s*=\s*\$state/);
+      expect(liveDeskSource).toMatch(/let\s+selectedIndices\s*=\s*\$state/);
+
+      // Must provide explicit Update Targets flow
+      expect(liveDeskSource).toMatch(/async\s+function\s+updateTargets\s*\(/);
+      expect(liveDeskSource).toMatch(/Update Targets/);
+
+      // Must delegate telemetry to session
+      expect(liveDeskSource).toMatch(/session\.onTelemetry\(/);
+
+      // Must teardown cleanly via session.destroy
+      expect(liveDeskSource).toMatch(/session\.destroy\(/);
+    });
+  });
 });
+

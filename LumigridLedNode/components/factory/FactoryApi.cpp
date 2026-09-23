@@ -53,7 +53,7 @@ esp_err_t send_json(httpd_req_t* request,
     httpd_resp_set_hdr(request, "Cache-Control", "no-store");
     httpd_resp_set_hdr(request, "Access-Control-Allow-Origin", "*");
     httpd_resp_set_hdr(request, "Access-Control-Allow-Headers", "Authorization, Content-Type, X-Auth-Token, X-API-Key");
-    httpd_resp_set_hdr(request, "Access-Control-Allow-Methods", "GET, POST, PUT, OPTIONS");
+    httpd_resp_set_hdr(request, "Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
     return httpd_resp_sendstr(request, body);
 }
 
@@ -63,6 +63,13 @@ esp_err_t send_error(httpd_req_t* request,
     char body[128];
     snprintf(body, sizeof(body), R"({"error":"%s"})", code);
     return send_json(request, body, status);
+}
+
+inline bool channel_is_configured(const ChannelHardwareDesc& hw, const ChannelConfig& cfg) {
+    if (hw.kind == ChannelKind::Addressable) {
+        return cfg.pixel_count > 0 || cfg.enabled || cfg.dmx_start_channel > 0 || cfg.max_milliwatts > 0 || cfg.name[0] != '\0';
+    }
+    return cfg.enabled || cfg.dmx_start_channel > 0 || cfg.max_milliwatts > 0 || cfg.name[0] != '\0';
 }
 
 esp_err_t read_json(httpd_req_t* request, cJSON** out) {
@@ -645,6 +652,8 @@ esp_err_t get_logs(httpd_req_t* request) {
     httpd_resp_set_status(request, "200 OK");
     httpd_resp_set_type(request, "text/plain");
     httpd_resp_set_hdr(request, "Cache-Control", "no-store");
+    httpd_resp_set_hdr(request, "Access-Control-Allow-Origin", "*");
+    httpd_resp_set_hdr(request, "Access-Control-Allow-Headers", "Authorization, Content-Type, X-Auth-Token, X-API-Key");
     esp_err_t err = httpd_resp_sendstr(request, logs);
     
     delete[] logs;
@@ -705,14 +714,107 @@ esp_err_t post_auth_update(httpd_req_t* request) {
 // Signage REST Endpoints
 // ═══════════════════════════════════════════════════════════════════
 
+cJSON* build_scene_json(uint8_t i, const SceneConfig& scene) {
+    cJSON* obj = cJSON_CreateObject();
+    if (!obj) return nullptr;
+    cJSON_AddNumberToObject(obj, "index", i);
+    cJSON_AddStringToObject(obj, "name", scene.name);
+    cJSON_AddNumberToObject(obj, "globalBrightness", scene.global_brightness);
+    cJSON_AddNumberToObject(obj, "transitionMs", scene.transition_ms);
+
+    cJSON* channels = cJSON_CreateArray();
+    for (uint8_t c = 0; c < 16; ++c) {
+        cJSON* ch_obj = cJSON_CreateObject();
+        cJSON* layers = cJSON_CreateArray();
+        for (uint8_t l = 0; l < 3; ++l) {
+            const auto& layer = scene.channels[c].layers[l];
+            cJSON* layer_obj = cJSON_CreateObject();
+            cJSON_AddStringToObject(layer_obj, "effect", signage_effect_name(static_cast<SignageEffect>(layer.effect)));
+            cJSON_AddStringToObject(layer_obj, "blendMode", blend_mode_name(layer.blend_mode));
+            
+            cJSON* pcolor = cJSON_CreateObject();
+            cJSON_AddNumberToObject(pcolor, "r", layer.primary_color.r);
+            cJSON_AddNumberToObject(pcolor, "g", layer.primary_color.g);
+            cJSON_AddNumberToObject(pcolor, "b", layer.primary_color.b);
+            cJSON_AddItemToObject(layer_obj, "primaryColor", pcolor);
+            
+            cJSON* scolor = cJSON_CreateObject();
+            cJSON_AddNumberToObject(scolor, "r", layer.secondary_color.r);
+            cJSON_AddNumberToObject(scolor, "g", layer.secondary_color.g);
+            cJSON_AddNumberToObject(scolor, "b", layer.secondary_color.b);
+            cJSON_AddItemToObject(layer_obj, "secondaryColor", scolor);
+
+            cJSON_AddNumberToObject(layer_obj, "speedMs", layer.speed_ms);
+            cJSON_AddNumberToObject(layer_obj, "fxParam", layer.fx_param);
+            cJSON_AddNumberToObject(layer_obj, "paletteId", layer.palette_id);
+            cJSON_AddNumberToObject(layer_obj, "opacity", layer.opacity);
+            cJSON_AddBoolToObject(layer_obj, "enabled", layer.enabled);
+            cJSON_AddItemToArray(layers, layer_obj);
+        }
+        cJSON_AddItemToObject(ch_obj, "layers", layers);
+        cJSON_AddItemToArray(channels, ch_obj);
+    }
+    cJSON_AddItemToObject(obj, "channels", channels);
+
+    // Legacy compatibility: mirror first 8 channels into zones array
+    cJSON* zones = cJSON_CreateArray();
+    for (uint8_t z = 0; z < 8; ++z) {
+        cJSON* zone_obj = cJSON_CreateObject();
+        cJSON* layers = cJSON_CreateArray();
+        for (uint8_t l = 0; l < 3; ++l) {
+            const auto& layer = scene.channels[z].layers[l];
+            cJSON* layer_obj = cJSON_CreateObject();
+            cJSON_AddStringToObject(layer_obj, "effect", signage_effect_name(static_cast<SignageEffect>(layer.effect)));
+            cJSON_AddStringToObject(layer_obj, "blendMode", blend_mode_name(layer.blend_mode));
+            cJSON_AddBoolToObject(layer_obj, "enabled", layer.enabled);
+            cJSON_AddItemToArray(layers, layer_obj);
+        }
+        cJSON_AddItemToObject(zone_obj, "layers", layers);
+        cJSON_AddItemToArray(zones, zone_obj);
+    }
+    cJSON_AddItemToObject(obj, "zones", zones);
+    return obj;
+}
+
 esp_err_t get_presets(httpd_req_t* request) {
     if (!api::authorize(request, api::ApiRole::Operator)) return ESP_OK;
 
     FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
     if (!api_ptr->config()) return send_error(request, "503 Service Unavailable", "config_not_ready");
 
+    // Support singular preset fetch via ?index=N (Phase 10)
+    size_t qlen = httpd_req_get_url_query_len(request);
+    if (qlen > 0 && qlen < 64) {
+        char query[64];
+        if (httpd_req_get_url_query_str(request, query, sizeof(query)) == ESP_OK) {
+            char param[16];
+            if (httpd_query_key_value(query, "index", param, sizeof(param)) == ESP_OK) {
+                int idx = atoi(param);
+                if (idx < 0 || idx >= kMaxPresets) {
+                    return send_error(request, "400 Bad Request", "invalid_index");
+                }
+                SceneConfig scene;
+                if (api_ptr->config()->load_scene(static_cast<uint8_t>(idx), scene) != ESP_OK) {
+                    return send_error(request, "404 Not Found", "scene_not_found");
+                }
+                cJSON* obj = build_scene_json(static_cast<uint8_t>(idx), scene);
+                if (!obj) return send_error(request, "500 Internal Server Error", "json_encode_failed");
+                char* json = cJSON_PrintUnformatted(obj);
+                cJSON_Delete(obj);
+                if (!json) return send_error(request, "500 Internal Server Error", "json_encode_failed");
+                esp_err_t ret = send_json(request, json);
+                cJSON_free(json);
+                return ret;
+            }
+        }
+    }
+
     httpd_resp_set_type(request, "application/json");
     httpd_resp_set_status(request, "200 OK");
+    httpd_resp_set_hdr(request, "Cache-Control", "no-store");
+    httpd_resp_set_hdr(request, "Access-Control-Allow-Origin", "*");
+    httpd_resp_set_hdr(request, "Access-Control-Allow-Headers", "Authorization, Content-Type, X-Auth-Token, X-API-Key");
+    httpd_resp_set_hdr(request, "Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
     httpd_resp_send_chunk(request, "[", 1);
 
     bool first = true;
@@ -720,64 +822,8 @@ esp_err_t get_presets(httpd_req_t* request) {
         SceneConfig scene;
         if (api_ptr->config()->load_scene(i, scene) != ESP_OK) continue;
 
-        cJSON* obj = cJSON_CreateObject();
+        cJSON* obj = build_scene_json(i, scene);
         if (!obj) continue;
-        cJSON_AddNumberToObject(obj, "index", i);
-        cJSON_AddStringToObject(obj, "name", scene.name);
-        cJSON_AddNumberToObject(obj, "globalBrightness", scene.global_brightness);
-        cJSON_AddNumberToObject(obj, "transitionMs", scene.transition_ms);
-
-        cJSON* channels = cJSON_CreateArray();
-        for (uint8_t c = 0; c < 16; ++c) {
-            cJSON* ch_obj = cJSON_CreateObject();
-            cJSON* layers = cJSON_CreateArray();
-            for (uint8_t l = 0; l < 3; ++l) {
-                const auto& layer = scene.channels[c].layers[l];
-                cJSON* layer_obj = cJSON_CreateObject();
-                cJSON_AddStringToObject(layer_obj, "effect", signage_effect_name(static_cast<SignageEffect>(layer.effect)));
-                cJSON_AddStringToObject(layer_obj, "blendMode", blend_mode_name(layer.blend_mode));
-                
-                cJSON* pcolor = cJSON_CreateObject();
-                cJSON_AddNumberToObject(pcolor, "r", layer.primary_color.r);
-                cJSON_AddNumberToObject(pcolor, "g", layer.primary_color.g);
-                cJSON_AddNumberToObject(pcolor, "b", layer.primary_color.b);
-                cJSON_AddItemToObject(layer_obj, "primaryColor", pcolor);
-                
-                cJSON* scolor = cJSON_CreateObject();
-                cJSON_AddNumberToObject(scolor, "r", layer.secondary_color.r);
-                cJSON_AddNumberToObject(scolor, "g", layer.secondary_color.g);
-                cJSON_AddNumberToObject(scolor, "b", layer.secondary_color.b);
-                cJSON_AddItemToObject(layer_obj, "secondaryColor", scolor);
-
-                cJSON_AddNumberToObject(layer_obj, "speedMs", layer.speed_ms);
-                cJSON_AddNumberToObject(layer_obj, "fxParam", layer.fx_param);
-                cJSON_AddNumberToObject(layer_obj, "paletteId", layer.palette_id);
-                cJSON_AddNumberToObject(layer_obj, "opacity", layer.opacity);
-                cJSON_AddBoolToObject(layer_obj, "enabled", layer.enabled);
-                cJSON_AddItemToArray(layers, layer_obj);
-            }
-            cJSON_AddItemToObject(ch_obj, "layers", layers);
-            cJSON_AddItemToArray(channels, ch_obj);
-        }
-        cJSON_AddItemToObject(obj, "channels", channels);
-
-        // Legacy compatibility: mirror first 8 channels into zones array
-        cJSON* zones = cJSON_CreateArray();
-        for (uint8_t z = 0; z < 8; ++z) {
-            cJSON* zone_obj = cJSON_CreateObject();
-            cJSON* layers = cJSON_CreateArray();
-            for (uint8_t l = 0; l < 3; ++l) {
-                const auto& layer = scene.channels[z].layers[l];
-                cJSON* layer_obj = cJSON_CreateObject();
-                cJSON_AddStringToObject(layer_obj, "effect", signage_effect_name(static_cast<SignageEffect>(layer.effect)));
-                cJSON_AddStringToObject(layer_obj, "blendMode", blend_mode_name(layer.blend_mode));
-                cJSON_AddBoolToObject(layer_obj, "enabled", layer.enabled);
-                cJSON_AddItemToArray(layers, layer_obj);
-            }
-            cJSON_AddItemToObject(zone_obj, "layers", layers);
-            cJSON_AddItemToArray(zones, zone_obj);
-        }
-        cJSON_AddItemToObject(obj, "zones", zones);
 
         char* json = cJSON_PrintUnformatted(obj);
         cJSON_Delete(obj);
@@ -794,6 +840,149 @@ esp_err_t get_presets(httpd_req_t* request) {
     httpd_resp_send_chunk(request, "]", 1);
     httpd_resp_send_chunk(request, nullptr, 0);
     return ESP_OK;
+}
+
+esp_err_t delete_preset(httpd_req_t* request) {
+    if (!api::authorize(request, api::ApiRole::Operator)) return ESP_OK;
+
+    FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+    if (!api_ptr->config()) return send_error(request, "503 Service Unavailable", "config_not_ready");
+
+    int index = -1;
+    size_t qlen = httpd_req_get_url_query_len(request);
+    if (qlen > 0 && qlen < 64) {
+        char query[64];
+        if (httpd_req_get_url_query_str(request, query, sizeof(query)) == ESP_OK) {
+            char param[16];
+            if (httpd_query_key_value(query, "index", param, sizeof(param)) == ESP_OK) {
+                index = atoi(param);
+            }
+        }
+    }
+
+    if (index < 0 && request->content_len > 0) {
+        cJSON* root = nullptr;
+        if (read_json(request, &root) == ESP_OK && root) {
+            uint8_t idx_u8 = 0;
+            if (json_u8(root, "index", 0, kMaxPresets - 1, idx_u8)) {
+                index = idx_u8;
+            }
+            cJSON_Delete(root);
+        }
+    }
+
+    if (index < 0 || index >= kMaxPresets) {
+        return send_error(request, "400 Bad Request", "invalid_or_missing_index");
+    }
+
+    api_ptr->config()->delete_scene(static_cast<uint8_t>(index));
+    api_ptr->config()->delete_scene_motion(static_cast<uint8_t>(index));
+
+    char audit_detail[64];
+    snprintf(audit_detail, sizeof(audit_detail), "Preset %d deleted", index);
+    api::AuditLog::instance().log(api::ApiRole::Operator, "preset_delete", audit_detail);
+
+    char resp[64];
+    snprintf(resp, sizeof(resp), "{\"deleted\":true,\"index\":%d}", index);
+    return send_json(request, resp, "200 OK");
+}
+
+esp_err_t get_show_manifest(httpd_req_t* request) {
+    if (!api::authorize(request, api::ApiRole::Operator)) return ESP_OK;
+
+    FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+    if (!api_ptr->config()) return send_error(request, "503 Service Unavailable", "config_not_ready");
+
+    NodeIdentity id = get_node_identity(nullptr);
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "schema", 1);
+    cJSON_AddNumberToObject(root, "schemaVersion", 1);
+    cJSON_AddStringToObject(root, "firmware", id.fw_version);
+    cJSON_AddNumberToObject(root, "protocol", 1);
+    cJSON_AddNumberToObject(root, "showHash", api_ptr->config()->compute_show_hash());
+
+    // Occupied scenes
+    cJSON* scenes_arr = cJSON_CreateArray();
+    for (uint8_t i = 0; i < kMaxPresets; ++i) {
+        SceneConfig scene;
+        if (api_ptr->config()->load_scene(i, scene) == ESP_OK) {
+            cJSON* item = cJSON_CreateObject();
+            cJSON_AddNumberToObject(item, "index", i);
+            cJSON_AddStringToObject(item, "name", scene.name);
+            cJSON_AddNumberToObject(item, "checksum", scene.checksum);
+            SceneMotionConfig motion;
+            uint32_t motion_cs = 0;
+            if (api_ptr->config()->load_scene_motion(i, motion) == ESP_OK) {
+                motion_cs = motion.checksum;
+            }
+            cJSON_AddNumberToObject(item, "motionChecksum", motion_cs);
+            cJSON_AddItemToArray(scenes_arr, item);
+        }
+    }
+    cJSON_AddItemToObject(root, "scenes", scenes_arr);
+
+    // Occupied scene motions
+    cJSON* motions_arr = cJSON_CreateArray();
+    for (uint8_t i = 0; i < kMaxPresets; ++i) {
+        SceneMotionConfig motion;
+        if (api_ptr->config()->load_scene_motion(i, motion) == ESP_OK && motion.track_count > 0) {
+            cJSON* item = cJSON_CreateObject();
+            cJSON_AddNumberToObject(item, "index", i);
+            cJSON_AddNumberToObject(item, "checksum", motion.checksum);
+            cJSON_AddItemToArray(motions_arr, item);
+        }
+    }
+    cJSON_AddItemToObject(root, "sceneMotions", motions_arr);
+
+    // Timeline sequence
+    Sequence seq;
+    cJSON* tl_obj = cJSON_CreateObject();
+    if (api_ptr->config()->load_sequence(seq) == ESP_OK) {
+        cJSON_AddBoolToObject(tl_obj, "enabled", seq.enabled);
+        cJSON_AddNumberToObject(tl_obj, "bpm", seq.bpm);
+        cJSON_AddNumberToObject(tl_obj, "checksum", seq.checksum);
+    } else {
+        cJSON_AddBoolToObject(tl_obj, "enabled", false);
+        cJSON_AddNumberToObject(tl_obj, "bpm", 120);
+        cJSON_AddNumberToObject(tl_obj, "checksum", 0);
+    }
+    cJSON_AddItemToObject(root, "timeline", tl_obj);
+
+    // Calendar / Schedules
+    CalendarSchedule sched;
+    cJSON* cal_obj = cJSON_CreateObject();
+    if (api_ptr->config()->load_calendar_schedule(sched) == ESP_OK) {
+        cJSON_AddNumberToObject(cal_obj, "checksum", sched.checksum);
+    } else {
+        cJSON_AddNumberToObject(cal_obj, "checksum", 0);
+    }
+    cJSON_AddItemToObject(root, "calendar", cal_obj);
+    cJSON* sched_obj = cJSON_CreateObject();
+    cJSON_AddNumberToObject(sched_obj, "checksum", cJSON_GetObjectItem(cal_obj, "checksum")->valueint);
+    cJSON_AddItemToObject(root, "schedules", sched_obj);
+
+    // Cue lists
+    cJSON* cl_arr = cJSON_CreateArray();
+    for (uint8_t i = 0; i < kMaxCueLists; ++i) {
+        CueList cl;
+        if (api_ptr->config()->load_cue_list(i, cl) == ESP_OK && cl.cue_count > 0) {
+            cJSON* item = cJSON_CreateObject();
+            cJSON_AddNumberToObject(item, "index", i);
+            cJSON_AddStringToObject(item, "name", cl.name);
+            cJSON_AddNumberToObject(item, "cueCount", cl.cue_count);
+            cJSON_AddNumberToObject(item, "checksum", cl.checksum);
+            cJSON_AddItemToArray(cl_arr, item);
+        }
+    }
+    cJSON_AddItemToObject(root, "cueLists", cl_arr);
+
+    char* json = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (!json) return send_error(request, "500 Internal Server Error", "json_encode_failed");
+
+    esp_err_t ret = send_json(request, json);
+    cJSON_free(json);
+    return ret;
 }
 
 esp_err_t put_preset(httpd_req_t* request) {
@@ -1555,6 +1744,7 @@ esp_err_t get_device_config(httpd_req_t* request) {
     cJSON_AddStringToObject(response, "timezone", cfg.timezone);
     cJSON_AddBoolToObject(response, "syncEnabled", cfg.sync_enabled);
     cJSON_AddNumberToObject(response, "syncRole", cfg.sync_role);
+    cJSON_AddNumberToObject(response, "syncToken", cfg.sync_token);
     cJSON_AddBoolToObject(response, "mqttEnabled", cfg.mqtt_enabled);
     cJSON_AddStringToObject(response, "mqttBroker", cfg.mqtt_broker);
     cJSON_AddNumberToObject(response, "mqttPort", cfg.mqtt_port);
@@ -1566,9 +1756,7 @@ esp_err_t get_device_config(httpd_req_t* request) {
         char port[8];
         channel_port_name(i, port, sizeof(port));
 
-        const bool is_configured = (hw.kind == ChannelKind::Addressable)
-            ? (c.pixel_count > 0 || c.enabled || c.dmx_start_channel > 0 || c.max_milliwatts > 0)
-            : (c.enabled || c.dmx_start_channel > 0 || c.max_milliwatts > 0);
+        const bool is_configured = channel_is_configured(hw, c);
 
         cJSON* ch = cJSON_CreateObject();
         cJSON_AddNumberToObject(ch, "index", i);
@@ -1694,6 +1882,7 @@ esp_err_t put_device_config(httpd_req_t* request) {
 
     DeviceConfig cfg;
     api_ptr->config()->load_config(cfg);
+    DeviceConfig old_cfg = cfg;
 
     VALIDATE_STRING("deviceName", sizeof(cfg.device_name), cfg.device_name);
     VALIDATE_STRING("serialNumber", sizeof(cfg.serial_number), cfg.serial_number);
@@ -1773,6 +1962,15 @@ esp_err_t put_device_config(httpd_req_t* request) {
     VALIDATE_U16("mqttPort", 1, 65535, cfg.mqtt_port);
 
     VALIDATE_U8("syncRole", 0, 2, cfg.sync_role);
+
+    const cJSON* st = cJSON_GetObjectItemCaseSensitive(root, "syncToken");
+    if (st) {
+        if (!cJSON_IsNumber(st) || st->valuedouble < 0 || st->valuedouble > 4294967295.0) {
+            cJSON_Delete(root);
+            return send_error(request, "400 Bad Request", "invalid_field_syncToken");
+        }
+        cfg.sync_token = static_cast<uint32_t>(st->valuedouble);
+    }
 
     const cJSON* channels_arr = cJSON_GetObjectItemCaseSensitive(root, "channels");
     if (channels_arr && cJSON_IsArray(channels_arr)) {
@@ -1892,6 +2090,18 @@ esp_err_t put_device_config(httpd_req_t* request) {
     if (api_ptr->config()->save_config(cfg) != ESP_OK) {
         api_ptr->command_journal().failed(cmd_id, ESP_ERR_NVS_NOT_FOUND);
         return send_error(request, "500 Internal Server Error", "nvs_write_failed");
+    }
+
+    bool sync_changed = (old_cfg.sync_enabled != cfg.sync_enabled) ||
+                        (old_cfg.sync_role != cfg.sync_role) ||
+                        (old_cfg.sync_token != cfg.sync_token);
+    if (sync_changed && api_ptr->config_apply_callback()) {
+        esp_err_t apply_err = api_ptr->config_apply_callback()(old_cfg, cfg);
+        if (apply_err != ESP_OK) {
+            api_ptr->config()->save_config(old_cfg);
+            api_ptr->command_journal().failed(cmd_id, apply_err);
+            return send_error(request, "500 Internal Server Error", "sync_reconfig_failed");
+        }
     }
 
     if (api_ptr->signage()) {
@@ -2144,6 +2354,39 @@ esp_err_t get_signage_status(httpd_req_t* request) {
         "timeSynced",
         api_ptr->scheduler() && api_ptr->scheduler()->has_time()
     );
+
+    cJSON* limits = cJSON_CreateObject();
+    cJSON_AddNumberToObject(limits, "channels", 16);
+    cJSON_AddNumberToObject(limits, "groups", 8);
+    cJSON_AddNumberToObject(limits, "pixelLanes", CapabilitiesManifest::kPixelLanes);
+    cJSON_AddNumberToObject(limits, "pwmChannels", CapabilitiesManifest::kPwmChannels);
+    cJSON_AddNumberToObject(limits, "zones", CapabilitiesManifest::kZones);
+    cJSON_AddNumberToObject(limits, "layersPerZone", CapabilitiesManifest::kLayersPerZone);
+    cJSON_AddNumberToObject(limits, "presets", CapabilitiesManifest::kPresets);
+    cJSON_AddNumberToObject(limits, "timelineSteps", CapabilitiesManifest::kTimelineSteps);
+    cJSON_AddNumberToObject(limits, "cueLists", CapabilitiesManifest::kCueLists);
+    cJSON_AddNumberToObject(limits, "cuesPerList", CapabilitiesManifest::kCuesPerList);
+    cJSON_AddNumberToObject(limits, "automationTracks", CapabilitiesManifest::kAutomationTracks);
+    cJSON_AddNumberToObject(limits, "automationPoints", CapabilitiesManifest::kAutomationPoints);
+    cJSON_AddItemToObject(response, "limits", limits);
+
+    cJSON* features = cJSON_CreateObject();
+    cJSON_AddBoolToObject(features, "manualControl", true);
+    cJSON_AddBoolToObject(features, "addressable", CapabilitiesManifest::kFeatureAddressable);
+    cJSON_AddBoolToObject(features, "pwm", CapabilitiesManifest::kFeaturePwm);
+    cJSON_AddBoolToObject(features, "artnet", CapabilitiesManifest::kFeatureArtnet);
+    cJSON_AddBoolToObject(features, "sacn", CapabilitiesManifest::kFeatureSacn);
+    cJSON_AddBoolToObject(features, "sync", CapabilitiesManifest::kFeatureSync);
+    cJSON_AddBoolToObject(features, "mqtt", CapabilitiesManifest::kFeatureMqtt);
+    cJSON_AddBoolToObject(features, "factory", CapabilitiesManifest::kFeatureFactory);
+    cJSON_AddBoolToObject(features, "ota", CapabilitiesManifest::kFeatureOta);
+    cJSON_AddBoolToObject(features, "signedOta", CapabilitiesManifest::kFeatureSignedOta);
+    cJSON_AddBoolToObject(features, "backup", CapabilitiesManifest::kFeatureBackup);
+    cJSON_AddBoolToObject(features, "sceneMotion", CapabilitiesManifest::kFeatureSceneMotion);
+    cJSON_AddBoolToObject(features, "cueLists", CapabilitiesManifest::kFeatureCueLists);
+    cJSON_AddBoolToObject(features, "transitionEngineV2", CapabilitiesManifest::kFeatureTransitionEngineV2);
+    cJSON_AddItemToObject(response, "features", features);
+
     char* json = cJSON_PrintUnformatted(response);
     cJSON_Delete(response);
     if (json == nullptr) {
@@ -2360,9 +2603,7 @@ void build_schema2_status_json(FactoryApi* api, char* response, size_t max_len) 
         channel_port_name(i, port, sizeof(port));
         auto hw = channel_hardware(i);
         const auto& ch_cfg = status_cfg.channels[i];
-        bool ch_configured = (hw.kind == ChannelKind::Addressable)
-            ? (ch_cfg.pixel_count > 0 || ch_cfg.enabled || ch_cfg.name[0] != '\0')
-            : (ch_cfg.enabled || ch_cfg.name[0] != '\0');
+        bool ch_configured = channel_is_configured(hw, ch_cfg);
         bool ch_enabled = ch_cfg.enabled;
         ControlSource ch_source = ctrl_snapshot.resolve_channel(i, now);
         const char* ch_owner = control_source_name(ch_source);
@@ -2627,9 +2868,7 @@ esp_err_t put_manual(httpd_req_t* request) {
         const auto& ch_cfg = cfg.channels[ch_idx];
         auto hw = channel_hardware(ch_idx);
 
-        const bool is_configured = (hw.kind == ChannelKind::Addressable)
-            ? (ch_cfg.pixel_count > 0 || ch_cfg.enabled || ch_cfg.dmx_start_channel > 0 || ch_cfg.max_milliwatts > 0)
-            : (ch_cfg.enabled || ch_cfg.dmx_start_channel > 0 || ch_cfg.max_milliwatts > 0);
+        const bool is_configured = channel_is_configured(hw, ch_cfg);
 
         if (!is_configured || !ch_cfg.enabled) {
             cJSON_Delete(root);
@@ -2855,6 +3094,27 @@ esp_err_t get_sync_status(httpd_req_t* request) {
     cJSON_AddNumberToObject(response, "packetsMissed", status.packets_missed);
     cJSON_AddNumberToObject(response, "clockOffsetMs", status.clock_offset_ms);
     cJSON_AddNumberToObject(response, "clockJitterUs", status.clock_jitter_us);
+
+    if (status.master_address == 0) {
+        cJSON_AddNullToObject(response, "masterAddress");
+    } else {
+        char master_str[16] = {};
+        format_ipv4(status.master_address, master_str, sizeof(master_str));
+        cJSON_AddStringToObject(response, "masterAddress", master_str);
+    }
+    const char* transport_str = "standalone";
+    if (status.transport == 1) {
+        transport_str = "scene";
+    } else if (status.transport == 2) {
+        transport_str = "timeline";
+    }
+    cJSON_AddStringToObject(response, "transport", transport_str);
+    if (status.remote_bpm == 0) {
+        cJSON_AddNullToObject(response, "remoteBpm");
+    } else {
+        cJSON_AddNumberToObject(response, "remoteBpm", status.remote_bpm);
+    }
+    cJSON_AddBoolToObject(response, "remoteTimelineEnabled", status.remote_timeline_enabled);
 
     cJSON* peers = cJSON_CreateArray();
     for (uint8_t index = 0; index < status.peer_count; ++index) {
@@ -3618,6 +3878,15 @@ static esp_err_t get_favicon(httpd_req_t* request) {
     return httpd_resp_send(request, nullptr, 0);
 }
 
+static esp_err_t options_handler(httpd_req_t* request) {
+    httpd_resp_set_status(request, "204 No Content");
+    httpd_resp_set_hdr(request, "Access-Control-Allow-Origin", "*");
+    httpd_resp_set_hdr(request, "Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+    httpd_resp_set_hdr(request, "Access-Control-Allow-Headers", "Authorization, Content-Type, X-Auth-Token, X-API-Key");
+    httpd_resp_set_hdr(request, "Access-Control-Max-Age", "86400");
+    return httpd_resp_send(request, nullptr, 0);
+}
+
 esp_err_t FactoryApi::start(
     uint16_t signage_port,
     uint16_t factory_port,
@@ -3643,12 +3912,13 @@ esp_err_t FactoryApi::start(
     identity_ = get_node_identity(dev_name);
 
     httpd_config_t http_config = HTTPD_DEFAULT_CONFIG();
-    http_config.max_uri_handlers = 64;
+    http_config.max_uri_handlers = 80;
     http_config.stack_size = 8192;
     http_config.lru_purge_enable = true;
     http_config.recv_wait_timeout = 10;
     http_config.send_wait_timeout = 10;
     http_config.server_port = signage_port;
+    http_config.uri_match_fn = httpd_uri_match_wildcard;
     ESP_RETURN_ON_ERROR(httpd_start(&signage_server_, &http_config), "factory-api", "start server");
     factory_server_ = signage_server_;
 
@@ -3665,11 +3935,14 @@ esp_err_t FactoryApi::start(
     };
 
     const httpd_uri_t signage_routes[] = {
-        // ── WebSocket + Dashboard ──
-        { .uri = "/ws", .method = HTTP_GET, .handler = ws_handler, .user_ctx = this,
+        // ── WebSocket + Dashboard + Preflight ──
+        { .uri = "/ws",         .method = HTTP_GET,     .handler = ws_handler,      .user_ctx = this,
           .is_websocket = true, .handle_ws_control_frames = false, .supported_subprotocol = nullptr },
-        { .uri = "/",   .method = HTTP_GET, .handler = serve_dashboard, .user_ctx = this },
-        { .uri = "/favicon.ico", .method = HTTP_GET, .handler = get_favicon, .user_ctx = this },
+        { .uri = "/",           .method = HTTP_GET,     .handler = serve_dashboard, .user_ctx = this },
+        { .uri = "/index.html", .method = HTTP_GET,     .handler = serve_dashboard, .user_ctx = this },
+        { .uri = "/dashboard",  .method = HTTP_GET,     .handler = serve_dashboard, .user_ctx = this },
+        { .uri = "/favicon.ico",.method = HTTP_GET,     .handler = get_favicon,     .user_ctx = this },
+        { .uri = "/api/v1/*",   .method = HTTP_OPTIONS, .handler = options_handler, .user_ctx = nullptr },
         
         // ── Signage endpoints ──
         { .uri = "/api/v1/identity",          .method = HTTP_GET,  .handler = get_identity,       .user_ctx = this },
@@ -3679,6 +3952,7 @@ esp_err_t FactoryApi::start(
         { .uri = "/api/v1/channel/test",      .method = HTTP_POST, .handler = post_channel_test,  .user_ctx = this },
         { .uri = "/api/v1/presets",           .method = HTTP_GET,  .handler = get_presets,      .user_ctx = this },
         { .uri = "/api/v1/presets",           .method = HTTP_PUT,  .handler = put_preset,       .user_ctx = this },
+        { .uri = "/api/v1/presets",           .method = HTTP_DELETE,.handler = delete_preset,    .user_ctx = this },
         { .uri = "/api/v1/auth/update",       .method = HTTP_POST, .handler = post_auth_update, .user_ctx = this },
         { .uri = "/api/v1/activate",          .method = HTTP_POST, .handler = post_activate,    .user_ctx = this },
         { .uri = "/api/v1/config",            .method = HTTP_GET,  .handler = get_device_config, .user_ctx = this },
@@ -3702,6 +3976,7 @@ esp_err_t FactoryApi::start(
         { .uri = "/api/v1/cue/control",       .method = HTTP_POST, .handler = post_cue_control, .user_ctx = this },
         { .uri = "/api/v1/cue/status",        .method = HTTP_GET,  .handler = get_cue_status,   .user_ctx = this },
         { .uri = "/api/v1/sync",              .method = HTTP_GET,  .handler = get_sync_status,     .user_ctx = this },
+        { .uri = "/api/v1/show-manifest",     .method = HTTP_GET,  .handler = get_show_manifest, .user_ctx = this },
         { .uri = "/api/v1/audit",             .method = HTTP_GET,  .handler = get_audit_log,       .user_ctx = this },
         { .uri = "/api/v1/ota",               .method = HTTP_POST, .handler = post_ota,           .user_ctx = this },
         { .uri = "/api/v1/backup",            .method = HTTP_GET,  .handler = get_backup,         .user_ctx = this },

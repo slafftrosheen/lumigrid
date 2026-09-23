@@ -12,6 +12,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 
 namespace lg {
 
@@ -34,11 +35,17 @@ struct NodeSyncStatus {
     int32_t clock_offset_ms = 0;
     uint32_t clock_jitter_us = 0;
     SyncPeerStatus peers[8] = {};
+    uint32_t master_address = 0;       // IPv4 of current leader (0 for leader itself)
+    uint8_t  transport = 0;            // 0=standalone, 1=scene, 2=timeline
+    uint16_t remote_bpm = 0;
+    bool     remote_timeline_enabled = false;
 };
 
 /// Multi-node synchronization over UDP broadcast with bounded clock discipline.
 class NodeSync {
 public:
+    using TransportCallback = std::function<void(bool timeline_enabled, uint16_t bpm)>;
+
     NodeSync(LightingRuntime& engine, ConfigStore& config, ClockDiscipline& clock);
 
     esp_err_t start(NodeRole role);
@@ -47,6 +54,10 @@ public:
     NodeRole role() const { return configured_role_; }
     NodeRole active_role() const;
     NodeSyncStatus status() const;
+
+    void set_transport_callback(TransportCallback callback) {
+        transport_callback_ = std::move(callback);
+    }
 
 private:
     struct SyncPacket;
@@ -90,6 +101,9 @@ private:
     bool has_sequence_ = false;
     uint32_t packets_received_ = 0;
     uint32_t packets_missed_ = 0;
+    uint16_t remote_bpm_ = 0;
+    bool     remote_timeline_enabled_ = false;
+    TransportCallback transport_callback_{};
 
     static constexpr size_t kMaxPeers = 8;
     struct Peer {

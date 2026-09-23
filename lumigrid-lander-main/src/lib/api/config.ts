@@ -293,7 +293,9 @@ export function serializeDeviceConfig(config: DeviceConfig): Record<string, unkn
   if (config.timezone !== undefined) payload.timezone = config.timezone;
   if (config.syncEnabled !== undefined) payload.syncEnabled = config.syncEnabled;
   if (config.syncRole !== undefined) payload.syncRole = config.syncRole;
-  if (config.syncToken !== undefined) payload.syncToken = config.syncToken;
+  if (config.syncToken !== undefined && config.syncToken !== null && config.syncToken !== 0) {
+    payload.syncToken = config.syncToken;
+  }
   if (config.mqttEnabled !== undefined) payload.mqttEnabled = config.mqttEnabled;
   if (config.mqttBroker !== undefined) payload.mqttBroker = config.mqttBroker;
   if (config.mqttPort !== undefined) payload.mqttPort = config.mqttPort;

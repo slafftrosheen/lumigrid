@@ -107,6 +107,9 @@ esp_err_t OutputController::reconfigure(const DeviceConfig& cfg) {
     }
 
     topology_valid_.store(true, std::memory_order_release);
+    if (!estop_latched_.load(std::memory_order_acquire)) {
+        output_enabled_.store(true, std::memory_order_release);
+    }
     unlock();
     return ESP_OK;
 

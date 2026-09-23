@@ -46,8 +46,9 @@ that has not completed initialization.
 | `POST` | `/api/v1/channel/test` | Test or identify a specific physical channel connector. |
 | `PUT` | `/api/v1/manual` | Apply live manual control override frame across 16 physical channels. |
 | `DELETE` | `/api/v1/manual` | Release live manual control override lease. |
-| `GET` | `/api/v1/presets` | List stored scene presets. |
+| `GET` | `/api/v1/presets` | List stored scene presets (or `?index=N` for singular preset fetch). |
 | `PUT` | `/api/v1/presets` | Save a scene preset in slot 0–31. |
+| `DELETE` | `/api/v1/presets` | Free/delete a scene preset in slot 0–31 (via `?index=N`). |
 | `POST` | `/api/v1/activate` | Activate a preset. |
 | `GET` | `/api/v1/effects` | Read display names, descriptions, and controls for each effect. |
 | `GET` | `/api/v1/sequence` | Read the 16-channel, 16-step timeline. |
@@ -56,7 +57,8 @@ that has not completed initialization.
 | `PUT` | `/api/v1/config` | Update persisted node settings. |
 | `GET` | `/api/v1/schedules` | List calendar automation cues. |
 | `PUT` | `/api/v1/schedules` | Replace all calendar automation cues. |
-| `GET` | `/api/v1/sync` | Read sync role, clock health, and discovered followers. |
+| `GET` | `/api/v1/sync` | Read sync role, clock health, transport, master address, and discovered followers. |
+| `GET` | `/api/v1/show-manifest` | Read compact CRC32 show manifest and aggregate showHash. |
 | `GET` | `/api/v1/health` | Read system memory, uptime, and telemetry. |
 | `GET` | `/api/v1/logs` | Read recent diagnostic logs. |
 | `GET` | `/api/v1/audit` | Read recent security and configuration events. |
@@ -164,18 +166,18 @@ Authorization: ******
 
 ```json
 {
-  "channelMask": 65535,
-  "leaseDurationMs": 15000,
+  "leaseMs": 15000,
   "channels": [
-    { "channel": 0, "r": 255, "g": 128, "b": 0, "brightness": 255, "white": 0, "pwm": 0 },
-    { "channel": 8, "r": 0, "g": 0, "b": 0, "brightness": 0, "white": 0, "pwm": 3072 }
+    { "index": 0, "r": 255, "g": 128, "b": 0, "brightness": 255 },
+    { "index": 8, "pwm": 3072 }
   ]
 }
 ```
 
-- **Lease duration**: `1000` to `60000` ms (default: `15000` ms). Overrides automatically expire and fall back to the lower-priority source (CueRunner, Timeline, or active Preset) if heartbeats cease.
-- **Channel scoping**: `channelMask` is a 16-bit mask (bits 0–7: A1–A8; bits 8–15: P1–P8). Only channels set in `channelMask` are acquired or overridden. Unmasked channels remain in their background playback state.
-- **Snapshot replacement**: Active channels are updated atomically from the submitted snapshot.
+- **Replacement semantics**: Each `PUT /api/v1/manual` completely replaces the previous manual override frame and active channel mask. It does not merge with prior manual state. Channels omitted from the `channels` array are released from manual control and return to their lower-priority source.
+- **Server-derived channel mask**: The firmware derives the active 16-bit channel mask directly from the indices present in the `channels` array. Clients do not specify `channelMask` in the request body.
+- **Lease duration**: `leaseMs` is clamped between `1000` and `60000` ms (default: `15000` ms). Overrides automatically expire and fall back to the lower-priority source (CueRunner, Timeline, or active Preset) if heartbeats cease.
+- **Channel scoping**: Only channels included in `channels` are acquired or overridden. Unclaimed channels remain in their background playback state.
 - **Safety pipeline**: Manual control commands pass through the identical `ColorPipeline`, `max_brightness`, per-channel limits, gamma calibration, global `PowerBudget`, and `OutputScheduler` transactions. Safety limits cannot be bypassed.
 - **Authorization**: Requires `Operator` or `Admin` role (`403 Forbidden` if unprivileged).
 - **Arbitration priority**:
@@ -191,26 +193,27 @@ Response:
 ```json
 {
   "accepted": true,
-  "channelMask": 65535,
-  "leaseDurationMs": 15000
+  "channelMask": 257,
+  "leaseMs": 15000
 }
 ```
+The response `channelMask` reflects the exact mask acquired by firmware (`257` = `0x0101` for channels 0 and 8). Clients must verify that this matches their requested mask, failing closed on any discrepancy.
 
 #### Release manual control
 
 ```http
 DELETE /api/v1/manual
-Content-Type: application/json
 Authorization: ******
 ```
 
+Response:
 ```json
 {
-  "channelMask": 65535
+  "released": true
 }
 ```
 
-Releases manual control ownership for the specified channels (or all 16 channels if omitted), returning them to background playback immediately without waiting for lease expiration.
+`DELETE /api/v1/manual` releases the complete `ManualOverride` control source state on the node, returning all previously overridden channels to background playback immediately without waiting for lease expiration. It does not accept a payload. Other control sources (such as `LiveDmx` or `Factory`) remain entirely unaffected.
 
 ### Timeline
 
@@ -248,17 +251,49 @@ minute. A scene action stops a calendar-started timeline.
 }
 ```
 
-### Sync health
+### Sync health and Topology
 
-`GET /api/v1/sync` returns the configured and active role, clock lock and
-epoch state, receive/miss counts, the latest clock correction and jitter, and
-the master node's recently acknowledged followers with round-trip latency.
-`auto` nodes elect a leader using a stable MAC-address tie-breaker; only one
-node should be explicitly configured as `master`.
+`GET /api/v1/sync` returns:
+- `configuredRole`: `auto`, `master`, or `worker`.
+- `activeRole`: Currently resolved role (`auto`, `master`, or `worker`).
+- `running`: Boolean indicating if NodeSync UDP background task is active.
+- `clockLocked`: Boolean indicating bounded clock offset lock (< 5 ms).
+- `clockHasEpoch`: Boolean indicating valid epoch reference.
+- `masterAddress`: IPv4 string of the current leader node (or null for the leader itself).
+- `transport`: Active playback transport mode (`standalone`, `scene`, `timeline`).
+- `remoteBpm`: Remote BPM broadcast from leader during timeline transport (or null).
+- `remoteTimelineEnabled`: Boolean indicating if leader's timeline sequence is active.
+- `peerCount`, `packetsReceived`, `packetsMissed`, `clockOffsetMs`, `clockJitterUs`.
+- `peers[]`: List of acknowledged peers with address, ageMs, and latencyMs.
 
-Sync uses UDP broadcast on port 6455. Keep sync nodes on a trusted, isolated
-network. The endpoint reports measured health, but hardware deployment testing
-is still required to establish timing accuracy for a specific Wi-Fi layout.
+### Show Manifest and Content Parity
+
+`GET /api/v1/show-manifest` returns compact content CRC32 checksums:
+```json
+{
+  "schema": 1,
+  "firmware": "0.9.0",
+  "protocol": 1,
+  "showHash": 2851193042,
+  "scenes": [
+    { "index": 0, "checksum": 182736455, "motionChecksum": 98233441 }
+  ],
+  "timeline": { "checksum": 33182761 },
+  "schedules": { "checksum": 7174411 },
+  "cueLists": [
+    { "index": 0, "checksum": 9182771 }
+  ]
+}
+```
+- `showHash`: Deterministic CRC32 computed across schema, scenes, scene motions, timeline, calendar schedule, and cue lists.
+- Hardware configuration (IP, Wi-Fi, channel mapping, brightness limits) is strictly separated and does not affect `showHash`.
+- Cluster READY state requires both clock synchronization (`clockLocked === true`) and content parity (`showHash` match).
+
+### Show Deployment Rules
+- Show deployment distributes Show content (Scenes, Motions, Timeline, Cue Lists, and optional Schedules) from a source node to target nodes via sequential HTTP requests (`GET source` -> `PUT target`).
+- **Never** uses `/api/v1/backup` or `/api/v1/restore` for Show deployment to avoid overwriting node hardware, networking, or credentials.
+- When `mirrorExactly` is enabled, stale scenes and cue lists on target nodes are purged using `DELETE /api/v1/presets?index=N` and `DELETE /api/v1/cue-list?index=N`.
+- **Cue Lists**: Cue Lists can be mirrored across the fleet, but live Cue playback is not synchronized over UDP in Sync v1. Synchronized playback is supported for Scenes (leader slot propagation) and Timeline (clock + BPM transport).
 
 ### Diagnostics and Logs
 

@@ -53,9 +53,34 @@ esp_err_t Scheduler::start(const char* timezone) {
     return ESP_OK;
 }
 
+void Scheduler::apply_sync_transport(bool timeline_enabled, uint16_t bpm, uint32_t now_ms) {
+    portENTER_CRITICAL(&sync_transport_mutex_);
+    sync_transport_.active = true;
+    sync_transport_.timeline_enabled = timeline_enabled;
+    sync_transport_.bpm = bpm;
+    sync_transport_.updated_ms = now_ms;
+    portEXIT_CRITICAL(&sync_transport_mutex_);
+}
+
+void Scheduler::clear_sync_transport() {
+    portENTER_CRITICAL(&sync_transport_mutex_);
+    sync_transport_.active = false;
+    sync_transport_.timeline_enabled = false;
+    sync_transport_.bpm = 120;
+    portEXIT_CRITICAL(&sync_transport_mutex_);
+}
+
+Scheduler::SyncTimelineTransport Scheduler::sync_transport() const {
+    portENTER_CRITICAL(&sync_transport_mutex_);
+    SyncTimelineTransport copy = sync_transport_;
+    portEXIT_CRITICAL(&sync_transport_mutex_);
+    return copy;
+}
+
 esp_err_t Scheduler::stop() {
     if (!running_) return ESP_OK;
     running_ = false;
+    clear_sync_transport();
     if (task_handle_) {
         xTaskAbortDelay(task_handle_);
     }
@@ -123,17 +148,31 @@ void Scheduler::task() {
         }
         evaluate_calendar(calendar_, clock_ms);
 
-        if (sequence_.bpm == 0 ||
-            (!sequence_.enabled && !calendar_sequence_active_)) {
+        bool seq_enabled = sequence_.enabled;
+        uint16_t seq_bpm = sequence_.bpm;
+
+        portENTER_CRITICAL(&sync_transport_mutex_);
+        if (sync_transport_.active) {
+            seq_enabled = sync_transport_.timeline_enabled;
+            seq_bpm = sync_transport_.bpm;
+        }
+        portEXIT_CRITICAL(&sync_transport_mutex_);
+
+        if (seq_bpm == 0 ||
+            (!seq_enabled && !calendar_sequence_active_)) {
             engine_.release_control(ControlSource::Scheduler);
             continue;
         }
+
+        Sequence effective_seq = sequence_;
+        effective_seq.enabled = seq_enabled;
+        effective_seq.bpm = seq_bpm;
 
         const uint64_t sequence_clock_ms =
             calendar_sequence_active_ && clock_ms >= calendar_sequence_started_ms_
                 ? clock_ms - calendar_sequence_started_ms_
                 : calendar_sequence_active_ ? 0 : clock_ms;
-        evaluate(sequence_, sequence_clock_ms);
+        evaluate(effective_seq, sequence_clock_ms);
     }
 }
 

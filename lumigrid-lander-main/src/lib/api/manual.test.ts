@@ -8,6 +8,8 @@ import {
   putManualState,
   releaseManualState,
   captureLiveDeskToScene,
+  buildManualSnapshot,
+  type ManualDeskChannel,
   type ManualAddressableValue,
   type ManualPwmValue,
   type ManualChannelValue,
@@ -234,5 +236,130 @@ describe('manual API', () => {
       expect(scene.zones[1].layers[0].enabled).toBe(false);
     });
   });
+
+  describe('subset snapshot contracts', () => {
+    function makeDeskChannels(): ManualDeskChannel[] {
+      const channels: ManualDeskChannel[] = [];
+      for (let i = 0; i < 8; i++) {
+        channels.push({
+          index: i,
+          kind: 'addressable',
+          enabled: true,
+          r: 200,
+          g: 100,
+          b: 50,
+          brightness: 180,
+          pwm: 0,
+        });
+      }
+      for (let i = 8; i < 16; i++) {
+        channels.push({
+          index: i,
+          kind: 'pwm',
+          enabled: true,
+          r: 0,
+          g: 0,
+          b: 0,
+          brightness: 255,
+          pwm: 1024,
+        });
+      }
+      return channels;
+    }
+
+    it('channelsToMask([0, 1, 8]) produces 0x0103', () => {
+      expect(channelsToMask([0, 1, 8])).toBe(0x0103);
+    });
+
+    it('buildManualSnapshot with one A channel includes only that index and addressable fields', () => {
+      const channels = makeDeskChannels();
+      const snapshot = buildManualSnapshot(channels, [0]);
+      expect(snapshot).toHaveLength(1);
+      expect(snapshot[0]).toEqual({
+        index: 0,
+        r: 200,
+        g: 100,
+        b: 50,
+        brightness: 180,
+      });
+      expect('pwm' in snapshot[0]).toBe(false);
+    });
+
+    it('buildManualSnapshot with one P channel includes only that index and pwm field', () => {
+      const channels = makeDeskChannels();
+      const snapshot = buildManualSnapshot(channels, [8]);
+      expect(snapshot).toHaveLength(1);
+      expect(snapshot[0]).toEqual({
+        index: 8,
+        pwm: 1024,
+      });
+      expect('r' in snapshot[0]).toBe(false);
+      expect('brightness' in snapshot[0]).toBe(false);
+    });
+
+    it('buildManualSnapshot with mixed A/P group (A1, A2, P1) produces exact three-channel payload', () => {
+      const channels = makeDeskChannels();
+      const snapshot = buildManualSnapshot(channels, [0, 1, 8]);
+      expect(snapshot).toHaveLength(3);
+      expect(snapshot.map((s) => s.index)).toEqual([0, 1, 8]);
+      expect(snapshot[0]).toEqual({ index: 0, r: 200, g: 100, b: 50, brightness: 180 });
+      expect(snapshot[1]).toEqual({ index: 1, r: 200, g: 100, b: 50, brightness: 180 });
+      expect(snapshot[2]).toEqual({ index: 8, pwm: 1024 });
+    });
+
+    it('excludes disabled channels from snapshot even when selected', () => {
+      const channels = makeDeskChannels();
+      channels[0].enabled = false;
+      channels[8].enabled = false;
+
+      const snapshot = buildManualSnapshot(channels, [0, 1, 8]);
+      expect(snapshot).toHaveLength(1);
+      expect(snapshot[0].index).toBe(1);
+    });
+
+    it('normalizes duplicate selection indices (Set semantics)', () => {
+      const channels = makeDeskChannels();
+      const snapshot = buildManualSnapshot(channels, [0, 0, 1, 1, 8, 8]);
+      expect(snapshot).toHaveLength(3);
+      expect(snapshot.map((s) => s.index)).toEqual([0, 1, 8]);
+    });
+
+    it('returns empty array when control target is empty', () => {
+      const channels = makeDeskChannels();
+      const snapshot = buildManualSnapshot(channels, []);
+      expect(snapshot).toEqual([]);
+    });
+
+    it('PUT body contains only indices [0, 1, 8] when snapshot built from those indices', async () => {
+      const apiJsonSpy = vi.spyOn(transport, 'apiJson').mockResolvedValue({
+        accepted: true,
+        channelMask: 0x0103,
+        leaseMs: 15000,
+      });
+
+      const channels = makeDeskChannels();
+      const snapshot = buildManualSnapshot(channels, [0, 1, 8]);
+      const res = await putManualState('192.168.1.50', snapshot, 15000);
+
+      expect(res.accepted).toBe(true);
+      expect(res.channelMask).toBe(0x0103);
+      expect(apiJsonSpy).toHaveBeenCalledWith(
+        '192.168.1.50',
+        '/api/v1/manual',
+        expect.objectContaining({
+          body: JSON.stringify({
+            leaseMs: 15000,
+            channels: snapshot,
+          }),
+        }),
+      );
+      const parsedBody = JSON.parse(
+        (apiJsonSpy.mock.calls[0][2] as { body: string }).body,
+      );
+      expect(parsedBody.channels).toHaveLength(3);
+      expect(parsedBody.channels.map((c: { index: number }) => c.index)).toEqual([0, 1, 8]);
+    });
+  });
 });
+
 

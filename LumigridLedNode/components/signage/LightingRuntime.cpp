@@ -80,6 +80,8 @@ void LightingRuntime::stop() {
         source_manager_.release(ControlSource::LiveDmx);
         source_manager_.release(ControlSource::ScenePlayback);
         source_manager_.release(ControlSource::Factory);
+        source_manager_.release(ControlSource::ManualOverride);
+        manual_override_ = {};
         // Do NOT give the mutex before deleting it. The task is confirmed dead
         // (shutdown_sem_ was acked). Giving first would allow any concurrent waiter
         // that slipped in to grab the semaphore and then touch the deleted object

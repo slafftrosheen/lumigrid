@@ -317,6 +317,71 @@ uint8_t ConfigStore::scene_count() {
     return count;
 }
 
+bool ConfigStore::scene_exists(uint8_t index) const {
+    if (index >= kMaxPresets) return false;
+    SceneConfig sc;
+    return const_cast<ConfigStore*>(this)->load_scene(index, sc) == ESP_OK;
+}
+
+uint32_t ConfigStore::compute_show_hash() const {
+    uint32_t hash = 0;
+    // Show schema version
+    const uint32_t show_schema = 1;
+    hash = esp_rom_crc32_le(hash, reinterpret_cast<const uint8_t*>(&show_schema), sizeof(show_schema));
+
+    // Ordered scene checksums (slots 0..31)
+    for (uint8_t i = 0; i < kMaxPresets; ++i) {
+        SceneConfig scene;
+        uint32_t crc = 0;
+        if (const_cast<ConfigStore*>(this)->load_scene(i, scene) == ESP_OK) {
+            crc = scene.checksum;
+        }
+        hash = esp_rom_crc32_le(hash, reinterpret_cast<const uint8_t*>(&crc), sizeof(crc));
+    }
+
+    // Ordered scene motion checksums (slots 0..31)
+    for (uint8_t i = 0; i < kMaxPresets; ++i) {
+        SceneMotionConfig motion;
+        uint32_t crc = 0;
+        if (const_cast<ConfigStore*>(this)->load_scene_motion(i, motion) == ESP_OK) {
+            crc = motion.checksum;
+        }
+        hash = esp_rom_crc32_le(hash, reinterpret_cast<const uint8_t*>(&crc), sizeof(crc));
+    }
+
+    // Sequence (Timeline) checksum
+    {
+        Sequence seq;
+        uint32_t crc = 0;
+        if (const_cast<ConfigStore*>(this)->load_sequence(seq) == ESP_OK) {
+            crc = seq.checksum;
+        }
+        hash = esp_rom_crc32_le(hash, reinterpret_cast<const uint8_t*>(&crc), sizeof(crc));
+    }
+
+    // Calendar schedule checksum
+    {
+        CalendarSchedule sched;
+        uint32_t crc = 0;
+        if (const_cast<ConfigStore*>(this)->load_calendar_schedule(sched) == ESP_OK) {
+            crc = sched.checksum;
+        }
+        hash = esp_rom_crc32_le(hash, reinterpret_cast<const uint8_t*>(&crc), sizeof(crc));
+    }
+
+    // Ordered cue-list checksums (0..kMaxCueLists-1)
+    for (uint8_t i = 0; i < kMaxCueLists; ++i) {
+        CueList cl;
+        uint32_t crc = 0;
+        if (const_cast<ConfigStore*>(this)->load_cue_list(i, cl) == ESP_OK) {
+            crc = cl.checksum;
+        }
+        hash = esp_rom_crc32_le(hash, reinterpret_cast<const uint8_t*>(&crc), sizeof(crc));
+    }
+
+    return hash;
+}
+
 // ── Scene Motion ────────────────────────────────────────────────────
 
 esp_err_t ConfigStore::save_scene_motion(uint8_t index, const SceneMotionConfig& motion) {

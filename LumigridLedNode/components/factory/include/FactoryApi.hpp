@@ -13,6 +13,7 @@ struct cJSON;
 // Forward declarations for signage components
 namespace lg {
 class ConfigStore;
+struct DeviceConfig;
 class LightingRuntime;
 class Scheduler;
 class NodeSync;
@@ -128,8 +129,15 @@ public:
     LightingRuntime* signage() { return signage_; }
     Scheduler* scheduler() { return scheduler_; }
     NodeSync* node_sync() { return node_sync_; }
-    DmxRouter* dmx_router() { return dmx_router_; }
     class CueRunner* cue_runner() { return cue_runner_; }
+
+    using RuntimeConfigApplyCallback = std::function<esp_err_t(const DeviceConfig& old_cfg, const DeviceConfig& new_cfg)>;
+    void set_config_apply_callback(RuntimeConfigApplyCallback callback) {
+        config_apply_callback_ = std::move(callback);
+    }
+    const RuntimeConfigApplyCallback& config_apply_callback() const {
+        return config_apply_callback_;
+    }
 
     void notify_status_async();
 
@@ -151,6 +159,7 @@ public:
     DmxRouter* dmx_router_ = nullptr;
     class CueRunner* cue_runner_ = nullptr;
     std::function<StartupDiagnostics()> diagnostics_provider_{};
+    RuntimeConfigApplyCallback config_apply_callback_{};
     httpd_handle_t signage_server_ = nullptr;
     httpd_handle_t factory_server_ = nullptr;
     size_t max_open_sockets_ = 0;

@@ -99,9 +99,15 @@ esp_err_t NodeSync::start(NodeRole role) {
 void NodeSync::stop() {
     // The task owns and closes its socket after the short receive timeout.
     // Avoid force-deleting a task while it is in a socket call.
+    TransportCallback cb;
     portENTER_CRITICAL(&status_mutex_);
     running_ = false;
+    remote_timeline_enabled_ = false;
+    remote_bpm_ = 0;
+    cb = transport_callback_;
     portEXIT_CRITICAL(&status_mutex_);
+
+    if (cb) cb(false, 120);
 }
 
 void NodeSync::master_task_entry(void* arg) {
@@ -325,8 +331,19 @@ NodeRole NodeSync::worker_loop(int socket, bool auto_mode) {
             }
         }
 
+        const uint32_t now = now_ms();
+        TransportCallback timeout_cb;
+        portENTER_CRITICAL(&status_mutex_);
+        const bool timed_out = (last_packet_ms_ != 0 && elapsed_ms(now, last_packet_ms_) > kPeerTimeoutMs);
+        if (timed_out && remote_timeline_enabled_) {
+            remote_timeline_enabled_ = false;
+            remote_bpm_ = 0;
+            timeout_cb = transport_callback_;
+        }
+        portEXIT_CRITICAL(&status_mutex_);
+        if (timeout_cb) timeout_cb(false, 120);
+
         if (auto_mode) {
-            const uint32_t now = now_ms();
             portENTER_CRITICAL(&status_mutex_);
             const uint32_t updated_last_packet_ms = last_packet_ms_;
             portEXIT_CRITICAL(&status_mutex_);
@@ -386,21 +403,38 @@ bool NodeSync::handle_heartbeat(
 
     if (!accepted) return false;
 
+    TransportCallback cb;
+    portENTER_CRITICAL(&status_mutex_);
+    remote_bpm_ = packet.bpm;
+    remote_timeline_enabled_ = (packet.sequence_enabled != 0);
+    cb = transport_callback_;
+    portEXIT_CRITICAL(&status_mutex_);
+
     clock_.discipline(packet.global_clock_ms, (packet.flags & 0x01) != 0);
     engine_.feed_watchdog();
 
-    // Multi-node fleet preset synchronization is part of accepting a heartbeat.
-    // Do not ACK a master state that this worker could not actually apply.
-    if ((packet.flags & 0x02) != 0) {
-        const uint8_t master_preset = (packet.flags >> 2) & 0x1F;
-        if (master_preset >= kMaxPresets) {
-            ESP_LOGW(TAG, "Rejected master preset %u: out of range", master_preset);
-            return false;
-        }
-        if (engine_.active_scene_index() != master_preset &&
-            !engine_.activate_scene_checked(master_preset)) {
-            ESP_LOGW(TAG, "Rejected master preset %u: scene unavailable or runtime stopping", master_preset);
-            return false;
+    // Scene vs Timeline sync semantics (LG-025 Phase 5)
+    if (packet.sequence_enabled != 0) {
+        // Leader has timeline enabled: follower scheduler evaluates timeline steps
+        // Do NOT overwrite scene slot or activate scene
+        if (cb) cb(true, packet.bpm);
+    } else {
+        // Timeline inactive: notify scheduler to clear sync transport
+        if (cb) cb(false, packet.bpm);
+
+        // Multi-node fleet preset synchronization
+        // Do not ACK a master state that this worker could not actually apply.
+        if ((packet.flags & 0x02) != 0) {
+            const uint8_t master_preset = (packet.flags >> 2) & 0x1F;
+            if (master_preset >= kMaxPresets) {
+                ESP_LOGW(TAG, "Rejected master preset %u: out of range", master_preset);
+                return false;
+            }
+            if (engine_.active_scene_index() != master_preset &&
+                !engine_.activate_scene_checked(master_preset)) {
+                ESP_LOGW(TAG, "Rejected master preset %u: scene unavailable or runtime stopping", master_preset);
+                return false;
+            }
         }
     }
     return true;
@@ -458,13 +492,19 @@ void NodeSync::update_peer(const sockaddr_in& sender, uint16_t latency_ms) {
 }
 
 void NodeSync::reset_master() {
+    TransportCallback cb;
     portENTER_CRITICAL(&status_mutex_);
     master_address_ = 0;
     std::memset(master_mac_, 0, sizeof(master_mac_));
     last_packet_ms_ = 0;
     last_sequence_ = 0;
     has_sequence_ = false;
+    remote_timeline_enabled_ = false;
+    remote_bpm_ = 0;
+    cb = transport_callback_;
     portEXIT_CRITICAL(&status_mutex_);
+
+    if (cb) cb(false, 120);
 }
 
 NodeRole NodeSync::active_role() const {
@@ -488,6 +528,18 @@ NodeSyncStatus NodeSync::status() const {
     result.last_packet_age_ms = last_packet_ms_ == 0
         ? std::numeric_limits<uint32_t>::max()
         : elapsed_ms(now, last_packet_ms_);
+
+    result.master_address = (active_role_ == NodeRole::Master) ? 0 : master_address_;
+    result.remote_bpm = remote_bpm_;
+    result.remote_timeline_enabled = remote_timeline_enabled_;
+
+    if (!running_) {
+        result.transport = 0; // standalone
+    } else if (remote_timeline_enabled_) {
+        result.transport = 2; // timeline
+    } else {
+        result.transport = 1; // scene
+    }
 
     for (const Peer& peer : peers_) {
         if (peer.address == 0 || elapsed_ms(now, peer.last_seen_ms) > kPeerTimeoutMs) {

@@ -100,7 +100,9 @@ public:
     esp_err_t save_scene(uint8_t index, const SceneConfig& scene);
     esp_err_t load_scene(uint8_t index, SceneConfig& scene);
     esp_err_t delete_scene(uint8_t index);
+    bool      scene_exists(uint8_t index) const;
     uint8_t   scene_count();
+    uint32_t  compute_show_hash() const;
 
     // ── Device config ──
     esp_err_t save_config(const DeviceConfig& config);

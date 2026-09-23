@@ -505,6 +505,45 @@ esp_err_t LumigridRuntime::start() {
     }
     started_subsystems_.api = true;
 
+    api_.set_config_apply_callback([this](const DeviceConfig& old_cfg, const DeviceConfig& new_cfg) -> esp_err_t {
+        if (safe_mode_) return ESP_OK;
+
+        const bool sync_en_changed = (old_cfg.sync_enabled != new_cfg.sync_enabled);
+        const bool sync_role_changed = (old_cfg.sync_role != new_cfg.sync_role);
+        const bool sync_token_changed = (old_cfg.sync_token != new_cfg.sync_token);
+
+        if (!sync_en_changed && !sync_role_changed && !sync_token_changed) {
+            return ESP_OK;
+        }
+
+        if (!new_cfg.sync_enabled) {
+            if (started_subsystems_.node_sync) {
+                node_sync_.stop();
+                started_subsystems_.node_sync = false;
+            }
+            return ESP_OK;
+        }
+
+        if (started_subsystems_.node_sync) {
+            node_sync_.stop();
+            started_subsystems_.node_sync = false;
+        }
+
+        esp_err_t start_err = node_sync_.start(static_cast<NodeRole>(new_cfg.sync_role));
+        if (start_err == ESP_OK) {
+            started_subsystems_.node_sync = true;
+        }
+        return start_err;
+    });
+
+    node_sync_.set_transport_callback([this](bool timeline_enabled, uint16_t bpm) {
+        if (timeline_enabled) {
+            scheduler_.apply_sync_transport(true, bpm, static_cast<uint32_t>(clock_.now_ms()));
+        } else {
+            scheduler_.clear_sync_transport();
+        }
+    });
+
     ESP_LOGI("lumigrid", "Step 7: mdns.start()...");
     err = mdns_.start(current_cfg.device_name, "LumiGrid Signage", 80);
     if (err != ESP_OK) {

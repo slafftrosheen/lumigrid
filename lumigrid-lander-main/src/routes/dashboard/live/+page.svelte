@@ -6,14 +6,18 @@
     releaseManualState,
     captureLiveDeskToScene,
     expandChannelMask,
+    buildManualSnapshot,
+    channelsToMask,
     type ManualChannelValue,
     type ManualAddressableValue,
     type ManualPwmValue,
+    type ManualDeskChannel,
   } from '$lib/api/manual';
   import { getDeviceConfig, type DeviceConfig, type ChannelGroup } from '$lib/api/config';
   import { getPresets, savePreset, MAX_PRESETS, type ScenePreset } from '$lib/api/scenes';
   import { getSelectedNodeIp } from '$lib/auth/storage';
   import { nodeStore } from '$lib/state/nodeStore';
+  import { ManualSession, type ManualSessionSnapshot, type ManualSessionState } from '$lib/live/manualSession';
 
   interface ChannelDeskState {
     index: number;
@@ -35,7 +39,7 @@
   let toast = $state('');
   let toastTimeout: ReturnType<typeof setTimeout> | null = null;
 
-  // Selected channels
+  // Selected channels (UI selection — may differ from controlled)
   let selectedIndices = $state<number[]>([0]);
 
   // Desk channel values (16 channels)
@@ -53,12 +57,43 @@
     }))
   );
 
-  // Manual session state
-  let isManualActive = $state(false);
-  let leaseRemainingSec = $state(15);
+  // ── Manual Session State Machine ─────────────────────────────────────────
+  let sessionState = $state<ManualSessionState>('idle');
+  let controlledIndices = $state<number[]>([]);
+  let sessionRequestedMask = $state(0);
+  let leaseRemainingSec = $state(0);
+  let sessionErrorMessage = $state<string | null>(null);
+
+  const session = new ManualSession((snap: ManualSessionSnapshot) => {
+    sessionState = snap.state;
+    controlledIndices = snap.controlledIndices;
+    sessionRequestedMask = snap.requestedMask;
+    leaseRemainingSec = snap.leaseRemainingSec;
+    sessionErrorMessage = snap.errorMessage;
+  });
+
+  let isManualActive = $derived(sessionState === 'active');
+  let isSessionBusy = $derived(sessionState === 'acquiring' || sessionState === 'releasing');
+  let isSessionLostOrError = $derived(sessionState === 'lost' || sessionState === 'error');
+
+  // Whether UI selection differs from controlled set (for Update Targets visibility)
+  let selectionDiffersFromControlled = $derived.by(() => {
+    if (!isManualActive) return false;
+    const selSet = new Set(selectedIndices);
+    const ctrlSet = new Set(controlledIndices);
+    if (selSet.size !== ctrlSet.size) return true;
+    for (const idx of selSet) {
+      if (!ctrlSet.has(idx)) return true;
+    }
+    return false;
+  });
+
+  // Controlled channel names for ownership summary badge
+  let controlledLabels = $derived(
+    controlledIndices.map(i => i < 8 ? `A${i + 1}` : `P${i - 7}`).join(' '),
+  );
+
   let sendThrottleTimer: ReturnType<typeof setTimeout> | null = null;
-  let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
-  let leaseCountdownInterval: ReturnType<typeof setInterval> | null = null;
   let lastSendTimestamp = 0;
 
   // Save Scene Dialog
@@ -84,15 +119,10 @@
     return map;
   });
 
-  // Watch telemetry for manual status
+  // Watch telemetry for manual status — delegate to session (server-authoritative)
   $effect(() => {
     if (liveStatus?.manual) {
-      if (liveStatus.manual.active) {
-        isManualActive = true;
-        leaseRemainingSec = Math.max(0, Math.ceil(liveStatus.manual.leaseRemainingMs / 1000));
-      } else if (!isManualActive) {
-        leaseRemainingSec = 0;
-      }
+      session.onTelemetry(liveStatus.manual);
     }
   });
 
@@ -110,6 +140,17 @@
     if (!activeAChannel) return '#ffffff';
     const toHex = (n: number) => n.toString(16).padStart(2, '0');
     return `#${toHex(activeAChannel.r)}${toHex(activeAChannel.g)}${toHex(activeAChannel.b)}`;
+  });
+
+  // Per-channel ownership detail: manual armed vs output owner
+  let channelOwnershipDetail = $derived.by(() => {
+    const details = new Map<number, { armed: boolean; outputOwner: string }>();
+    for (const idx of selectedIndices) {
+      const owner = channelOwners.get(idx) ?? 'Idle';
+      const armed = controlledIndices.includes(idx);
+      details.set(idx, { armed, outputOwner: owner });
+    }
+    return details;
   });
 
   // Preemption warnings for selected channels
@@ -178,26 +219,12 @@
 
   // ── Snapshot Dispatch ──────────────────────────────────────────────────────────
 
-  function buildFullSnapshot(): ManualChannelValue[] {
-    const payload: ManualChannelValue[] = [];
-    for (const ch of channels) {
-      if (!ch.enabled) continue;
-      if (ch.kind === 'addressable') {
-        payload.push({
-          index: ch.index,
-          r: ch.r,
-          g: ch.g,
-          b: ch.b,
-          brightness: ch.brightness,
-        });
-      } else {
-        payload.push({
-          index: ch.index,
-          pwm: ch.pwm,
-        });
-      }
-    }
-    return payload;
+  /**
+   * Build a scoped snapshot for only the controlled channels (not all enabled).
+   * Used for throttled live-edit sends while session is active.
+   */
+  function buildControlledSnapshot(): ManualChannelValue[] {
+    return buildManualSnapshot(channels as ManualDeskChannel[], controlledIndices);
   }
 
   async function sendManualSnapshot() {
@@ -206,11 +233,12 @@
     lastSendTimestamp = now;
 
     try {
-      const payload = buildFullSnapshot();
+      const payload = buildControlledSnapshot();
       if (payload.length === 0) return;
       await putManualState(nodeIp, payload, 15_000);
-      leaseRemainingSec = 15;
+      // Lease countdown is updated from telemetry, not locally
     } catch (e) {
+      // Heartbeat handles fail-closed; throttled edits log but don't kill session
       console.warn('Manual state dispatch failed', e);
     }
   }
@@ -250,25 +278,27 @@
 
   async function takeManualControl() {
     if (!nodeIp) return;
-    isManualActive = true;
-    leaseRemainingSec = 15;
-    await sendManualSnapshot();
-    showToast('Manual control active (15s lease)');
-
-    startHeartbeat();
+    const ok = await session.acquire(nodeIp, channels as ManualDeskChannel[], selectedIndices);
+    if (ok) {
+      showToast(`Manual control active · ${controlledLabels}`);
+    } else if (sessionErrorMessage) {
+      showToast(sessionErrorMessage);
+    }
   }
 
   async function releaseControl() {
     if (!nodeIp) return;
-    isManualActive = false;
-    stopHeartbeat();
-    leaseRemainingSec = 0;
+    await session.release(nodeIp);
+    showToast('Manual control released to Scene');
+  }
 
-    try {
-      await releaseManualState(nodeIp);
-      showToast('Manual control released to Scene');
-    } catch (e) {
-      showToast('Release failed: ' + (e instanceof Error ? e.message : String(e)));
+  async function updateTargets() {
+    if (!nodeIp) return;
+    const ok = await session.updateTargets(nodeIp, channels as ManualDeskChannel[], selectedIndices);
+    if (ok) {
+      showToast(`Targets updated · ${controlledLabels}`);
+    } else if (sessionErrorMessage) {
+      showToast(sessionErrorMessage);
     }
   }
 
@@ -286,36 +316,6 @@
     }
     commitImmediateSend();
     showToast('Selected channels blacked out');
-  }
-
-  function startHeartbeat() {
-    stopHeartbeat();
-    heartbeatInterval = setInterval(() => {
-      if (isManualActive && nodeIp) {
-        sendManualSnapshot();
-      }
-    }, 5000);
-
-    leaseCountdownInterval = setInterval(() => {
-      if (isManualActive && leaseRemainingSec > 0) {
-        leaseRemainingSec -= 1;
-        if (leaseRemainingSec <= 0) {
-          isManualActive = false;
-          stopHeartbeat();
-        }
-      }
-    }, 1000);
-  }
-
-  function stopHeartbeat() {
-    if (heartbeatInterval) {
-      clearInterval(heartbeatInterval);
-      heartbeatInterval = null;
-    }
-    if (leaseCountdownInterval) {
-      clearInterval(leaseCountdownInterval);
-      leaseCountdownInterval = null;
-    }
   }
 
   // ── Target Selection ──────────────────────────────────────────────────────────
@@ -439,7 +439,7 @@
         return;
       }
 
-      const activeManuals = buildFullSnapshot();
+      const activeManuals = buildControlledSnapshot();
       const newPreset = captureLiveDeskToScene(freeSlot, name.trim() || `Live Look ${freeSlot}`, activeManuals);
 
       await savePreset(nodeIp, newPreset);
@@ -462,12 +462,8 @@
   });
 
   onDestroy(() => {
-    stopHeartbeat();
     if (sendThrottleTimer) clearTimeout(sendThrottleTimer);
-    if (isManualActive && nodeIp) {
-      // Best-effort release on teardown
-      releaseManualState(nodeIp).catch(() => {});
-    }
+    session.destroy(nodeIp);
   });
 
   // Color Swatches
@@ -515,10 +511,31 @@
 
       <div class="live-telemetry-item">
         <span class="live-telemetry-label">Manual Session</span>
-        <span class="live-telemetry-val" class:live-active={isManualActive}>
-          {isManualActive ? `Active (${leaseRemainingSec}s)` : 'Standby'}
+        <span class="live-telemetry-val" class:live-active={isManualActive} class:live-lost={isSessionLostOrError}>
+          {#if sessionState === 'active'}
+            Active ({leaseRemainingSec}s)
+          {:else if sessionState === 'acquiring'}
+            Acquiring…
+          {:else if sessionState === 'releasing'}
+            Releasing…
+          {:else if sessionState === 'lost'}
+            Lost
+          {:else if sessionState === 'error'}
+            Error
+          {:else}
+            Standby
+          {/if}
         </span>
       </div>
+
+      {#if isManualActive && controlledIndices.length > 0}
+        <div class="live-telemetry-item">
+          <span class="live-telemetry-label">Manual Lease</span>
+          <span class="live-telemetry-val live-active">
+            {controlledLabels} · {leaseRemainingSec}s
+          </span>
+        </div>
+      {/if}
 
       {#if liveHealth?.output?.current_power_mw != null || liveStatus?.powerMw != null}
         <div class="live-telemetry-item">
@@ -546,25 +563,51 @@
     </div>
   {/if}
 
+  <!-- Session Lost/Error Banner -->
+  {#if isSessionLostOrError && sessionErrorMessage}
+    <div class="live-preemption-alert danger">
+      <span class="live-alert-icon">⚡</span>
+      <p class="live-alert-text">{sessionErrorMessage}</p>
+    </div>
+  {/if}
+
   <!-- Actions Bar -->
   <div class="live-actions-bar">
     <div class="live-actions-left">
-      {#if !isManualActive}
+      {#if sessionState === 'idle' || sessionState === 'lost' || sessionState === 'error'}
         <button
           type="button"
           class="live-action-btn live-btn-take"
           onclick={takeManualControl}
-          disabled={!isConnected}
+          disabled={!isConnected || isSessionBusy}
         >
-          Take Manual Control
+          {sessionState === 'lost' || sessionState === 'error' ? 'Re-acquire Control' : 'Take Manual Control'}
         </button>
-      {:else}
+      {:else if sessionState === 'active'}
         <button
           type="button"
           class="live-action-btn live-btn-release"
           onclick={releaseControl}
         >
           Release to Scene
+        </button>
+
+        {#if selectionDiffersFromControlled}
+          <button
+            type="button"
+            class="live-action-btn live-btn-update-targets"
+            onclick={updateTargets}
+          >
+            Update Targets
+          </button>
+        {/if}
+      {:else}
+        <button
+          type="button"
+          class="live-action-btn live-btn-take"
+          disabled
+        >
+          {sessionState === 'acquiring' ? 'Acquiring…' : 'Releasing…'}
         </button>
       {/if}
 
@@ -640,18 +683,22 @@
         <div class="live-ports-row">
           {#each channels.slice(0, 8) as ch}
             {@const isSel = selectedIndices.includes(ch.index)}
+            {@const isCtrl = controlledIndices.includes(ch.index)}
             {@const owner = channelOwners.get(ch.index)}
             <button
               type="button"
               class="live-port-btn live-port-a"
               class:selected={isSel}
+              class:controlled={isCtrl}
               class:disabled={!ch.enabled}
               disabled={!ch.enabled}
               onclick={(e) => toggleChannel(ch.index, e.shiftKey || e.ctrlKey || e.metaKey)}
             >
               <span class="live-port-id">A{ch.index + 1}</span>
               <span class="live-port-name">{ch.name !== `A${ch.index + 1}` ? ch.name : ''}</span>
-              {#if owner}
+              {#if isCtrl && owner && owner !== 'ManualOverride'}
+                <span class="live-port-owner live-port-owner-armed">Manual armed · {owner} owns</span>
+              {:else if owner}
                 <span class="live-port-owner">{owner}</span>
               {/if}
             </button>
@@ -665,18 +712,22 @@
         <div class="live-ports-row">
           {#each channels.slice(8, 16) as ch}
             {@const isSel = selectedIndices.includes(ch.index)}
+            {@const isCtrl = controlledIndices.includes(ch.index)}
             {@const owner = channelOwners.get(ch.index)}
             <button
               type="button"
               class="live-port-btn live-port-p"
               class:selected={isSel}
+              class:controlled={isCtrl}
               class:disabled={!ch.enabled}
               disabled={!ch.enabled}
               onclick={(e) => toggleChannel(ch.index, e.shiftKey || e.ctrlKey || e.metaKey)}
             >
               <span class="live-port-id">P{ch.index - 7}</span>
               <span class="live-port-name">{ch.name !== `P${ch.index - 7}` ? ch.name : ''}</span>
-              {#if owner}
+              {#if isCtrl && owner && owner !== 'ManualOverride'}
+                <span class="live-port-owner live-port-owner-armed">Manual armed · {owner} owns</span>
+              {:else if owner}
                 <span class="live-port-owner">{owner}</span>
               {/if}
             </button>
@@ -1006,6 +1057,10 @@
     color: #d946ef;
   }
 
+  .live-telemetry-val.live-lost {
+    color: #f87171;
+  }
+
   .live-telemetry-val.manual-source {
     color: #f59e0b;
   }
@@ -1100,6 +1155,16 @@
 
   .live-btn-release:hover:not(:disabled) {
     background: #3f3f46;
+  }
+
+  .live-btn-update-targets {
+    background: rgba(217, 70, 239, 0.15);
+    border: 1px solid #d946ef;
+    color: #f0abfc;
+  }
+
+  .live-btn-update-targets:hover:not(:disabled) {
+    background: rgba(217, 70, 239, 0.25);
   }
 
   .live-btn-blackout {
@@ -1252,6 +1317,15 @@
     color: #06b6d4;
     text-transform: uppercase;
     font-family: ui-monospace, monospace;
+  }
+
+  .live-port-owner-armed {
+    color: #f59e0b;
+  }
+
+  .live-port-btn.controlled:not(.selected) {
+    border-color: rgba(217, 70, 239, 0.45);
+    background: rgba(217, 70, 239, 0.06);
   }
 
   /* Port selection styles */

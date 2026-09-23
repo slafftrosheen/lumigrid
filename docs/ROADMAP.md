@@ -13,7 +13,8 @@ This document outlines the aspirational ecosystem vision for LumiGrid beyond the
 - **Effect Parameter Automation / Scene Motion:** Real-time parameter morphing and multi-track motion curves (`AutomationEngine`).
 - **Cue Lists / Show Execution:** Structured playlist-style cue execution with automatic and trigger-based step advances (`CueRunner`).
 - **Manual Cue Crossfade:** Operator manual fader crossfade between arbitrary cue scenes.
-- **Live Desk v1 / Manual Override (LG-024):** Non-persistent live manual fader and RGB matrix override across 16 physical channels (A1–A8 and P1–P8) with lease protection, group targeting, scene capture, and safety pipeline compliance.
+- **Live Desk v1 / Manual Override (LG-024):** Non-persistent live manual fader and RGB matrix override across 16 physical channels (A1–A8 and P1–P8) with lease protection, group targeting, scene capture, and safety pipeline compliance. Hardened with server-authoritative `ManualSession` state machine, strict selection-versus-controlled scope decoupling, fail-closed telemetry & heartbeat reconciliation, verified channel isolation, replacement semantics, and runtime preemption test coverage (A–H).
+- **Fleet Sync Studio & Show Deployment v1 (LG-025):** Multi-node cluster orchestration and show distribution. Provides real-time fleet visibility (leader election, follower topology, bounded microsecond clock offset, RTT latency), show manifest CRC32 checksum generation and parity comparison (`showHash`), real Scene slot deletion (`DELETE /api/v1/presets?index=N`), follower timeline transient transport synchronization, sequential multi-node show deployment engine with verification, and synchronized Scene and Timeline playback controls directed to the cluster leader.
 
 ## Node Family (Conceptual)
 

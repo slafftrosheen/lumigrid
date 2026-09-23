@@ -17,6 +17,9 @@
 #include "SceneTransition.hpp"
 #include "AutomationEngine.hpp"
 #include "CueRunner.hpp"
+#include "NodeSync.hpp"
+#include "Scheduler.hpp"
+#include "ClockDiscipline.hpp"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -1938,7 +1941,20 @@ bool test_batch8_output_transaction_and_fault_unification() {
         assert(tx.commit() == ESP_ERR_INVALID_STATE);
     }
 
-    ESP_LOGI(TAG, "[PASS] Batch 8 Test C passed (driver failure injection & topology invalidation verified).");
+    // Recovery gate: applying a valid configuration restores topology_valid_ and re-arms output_enabled_
+    DeviceConfig good_cfg{};
+    good_cfg.channels[0].enabled = true;
+    good_cfg.channels[0].pixel_count = 60;
+    esp_err_t good_reconf = ctrl.reconfigure(good_cfg);
+    assert(good_reconf == ESP_OK);
+    assert(ctrl.is_topology_valid() == true);
+    assert(ctrl.output_enabled() == true);
+    {
+        auto tx = ctrl.begin_transaction();
+        assert(tx.commit() == ESP_OK);
+    }
+
+    ESP_LOGI(TAG, "[PASS] Batch 8 Test C passed (driver failure injection, topology invalidation & recovery verified).");
     return true;
 }
 
@@ -2830,85 +2846,105 @@ bool test_lg022_show_engine() {
 // LG-024 Live Desk & Manual Override Hardening Tests
 // ============================================================================
 bool test_lg024_live_desk_and_manual_override() {
-    ESP_LOGI(TAG, "Testing LG-024 Live Desk & Manual Override...");
+    ESP_LOGI(TAG, "Testing LG-024 Live Desk & Manual Override (Tests A-H)...");
 
-    // 1. Channel-scoped ownership arbitration & preemption
+    const uint32_t t_base = 10000;
+    uint32_t now = t_base;
+
+    // Test A — Channel Isolation:
+    // Manual mask 0x0001 (A1 only) must isolate to channel 0 without bleeding to A2 (ch 1) or P1 (ch 8)
     {
         ControlSourceManager csm;
         csm.init();
-
-        const uint32_t t_base = 10000;
-        uint32_t now = t_base;
-
-        // Scene owns all 16 channels indefinitely
-        csm.acquire(ControlSource::ScenePlayback, 0, 0xFF, 0x07, 0xFFFF);
-        auto snap = csm.get_snapshot(now);
-        for (uint8_t ch = 0; ch < 16; ch++) {
-            assert(snap.resolve_channel(ch, now) == ControlSource::ScenePlayback);
-        }
-
-        // ManualOverride claims A1 only (channel 0, mask 0x0001) with 15s lease (expires at t_base + 15000)
         csm.acquire(ControlSource::ManualOverride, 15000, 0x01, 0x01, 0x0001);
-        now = t_base + 1000;
-        snap = csm.get_snapshot(now);
+        auto snap = csm.get_snapshot(now);
         assert(snap.resolve_channel(0, now) == ControlSource::ManualOverride);
-        for (uint8_t ch = 1; ch < 16; ch++) {
+        assert(snap.resolve_channel(1, now) != ControlSource::ManualOverride);
+        assert(snap.resolve_channel(8, now) != ControlSource::ManualOverride);
+        for (uint8_t ch = 1; ch < 16; ++ch) {
+            assert(snap.resolve_channel(ch, now) == ControlSource::Idle);
+        }
+    }
+
+    // Test B — Scene/Manual Coexistence:
+    // Scene owns all 16 channels indefinitely; Manual claims A1 only.
+    // Verify channel 0 resolves to ManualOverride, while channels 1..15 remain ScenePlayback.
+    {
+        ControlSourceManager csm;
+        csm.init();
+        csm.acquire(ControlSource::ScenePlayback, 0, 0xFF, 0x07, 0xFFFF);
+        csm.acquire(ControlSource::ManualOverride, 15000, 0x01, 0x01, 0x0001);
+        auto snap = csm.get_snapshot(now);
+        assert(snap.resolve_channel(0, now) == ControlSource::ManualOverride);
+        assert(snap.resolve_channel(1, now) == ControlSource::ScenePlayback);
+        assert(snap.resolve_channel(8, now) == ControlSource::ScenePlayback);
+        for (uint8_t ch = 1; ch < 16; ++ch) {
             assert(snap.resolve_channel(ch, now) == ControlSource::ScenePlayback);
         }
+    }
 
-        // LiveDmx claims A1 (channel 0, mask 0x0001) with 3s lease
-        csm.acquire(ControlSource::LiveDmx, 3000, 0x01, 0x01, 0x0001);
-        now = t_base + 2000;
-        snap = csm.get_snapshot(now);
+    // Test C — DMX Preemption (Channel-Local):
+    // Manual claims A1+A2 (mask 0x0003). DMX claims A1 only (mask 0x0001).
+    // Verify A1 -> LiveDmx, A2 -> ManualOverride. Releasing DMX restores A1 -> ManualOverride.
+    {
+        ControlSourceManager csm;
+        csm.init();
+        csm.acquire(ControlSource::ManualOverride, 15000, 0x03, 0x01, 0x0003);
+        csm.acquire(ControlSource::LiveDmx, 5000, 0x01, 0x01, 0x0001);
+        auto snap = csm.get_snapshot(now);
         assert(snap.resolve_channel(0, now) == ControlSource::LiveDmx);
-        for (uint8_t ch = 1; ch < 16; ch++) {
-            assert(snap.resolve_channel(ch, now) == ControlSource::ScenePlayback);
-        }
+        assert(snap.resolve_channel(1, now) == ControlSource::ManualOverride);
+        assert(snap.resolve_channel(8, now) == ControlSource::Idle);
 
-        // Release LiveDmx before manual lease expires (manual lease alive until t_base + 15000)
+        // Releasing DMX restores A1 to ManualOverride while lease is still valid
         csm.release(ControlSource::LiveDmx);
-        now = t_base + 3000;
         snap = csm.get_snapshot(now);
         assert(snap.resolve_channel(0, now) == ControlSource::ManualOverride);
-        for (uint8_t ch = 1; ch < 16; ch++) {
-            assert(snap.resolve_channel(ch, now) == ControlSource::ScenePlayback);
-        }
+        assert(snap.resolve_channel(1, now) == ControlSource::ManualOverride);
+    }
 
-        // Expire ManualOverride lease (advance time beyond t_base + 15000)
-        now = t_base + 16000;
+    // Test D — Manual Lease Expiry:
+    // Scene owns all channels; manual acquires A1 with 3s lease.
+    // Advancing time past 3s expires manual lease and cleanly resumes Scene.
+    {
+        ControlSourceManager csm;
+        csm.init();
+        csm.acquire(ControlSource::ScenePlayback, 0, 0xFF, 0x07, 0xFFFF);
+        csm.acquire(ControlSource::ManualOverride, 3000, 0x01, 0x01, 0x0001);
+        now = t_base + 1000;
+        auto snap = csm.get_snapshot(now);
+        assert(snap.resolve_channel(0, now) == ControlSource::ManualOverride);
+
+        // Advance time past 3000ms lease
+        now = t_base + 3500;
         snap = csm.get_snapshot(now);
         assert(snap.resolve_channel(0, now) == ControlSource::ScenePlayback);
-        for (uint8_t ch = 1; ch < 16; ch++) {
+        for (uint8_t ch = 0; ch < 16; ++ch) {
             assert(snap.resolve_channel(ch, now) == ControlSource::ScenePlayback);
         }
     }
 
-    // 2. Factory and E-Stop preemption over ManualOverride
+    // Test E — Factory Priority:
+    // Manual claims A1+A2. Factory claims A1.
+    // Verify A1 -> Factory, A2 -> ManualOverride. Releasing Factory restores A1 -> ManualOverride.
     {
         ControlSourceManager csm;
         csm.init();
-        uint32_t now = 5000;
+        csm.acquire(ControlSource::ManualOverride, 15000, 0x03, 0x01, 0x0003);
+        csm.acquire(ControlSource::Factory, 5000, 0x01, 0x01, 0x0001);
+        auto snap = csm.get_snapshot(now);
+        assert(snap.resolve_channel(0, now) == ControlSource::Factory);
+        assert(snap.resolve_channel(1, now) == ControlSource::ManualOverride);
 
-        csm.acquire(ControlSource::ManualOverride, 15000, 0xFF, 0x07, 0xFFFF);
-        assert(csm.resolve(0, 0, now) == ControlSource::ManualOverride);
-
-        // Factory preempts ManualOverride
-        csm.acquire(ControlSource::Factory, 5000, 0xFF, 0x07, 0xFFFF);
-        assert(csm.resolve(0, 0, now) == ControlSource::Factory);
-        assert(csm.get_snapshot(now).resolve_channel(0, now) == ControlSource::Factory);
-
-        // Releasing Factory restores ManualOverride
         csm.release(ControlSource::Factory);
-        assert(csm.resolve(0, 0, now) == ControlSource::ManualOverride);
-        assert(csm.get_snapshot(now).resolve_channel(0, now) == ControlSource::ManualOverride);
-
-        // E-Stop preempts everything and latches
-        csm.acquire(ControlSource::EStop, 0, 0xFF, 0x07, 0xFFFF);
-        assert(csm.resolve(0, 0, now) == ControlSource::EStop);
-        assert(csm.get_snapshot(now).resolve_channel(0, now) == ControlSource::EStop);
+        snap = csm.get_snapshot(now);
+        assert(snap.resolve_channel(0, now) == ControlSource::ManualOverride);
+        assert(snap.resolve_channel(1, now) == ControlSource::ManualOverride);
     }
 
-    // 3. LightingRuntime integration: submission, mixed frame, status, release, E-Stop
+    // Test F — Emergency Stop:
+    // Manual active on multiple channels; trigger E-Stop.
+    // Verify manual is deactivated and output controller latches.
     {
         OutputController ctrl;
         ConfigStore cfg_store;
@@ -2916,48 +2952,218 @@ bool test_lg024_live_desk_and_manual_override() {
         csm.init();
         LightingRuntime runtime(csm, ctrl, cfg_store);
 
-        // Submit mixed manual frame: A1 red @ 50% (brightness 128), P1 PWM 2048
         ManualOverrideFrame frame{};
         frame.channels[0].active = true;
-        frame.channels[0].color = LightValue(255, 0, 0, 0);
-        frame.channels[0].brightness = 128;
-
+        frame.channels[1].active = true;
         frame.channels[8].active = true;
-        frame.channels[8].pwm = 2048;
-
-        frame.channel_mask = (1 << 0) | (1 << 8); // 257
-
-        bool submitted = runtime.submit_manual_override(frame, 15000);
-        assert(submitted);
-
-        ManualControlStatus status = runtime.manual_control_status();
-        assert(status.active == true);
-        assert(status.channel_mask == 257);
-        assert(status.lease_remaining_ms > 0 && status.lease_remaining_ms <= 15000);
-
-        // Verify channel values in manual state
-        assert(frame.channels[0].color.r == 255);
-        assert(frame.channels[0].color.g == 0);
-        assert(frame.channels[0].color.b == 0);
-        assert(frame.channels[0].brightness == 128);
-        assert(frame.channels[8].pwm == 2048);
-
-        // Release / DELETE manual override clears transient state
-        runtime.clear_manual_override();
-        status = runtime.manual_control_status();
-        assert(status.active == false);
-        assert(status.channel_mask == 0);
-        assert(status.lease_remaining_ms == 0);
-
-        // E-Stop clears manual override and latches controller
         runtime.submit_manual_override(frame, 15000);
         assert(runtime.manual_control_status().active == true);
+
         runtime.trigger_estop();
         assert(runtime.manual_control_status().active == false);
         assert(ctrl.is_estop_latched() == true);
     }
 
-    ESP_LOGI(TAG, "[PASS] LG-024 Live Desk & Manual Override tests passed.");
+    // Test G — DELETE Semantics:
+    // LiveDmx and ManualOverride both active. clear_manual_override() releases only ManualOverride;
+    // LiveDmx and other sources remain active and unchanged.
+    {
+        OutputController ctrl;
+        ConfigStore cfg_store;
+        ControlSourceManager csm;
+        csm.init();
+        LightingRuntime runtime(csm, ctrl, cfg_store);
+
+        // Claim LiveDmx on P1 (channel 8)
+        csm.acquire(ControlSource::LiveDmx, 10000, 0x01, 0x01, 0x0100);
+
+        // Submit ManualOverride on A1 (channel 0)
+        ManualOverrideFrame frame{};
+        frame.channels[0].active = true;
+        runtime.submit_manual_override(frame, 15000);
+
+        now = t_base;
+        auto snap = csm.get_snapshot(now);
+        assert(snap.resolve_channel(0, now) == ControlSource::ManualOverride);
+        assert(snap.resolve_channel(8, now) == ControlSource::LiveDmx);
+
+        // Clear manual override
+        runtime.clear_manual_override();
+
+        // ManualOverride must be inactive, but LiveDmx must remain active
+        assert(runtime.manual_control_status().active == false);
+        snap = csm.get_snapshot(now);
+        assert(snap.resolve_channel(0, now) != ControlSource::ManualOverride);
+        assert(snap.resolve_channel(8, now) == ControlSource::LiveDmx);
+    }
+
+    // Test H — Replacement Semantics:
+    // Submitting manual A1+A2, then submitting replacement manual P1 only.
+    // Resulting mask must be only P1 (0x0100). A1 and A2 must no longer be ManualOverride.
+    {
+        OutputController ctrl;
+        ConfigStore cfg_store;
+        ControlSourceManager csm;
+        csm.init();
+        LightingRuntime runtime(csm, ctrl, cfg_store);
+
+        // First frame: A1 + A2
+        ManualOverrideFrame frame1{};
+        frame1.channels[0].active = true;
+        frame1.channels[0].color = LightValue(255, 0, 0, 0);
+        frame1.channels[0].brightness = 255;
+        frame1.channels[1].active = true;
+        frame1.channels[1].color = LightValue(0, 255, 0, 0);
+        frame1.channels[1].brightness = 255;
+
+        bool ok1 = runtime.submit_manual_override(frame1, 15000);
+        assert(ok1);
+        ManualControlStatus status1 = runtime.manual_control_status();
+        assert(status1.active == true);
+        assert(status1.channel_mask == 0x0003); // A1 + A2
+
+        // Second frame: P1 only (replacement)
+        ManualOverrideFrame frame2{};
+        frame2.channels[8].active = true;
+        frame2.channels[8].pwm = 3000;
+
+        bool ok2 = runtime.submit_manual_override(frame2, 15000);
+        assert(ok2);
+        ManualControlStatus status2 = runtime.manual_control_status();
+        assert(status2.active == true);
+        assert(status2.channel_mask == 0x0100); // P1 only!
+
+        now = t_base;
+        auto snap = csm.get_snapshot(now);
+        assert(snap.resolve_channel(0, now) != ControlSource::ManualOverride);
+        assert(snap.resolve_channel(1, now) != ControlSource::ManualOverride);
+        assert(snap.resolve_channel(8, now) == ControlSource::ManualOverride);
+    }
+
+    ESP_LOGI(TAG, "[PASS] LG-024 Live Desk & Manual Override tests A-H passed.");
+    return true;
+}
+
+bool test_lg025_fleet_sync_and_show_deployment() {
+    ESP_LOGI(TAG, "Testing LG-025 Fleet Sync & Show Deployment...");
+
+    // ── Test A: ManualOverride scope and stop lifecycle ────────────────────────
+    {
+        OutputController ctrl;
+        ConfigStore cfg;
+        ControlSourceManager csm;
+        csm.init();
+        LightingRuntime runtime(csm, ctrl, cfg);
+
+        // Submit A1 only
+        ManualOverrideFrame frame{};
+        frame.channels[0].active = true;
+        frame.channels[0].color = LightValue(200, 100, 50, 0);
+        frame.channels[0].brightness = 255;
+
+        bool ok = runtime.submit_manual_override(frame, 10000);
+        assert(ok);
+        assert(runtime.manual_control_status().active);
+        assert(runtime.manual_control_status().channel_mask == 0x0001); // A1 only
+
+        // Verify channel resolution
+        uint64_t now = 1000;
+        auto snap = csm.get_snapshot(now);
+        assert(snap.resolve_channel(0, now) == ControlSource::ManualOverride);
+        assert(snap.resolve_channel(1, now) != ControlSource::ManualOverride);
+
+        // Stop runtime -> ManualOverride must be released
+        runtime.stop();
+        assert(!runtime.manual_control_status().active);
+        snap = csm.get_snapshot(now);
+        assert(snap.resolve_channel(0, now) != ControlSource::ManualOverride);
+    }
+
+    // ── Test B: Real Scene Deletion ───────────────────────────────────────────
+    {
+        ConfigStore cfg;
+        SceneConfig scene{};
+        scene.index = 7;
+        strncpy(scene.name, "Test Scene 7", sizeof(scene.name) - 1);
+        scene.checksum = 7777;
+        assert(cfg.save_scene(7, scene) == ESP_OK);
+        assert(cfg.scene_exists(7));
+
+        SceneMotionConfig motion{};
+        motion.index = 7;
+        motion.track_count = 1;
+        motion.checksum = 8888;
+        assert(cfg.save_scene_motion(7, motion) == ESP_OK);
+
+        // Delete Scene 7
+        assert(cfg.delete_scene(7) == ESP_OK);
+        assert(!cfg.scene_exists(7));
+        assert(cfg.delete_scene_motion(7) == ESP_OK);
+
+        SceneConfig loaded{};
+        assert(cfg.load_scene(7, loaded) != ESP_OK);
+    }
+
+    // ── Test C: Scheduler Sync Timeline Transport ─────────────────────────────
+    {
+        ConfigStore cfg;
+        OutputController ctrl;
+        ControlSourceManager csm;
+        csm.init();
+        LightingRuntime runtime(csm, ctrl, cfg);
+        ClockDiscipline clock;
+        Scheduler scheduler(cfg, runtime, clock);
+
+        assert(!scheduler.sync_transport().active);
+
+        // Apply transient transport
+        scheduler.apply_sync_transport(true, 130, 5000);
+        auto trans = scheduler.sync_transport();
+        assert(trans.active);
+        assert(trans.timeline_enabled);
+        assert(trans.bpm == 130);
+
+        // Clear transient transport
+        scheduler.clear_sync_transport();
+        assert(!scheduler.sync_transport().active);
+    }
+
+    // ── Test D: Show Manifest Hash Determinism ─────────────────────────────────
+    {
+        ConfigStore cfg1;
+        ConfigStore cfg2;
+
+        uint32_t hash1 = cfg1.compute_show_hash();
+        uint32_t hash2 = cfg2.compute_show_hash();
+        assert(hash1 == hash2);
+
+        // Modify Scene 4 on cfg1
+        SceneConfig scene4{};
+        scene4.index = 4;
+        strncpy(scene4.name, "Scene 4", sizeof(scene4.name) - 1);
+        scene4.checksum = 4444;
+        assert(cfg1.save_scene(4, scene4) == ESP_OK);
+        assert(cfg1.compute_show_hash() != hash2);
+
+        // Modify Scene Motion 4 on cfg2
+        SceneMotionConfig motion4{};
+        motion4.index = 4;
+        motion4.track_count = 1;
+        motion4.checksum = 4445;
+        assert(cfg2.save_scene_motion(4, motion4) == ESP_OK);
+        assert(cfg2.compute_show_hash() != hash1);
+
+        // Modify hardware configuration on a fresh cfg3: showHash must remain identical to cfg1 baseline
+        ConfigStore cfg3;
+        DeviceConfig dev_cfg{};
+        cfg3.load_config(dev_cfg);
+        dev_cfg.channels[0].max_brightness = 100;
+        dev_cfg.channels[0].max_milliwatts = 5000;
+        cfg3.save_config(dev_cfg);
+        assert(cfg3.compute_show_hash() == hash1); // Hardware config does not affect Show content hash!
+    }
+
+    ESP_LOGI(TAG, "[PASS] LG-025 Fleet Sync & Show Deployment tests passed.");
     return true;
 }
 
@@ -3037,6 +3243,9 @@ bool run_runtime_hardening_tests() {
 
     // LG-024 Live Desk & Manual Override Tests
     all_ok &= test_lg024_live_desk_and_manual_override();
+
+    // LG-025 Fleet Sync & Show Deployment Tests
+    all_ok &= test_lg025_fleet_sync_and_show_deployment();
 
     if (all_ok) {
         ESP_LOGI(TAG, "==================================================");

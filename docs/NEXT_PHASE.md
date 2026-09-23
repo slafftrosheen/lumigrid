@@ -93,9 +93,19 @@ Firmware
 - Backup/restore validation and recovery UI.
 - OTA progress/reboot/reconnect state.
 
-### 8. Hardware validation
+### 8. Fleet Sync Studio & Show Deployment (LG-025)
 
-Execute the documented matrix: boot, networking, API, WebSocket, pixel output, PCA9685, DMX, arbitration, limiter, E-stop, watchdog, recovery, backup/restore, OTA, and extended burn-in.
+- Multi-node cluster orchestration and fleet discovery.
+- Leader election, peer RTT latency, bounded clock discipline (< 5 ms).
+- Compact show manifest CRC32 checksums (`GET /api/v1/show-manifest`) and content parity (`showHash`).
+- Real Scene slot deletion (`DELETE /api/v1/presets?index=N`).
+- Follower timeline synchronization via transient transport (zero NVS writes during playback).
+- Concurrency-limited show deployment engine with exact mirror mode and verification.
+- Synchronized Scene and Timeline playback controls routed to Leader only.
+
+### 9. Hardware validation
+
+Execute the documented matrix: boot, networking, API, WebSocket, pixel output, PCA9685, DMX, arbitration, limiter, E-stop, watchdog, recovery, backup/restore, OTA, extended burn-in, and multi-node sync bench tests.
 
 ## Explicit non-goals for this phase
 

@@ -145,6 +145,7 @@
 
   const navLinks: NavLink[] = [
     { group: 'Overview', href: '/dashboard',              icon: '⬡',  label: 'Fleet' },
+    { group: 'Overview', href: '/dashboard/sync',         icon: '⇄',  label: 'Sync' },
     { group: 'Create',   href: '/dashboard/scenes',       icon: '◆',  label: 'Scenes' },
     { group: 'Create',   href: '/dashboard/cues',         icon: '⏯',  label: 'Cues' },
     { group: 'Create',   href: '/dashboard/timeline',     icon: '▤',  label: 'Timeline' },

@@ -13,6 +13,7 @@ import {
   normalizeZone,
   normalizeScene,
   deletePreset,
+  getPreset,
 } from './scenes';
 import * as scenesApi from './scenes';
 
@@ -149,19 +150,38 @@ describe('scenes model & serialization', () => {
     expect(c2).toEqual({ r: 200, g: 150, b: 0 });
   });
 
-  it('calls savePreset with empty name on deletePreset', async () => {
+  it('issues DELETE request on deletePreset', async () => {
     const originalFetch = globalThis.fetch;
     const mockFetch = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify({ saved: true }), { status: 200 })
+      new Response(JSON.stringify({ deleted: true, index: 5 }), { status: 200 })
     );
     vi.stubGlobal('fetch', mockFetch);
     try {
-      await deletePreset('192.168.1.50', 5);
+      const res = await deletePreset('192.168.1.50', 5);
       expect(mockFetch).toHaveBeenCalled();
       const [url, opts] = mockFetch.mock.calls[0];
-      expect(url).toBe('http://192.168.1.50/api/v1/presets');
-      expect(opts.method).toBe('PUT');
-      expect(JSON.parse(opts.body)).toEqual({ index: 5, name: '' });
+      expect(url).toBe('http://192.168.1.50/api/v1/presets?index=5');
+      expect(opts.method).toBe('DELETE');
+      expect(res).toEqual({ deleted: true, index: 5 });
+    } finally {
+      vi.stubGlobal('fetch', originalFetch);
+    }
+  });
+
+  it('fetches single preset on getPreset', async () => {
+    const originalFetch = globalThis.fetch;
+    const mockScene = { index: 3, name: 'Lobby', globalBrightness: 255, transitionMs: 500, zones: [] };
+    const mockFetch = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(mockScene), { status: 200 })
+    );
+    vi.stubGlobal('fetch', mockFetch);
+    try {
+      const res = await getPreset('192.168.1.50', 3);
+      expect(mockFetch).toHaveBeenCalled();
+      const [url, opts] = mockFetch.mock.calls[0];
+      expect(url).toBe('http://192.168.1.50/api/v1/presets?index=3');
+      expect(opts?.method ?? 'GET').toBe('GET');
+      expect(res.name).toBe('Lobby');
     } finally {
       vi.stubGlobal('fetch', originalFetch);
     }

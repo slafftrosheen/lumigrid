@@ -22,6 +22,55 @@ export interface ManualPwmValue {
 
 export type ManualChannelValue = ManualAddressableValue | ManualPwmValue;
 
+/**
+ * Represents a Live Desk channel with enough state for snapshot building.
+ * This mirrors ChannelDeskState in the Svelte page but is a portable type.
+ */
+export interface ManualDeskChannel {
+  index: number;
+  kind: 'addressable' | 'pwm';
+  enabled: boolean;
+  r: number;
+  g: number;
+  b: number;
+  brightness: number;
+  pwm: number;
+}
+
+/**
+ * Build a channel-scoped manual override snapshot.
+ *
+ * Only channels whose index appears in `indices` AND whose `enabled` flag
+ * is true are included.  This prevents the ownership-scope bug where
+ * selecting A1 would leak all enabled channels into the ManualOverride mask.
+ *
+ * @param channels - Full 16-channel desk state array
+ * @param indices  - Channel indices the operator intends to control
+ * @returns Sanitized payload containing only the requested subset
+ */
+export function buildManualSnapshot(
+  channels: ManualDeskChannel[],
+  indices: number[],
+): ManualChannelValue[] {
+  const wanted = new Set(indices);
+  return channels
+    .filter((ch) => ch.enabled && wanted.has(ch.index))
+    .map((ch) =>
+      ch.kind === 'addressable'
+        ? {
+            index: ch.index,
+            r: ch.r,
+            g: ch.g,
+            b: ch.b,
+            brightness: ch.brightness,
+          }
+        : {
+            index: ch.index,
+            pwm: ch.pwm,
+          },
+    );
+}
+
 export interface ManualControlResponse {
   accepted: boolean;
   channelMask: number;

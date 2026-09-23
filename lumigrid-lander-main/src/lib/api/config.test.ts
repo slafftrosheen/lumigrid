@@ -253,6 +253,43 @@ describe('config client contract', () => {
       expect(body.softStart).toBe(true);
       expect(body.activePresetIndex).toBeUndefined();
       expect(body.gammaX10).toBeUndefined();
+      expect(body.syncToken).toBeUndefined();
+    });
+
+    it('serializeDeviceConfig omits syncToken when 0 or undefined, but includes when valid', () => {
+      const base: DeviceConfig = {
+        deviceName: 'node-sync',
+        activePresetIndex: 0,
+        fallbackPresetIndex: 0,
+        watchdogTimeoutS: 60,
+        maxPowerMw: 1000,
+        gammaX10: 22,
+        softStartEnabled: true,
+        softStartMs: 500,
+        mqttEnabled: false,
+        mqttBroker: '',
+        mqttPort: 1883,
+        syncEnabled: true,
+        syncRole: 1,
+        protocol: {
+          artnetEnabled: false,
+          sacnEnabled: false,
+          universeStart: 1,
+          liveStreamLayer: 2,
+        },
+      };
+
+      // Undefined token
+      const p1 = serializeDeviceConfig(base);
+      expect(p1.syncToken).toBeUndefined();
+
+      // Zero token
+      const p2 = serializeDeviceConfig({ ...base, syncToken: 0 });
+      expect(p2.syncToken).toBeUndefined();
+
+      // Non-zero token
+      const p3 = serializeDeviceConfig({ ...base, syncToken: 12345678 });
+      expect(p3.syncToken).toBe(12345678);
     });
   });
 });

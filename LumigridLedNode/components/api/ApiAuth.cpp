@@ -77,6 +77,7 @@ bool authorize(httpd_req_t* request, ApiRole minimum_role) {
         httpd_resp_set_type(request, "application/json");
         httpd_resp_set_hdr(request, "WWW-Authenticate", "Bearer");
         httpd_resp_set_hdr(request, "Access-Control-Allow-Origin", "*");
+        httpd_resp_set_hdr(request, "Access-Control-Allow-Headers", "Authorization, Content-Type, X-Auth-Token, X-API-Key");
         httpd_resp_sendstr(request, R"({"error":"authorization_required"})");
         return false;
     }
@@ -116,6 +117,7 @@ bool authorize(httpd_req_t* request, ApiRole minimum_role) {
     } else {
         ESP_LOGW(TAG, "Auth failed! Received invalid token: '%s'", provided_token);
         httpd_resp_set_hdr(request, "Access-Control-Allow-Origin", "*");
+        httpd_resp_set_hdr(request, "Access-Control-Allow-Headers", "Authorization, Content-Type, X-Auth-Token, X-API-Key");
         httpd_resp_send_err(request, HTTPD_403_FORBIDDEN, "Invalid factory token");
         return false;
     }
@@ -123,6 +125,7 @@ bool authorize(httpd_req_t* request, ApiRole minimum_role) {
     if (static_cast<uint8_t>(provided_role) < static_cast<uint8_t>(minimum_role)) {
         ESP_LOGW(TAG, "Auth failed! Insufficient role.");
         httpd_resp_set_hdr(request, "Access-Control-Allow-Origin", "*");
+        httpd_resp_set_hdr(request, "Access-Control-Allow-Headers", "Authorization, Content-Type, X-Auth-Token, X-API-Key");
         httpd_resp_send_err(request, HTTPD_403_FORBIDDEN, "Insufficient permissions");
         return false;
     }

@@ -459,6 +459,10 @@
             </div>
             <h1 id="login-title">Make light<br>feel alive.</h1>
             <p class="muted" style="margin-bottom: 1.25rem;">Connect securely to monitor live LED strips, patch DMX universes, and orchestrate scenes.</p>
+            <div style="margin-bottom: 0.85rem;">
+                <label for="experience-host" style="display:block; font-size:0.75rem; font-weight:700; color:var(--text-secondary); margin-bottom:0.4rem;">Node Host / IP Address <span style="font-weight:400; color:var(--text-muted);">(Default: auto-detected or 192.168.4.1)</span></label>
+                <input id="experience-host" type="text" placeholder="192.168.4.1" value="" style="width: 100%;">
+            </div>
             <label for="experience-token" style="display:block; font-size:0.75rem; font-weight:700; color:var(--text-secondary); margin-bottom:0.4rem;">Node Access Token <span style="font-weight:400; color:var(--text-muted);">(Default: lumigrid_admin)</span></label>
             <input id="experience-token" type="password" autocomplete="current-password" placeholder="Enter operator or admin token" value="lumigrid_admin" required>
             <button class="button-primary" type="submit" style="width: 100%; margin-top: 1.25rem; min-height: 2.5rem;">Connect to Node</button>
@@ -919,9 +923,10 @@ window.lg = (() => {
     // ── Application State ──
     const state = {
         token: '',
+        host: '',
         effects: fallbackEffects,
         presets: [],
-        sequence: null,
+        sequence: { bpm: 120, enabled: false, tracks: [] },
         schedules: null,
         config: null,
         status: null,
@@ -958,11 +963,24 @@ window.lg = (() => {
     async function api(path, method='GET', body) {
         const headers = { Authorization: 'Bearer ' + state.token };
         if (body !== undefined) headers['Content-Type'] = 'application/json';
-        const res = await fetch(path, { method, headers, body: body !== undefined ? JSON.stringify(body) : undefined });
+
+        let baseUrl = '';
+        const host = state.host || (location.protocol !== 'file:' && location.host ? location.host : '192.168.4.1');
+        if (host && !host.startsWith('http://') && !host.startsWith('https://')) {
+            baseUrl = `http://${host}`;
+        } else if (host) {
+            baseUrl = host;
+        }
+        baseUrl = baseUrl.replace(/\/+$/, '');
+        const targetUrl = `${baseUrl}${path}`;
+
+        const res = await fetch(targetUrl, { method, headers, body: body !== undefined ? JSON.stringify(body) : undefined });
         if (!res.ok) {
             let msg = `Request failed (${res.status})`;
             try { msg = (await res.json()).error || msg; } catch (_) {}
-            throw new Error(msg);
+            const err = new Error(msg);
+            err.status = res.status;
+            throw err;
         }
         return res.json();
     }
@@ -993,8 +1011,14 @@ window.lg = (() => {
     let ws = null;
     function initWebSocket() {
         if (ws) { ws.close(); ws = null; }
+        const rawHost = state.host || (location.protocol !== 'file:' && location.host ? location.host : '192.168.4.1');
+        const cleanHost = rawHost.replace(/^https?:\/\//, '').replace(/\/+$/, '');
         const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-        ws = new WebSocket(`${proto}//${location.host}/ws`);
+        try {
+            ws = new WebSocket(`${proto}//${cleanHost}/ws`);
+        } catch (_) {
+            return;
+        }
         ws.binaryType = 'arraybuffer';
         ws.onmessage = (event) => {
             if (event.data instanceof ArrayBuffer) {
@@ -1220,9 +1244,20 @@ window.lg = (() => {
     // ── Auth & Connection ──
     async function connect() {
         const tokenInput = byId('experience-token');
+        const hostInput = byId('experience-host');
         state.token = tokenInput ? tokenInput.value.trim() : '';
-        if (!state.token) return toast('Enter node token.', true);
+        state.host = hostInput ? hostInput.value.trim() : '';
+        if (state.host) {
+            try { localStorage.setItem('lg_node_host', state.host); } catch (_) {}
+        }
+        if (state.token) {
+            try { localStorage.setItem('lg_node_token', state.token); } catch (_) {}
+        }
+        if (!state.token) return toast('Enter node access token.', true);
         try {
+            toast('Connecting to node...');
+            const status = await api('/api/v1/status');
+            state.status = status;
             await refresh();
             byId('experience-auth').hidden = true;
             byId('product-app').hidden = false;
@@ -1232,7 +1267,17 @@ window.lg = (() => {
             nav('dashboard', document.querySelector('[data-page=dashboard]'));
             toast('Connected to LumiGrid node.');
         } catch (e) {
-            toast(`Connection error: ${e.message}`, true);
+            const status = e.status || 0;
+            const msg = e.message || 'Unknown error';
+            if (status === 401 || msg.includes('401') || msg.includes('authorization_required')) {
+                toast('Authentication failed: Invalid Node Access Token.', true);
+            } else if (status === 403 || msg.includes('403') || msg.includes('Invalid factory token')) {
+                toast('Access denied: Token lacks necessary permissions.', true);
+            } else if (msg.includes('Failed to fetch') || msg.includes('NetworkError') || msg.includes('Load failed')) {
+                toast(`Network error: Cannot reach node at ${state.host || location.host}. Check IP/Wi-Fi.`, true);
+            } else {
+                toast(`Connection error: ${msg}`, true);
+            }
         }
     }
 
@@ -1247,8 +1292,8 @@ window.lg = (() => {
     async function refresh() {
         const effects = await api('/api/v1/effects').catch(() => fallbackEffects);
         const presets = await api('/api/v1/presets').catch(() => []);
-        const status = await api('/api/v1/status').catch(() => ({}));
-        const sequence = await api('/api/v1/sequence').catch(() => ({}));
+        const status = state.status || await api('/api/v1/status').catch(() => ({}));
+        const sequence = await api('/api/v1/sequence').catch(() => ({ bpm: 120, enabled: false, tracks: [] }));
         const config = await api('/api/v1/config').catch(() => ({}));
         const health = await api('/api/v1/health').catch(() => ({}));
         const schedules = await api('/api/v1/schedules').catch(() => []);
@@ -1270,7 +1315,16 @@ window.lg = (() => {
         });
 
         state.status = status;
-        state.sequence = sequence;
+        if (!sequence || typeof sequence !== 'object') {
+            state.sequence = { bpm: 120, enabled: false, tracks: [] };
+        } else {
+            state.sequence = sequence;
+            if (!Array.isArray(state.sequence.tracks)) state.sequence.tracks = [];
+        }
+        if (state.sequence.tracks.length === 0) {
+            state.sequence.tracks = [0, 1, 2, 3].map(() => ({ steps: [{ presetIndex: 0, lengthBeats: 4 }] }));
+        }
+
         state.config = config;
         state.health = health;
         
@@ -1278,7 +1332,8 @@ window.lg = (() => {
         while (validScheds.length < 8) validScheds.push({ enabled: false, hour: 0, minute: 0, daysOfWeek: 0, action: 'preset', presetIndex: 0 });
         state.schedules = validScheds.slice(0, 8);
 
-        byId('experience-node-name').textContent = (config.deviceName || 'LIGHTING NODE').toUpperCase();
+        const nodeNameEl = byId('experience-node-name');
+        if (nodeNameEl) nodeNameEl.textContent = (config.deviceName || 'LIGHTING NODE').toUpperCase();
         updateTelemetryUI();
         renderDashboard();
         renderScenes();
@@ -1711,7 +1766,8 @@ window.lg = (() => {
             for (let f = 0; f < 16; ++f) {
                 const fix = state.config.fixtures?.[f];
                 if (fix && fix.zoneId === z && fix.profile > 0) {
-                    fixtures.push(`Fixture ${f+1} (Lane ${fix.physicalOutputIndex[0]}, ${fix.numPixels} px)`);
+                    const outIdx = Array.isArray(fix.physicalOutputIndex) ? fix.physicalOutputIndex[0] : (fix.physicalOutputIndex ?? 0);
+                    fixtures.push(`Fixture ${f+1} (Lane ${outIdx}, ${fix.numPixels} px)`);
                     totalPx += fix.numPixels;
                 }
             }
@@ -1759,6 +1815,7 @@ window.lg = (() => {
                 zoneId: 0, profile: 1, physicalOutputIndex: [i % 8,0,0,0], numPixels: 60,
                 dmxUniverse: 0, dmxStartChannel: 0, dmxMode: 0, maxBrightness: 255, maxMilliwatts: 15000
             };
+            const outIdx = Array.isArray(f.physicalOutputIndex) ? f.physicalOutputIndex[0] : (f.physicalOutputIndex ?? 0);
 
             return `
                 <tr>
@@ -1774,7 +1831,7 @@ window.lg = (() => {
                         </select>
                     </td>
                     <td>
-                        <input id="fix-out-${i}" type="number" min="0" max="15" value="${f.physicalOutputIndex[0]}" style="width:4.5rem;">
+                        <input id="fix-out-${i}" type="number" min="0" max="15" value="${outIdx}" style="width:4.5rem;">
                     </td>
                     <td>
                         <input id="fix-len-${i}" type="number" min="1" max="1024" value="${f.numPixels}" style="width:5rem;">
@@ -1804,7 +1861,8 @@ window.lg = (() => {
 
     async function saveHardwarePatch() {
         try {
-            const updated = clone(state.config);
+            const updated = clone(state.config || {});
+            if (!Array.isArray(updated.fixtures)) updated.fixtures = [];
             updated.protocol = {
                 artnetEnabled: byId('proto-artnet')?.checked ?? true,
                 sacnEnabled: byId('proto-sacn')?.checked ?? true,
@@ -1816,7 +1874,8 @@ window.lg = (() => {
             };
 
             for (let i = 0; i < 16; ++i) {
-                const f = updated.fixtures[i] || {};
+                if (!updated.fixtures[i]) updated.fixtures[i] = {};
+                const f = updated.fixtures[i];
                 f.zoneId = Number(byId(`fix-zone-${i}`)?.value || 0);
                 f.profile = Number(byId(`fix-prof-${i}`)?.value || 0);
                 f.physicalOutputIndex = [Number(byId(`fix-out-${i}`)?.value || 0), 0, 0, 0];
@@ -1879,16 +1938,32 @@ window.lg = (() => {
 
     // ── Timeline Editor ──
     function renderTimeline() {
-        if (!state.sequence) return;
-        byId('timeline-bpm').value = clamp(state.sequence.bpm, 40, 240);
-        byId('timeline-bpm-output').textContent = `${state.sequence.bpm} BPM`;
-        byId('timeline-enabled').checked = state.sequence.enabled;
+        if (!state.sequence || typeof state.sequence !== 'object') {
+            state.sequence = { bpm: 120, enabled: false, tracks: [] };
+        }
+        if (!Array.isArray(state.sequence.tracks)) state.sequence.tracks = [];
+        if (state.sequence.tracks.length === 0) {
+            state.sequence.tracks = [0, 1, 2, 3].map(() => ({ steps: [{ presetIndex: 0, lengthBeats: 4 }] }));
+        }
+        if (!state.activeTimelineStep) state.activeTimelineStep = { track: 0, step: 0 };
 
-        const activeTrk = state.activeTimelineStep.track;
-        const activeStp = state.activeTimelineStep.step;
-        const activeStepObj = state.sequence.tracks[activeTrk]?.steps[activeStp];
+        const bpmEl = byId('timeline-bpm');
+        if (bpmEl) bpmEl.value = clamp(state.sequence.bpm ?? 120, 40, 240);
+        const bpmOut = byId('timeline-bpm-output');
+        if (bpmOut) bpmOut.textContent = `${state.sequence.bpm ?? 120} BPM`;
+        const enEl = byId('timeline-enabled');
+        if (enEl) enEl.checked = !!state.sequence.enabled;
 
-        const validPresets = state.presets.filter(p => p.name && p.name.trim() !== '');
+        const activeTrk = Math.min(state.activeTimelineStep.track || 0, Math.max(0, state.sequence.tracks.length - 1));
+        const currentTrack = state.sequence.tracks[activeTrk] || { steps: [] };
+        if (!Array.isArray(currentTrack.steps) || currentTrack.steps.length === 0) {
+            currentTrack.steps = [{ presetIndex: 0, lengthBeats: 4 }];
+        }
+        const activeStp = Math.min(state.activeTimelineStep.step || 0, Math.max(0, currentTrack.steps.length - 1));
+        state.activeTimelineStep = { track: activeTrk, step: activeStp };
+        const activeStepObj = currentTrack.steps[activeStp];
+
+        const validPresets = (Array.isArray(state.presets) ? state.presets : []).filter(p => p && p.name && p.name.trim() !== '');
         
         let paletteHtml = `<div style="margin-bottom:0.75rem; color:var(--text-secondary); font-size:0.75rem; font-weight:600;">Assign Preset to Track ${activeTrk+1}, Step ${activeStp+1}</div>`;
         paletteHtml += `<div style="display:flex; gap:0.5rem; overflow-x:auto; padding-bottom:0.5rem;">`;
@@ -1910,33 +1985,38 @@ window.lg = (() => {
             </div>`;
         }
         
-        byId('timeline-palette').innerHTML = paletteHtml;
+        const palEl = byId('timeline-palette');
+        if (palEl) palEl.innerHTML = paletteHtml;
 
-        byId('timeline-tracks').innerHTML = state.sequence.tracks.map((track, trackIdx) => {
-            const zName = state.config?.zones?.[trackIdx]?.name || `Zone ${trackIdx + 1}`;
-            return `
-                <div style="display:flex; align-items:center; gap:0.75rem; background:rgba(0,0,0,0.25); padding:0.5rem; border-radius:8px; border:1px solid var(--border-subtle);">
-                    <div style="width:110px; font-weight:700; font-size:0.8rem; color:${trackIdx === activeTrk ? 'var(--primary)' : 'inherit'};">${esc(zName)}</div>
-                    <div style="display:flex; gap:4px; flex:1; overflow-x:auto; align-items:center;">
-                        ${track.steps.map((step, stepIdx) => {
-                            const isActive = (trackIdx === activeTrk && stepIdx === activeStp);
-                            const preset = validPresets.find(p => Number(p.index) === step.presetIndex);
-                            const hexColor = preset ? colorToHex(preset.zones[0]?.layers[0]?.primaryColor) : '#444';
-                            const widthPx = Math.max(28, step.lengthBeats * 14); // 14px per beat
-                            return `
-                                <div onclick="lg.selectTimelineStep(${trackIdx}, ${stepIdx})" style="width:${widthPx}px; height:36px; border-radius:4px; background:${isActive ? hexColor : hexColor+'40'}; border: 2px solid ${isActive ? '#fff' : 'transparent'}; display:flex; align-items:center; justify-content:center; font-size:0.65rem; font-weight:700; color:#fff; cursor:pointer; transition:all 0.2s; box-shadow:${isActive ? '0 0 10px '+hexColor+'80' : 'none'}; flex-shrink:0;" title="Step ${stepIdx+1}: ${preset ? esc(preset.name) : 'Slot '+step.presetIndex} (${step.lengthBeats} beats)">
-                                    ${stepIdx+1}
-                                </div>
-                            `;
-                        }).join('')}
-                        <div style="display:flex; gap:4px; margin-left:8px;">
-                            ${track.steps.length < 16 ? `<button class="button-secondary" style="padding:0; width:28px; height:28px; border-radius:50%; font-size:1rem;" onclick="lg.addTimelineStep(${trackIdx})">+</button>` : ''}
-                            ${track.steps.length > 1 ? `<button class="button-secondary" style="padding:0; width:28px; height:28px; border-radius:50%; font-size:1rem; color:var(--danger);" onclick="lg.removeTimelineStep(${trackIdx})">−</button>` : ''}
+        const tracksEl = byId('timeline-tracks');
+        if (tracksEl) {
+            tracksEl.innerHTML = state.sequence.tracks.map((track, trackIdx) => {
+                const zName = state.config?.zones?.[trackIdx]?.name || `Zone ${trackIdx + 1}`;
+                const steps = Array.isArray(track.steps) ? track.steps : [];
+                return `
+                    <div style="display:flex; align-items:center; gap:0.75rem; background:rgba(0,0,0,0.25); padding:0.5rem; border-radius:8px; border:1px solid var(--border-subtle);">
+                        <div style="width:110px; font-weight:700; font-size:0.8rem; color:${trackIdx === activeTrk ? 'var(--primary)' : 'inherit'};">${esc(zName)}</div>
+                        <div style="display:flex; gap:4px; flex:1; overflow-x:auto; align-items:center;">
+                            ${steps.map((step, stepIdx) => {
+                                const isActive = (trackIdx === activeTrk && stepIdx === activeStp);
+                                const preset = validPresets.find(p => Number(p.index) === step.presetIndex);
+                                const hexColor = preset ? colorToHex(preset.zones?.[0]?.layers?.[0]?.primaryColor) : '#444';
+                                const widthPx = Math.max(28, (step.lengthBeats || 4) * 14);
+                                return `
+                                    <div onclick="lg.selectTimelineStep(${trackIdx}, ${stepIdx})" style="width:${widthPx}px; height:36px; border-radius:4px; background:${isActive ? hexColor : hexColor+'40'}; border: 2px solid ${isActive ? '#fff' : 'transparent'}; display:flex; align-items:center; justify-content:center; font-size:0.65rem; font-weight:700; color:#fff; cursor:pointer; transition:all 0.2s; box-shadow:${isActive ? '0 0 10px '+hexColor+'80' : 'none'}; flex-shrink:0;" title="Step ${stepIdx+1}: ${preset ? esc(preset.name) : 'Slot '+step.presetIndex} (${step.lengthBeats} beats)">
+                                        ${stepIdx+1}
+                                    </div>
+                                `;
+                            }).join('')}
+                            <div style="display:flex; gap:4px; margin-left:8px;">
+                                ${steps.length < 16 ? `<button class="button-secondary" style="padding:0; width:28px; height:28px; border-radius:50%; font-size:1rem;" onclick="lg.addTimelineStep(${trackIdx})">+</button>` : ''}
+                                ${steps.length > 1 ? `<button class="button-secondary" style="padding:0; width:28px; height:28px; border-radius:50%; font-size:1rem; color:var(--danger);" onclick="lg.removeTimelineStep(${trackIdx})">−</button>` : ''}
+                            </div>
                         </div>
                     </div>
-                </div>
-            `;
-        }).join('');
+                `;
+            }).join('');
+        }
     }
 
     function selectTimelineStep(track, step) {
@@ -1945,27 +2025,27 @@ window.lg = (() => {
     }
 
     function assignTimelinePreset(presetIdx) {
-        if (!state.sequence) return;
-        const { track, step } = state.activeTimelineStep;
-        if (state.sequence.tracks[track] && state.sequence.tracks[track].steps[step]) {
+        if (!state.sequence || !Array.isArray(state.sequence.tracks)) return;
+        const { track, step } = state.activeTimelineStep || { track: 0, step: 0 };
+        if (state.sequence.tracks[track] && state.sequence.tracks[track].steps?.[step]) {
             state.sequence.tracks[track].steps[step].presetIndex = presetIdx;
             renderTimeline();
         }
     }
 
     function setTimelineStepLength(beats) {
-        if (!state.sequence) return;
-        const { track, step } = state.activeTimelineStep;
-        if (state.sequence.tracks[track] && state.sequence.tracks[track].steps[step]) {
+        if (!state.sequence || !Array.isArray(state.sequence.tracks)) return;
+        const { track, step } = state.activeTimelineStep || { track: 0, step: 0 };
+        if (state.sequence.tracks[track] && state.sequence.tracks[track].steps?.[step]) {
             state.sequence.tracks[track].steps[step].lengthBeats = clamp(beats, 1, 64);
             renderTimeline();
         }
     }
 
     function addTimelineStep(trackIdx) {
-        if (!state.sequence) return;
+        if (!state.sequence || !Array.isArray(state.sequence.tracks)) return;
         const track = state.sequence.tracks[trackIdx];
-        if (track && track.steps.length < 16) {
+        if (track && Array.isArray(track.steps) && track.steps.length < 16) {
             track.steps.push({ presetIndex: 0, lengthBeats: 4 });
             state.activeTimelineStep = { track: trackIdx, step: track.steps.length - 1 };
             renderTimeline();
@@ -1973,11 +2053,11 @@ window.lg = (() => {
     }
 
     function removeTimelineStep(trackIdx) {
-        if (!state.sequence) return;
+        if (!state.sequence || !Array.isArray(state.sequence.tracks)) return;
         const track = state.sequence.tracks[trackIdx];
-        if (track && track.steps.length > 1) {
+        if (track && Array.isArray(track.steps) && track.steps.length > 1) {
             track.steps.pop();
-            if (state.activeTimelineStep.track === trackIdx && state.activeTimelineStep.step >= track.steps.length) {
+            if (state.activeTimelineStep?.track === trackIdx && state.activeTimelineStep.step >= track.steps.length) {
                 state.activeTimelineStep.step = track.steps.length - 1;
             }
             renderTimeline();
@@ -1985,13 +2065,14 @@ window.lg = (() => {
     }
 
     function setBpm(val) {
-        if (!state.sequence) return;
+        if (!state.sequence) state.sequence = { bpm: 120, enabled: false, tracks: [] };
         state.sequence.bpm = clamp(val, 40, 240);
-        byId('timeline-bpm-output').textContent = `${state.sequence.bpm} BPM`;
+        const bpmOut = byId('timeline-bpm-output');
+        if (bpmOut) bpmOut.textContent = `${state.sequence.bpm} BPM`;
     }
 
     function setTimelineEnabled(en) {
-        if (!state.sequence) return;
+        if (!state.sequence) state.sequence = { bpm: 120, enabled: false, tracks: [] };
         state.sequence.enabled = en;
     }
 
@@ -2238,11 +2319,39 @@ window.lg = (() => {
         if (el) el.textContent = txt;
     }
 
+    function initAuthInputs() {
+        const hostInput = byId('experience-host');
+        if (hostInput) {
+            const savedHost = localStorage.getItem('lg_node_host');
+            if (savedHost) {
+                hostInput.value = savedHost;
+                state.host = savedHost;
+            } else if (location.hostname && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1' && location.protocol !== 'file:') {
+                hostInput.value = location.host;
+                state.host = location.host;
+            } else {
+                hostInput.value = '192.168.4.1';
+                state.host = '192.168.4.1';
+            }
+        }
+        const tokenInput = byId('experience-token');
+        if (tokenInput) {
+            const savedToken = localStorage.getItem('lg_node_token');
+            if (savedToken) {
+                tokenInput.value = savedToken;
+                state.token = savedToken;
+            } else if (tokenInput.value) {
+                state.token = tokenInput.value.trim();
+            }
+        }
+    }
+    initAuthInputs();
+
     return {
         connect, disconnect, refresh, nav, playScene, blackout,
         editScene, backToScenes, saveScene, testSceneLive, toggleTargetZone, selectAllTargetZones,
         createNewScene, duplicateScene, clearScene,
-        changeLayerEffect, changeLayerEnabled, speedLabel, updateText,
+        changeLayerEffect, changeLayerEnabled, speedLabel, updateText, initAuthInputs,
         saveHardwarePatch, renderPatcher, hoverDmxCell, toggleVisualizerMode, fitVisualizer, redrawVisualizer,
         setBpm, setTimelineEnabled, saveTimeline, selectTimelineStep, assignTimelinePreset, setTimelineStepLength, addTimelineStep, removeTimelineStep,
         saveSchedules,
