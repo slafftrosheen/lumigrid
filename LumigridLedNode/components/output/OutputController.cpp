@@ -213,8 +213,8 @@ esp_err_t OutputController::try_commit_locked() {
         uint32_t non_zero_bytes = 0;
         uint32_t pixel_count = 0;
         auto& buf = pixels_.buffer();
-        for (uint8_t l = 0; l < 8; ++l) {
-            for (uint16_t p = 0; p < 144; ++p) {
+        for (uint8_t l = 0; l < AddressableDriver::kLanes; ++l) {
+            for (uint16_t p = 0; p < AddressableDriver::kPixels; ++p) {
                 pixel_count++;
                 if (buf[l][p].r > 0 || buf[l][p].g > 0 || buf[l][p].b > 0) {
                     non_zero_pixels++;

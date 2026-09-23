@@ -85,6 +85,7 @@ export interface DeviceConfig {
   mqttPort: number;
   syncEnabled: boolean;
   syncRole: number;
+  syncToken?: number;
   protocol: DeviceProtocolConfig;
   auth?: DeviceAuthConfig;
   channels?: ChannelConfig[];

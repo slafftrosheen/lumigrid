@@ -557,9 +557,12 @@
                 <select bind:value={editForm.pixelOrder} class="select-input">
                   <option value="GRB">GRB (Standard WS2812)</option>
                   <option value="RGB">RGB</option>
-                  <option value="GRBW">GRBW (SK6812)</option>
-                  <option value="RGBW">RGBW</option>
+                  <option value="GRBW" disabled={editForm.addressableType === 'WS2812'} title={editForm.addressableType === 'WS2812' ? 'GRBW requires SK6812 hardware' : ''}>GRBW (SK6812 only)</option>
+                  <option value="RGBW" disabled={editForm.addressableType === 'WS2812'} title={editForm.addressableType === 'WS2812' ? 'RGBW requires SK6812 hardware' : ''}>RGBW (SK6812 only)</option>
                 </select>
+                {#if editForm.addressableType === 'WS2812' && (editForm.pixelOrder === 'GRBW' || editForm.pixelOrder === 'RGBW')}
+                  <span class="input-hint input-warn">⚠ RGBW/GRBW requires SK6812. Switch to GRB or RGB for this strip type.</span>
+                {/if}
               </label>
             </div>
           {:else}
@@ -597,7 +600,9 @@
 
           <div class="form-row">
             <label class="form-field">
-              <span class="field-label">Max Brightness ({Math.round((editForm.maxBrightness / 255) * 100)}%)</span>
+              <span class="field-label">
+                Max Brightness&nbsp;<span class="field-subvalue">{Math.round((editForm.maxBrightness / 255) * 100)}% &bull; raw&nbsp;{editForm.maxBrightness}/255</span>
+              </span>
               <input
                 type="range"
                 min="0"
@@ -1386,6 +1391,18 @@
   .input-hint {
     font-size: 0.7rem;
     color: #636366;
+  }
+
+  .input-hint.input-warn {
+    color: #ff9f0a;
+    font-weight: 500;
+  }
+
+  .field-subvalue {
+    font-weight: 400;
+    font-size: 0.72rem;
+    color: #636366;
+    font-variant-numeric: tabular-nums;
   }
 
   .text-input, .select-input {

@@ -197,16 +197,20 @@ void AddressableDriver::fill(uint8_t lane, uint8_t r, uint8_t g, uint8_t b, uint
 // ── Hardware commit ───────────────────────────────────────────────────────────
 
 // show() transmits the current encoder buffer to all active lanes.
-// Lanes without a strip are skipped. Stops on first error.
+// Lanes are independent RMT channels — a failure on one lane must NOT prevent
+// the remaining lanes from being refreshed, as that would leave them stale.
+// The first error encountered is captured and returned to the caller.
 esp_err_t AddressableDriver::show() {
+    esp_err_t first_err = ESP_OK;
     for (uint8_t lane = 0; lane < kLanes; ++lane) {
         if (strips_[lane] == nullptr) continue;
-        ESP_RETURN_ON_ERROR(
-            led_strip_refresh(strips_[lane]),
-            TAG, "refresh lane %u", lane
-        );
+        const esp_err_t err = led_strip_refresh(strips_[lane]);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "refresh lane %u failed: %s", lane, esp_err_to_name(err));
+            if (first_err == ESP_OK) first_err = err;
+        }
     }
-    return ESP_OK;
+    return first_err;
 }
 
 // blackout() clears all channels and immediately transmits zeros to hardware.

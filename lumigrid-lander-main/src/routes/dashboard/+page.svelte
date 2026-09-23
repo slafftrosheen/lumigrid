@@ -32,6 +32,7 @@
     getInfo,
     type NodeInfo,
   } from '$lib/api/node';
+  import { getDeviceConfig, type DeviceConfig } from '$lib/api/config';
 
   let nodeIp = $state('');
   let nodeInfo = $state<NodeInfo | null>(null);
@@ -54,6 +55,19 @@
   let fleetInputError = $state('');
   let fleetDialog = $state<{ kind: 'rename' | 'remove'; ip: string; currentName: string } | null>(null);
   let fleetDialogValue = $state('');
+  let deviceConfig = $state<DeviceConfig | null>(null);
+  let showConnInfo = $state(false);
+
+  // Derive the AP SSID the firmware will broadcast, matching LumigridRuntime.cpp logic:
+  //   valid config with non-default name -> "LumiGrid-{name}"
+  //   otherwise -> "LumiGrid-Factory" (first boot / factory state)
+  const apSsid = $derived.by(() => {
+    const name = deviceConfig?.deviceName;
+    if (name && name.trim().length > 0 && name.trim() !== 'lumigrid') {
+      return `LumiGrid-${name.trim()}`;
+    }
+    return 'LumiGrid-Factory';
+  });
 
   function toast(msg: string) {
     actionToast = msg;
@@ -259,6 +273,7 @@
     if (nodeIp) {
       connect(nodeIp);
       getInfo(nodeIp).then(info => { nodeInfo = info; }).catch(() => {});
+      getDeviceConfig(nodeIp).then(cfg => { deviceConfig = cfg; }).catch(() => {});
     }
 
     unsubscribeState = getNodeLiveState().subscribe(val => {
@@ -267,8 +282,10 @@
         nodeIp = val.nodeIp;
         if (nodeIp) {
           getInfo(nodeIp).then(info => { nodeInfo = info; }).catch(() => {});
+          getDeviceConfig(nodeIp).then(cfg => { deviceConfig = cfg; }).catch(() => {});
         } else {
           nodeInfo = null;
+          deviceConfig = null;
         }
       }
       if (val.status?.brightness !== undefined) {
@@ -685,6 +702,51 @@
           <span class="stat-sub">{liveState.health?.dmx.packets_accepted ?? 0} accepted</span>
         </div>
       </div>
+    </section>
+
+    <!-- ── CONNECTION INFO ─────────────────────────────────────────────────── -->
+    <section class="section-card conn-info-section">
+      <button
+        class="conn-info-toggle"
+        onclick={() => (showConnInfo = !showConnInfo)}
+        type="button"
+        aria-expanded={showConnInfo}
+      >
+        <h3>Connection Info</h3>
+        <span class="toggle-caret" class:open={showConnInfo}>▾</span>
+      </button>
+      {#if showConnInfo}
+        <div class="conn-info-grid">
+          <div class="conn-row">
+            <span class="conn-key">Node IP</span>
+            <span class="conn-val mono">{nodeIp}</span>
+          </div>
+          <div class="conn-row">
+            <span class="conn-key">Web UI URL</span>
+            <a class="conn-val mono conn-link" href="http://{nodeIp}" target="_blank" rel="noopener">http://{nodeIp}</a>
+          </div>
+          {#if nodeInfo?.mac}
+            <div class="conn-row">
+              <span class="conn-key">MAC Address</span>
+              <span class="conn-val mono">{nodeInfo.mac}</span>
+            </div>
+          {/if}
+          <div class="conn-row">
+            <span class="conn-key">Wi-Fi AP SSID</span>
+            <span class="conn-val mono">{apSsid}</span>
+          </div>
+          <div class="conn-row">
+            <span class="conn-key">AP Password</span>
+            <span class="conn-val conn-hint">Installer token (set in Config → Auth)</span>
+          </div>
+          {#if deviceConfig?.deviceName}
+            <div class="conn-row">
+              <span class="conn-key">Device Name</span>
+              <span class="conn-val mono">{deviceConfig.deviceName}</span>
+            </div>
+          {/if}
+        </div>
+      {/if}
     </section>
   {/if}
 </div>
@@ -1366,6 +1428,90 @@
     .node-header { padding: 1rem; }
     .section-card { padding: 1rem; }
     .actions-grid, .health-grid { grid-template-columns: 1fr; }
+  }
+
+  /* ── Connection Info Panel ─────────────────────────────────────────────── */
+  .conn-info-section {
+    padding: 0;
+  }
+
+  .conn-info-toggle {
+    width: 100%;
+    background: transparent;
+    border: none;
+    padding: 1.1rem 1.25rem;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    cursor: pointer;
+    color: inherit;
+    gap: 0.5rem;
+  }
+
+  .conn-info-toggle h3 {
+    margin: 0;
+    font-size: 1rem;
+    font-weight: 600;
+    color: #f5f5f7;
+  }
+
+  .toggle-caret {
+    font-size: 1.1rem;
+    color: #86868b;
+    transition: transform 0.2s ease;
+    display: inline-block;
+  }
+
+  .toggle-caret.open {
+    transform: rotate(180deg);
+  }
+
+  .conn-info-grid {
+    padding: 0 1.25rem 1.25rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+  }
+
+  .conn-row {
+    display: flex;
+    align-items: baseline;
+    gap: 1rem;
+    font-size: 0.88rem;
+  }
+
+  .conn-key {
+    flex: 0 0 130px;
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: #86868b;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+
+  .conn-val {
+    color: #f5f5f7;
+    font-size: 0.88rem;
+  }
+
+  .conn-val.mono {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 0.83rem;
+  }
+
+  .conn-val.conn-hint {
+    color: #636366;
+    font-style: italic;
+  }
+
+  .conn-link {
+    color: var(--dash-accent);
+    text-decoration: none;
+  }
+
+  .conn-link:hover {
+    text-decoration: underline;
   }
 
 </style>

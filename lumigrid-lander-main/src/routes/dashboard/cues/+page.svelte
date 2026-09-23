@@ -391,6 +391,15 @@
                   <option value={rm.id}>{rm.label}</option>
                 {/each}
               </select>
+              <select
+                bind:value={currentList.endAction}
+                class="select-mode select-end-action"
+                title="What happens when the cue list reaches its last cue"
+              >
+                <option value={0}>End: Hold last scene</option>
+                <option value={1}>End: Blackout</option>
+                <option value={2}>End: Restore previous scene</option>
+              </select>
             </div>
 
             <div class="editor-actions">
@@ -893,6 +902,17 @@
   .select-mode:focus-visible {
     border-color: var(--dash-accent);
     box-shadow: 0 0 0 3px rgba(var(--dash-accent-rgb),.12);
+  }
+
+  .select-end-action {
+    border-color: rgba(255, 159, 10, 0.3);
+    color: rgba(255, 255, 255, 0.75);
+    font-size: 0.82rem;
+  }
+
+  .select-end-action:focus-visible {
+    border-color: #ff9f0a;
+    box-shadow: 0 0 0 3px rgba(255, 159, 10, 0.15);
   }
 
   .editor-actions {

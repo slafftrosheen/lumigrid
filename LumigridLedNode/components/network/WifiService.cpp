@@ -220,6 +220,8 @@ esp_err_t WifiService::stop() {
     esp_wifi_stop();
     state_ = WifiState::Idle;
     has_ip_ = false;
+    callback_ = nullptr;
+    retries_ = 0;
     return ESP_OK;
 }
 

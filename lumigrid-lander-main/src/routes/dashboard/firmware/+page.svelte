@@ -625,6 +625,12 @@
                 <option value={2}>Follower (Slave)</option>
               </select>
             </label>
+            {#if currentConfig.syncEnabled}
+              <label class="field">
+                <span>Sync Token (Domain ID)</span>
+                <input type="number" min="0" max="4294967295" bind:value={currentConfig.syncToken} />
+              </label>
+            {/if}
             <label class="toggle-field">
               <input type="checkbox" bind:checked={currentConfig.mqttEnabled} />
               <span>MQTT Telemetry Enabled</span>
@@ -633,6 +639,10 @@
               <label class="field">
                 <span>Broker Host</span>
                 <input type="text" bind:value={currentConfig.mqttBroker} />
+              </label>
+              <label class="field">
+                <span>Broker Port</span>
+                <input type="number" min="1" max="65535" bind:value={currentConfig.mqttPort} />
               </label>
             {/if}
           </div>

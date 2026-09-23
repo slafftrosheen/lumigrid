@@ -374,7 +374,7 @@ esp_err_t LumigridRuntime::start() {
     lifecycle_state_ = RuntimeLifecycle::Initializing;
     services_started_ = false;
 
-    DeviceConfig dev_cfg;
+    DeviceConfig dev_cfg{};
     config_.load_config(dev_cfg);
 
     uint8_t mac[6] = {};
@@ -393,19 +393,35 @@ esp_err_t LumigridRuntime::start() {
     }
 #endif
 
+    // Derive AP SSID:
+    //   safe_mode            -> "LumiGrid-Recovery"  (config invalid / crash loop)
+    //   valid config + name  -> "LumiGrid-<device_name>"  (installed device)
+    //   fallback             -> "LumiGrid-Factory"   (first boot / no config)
+    std::string ap_ssid;
+    if (safe_mode_) {
+        ap_ssid = "LumiGrid-Recovery";
+    } else if (configuration_valid_ && strlen(dev_cfg.device_name) > 0
+               && std::strcmp(dev_cfg.device_name, "lumigrid") != 0) {
+        ap_ssid = std::string("LumiGrid-") + dev_cfg.device_name;
+    } else {
+        ap_ssid = "LumiGrid-Factory";
+    }
+
     WifiConfig wifi_cfg{
         .mode = WifiMode::ApOnly,
         .sta_ssid = "",
         .sta_password = "",
-        .ap_ssid = safe_mode_ ? "LumiGrid-Recovery" : "LumiGrid-Factory",
+        .ap_ssid = ap_ssid,
         .ap_password = ap_pass,
         .max_retry = 1
     };
 
-    if (!net_ready_sem_.load(std::memory_order_acquire)) {
+    // Always delete and recreate the semaphore so no stale "give" from a previous
+    // WiFi callback can cause a spurious ready signal on the next start() cycle.
+    {
+        SemaphoreHandle_t old_sem = net_ready_sem_.exchange(nullptr, std::memory_order_acq_rel);
+        if (old_sem) vSemaphoreDelete(old_sem);
         net_ready_sem_.store(xSemaphoreCreateBinary(), std::memory_order_release);
-    } else {
-        xSemaphoreTake(net_ready_sem_.load(std::memory_order_acquire), 0); // Drain stale token
     }
 
     startup_state_ = StartupState::StartingNetwork;
