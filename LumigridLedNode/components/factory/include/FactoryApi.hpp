@@ -18,6 +18,7 @@ class LightingRuntime;
 class Scheduler;
 class NodeSync;
 class DmxRouter;
+class ShowTransportCoordinator;
 }
 
 namespace lg {
@@ -114,7 +115,8 @@ public:
                     Scheduler* scheduler = nullptr,
                     NodeSync* node_sync = nullptr,
                     DmxRouter* dmx_router = nullptr,
-                    class CueRunner* cue_runner = nullptr);
+                    class CueRunner* cue_runner = nullptr,
+                    class ShowTransportCoordinator* show_transport = nullptr);
     void stop();
 
     void set_diagnostics_provider(std::function<StartupDiagnostics()> provider) {
@@ -130,6 +132,14 @@ public:
     Scheduler* scheduler() { return scheduler_; }
     NodeSync* node_sync() { return node_sync_; }
     class CueRunner* cue_runner() { return cue_runner_; }
+    class ShowTransportCoordinator* show_transport() { return show_transport_; }
+    void set_show_transport(class ShowTransportCoordinator* transport) { show_transport_ = transport; }
+    DmxRouter* dmx_router() { return dmx_router_; }
+    const DmxRouter* dmx_router() const { return dmx_router_; }
+
+    using ShowClockProvider = std::function<uint64_t()>;
+    void set_show_clock_provider(ShowClockProvider provider) { show_clock_provider_ = std::move(provider); }
+    uint64_t show_clock_now_ms() const { return show_clock_provider_ ? show_clock_provider_() : (esp_timer_get_time() / 1000ULL); }
 
     using RuntimeConfigApplyCallback = std::function<esp_err_t(const DeviceConfig& old_cfg, const DeviceConfig& new_cfg)>;
     void set_config_apply_callback(RuntimeConfigApplyCallback callback) {
@@ -158,6 +168,8 @@ public:
     NodeSync* node_sync_ = nullptr;
     DmxRouter* dmx_router_ = nullptr;
     class CueRunner* cue_runner_ = nullptr;
+    class ShowTransportCoordinator* show_transport_ = nullptr;
+    ShowClockProvider show_clock_provider_{};
     std::function<StartupDiagnostics()> diagnostics_provider_{};
     RuntimeConfigApplyCallback config_apply_callback_{};
     httpd_handle_t signage_server_ = nullptr;

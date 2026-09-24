@@ -323,10 +323,9 @@ bool ConfigStore::scene_exists(uint8_t index) const {
     return const_cast<ConfigStore*>(this)->load_scene(index, sc) == ESP_OK;
 }
 
-uint32_t ConfigStore::compute_show_hash() const {
+uint32_t ConfigStore::compute_playback_hash() const {
     uint32_t hash = 0;
-    // Show schema version
-    const uint32_t show_schema = 1;
+    const uint32_t show_schema = 2;
     hash = esp_rom_crc32_le(hash, reinterpret_cast<const uint8_t*>(&show_schema), sizeof(show_schema));
 
     // Ordered scene checksums (slots 0..31)
@@ -359,16 +358,6 @@ uint32_t ConfigStore::compute_show_hash() const {
         hash = esp_rom_crc32_le(hash, reinterpret_cast<const uint8_t*>(&crc), sizeof(crc));
     }
 
-    // Calendar schedule checksum
-    {
-        CalendarSchedule sched;
-        uint32_t crc = 0;
-        if (const_cast<ConfigStore*>(this)->load_calendar_schedule(sched) == ESP_OK) {
-            crc = sched.checksum;
-        }
-        hash = esp_rom_crc32_le(hash, reinterpret_cast<const uint8_t*>(&crc), sizeof(crc));
-    }
-
     // Ordered cue-list checksums (0..kMaxCueLists-1)
     for (uint8_t i = 0; i < kMaxCueLists; ++i) {
         CueList cl;
@@ -380,6 +369,34 @@ uint32_t ConfigStore::compute_show_hash() const {
     }
 
     return hash;
+}
+
+uint32_t ConfigStore::compute_schedule_hash() const {
+    uint32_t hash = 0;
+    const uint32_t show_schema = 2;
+    hash = esp_rom_crc32_le(hash, reinterpret_cast<const uint8_t*>(&show_schema), sizeof(show_schema));
+
+    CalendarSchedule sched;
+    uint32_t crc = 0;
+    if (const_cast<ConfigStore*>(this)->load_calendar_schedule(sched) == ESP_OK) {
+        crc = sched.checksum;
+    }
+    hash = esp_rom_crc32_le(hash, reinterpret_cast<const uint8_t*>(&crc), sizeof(crc));
+    return hash;
+}
+
+uint32_t ConfigStore::compute_full_show_hash() const {
+    const uint32_t pb = compute_playback_hash();
+    const uint32_t sc = compute_schedule_hash();
+    uint32_t hash = 0;
+    hash = esp_rom_crc32_le(hash, reinterpret_cast<const uint8_t*>(&pb), sizeof(pb));
+    hash = esp_rom_crc32_le(hash, reinterpret_cast<const uint8_t*>(&sc), sizeof(sc));
+    return hash;
+}
+
+uint32_t ConfigStore::compute_show_hash() const {
+    // Phase 1: showHash is a compatibility alias for playbackHash
+    return compute_playback_hash();
 }
 
 // ── Scene Motion ────────────────────────────────────────────────────

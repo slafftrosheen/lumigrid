@@ -57,8 +57,11 @@ that has not completed initialization.
 | `PUT` | `/api/v1/config` | Update persisted node settings. |
 | `GET` | `/api/v1/schedules` | List calendar automation cues. |
 | `PUT` | `/api/v1/schedules` | Replace all calendar automation cues. |
+| `POST` | `/api/v1/show/control` | Control unified Show Transport (Scene, Timeline, Cue) with leader authority. |
+| `GET` | `/api/v1/show/status` | Read unified Show Transport runtime status and mode. |
+| `DELETE` | `/api/v1/scene-motion` | Delete motion tracks for a scene preset (via `?index=N`). |
 | `GET` | `/api/v1/sync` | Read sync role, clock health, transport, master address, and discovered followers. |
-| `GET` | `/api/v1/show-manifest` | Read compact CRC32 show manifest and aggregate showHash. |
+| `GET` | `/api/v1/show-manifest` | Read compact CRC32 show manifest, playbackHash, and scheduleHash. |
 | `GET` | `/api/v1/health` | Read system memory, uptime, and telemetry. |
 | `GET` | `/api/v1/logs` | Read recent diagnostic logs. |
 | `GET` | `/api/v1/audit` | Read recent security and configuration events. |
@@ -251,49 +254,121 @@ minute. A scene action stops a calendar-started timeline.
 }
 ```
 
-### Sync health and Topology
+### Show Transport v2 Coordinator
+
+`POST /api/v1/show/control` provides explicit transport switching across Scene, Timeline, and Cue List:
+```json
+{
+  "mode": "scene",
+  "sceneIndex": 7
+}
+```
+Or for Timeline:
+```json
+{
+  "mode": "timeline",
+  "action": "start",
+  "bpm": 124
+}
+```
+Or for Cue List:
+```json
+{
+  "mode": "cue",
+  "action": "start",
+  "cueListIndex": 0,
+  "cueIndex": 0
+}
+```
+Supported Cue actions: `start`, `stop`, `pause`, `resume`, `next`, `previous`, `jump`, `crossfade`.
+
+`GET /api/v1/show/status` returns unified transport coordinator status:
+```json
+{
+  "mode": "cue",
+  "generation": 42,
+  "scene": { "index": 0 },
+  "timeline": { "running": false, "bpm": 120 },
+  "cue": {
+    "running": true,
+    "state": "fading",
+    "listIndex": 0,
+    "cueIndex": 3,
+    "nextCueIndex": 4,
+    "elapsedMs": 450,
+    "remainingMs": 1550,
+    "manualFade": 0
+  }
+}
+```
+
+#### Follower Read-Only Guard (409 Conflict)
+Active followers (`activeRole === 'worker'` tracking a reachable leader) reject local direct playback requests (`POST /api/v1/activate`, `POST /api/v1/cue-control`, `POST /api/v1/show/control`) with:
+```json
+{
+  "error": "sync_follower_read_only",
+  "message": "Playback is controlled by sync leader 192.168.1.50",
+  "leader": "192.168.1.50"
+}
+```
+Show content editing (`PUT /api/v1/presets`, `PUT /api/v1/sequence`, `PUT /api/v1/cue-list`) remains permitted.
+
+### Sync Health, Topology, and NodeSync Protocol v4
 
 `GET /api/v1/sync` returns:
+- `protocolVersion`: `4` (NodeSync v4 with packed 60-byte payload).
 - `configuredRole`: `auto`, `master`, or `worker`.
 - `activeRole`: Currently resolved role (`auto`, `master`, or `worker`).
 - `running`: Boolean indicating if NodeSync UDP background task is active.
+- `groupLabel`: Configured cluster group label.
+- `syncEnabled`: Boolean indicating if multi-node sync is enabled.
 - `clockLocked`: Boolean indicating bounded clock offset lock (< 5 ms).
 - `clockHasEpoch`: Boolean indicating valid epoch reference.
 - `masterAddress`: IPv4 string of the current leader node (or null for the leader itself).
-- `transport`: Active playback transport mode (`standalone`, `scene`, `timeline`).
+- `transport`: Active playback transport mode (`standalone`, `scene`, `timeline`, `cue`).
+- `transportGeneration`: Monotonic generation counter of the leader's transport commands.
+- `transportApplyOk`: Boolean indicating if follower successfully applied remote transport state.
+- `transportError`: Error string if follower failed to apply remote transport.
 - `remoteBpm`: Remote BPM broadcast from leader during timeline transport (or null).
 - `remoteTimelineEnabled`: Boolean indicating if leader's timeline sequence is active.
+- `cue`: Active cue playback telemetry (`listIndex`, `state`, `cueIndex`, `nextCueIndex`, `manualFade`).
 - `peerCount`, `packetsReceived`, `packetsMissed`, `clockOffsetMs`, `clockJitterUs`.
 - `peers[]`: List of acknowledged peers with address, ageMs, and latencyMs.
 
 ### Show Manifest and Content Parity
 
-`GET /api/v1/show-manifest` returns compact content CRC32 checksums:
+`GET /api/v1/show-manifest` returns compact content CRC32 checksums under schema 2:
 ```json
 {
-  "schema": 1,
-  "firmware": "0.9.0",
-  "protocol": 1,
+  "schema": 2,
+  "firmware": "0.10.0",
+  "protocol": 4,
+  "playbackHash": 182930411,
+  "scheduleHash": 7174411,
   "showHash": 2851193042,
   "scenes": [
     { "index": 0, "checksum": 182736455, "motionChecksum": 98233441 }
   ],
   "timeline": { "checksum": 33182761 },
-  "schedules": { "checksum": 7174411 },
   "cueLists": [
     { "index": 0, "checksum": 9182771 }
-  ]
+  ],
+  "schedules": { "checksum": 7174411 }
 }
 ```
-- `showHash`: Deterministic CRC32 computed across schema, scenes, scene motions, timeline, calendar schedule, and cue lists.
-- Hardware configuration (IP, Wi-Fi, channel mapping, brightness limits) is strictly separated and does not affect `showHash`.
-- Cluster READY state requires both clock synchronization (`clockLocked === true`) and content parity (`showHash` match).
+- `playbackHash`: Deterministic CRC32 computed across real-time playback assets (Scenes, Scene Motion tracks, Timeline sequence, and Cue Lists). Parity of `playbackHash` is required for cluster synchronization readiness.
+- `scheduleHash`: CRC32 of calendar automation cues. Schedule divergence between nodes is considered optional and does not block cluster playback.
+- `showHash`: Aggregate hash across all assets including calendar schedules.
+- Hardware configuration (IP, Wi-Fi, channel mapping, brightness limits) is strictly separated and does not affect show hashes.
 
 ### Show Deployment Rules
 - Show deployment distributes Show content (Scenes, Motions, Timeline, Cue Lists, and optional Schedules) from a source node to target nodes via sequential HTTP requests (`GET source` -> `PUT target`).
 - **Never** uses `/api/v1/backup` or `/api/v1/restore` for Show deployment to avoid overwriting node hardware, networking, or credentials.
-- When `mirrorExactly` is enabled, stale scenes and cue lists on target nodes are purged using `DELETE /api/v1/presets?index=N` and `DELETE /api/v1/cue-list?index=N`.
-- **Cue Lists**: Cue Lists can be mirrored across the fleet, but live Cue playback is not synchronized over UDP in Sync v1. Synchronized playback is supported for Scenes (leader slot propagation) and Timeline (clock + BPM transport).
+- When `mirrorExactly` is enabled:
+  - Stale presets are deleted with `DELETE /api/v1/presets?index=N`.
+  - Stale motion tracks are deleted with `DELETE /api/v1/scene-motion?index=N`.
+  - Stale cue lists are deleted with `DELETE /api/v1/cue-list?index=N`.
+- **Synchronized Cue Playback**: Under Show Transport v2 and NodeSync v4, live Cue playback is fully synchronized over UDP across the cluster. The Leader runs the authoritative cue list timing and crossfades, broadcasting cue indices, hold/fade states, and manual crossfade progress to all follower nodes at 10 Hz. Followers suppress local conflicting playback and render matching frames locked to the cluster clock.
 
 ### Diagnostics and Logs
 

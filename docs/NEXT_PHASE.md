@@ -28,10 +28,13 @@ Firmware
   FactoryApi
     |-- scenes / effects
     |-- timeline / schedules
+    |-- cue lists / show transport
     |-- diagnostics / health
     |-- factory / burn-in
     |-- configuration / recovery
     `-- OTA
+          |
+    ShowTransportCoordinator
           |
     Control arbitration
           |
@@ -103,7 +106,16 @@ Firmware
 - Concurrency-limited show deployment engine with exact mirror mode and verification.
 - Synchronized Scene and Timeline playback controls routed to Leader only.
 
-### 9. Hardware validation
+### 9. Show Transport v2 & Synchronized Cue Playback (LG-026)
+
+- Single explicit `ShowTransportCoordinator` unifying Scene, Timeline, and Cue List playback.
+- NodeSync protocol v4 with packed 60-byte UDP frames broadcasting explicit transport mode, monotonic generation, and cue snapshots.
+- Leader-authoritative cue lists, random progression, hold/fade duration, and manual crossfade progress.
+- Follower local playback suppression and 409 `sync_follower_read_only` guard on follower direct activate/transport requests.
+- Manifest schema 2 separating `playbackHash` from optional `scheduleHash`.
+- Fleet Sync Studio UI with group selector, cluster topology truth evaluation (`VALID_LEADER`, `NO_LEADER`, `SPLIT_BRAIN`, `LEADER_DISAGREEMENT`), polling race protection, leader-cache reset, and unified transport controls.
+
+### 10. Hardware validation
 
 Execute the documented matrix: boot, networking, API, WebSocket, pixel output, PCA9685, DMX, arbitration, limiter, E-stop, watchdog, recovery, backup/restore, OTA, extended burn-in, and multi-node sync bench tests.
 
@@ -117,4 +129,4 @@ Execute the documented matrix: boot, networking, API, WebSocket, pixel output, P
 
 ## Definition of done
 
-A new operator can discover/add a node, see its real live state, compose a scene, preview it, activate it, sequence it, schedule it, diagnose a fault, run a factory test, and recover/update the node without needing to understand firmware internals.
+A new operator can discover/add a node, see its real live state, compose a scene, preview it, activate it, sequence it, schedule it, run synchronized cue shows across a cluster, diagnose a fault, run a factory test, and recover/update the node without needing to understand firmware internals.

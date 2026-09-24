@@ -81,7 +81,7 @@ void LightingRuntime::stop() {
         source_manager_.release(ControlSource::ScenePlayback);
         source_manager_.release(ControlSource::Factory);
         source_manager_.release(ControlSource::ManualOverride);
-        manual_override_ = {};
+        manual_active_ = {};
         // Do NOT give the mutex before deleting it. The task is confirmed dead
         // (shutdown_sem_ was acked). Giving first would allow any concurrent waiter
         // that slipped in to grab the semaphore and then touch the deleted object
@@ -459,8 +459,19 @@ void LightingRuntime::render_frame(uint32_t current_ms) {
     }
 }
 
-void LightingRuntime::activate_scene(uint8_t index) { xSemaphoreTake(mutex_, portMAX_DELAY); scene_manager_.activate_scene(index, now_ms()); xSemaphoreGive(mutex_); }
-void LightingRuntime::activate_scene_direct(const SceneConfig& scene, bool immediate) { xSemaphoreTake(mutex_, portMAX_DELAY); scene_manager_.activate_scene_direct(scene, now_ms(), immediate); xSemaphoreGive(mutex_); }
+void LightingRuntime::activate_scene(uint8_t index) {
+    xSemaphoreTake(mutex_, portMAX_DELAY);
+    if (scene_manager_.activate_scene(index, now_ms())) {
+        source_manager_.acquire(ControlSource::ScenePlayback, 0, 0, 0, 0xFFFF);
+    }
+    xSemaphoreGive(mutex_);
+}
+void LightingRuntime::activate_scene_direct(const SceneConfig& scene, bool immediate) {
+    xSemaphoreTake(mutex_, portMAX_DELAY);
+    source_manager_.acquire(ControlSource::ScenePlayback, 0, 0, 0, 0xFFFF);
+    scene_manager_.activate_scene_direct(scene, now_ms(), immediate);
+    xSemaphoreGive(mutex_);
+}
 
 bool LightingRuntime::submit_live_frame(const LiveDmxFrame& frame) {
     if (shutting_down_.load(std::memory_order_acquire) || !mutex_) return false;

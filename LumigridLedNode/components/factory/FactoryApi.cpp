@@ -21,6 +21,8 @@
 #include "NodeIdentity.hpp"
 #include "Capabilities.hpp"
 #include "CueRunner.hpp"
+#include "ChannelConfiguration.hpp"
+#include "ShowTransport.hpp"
 #include <inttypes.h>
 #include <cmath>
 
@@ -65,11 +67,24 @@ esp_err_t send_error(httpd_req_t* request,
     return send_json(request, body, status);
 }
 
-inline bool channel_is_configured(const ChannelHardwareDesc& hw, const ChannelConfig& cfg) {
-    if (hw.kind == ChannelKind::Addressable) {
-        return cfg.pixel_count > 0 || cfg.enabled || cfg.dmx_start_channel > 0 || cfg.max_milliwatts > 0 || cfg.name[0] != '\0';
+inline bool channel_is_configured(const ChannelHardwareDescriptor& hw, const ChannelConfig& cfg) {
+    return channel_is_configured(hw.index, cfg);
+}
+
+void format_ipv4(uint32_t address, char* output, size_t output_size);
+
+static bool is_sync_follower_read_only(FactoryApi* api_ptr, char* out_leader, size_t leader_len) {
+    if (!api_ptr || !api_ptr->node_sync()) return false;
+    auto* sync = api_ptr->node_sync();
+    if (sync->active_role() != NodeRole::Worker) return false;
+    auto st = sync->status();
+    if (st.master_address != 0 && st.last_packet_age_ms < 3000) {
+        if (out_leader && leader_len > 0) {
+            format_ipv4(st.master_address, out_leader, leader_len);
+        }
+        return true;
     }
-    return cfg.enabled || cfg.dmx_start_channel > 0 || cfg.max_milliwatts > 0 || cfg.name[0] != '\0';
+    return false;
 }
 
 esp_err_t read_json(httpd_req_t* request, cJSON** out) {
@@ -887,6 +902,38 @@ esp_err_t delete_preset(httpd_req_t* request) {
     return send_json(request, resp, "200 OK");
 }
 
+esp_err_t delete_scene_motion(httpd_req_t* request) {
+    if (!api::authorize(request, api::ApiRole::Operator)) return ESP_OK;
+
+    FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+    if (!api_ptr->config()) return send_error(request, "503 Service Unavailable", "config_not_ready");
+
+    int index = -1;
+    char query[32];
+    if (httpd_req_get_url_query_str(request, query, sizeof(query)) == ESP_OK) {
+        char param[16];
+        if (httpd_query_key_value(query, "index", param, sizeof(param)) == ESP_OK) {
+            index = atoi(param);
+        }
+    }
+    if (index < 0 || index >= kMaxPresets) {
+        return send_error(request, "400 Bad Request", "invalid_or_missing_index");
+    }
+
+    esp_err_t err = api_ptr->config()->delete_scene_motion(static_cast<uint8_t>(index));
+    if (err != ESP_OK) {
+        return send_error(request, "500 Internal Server Error", "motion_delete_failed");
+    }
+
+    char audit_detail[64];
+    snprintf(audit_detail, sizeof(audit_detail), "Scene motion %d deleted", index);
+    api::AuditLog::instance().log(api::ApiRole::Operator, "scene_motion_deleted", audit_detail);
+
+    char resp[64];
+    snprintf(resp, sizeof(resp), "{\"deleted\":true,\"index\":%d}", index);
+    return send_json(request, resp, "200 OK");
+}
+
 esp_err_t get_show_manifest(httpd_req_t* request) {
     if (!api::authorize(request, api::ApiRole::Operator)) return ESP_OK;
 
@@ -895,10 +942,14 @@ esp_err_t get_show_manifest(httpd_req_t* request) {
 
     NodeIdentity id = get_node_identity(nullptr);
     cJSON* root = cJSON_CreateObject();
-    cJSON_AddNumberToObject(root, "schema", 1);
-    cJSON_AddNumberToObject(root, "schemaVersion", 1);
+    cJSON_AddNumberToObject(root, "schema", 2);
+    cJSON_AddNumberToObject(root, "schemaVersion", 2);
     cJSON_AddStringToObject(root, "firmware", id.fw_version);
     cJSON_AddNumberToObject(root, "protocol", 1);
+    cJSON_AddNumberToObject(root, "syncProtocol", 4);
+    cJSON_AddNumberToObject(root, "playbackHash", api_ptr->config()->compute_playback_hash());
+    cJSON_AddNumberToObject(root, "fullHash", api_ptr->config()->compute_full_show_hash());
+    cJSON_AddNumberToObject(root, "scheduleHash", api_ptr->config()->compute_schedule_hash());
     cJSON_AddNumberToObject(root, "showHash", api_ptr->config()->compute_show_hash());
 
     // Occupied scenes
@@ -965,11 +1016,11 @@ esp_err_t get_show_manifest(httpd_req_t* request) {
     cJSON* cl_arr = cJSON_CreateArray();
     for (uint8_t i = 0; i < kMaxCueLists; ++i) {
         CueList cl;
-        if (api_ptr->config()->load_cue_list(i, cl) == ESP_OK && cl.cue_count > 0) {
+        if (api_ptr->config()->load_cue_list(i, cl) == ESP_OK && cl.count > 0) {
             cJSON* item = cJSON_CreateObject();
             cJSON_AddNumberToObject(item, "index", i);
             cJSON_AddStringToObject(item, "name", cl.name);
-            cJSON_AddNumberToObject(item, "cueCount", cl.cue_count);
+            cJSON_AddNumberToObject(item, "cueCount", cl.count);
             cJSON_AddNumberToObject(item, "checksum", cl.checksum);
             cJSON_AddItemToArray(cl_arr, item);
         }
@@ -1505,11 +1556,296 @@ esp_err_t delete_cue_list(httpd_req_t* request) {
     return send_json(request, "{\"deleted\":true}", "200 OK");
 }
 
+esp_err_t post_show_control(httpd_req_t* request) {
+    if (!api::authorize(request, api::ApiRole::Operator)) return ESP_OK;
+
+    FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+    if (!api_ptr->signage()) return send_error(request, "503 Service Unavailable", "signage_not_ready");
+
+    char leader_ip[16] = {};
+    if (is_sync_follower_read_only(api_ptr, leader_ip, sizeof(leader_ip))) {
+        char err_body[96];
+        snprintf(err_body, sizeof(err_body), "{\"error\":\"sync_follower_read_only\",\"leader\":\"%s\"}", leader_ip);
+        return send_json(request, err_body, "409 Conflict");
+    }
+
+    cJSON* root = nullptr;
+    if (read_json(request, &root) != ESP_OK) return send_error(request, "400 Bad Request", "invalid_json");
+
+    const cJSON* mode_j = cJSON_GetObjectItemCaseSensitive(root, "mode");
+    if (!mode_j || !cJSON_IsString(mode_j)) {
+        cJSON_Delete(root);
+        return send_error(request, "400 Bad Request", "missing_mode");
+    }
+
+    const char* mode_str = mode_j->valuestring;
+    uint64_t now_ms = api_ptr->show_clock_now_ms();
+    uint32_t cmd_id = api_ptr->command_journal().accept(CommandDomain::Scene);
+
+    if (strcmp(mode_str, "scene") == 0) {
+        int scene_idx = 0;
+        const cJSON* si_j = cJSON_GetObjectItemCaseSensitive(root, "sceneIndex");
+        if (!si_j) si_j = cJSON_GetObjectItemCaseSensitive(root, "index");
+        if (!si_j) si_j = cJSON_GetObjectItemCaseSensitive(root, "presetIndex");
+        if (si_j && cJSON_IsNumber(si_j)) {
+            scene_idx = si_j->valueint;
+        }
+        if (scene_idx < 0 || scene_idx >= kMaxPresets) {
+            cJSON_Delete(root);
+            api_ptr->command_journal().failed(cmd_id, ESP_ERR_INVALID_ARG);
+            return send_error(request, "400 Bad Request", "invalid_scene_index");
+        }
+
+        if (api_ptr->cue_runner()) {
+            api_ptr->cue_runner()->stop(now_ms);
+        }
+        if (api_ptr->scheduler()) {
+            api_ptr->scheduler()->stop_local_timeline();
+            api_ptr->scheduler()->clear_sync_transport();
+        }
+
+        uint32_t gen = 0;
+        if (!api_ptr->signage()->activate_scene_checked(static_cast<uint8_t>(scene_idx), &gen)) {
+            cJSON_Delete(root);
+            api_ptr->command_journal().failed(cmd_id, ESP_ERR_INVALID_STATE);
+            return send_error(request, "404 Not Found", "scene_not_found");
+        }
+
+        api_ptr->signage()->feed_watchdog();
+        api_ptr->signage()->release_control(ControlSource::EStop);
+
+        uint32_t transport_gen = gen;
+        if (api_ptr->show_transport()) {
+            api_ptr->show_transport()->set_scene(static_cast<uint8_t>(scene_idx));
+            transport_gen = api_ptr->show_transport()->generation();
+        }
+
+        cJSON_Delete(root);
+        api_ptr->command_journal().applied(cmd_id);
+        api_ptr->notify_status_async();
+
+        char resp[128];
+        snprintf(resp, sizeof(resp), "{\"accepted\":true,\"mode\":\"scene\",\"generation\":%" PRIu32 ",\"commandId\":%" PRIu32 "}", transport_gen, cmd_id);
+        return send_json(request, resp, "200 OK");
+    } else if (strcmp(mode_str, "timeline") == 0) {
+        const cJSON* act_j = cJSON_GetObjectItemCaseSensitive(root, "action");
+        const char* action = (act_j && cJSON_IsString(act_j)) ? act_j->valuestring : "start";
+
+        uint32_t transport_gen = 0;
+        if (strcmp(action, "start") == 0) {
+            if (api_ptr->cue_runner()) {
+                api_ptr->cue_runner()->stop(now_ms);
+            }
+            uint16_t bpm = 120;
+            Sequence seq{};
+            if (api_ptr->config() && api_ptr->config()->load_sequence(seq) == ESP_OK) {
+                bpm = seq.bpm > 0 ? seq.bpm : 120;
+            }
+            const cJSON* bpm_j = cJSON_GetObjectItemCaseSensitive(root, "bpm");
+            if (bpm_j && cJSON_IsNumber(bpm_j) && bpm_j->valueint > 0) {
+                bpm = static_cast<uint16_t>(bpm_j->valueint);
+            }
+            if (api_ptr->scheduler()) {
+                api_ptr->scheduler()->start_local_timeline(bpm);
+            }
+            if (api_ptr->show_transport()) {
+                api_ptr->show_transport()->set_timeline(true, bpm);
+                transport_gen = api_ptr->show_transport()->generation();
+            }
+        } else if (strcmp(action, "stop") == 0) {
+            if (api_ptr->scheduler()) {
+                api_ptr->scheduler()->stop_local_timeline();
+            }
+            if (api_ptr->show_transport()) {
+                api_ptr->show_transport()->set_timeline(false, 120);
+                transport_gen = api_ptr->show_transport()->generation();
+            }
+        } else {
+            cJSON_Delete(root);
+            api_ptr->command_journal().failed(cmd_id, ESP_ERR_INVALID_ARG);
+            return send_error(request, "400 Bad Request", "unknown_action");
+        }
+
+        cJSON_Delete(root);
+        api_ptr->command_journal().applied(cmd_id);
+        api_ptr->notify_status_async();
+
+        char resp[128];
+        snprintf(resp, sizeof(resp), "{\"accepted\":true,\"mode\":\"timeline\",\"generation\":%" PRIu32 ",\"commandId\":%" PRIu32 "}", transport_gen, cmd_id);
+        return send_json(request, resp, "200 OK");
+    } else if (strcmp(mode_str, "cue") == 0) {
+        if (!api_ptr->cue_runner()) {
+            cJSON_Delete(root);
+            return send_error(request, "503 Service Unavailable", "cue_runner_not_ready");
+        }
+
+        const cJSON* act_j = cJSON_GetObjectItemCaseSensitive(root, "action");
+        if (!act_j || !cJSON_IsString(act_j)) {
+            cJSON_Delete(root);
+            return send_error(request, "400 Bad Request", "missing_action");
+        }
+        const char* action = act_j->valuestring;
+
+        if (strcmp(action, "start") == 0) {
+            if (api_ptr->scheduler()) {
+                api_ptr->scheduler()->stop_local_timeline();
+            }
+            uint8_t list_idx = 0;
+            uint8_t start_cue = 0;
+            const cJSON* li = cJSON_GetObjectItemCaseSensitive(root, "cueListIndex");
+            if (li && cJSON_IsNumber(li)) list_idx = static_cast<uint8_t>(li->valueint);
+            const cJSON* ci = cJSON_GetObjectItemCaseSensitive(root, "cueIndex");
+            if (ci && cJSON_IsNumber(ci)) start_cue = static_cast<uint8_t>(ci->valueint);
+            esp_err_t err = api_ptr->cue_runner()->start(list_idx, start_cue, now_ms);
+            if (err != ESP_OK) {
+                api_ptr->command_journal().failed(cmd_id, err);
+                cJSON_Delete(root);
+                return send_error(request, "400 Bad Request", "start_failed");
+            }
+        } else if (strcmp(action, "stop") == 0) {
+            api_ptr->cue_runner()->stop(now_ms);
+        } else if (strcmp(action, "pause") == 0) {
+            api_ptr->cue_runner()->pause();
+        } else if (strcmp(action, "resume") == 0) {
+            api_ptr->cue_runner()->resume(now_ms);
+        } else if (strcmp(action, "next") == 0) {
+            api_ptr->cue_runner()->next(now_ms);
+        } else if (strcmp(action, "previous") == 0) {
+            api_ptr->cue_runner()->previous(now_ms);
+        } else if (strcmp(action, "jump") == 0) {
+            uint8_t cue_idx = 0;
+            const cJSON* ci = cJSON_GetObjectItemCaseSensitive(root, "cueIndex");
+            if (ci && cJSON_IsNumber(ci)) cue_idx = static_cast<uint8_t>(ci->valueint);
+            api_ptr->cue_runner()->jump(cue_idx, now_ms);
+        } else if (strcmp(action, "crossfade") == 0) {
+            uint16_t fade_q15 = 0;
+            const cJSON* f_j = cJSON_GetObjectItemCaseSensitive(root, "crossfade");
+            if (f_j && cJSON_IsNumber(f_j)) {
+                if (f_j->valuedouble <= 1.0) {
+                    fade_q15 = static_cast<uint16_t>(f_j->valuedouble * 32768.0);
+                } else {
+                    fade_q15 = static_cast<uint16_t>(std::min<int>(32768, f_j->valueint));
+                }
+            }
+            api_ptr->cue_runner()->set_manual_fade(fade_q15);
+        } else {
+            cJSON_Delete(root);
+            api_ptr->command_journal().failed(cmd_id, ESP_ERR_INVALID_ARG);
+            return send_error(request, "400 Bad Request", "unknown_action");
+        }
+
+        uint32_t transport_gen = 0;
+        if (api_ptr->show_transport()) {
+            if (api_ptr->cue_runner()->is_running()) {
+                CueTransportSnapshot cs{};
+                auto cr_snap = api_ptr->cue_runner()->sync_snapshot(now_ms);
+                cs.active = cr_snap.active;
+                cs.list_index = cr_snap.list_index;
+                cs.state = static_cast<uint8_t>(cr_snap.state);
+                cs.current_cue = cr_snap.current_cue;
+                cs.next_cue = cr_snap.next_cue;
+                cs.manual_fade_q15 = cr_snap.manual_fade_q15;
+                cs.cue_anchor_ms = cr_snap.cue_anchor_ms;
+                cs.paused_elapsed_ms = cr_snap.paused_elapsed_ms;
+                cs.generation = cr_snap.generation;
+                api_ptr->show_transport()->set_cue(cs);
+            } else {
+                api_ptr->show_transport()->set_mode(ShowTransportMode::Scene);
+            }
+            transport_gen = api_ptr->show_transport()->generation();
+        }
+
+        cJSON_Delete(root);
+        api_ptr->command_journal().applied(cmd_id);
+        api_ptr->notify_status_async();
+
+        char resp[128];
+        snprintf(resp, sizeof(resp), "{\"accepted\":true,\"mode\":\"cue\",\"generation\":%" PRIu32 ",\"commandId\":%" PRIu32 "}", transport_gen, cmd_id);
+        return send_json(request, resp, "200 OK");
+    }
+
+    cJSON_Delete(root);
+    api_ptr->command_journal().failed(cmd_id, ESP_ERR_INVALID_ARG);
+    return send_error(request, "400 Bad Request", "unsupported_mode");
+}
+
+esp_err_t get_show_status(httpd_req_t* request) {
+    if (!api::authorize(request, api::ApiRole::Operator)) return ESP_OK;
+
+    FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+    uint64_t now_ms = api_ptr->show_clock_now_ms();
+
+    ShowTransportSnapshot st{};
+    if (api_ptr->show_transport()) {
+        st = api_ptr->show_transport()->snapshot();
+    } else {
+        st.mode = ShowTransportMode::Scene;
+        if (api_ptr->signage()) st.active_scene = api_ptr->signage()->active_scene_index();
+    }
+
+    const char* mode_str = "scene";
+    if (st.mode == ShowTransportMode::Timeline) mode_str = "timeline";
+    else if (st.mode == ShowTransportMode::Cue) mode_str = "cue";
+
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "mode", mode_str);
+    cJSON_AddNumberToObject(root, "generation", st.generation);
+
+    cJSON* scene_obj = cJSON_CreateObject();
+    cJSON_AddNumberToObject(scene_obj, "index", st.active_scene);
+    cJSON_AddItemToObject(root, "scene", scene_obj);
+
+    cJSON* tl_obj = cJSON_CreateObject();
+    cJSON_AddBoolToObject(tl_obj, "running", st.timeline_running());
+    cJSON_AddNumberToObject(tl_obj, "bpm", st.bpm);
+    cJSON_AddItemToObject(root, "timeline", tl_obj);
+
+    cJSON* cue_obj = cJSON_CreateObject();
+    if (api_ptr->cue_runner()) {
+        const auto* cr = api_ptr->cue_runner();
+        cJSON_AddBoolToObject(cue_obj, "running", cr->is_running());
+        cJSON_AddStringToObject(cue_obj, "state", cr->state_name());
+        cJSON_AddNumberToObject(cue_obj, "listIndex", cr->active_list_index());
+        cJSON_AddNumberToObject(cue_obj, "cueIndex", cr->current_cue_index());
+        cJSON_AddNumberToObject(cue_obj, "nextCueIndex", cr->next_cue_index());
+        cJSON_AddNumberToObject(cue_obj, "elapsedMs", cr->cue_elapsed_ms(now_ms));
+        cJSON_AddNumberToObject(cue_obj, "remainingMs", cr->cue_remaining_ms(now_ms));
+        cJSON_AddNumberToObject(cue_obj, "manualFade", cr->manual_fade_q15());
+        cJSON_AddNumberToObject(cue_obj, "generation", cr->transport_generation());
+    } else {
+        cJSON_AddBoolToObject(cue_obj, "running", false);
+        cJSON_AddStringToObject(cue_obj, "state", "stopped");
+        cJSON_AddNumberToObject(cue_obj, "listIndex", 0);
+        cJSON_AddNumberToObject(cue_obj, "cueIndex", 0);
+        cJSON_AddNumberToObject(cue_obj, "nextCueIndex", 0);
+        cJSON_AddNumberToObject(cue_obj, "elapsedMs", 0);
+        cJSON_AddNumberToObject(cue_obj, "remainingMs", 0);
+        cJSON_AddNumberToObject(cue_obj, "manualFade", 0);
+        cJSON_AddNumberToObject(cue_obj, "generation", 0);
+    }
+    cJSON_AddItemToObject(root, "cue", cue_obj);
+
+    char* json = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (!json) return send_error(request, "500 Internal Server Error", "json_encode_failed");
+
+    esp_err_t res = send_json(request, json, "200 OK");
+    cJSON_free(json);
+    return res;
+}
+
 esp_err_t post_cue_control(httpd_req_t* request) {
     if (!api::authorize(request, api::ApiRole::Operator)) return ESP_OK;
 
     FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
     if (!api_ptr->cue_runner()) return send_error(request, "503 Service Unavailable", "cue_runner_not_ready");
+
+    char leader_ip[16] = {};
+    if (is_sync_follower_read_only(api_ptr, leader_ip, sizeof(leader_ip))) {
+        char err_body[96];
+        snprintf(err_body, sizeof(err_body), "{\"error\":\"sync_follower_read_only\",\"leader\":\"%s\"}", leader_ip);
+        return send_json(request, err_body, "409 Conflict");
+    }
 
     cJSON* root = nullptr;
     if (read_json(request, &root) != ESP_OK) return send_error(request, "400 Bad Request", "invalid_json");
@@ -1521,37 +1857,40 @@ esp_err_t post_cue_control(httpd_req_t* request) {
     }
 
     const char* action = act_j->valuestring;
-    uint32_t now = esp_log_timestamp();
+    uint64_t now_ms = api_ptr->show_clock_now_ms();
     uint32_t cmd_id = api_ptr->command_journal().accept(CommandDomain::Cue);
 
     if (strcmp(action, "start") == 0) {
+        if (api_ptr->scheduler()) {
+            api_ptr->scheduler()->stop_local_timeline();
+        }
         uint8_t list_idx = 0;
         uint8_t start_cue = 0;
         const cJSON* li = cJSON_GetObjectItemCaseSensitive(root, "cueListIndex");
         if (li && cJSON_IsNumber(li)) list_idx = li->valueint;
         const cJSON* ci = cJSON_GetObjectItemCaseSensitive(root, "cueIndex");
         if (ci && cJSON_IsNumber(ci)) start_cue = ci->valueint;
-        esp_err_t err = api_ptr->cue_runner()->start(list_idx, start_cue, now);
+        esp_err_t err = api_ptr->cue_runner()->start(list_idx, start_cue, now_ms);
         if (err != ESP_OK) {
             api_ptr->command_journal().failed(cmd_id, err);
             cJSON_Delete(root);
             return send_error(request, "400 Bad Request", "start_failed");
         }
     } else if (strcmp(action, "stop") == 0) {
-        api_ptr->cue_runner()->stop(now);
+        api_ptr->cue_runner()->stop(now_ms);
     } else if (strcmp(action, "pause") == 0) {
         api_ptr->cue_runner()->pause();
     } else if (strcmp(action, "resume") == 0) {
-        api_ptr->cue_runner()->resume(now);
+        api_ptr->cue_runner()->resume(now_ms);
     } else if (strcmp(action, "next") == 0) {
-        api_ptr->cue_runner()->next(now);
+        api_ptr->cue_runner()->next(now_ms);
     } else if (strcmp(action, "previous") == 0) {
-        api_ptr->cue_runner()->previous(now);
+        api_ptr->cue_runner()->previous(now_ms);
     } else if (strcmp(action, "jump") == 0) {
         uint8_t cue_idx = 0;
         const cJSON* ci = cJSON_GetObjectItemCaseSensitive(root, "cueIndex");
         if (ci && cJSON_IsNumber(ci)) cue_idx = ci->valueint;
-        api_ptr->cue_runner()->jump(cue_idx, now);
+        api_ptr->cue_runner()->jump(cue_idx, now_ms);
     } else if (strcmp(action, "crossfade") == 0) {
         uint16_t fade_q15 = 0;
         const cJSON* f_j = cJSON_GetObjectItemCaseSensitive(root, "crossfade");
@@ -1567,6 +1906,25 @@ esp_err_t post_cue_control(httpd_req_t* request) {
         cJSON_Delete(root);
         api_ptr->command_journal().failed(cmd_id, ESP_ERR_INVALID_ARG);
         return send_error(request, "400 Bad Request", "unknown_action");
+    }
+
+    if (api_ptr->show_transport()) {
+        if (api_ptr->cue_runner()->is_running()) {
+            CueTransportSnapshot cs{};
+            auto cr_snap = api_ptr->cue_runner()->sync_snapshot(now_ms);
+            cs.active = cr_snap.active;
+            cs.list_index = cr_snap.list_index;
+            cs.state = static_cast<uint8_t>(cr_snap.state);
+            cs.current_cue = cr_snap.current_cue;
+            cs.next_cue = cr_snap.next_cue;
+            cs.manual_fade_q15 = cr_snap.manual_fade_q15;
+            cs.cue_anchor_ms = cr_snap.cue_anchor_ms;
+            cs.paused_elapsed_ms = cr_snap.paused_elapsed_ms;
+            cs.generation = cr_snap.generation;
+            api_ptr->show_transport()->set_cue(cs);
+        } else {
+            api_ptr->show_transport()->set_mode(ShowTransportMode::Scene);
+        }
     }
 
     cJSON_Delete(root);
@@ -1587,19 +1945,20 @@ esp_err_t get_cue_status(httpd_req_t* request) {
     }
 
     const auto* cr = api_ptr->cue_runner();
-    uint32_t now = esp_log_timestamp();
-    char body[320];
+    uint64_t now_ms = api_ptr->show_clock_now_ms();
+    char body[384];
     snprintf(body, sizeof(body),
-        "{\"running\":%s,\"state\":\"%s\",\"listIndex\":%u,\"cueIndex\":%u,\"nextCueIndex\":%u,\"mode\":\"%s\",\"elapsedMs\":%" PRIu32 ",\"remainingMs\":%" PRIu32 ",\"manualFade\":%u}",
+        "{\"running\":%s,\"state\":\"%s\",\"listIndex\":%u,\"cueIndex\":%u,\"nextCueIndex\":%u,\"mode\":\"%s\",\"elapsedMs\":%" PRIu32 ",\"remainingMs\":%" PRIu32 ",\"manualFade\":%u,\"generation\":%" PRIu32 "}",
         cr->is_running() ? "true" : "false",
         cr->state_name(),
         cr->active_list_index(),
         cr->current_cue_index(),
         cr->next_cue_index(),
         cue_run_mode_name(cr->current_list().mode),
-        cr->cue_elapsed_ms(now),
-        cr->cue_remaining_ms(now),
-        cr->manual_fade_q15());
+        cr->cue_elapsed_ms(now_ms),
+        cr->cue_remaining_ms(now_ms),
+        cr->manual_fade_q15(),
+        cr->transport_generation());
 
     return send_json(request, body, "200 OK");
 }
@@ -1609,95 +1968,68 @@ esp_err_t post_activate(httpd_req_t* request) {
 
     FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
     if (!api_ptr->signage()) {
-        return send_error(
-            request,
-            "503 Service Unavailable",
-            "signage_not_ready"
-        );
+        return send_error(request, "503 Service Unavailable", "signage_not_ready");
+    }
+
+    char leader_ip[16] = {};
+    if (is_sync_follower_read_only(api_ptr, leader_ip, sizeof(leader_ip))) {
+        char err_body[96];
+        snprintf(err_body, sizeof(err_body), "{\"error\":\"sync_follower_read_only\",\"leader\":\"%s\"}", leader_ip);
+        return send_json(request, err_body, "409 Conflict");
     }
 
     cJSON* root = nullptr;
     if (read_json(request, &root) != ESP_OK) {
-        return send_error(
-            request,
-            "400 Bad Request",
-            "invalid_json"
-        );
+        return send_error(request, "400 Bad Request", "invalid_json");
     }
 
     uint8_t index = 0;
-    if (!json_u8(root, "preset", 0, kMaxPresets - 1, index)) {
+    if (!json_u8(root, "preset", 0, kMaxPresets - 1, index) &&
+        !json_u8(root, "index", 0, kMaxPresets - 1, index) &&
+        !json_u8(root, "presetIndex", 0, kMaxPresets - 1, index)) {
         cJSON_Delete(root);
-        return send_error(
-            request,
-            "400 Bad Request",
-            "missing_preset_index"
-        );
+        return send_error(request, "400 Bad Request", "missing_preset_index");
     }
 
     cJSON_Delete(root);
 
-    /*
-     * Validate/load the requested scene before changing control ownership
-     * or clearing E-stop state.
-     *
-     * A rejected scene must not mutate the current control state.
-     */
+    uint64_t now_ms = api_ptr->show_clock_now_ms();
+
+    // Stop Cue if running
+    if (api_ptr->cue_runner()) {
+        api_ptr->cue_runner()->stop(now_ms);
+    }
+    // Suppress local Timeline
+    if (api_ptr->scheduler()) {
+        api_ptr->scheduler()->stop_local_timeline();
+        api_ptr->scheduler()->clear_sync_transport();
+    }
+
     uint32_t generation = 0;
     if (!api_ptr->signage()->activate_scene_checked(index, &generation)) {
         const uint32_t command_id = api_ptr->command_journal().accept(CommandDomain::Scene, 0);
         api_ptr->command_journal().failed(command_id, ESP_ERR_INVALID_STATE);
 
         char detail[64];
-        snprintf(
-            detail,
-            sizeof(detail),
-            "Preset %u activation rejected",
-            index
-        );
+        snprintf(detail, sizeof(detail), "Preset %u activation rejected", index);
+        api::AuditLog::instance().log(api::ApiRole::Operator, "preset_activate_rejected", detail);
 
-        api::AuditLog::instance().log(
-            api::ApiRole::Operator,
-            "preset_activate_rejected",
-            detail
-        );
+        return send_error(request, "409 Conflict", "scene_activation_rejected");
+    }
 
-        return send_error(
-            request,
-            "409 Conflict",
-            "scene_activation_rejected"
-        );
+    if (api_ptr->show_transport()) {
+        api_ptr->show_transport()->set_scene(index);
+        generation = api_ptr->show_transport()->generation();
     }
 
     const uint32_t command_id = api_ptr->command_journal().accept(CommandDomain::Scene, generation);
 
-    /*
-     * Scene activation has been accepted by the runtime.
-     *
-     * This does NOT mean a physical output frame has already committed.
-     * Higher-priority control sources may also still temporarily dominate
-     * output arbitration.
-     */
     api_ptr->signage()->feed_watchdog();
     api_ptr->signage()->release_control(ControlSource::EStop);
-    api_ptr->signage()->acquire_control(
-        ControlSource::ManualOverride,
-        0
-    );
 
     char detail[64];
-    snprintf(
-        detail,
-        sizeof(detail),
-        "Preset %u activation accepted",
-        index
-    );
-
-    api::AuditLog::instance().log(
-        api::ApiRole::Operator,
-        "preset_activate",
-        detail
-    );
+    snprintf(detail, sizeof(detail), "Preset %u activation accepted", index);
+    api::AuditLog::instance().log(api::ApiRole::Operator, "preset_activate", detail);
 
     api_ptr->notify_status_async();
 
@@ -1711,11 +2043,7 @@ esp_err_t post_activate(httpd_req_t* request) {
         generation
     );
 
-    return send_json(
-        request,
-        response,
-        "202 Accepted"
-    );
+    return send_json(request, response, "202 Accepted");
 }
 
 esp_err_t get_device_config(httpd_req_t* request) {
@@ -2096,9 +2424,16 @@ esp_err_t put_device_config(httpd_req_t* request) {
                         (old_cfg.sync_role != cfg.sync_role) ||
                         (old_cfg.sync_token != cfg.sync_token);
     if (sync_changed && api_ptr->config_apply_callback()) {
-        esp_err_t apply_err = api_ptr->config_apply_callback()(old_cfg, cfg);
+        const auto apply_err = api_ptr->config_apply_callback()(old_cfg, cfg);
         if (apply_err != ESP_OK) {
             api_ptr->config()->save_config(old_cfg);
+            const auto rollback_err = api_ptr->config_apply_callback()(cfg, old_cfg);
+            if (rollback_err != ESP_OK) {
+                api::AuditLog::instance().log(api::ApiRole::Admin, "sync_reconfig_rollback_failed", "Sync reconfig rollback failed");
+                api_ptr->command_journal().failed(cmd_id, rollback_err);
+                return send_error(request, "500 Internal Server Error", "sync_reconfig_rollback_failed");
+            }
+            api::AuditLog::instance().log(api::ApiRole::Admin, "sync_reconfig_failed", "Sync reconfig failed, rolled back");
             api_ptr->command_journal().failed(cmd_id, apply_err);
             return send_error(request, "500 Internal Server Error", "sync_reconfig_failed");
         }
@@ -2137,9 +2472,7 @@ esp_err_t get_channels(httpd_req_t* request) {
 
         // Hardware identity is not configuration. A1/P1 always exist even when
         // nothing is connected; only electrical/runtime settings make a port configured.
-        const bool configured = (hw.kind == ChannelKind::Addressable)
-            ? (c.pixel_count > 0 || c.enabled || c.dmx_start_channel > 0 || c.max_milliwatts > 0)
-            : (c.enabled || c.dmx_start_channel > 0 || c.max_milliwatts > 0);
+        const bool configured = channel_is_configured(i, c);
 
         cJSON* ch = cJSON_CreateObject();
         cJSON_AddNumberToObject(ch, "index", i);
@@ -2368,6 +2701,7 @@ esp_err_t get_signage_status(httpd_req_t* request) {
     cJSON_AddNumberToObject(limits, "cuesPerList", CapabilitiesManifest::kCuesPerList);
     cJSON_AddNumberToObject(limits, "automationTracks", CapabilitiesManifest::kAutomationTracks);
     cJSON_AddNumberToObject(limits, "automationPoints", CapabilitiesManifest::kAutomationPoints);
+    cJSON_AddNumberToObject(limits, "syncPeers", CapabilitiesManifest::kSyncPeers);
     cJSON_AddItemToObject(response, "limits", limits);
 
     cJSON* features = cJSON_CreateObject();
@@ -2385,6 +2719,11 @@ esp_err_t get_signage_status(httpd_req_t* request) {
     cJSON_AddBoolToObject(features, "sceneMotion", CapabilitiesManifest::kFeatureSceneMotion);
     cJSON_AddBoolToObject(features, "cueLists", CapabilitiesManifest::kFeatureCueLists);
     cJSON_AddBoolToObject(features, "transitionEngineV2", CapabilitiesManifest::kFeatureTransitionEngineV2);
+    cJSON_AddBoolToObject(features, "showTransportV2", CapabilitiesManifest::kFeatureShowTransportV2);
+    cJSON_AddBoolToObject(features, "syncCueTransport", CapabilitiesManifest::kFeatureSyncCueTransport);
+    cJSON_AddBoolToObject(features, "syncTimelineTransport", CapabilitiesManifest::kFeatureSyncTimelineTransport);
+    cJSON_AddBoolToObject(features, "showManifest", CapabilitiesManifest::kFeatureShowManifest);
+    cJSON_AddBoolToObject(features, "playbackManifest", CapabilitiesManifest::kFeaturePlaybackManifest);
     cJSON_AddItemToObject(response, "features", features);
 
     char* json = cJSON_PrintUnformatted(response);
@@ -2424,12 +2763,12 @@ esp_err_t get_capabilities(httpd_req_t* request) {
         dev_name = cfg.device_name;
     }
     NodeIdentity id = get_node_identity(dev_name);
-    char body[1024];
+    char body[1280];
     snprintf(body, sizeof(body),
         "{\"schema\":%u,"
         "\"node\":{\"family\":\"%s\",\"model\":\"%s\",\"firmware\":\"%s\",\"hardwareRevision\":\"%s\"},"
-        "\"limits\":{\"channels\":16,\"groups\":8,\"pixelLanes\":%u,\"pwmChannels\":%u,\"zones\":%u,\"layersPerZone\":%u,\"presets\":%u,\"timelineSteps\":%u,\"cueLists\":%u,\"cuesPerList\":%u,\"automationTracks\":%u,\"automationPoints\":%u},"
-        "\"features\":{\"manualControl\":true,\"addressable\":%s,\"pwm\":%s,\"artnet\":%s,\"sacn\":%s,\"sync\":%s,\"mqtt\":%s,\"factory\":%s,\"ota\":%s,\"signedOta\":%s,\"backup\":%s,\"sceneMotion\":%s,\"cueLists\":%s,\"transitionEngineV2\":%s},"
+        "\"limits\":{\"channels\":16,\"groups\":8,\"pixelLanes\":%u,\"pwmChannels\":%u,\"zones\":%u,\"layersPerZone\":%u,\"presets\":%u,\"timelineSteps\":%u,\"cueLists\":%u,\"cuesPerList\":%u,\"automationTracks\":%u,\"automationPoints\":%u,\"syncPeers\":%u,\"syncProtocol\":%u},"
+        "\"features\":{\"manualControl\":true,\"addressable\":%s,\"pwm\":%s,\"artnet\":%s,\"sacn\":%s,\"sync\":%s,\"mqtt\":%s,\"factory\":%s,\"ota\":%s,\"signedOta\":%s,\"backup\":%s,\"sceneMotion\":%s,\"cueLists\":%s,\"transitionEngineV2\":%s,\"showTransportV2\":%s,\"syncCueTransport\":%s,\"syncTimelineTransport\":%s,\"showManifest\":%s,\"playbackManifest\":%s},"
         "\"protocols\":{\"httpApi\":%u,\"websocket\":%u,\"sync\":%u}}",
         CapabilitiesManifest::kSchema,
         id.family, id.model, id.fw_version, id.hw_revision,
@@ -2438,6 +2777,8 @@ esp_err_t get_capabilities(httpd_req_t* request) {
         CapabilitiesManifest::kPresets, CapabilitiesManifest::kTimelineSteps,
         CapabilitiesManifest::kCueLists, CapabilitiesManifest::kCuesPerList,
         CapabilitiesManifest::kAutomationTracks, CapabilitiesManifest::kAutomationPoints,
+        CapabilitiesManifest::kSyncPeers,
+        CapabilitiesManifest::kProtocolSync,
         CapabilitiesManifest::kFeatureAddressable ? "true" : "false",
         CapabilitiesManifest::kFeaturePwm ? "true" : "false",
         CapabilitiesManifest::kFeatureArtnet ? "true" : "false",
@@ -2451,6 +2792,11 @@ esp_err_t get_capabilities(httpd_req_t* request) {
         CapabilitiesManifest::kFeatureSceneMotion ? "true" : "false",
         CapabilitiesManifest::kFeatureCueLists ? "true" : "false",
         CapabilitiesManifest::kFeatureTransitionEngineV2 ? "true" : "false",
+        CapabilitiesManifest::kFeatureShowTransportV2 ? "true" : "false",
+        CapabilitiesManifest::kFeatureSyncCueTransport ? "true" : "false",
+        CapabilitiesManifest::kFeatureSyncTimelineTransport ? "true" : "false",
+        CapabilitiesManifest::kFeatureShowManifest ? "true" : "false",
+        CapabilitiesManifest::kFeaturePlaybackManifest ? "true" : "false",
         CapabilitiesManifest::kProtocolHttpApi,
         CapabilitiesManifest::kProtocolWebsocket,
         CapabilitiesManifest::kProtocolSync
@@ -2653,10 +2999,36 @@ void build_schema2_status_json(FactoryApi* api, char* response, size_t max_len) 
             man_st.lease_remaining_ms);
     }
 
+    char show_transport_str[384] = "{\"mode\":\"scene\",\"generation\":0,\"sceneIndex\":0,\"timelineRunning\":false,\"timelineBpm\":120,\"cue\":{\"running\":false}}";
+    if (api->show_transport()) {
+        auto st = api->show_transport()->snapshot();
+        const char* mode_str = "scene";
+        if (st.mode == ShowTransportMode::Timeline) mode_str = "timeline";
+        else if (st.mode == ShowTransportMode::Cue) mode_str = "cue";
+
+        char cue_part[192];
+        if (st.cue.active) {
+            const char* c_state = "stopped";
+            if (st.cue.state == 1) c_state = "holding";
+            else if (st.cue.state == 2) c_state = "fading";
+            else if (st.cue.state == 3) c_state = "paused";
+            snprintf(cue_part, sizeof(cue_part),
+                "{\"running\":true,\"state\":\"%s\",\"listIndex\":%u,\"cueIndex\":%u,\"nextCueIndex\":%u,\"manualFade\":%u}",
+                c_state, st.cue.list_index, st.cue.current_cue, st.cue.next_cue, st.cue.manual_fade_q15);
+        } else {
+            snprintf(cue_part, sizeof(cue_part), "{\"running\":false}");
+        }
+
+        snprintf(show_transport_str, sizeof(show_transport_str),
+            "{\"mode\":\"%s\",\"generation\":%" PRIu32 ",\"sceneIndex\":%u,\"timelineRunning\":%s,\"timelineBpm\":%u,\"cue\":%s}",
+            mode_str, st.generation, st.active_scene, st.timeline_running() ? "true" : "false", st.bpm, cue_part);
+    }
+
     snprintf(response, max_len,
         "{\"schema\":2,\"seq\":%" PRIu32 ",\"nodeId\":\"%s\",\"uptimeMs\":%" PRIu32 ","
         "\"channels\":%s,"
         "\"manual\":%s,"
+        "\"showTransport\":%s,"
         "\"state\":{"
           "\"runtime\":{\"effect\":\"%s\",\"brightness\":%u,\"testActive\":%s,\"autoLoop\":%s,\"controlOwner\":\"%s\",\"frameCount\":%" PRIu32 "},"
           "\"output\":{\"outputsEnabled\":%s,\"powerMw\":%" PRIu32 ",\"fault\":%s,\"faultCount\":%" PRIu32 "},"
@@ -2669,6 +3041,7 @@ void build_schema2_status_json(FactoryApi* api, char* response, size_t max_len) 
                         "\"owner\":\"%s\"},"
           "\"timeline\":{\"clockMs\":%" PRIu64 ",\"driftPpm\":%" PRId32 ",\"synced\":%s},"
           "\"automation\":{\"activeTracks\":%u,\"transitionCurve\":\"%s\"},"
+          "\"showTransport\":%s,"
           "\"cue\":%s,"
           "\"job\":%s"
         "},"
@@ -2676,6 +3049,7 @@ void build_schema2_status_json(FactoryApi* api, char* response, size_t max_len) 
         seq, identity.id, now,
         channels_buf,
         manual_str,
+        show_transport_str,
         effect_name(api->runner().status().active_effect), brightness,
         api->runner().status().test_active ? "true" : "false",
         api->runner().status().auto_loop ? "true" : "false",
@@ -2691,6 +3065,7 @@ void build_schema2_status_json(FactoryApi* api, char* response, size_t max_len) 
         owner,
         clock_ms, drift_ppm, time_synced ? "true" : "false",
         motion_tracks, trans_curve,
+        show_transport_str,
         cue_str,
         job_str,
         effect_name(api->runner().status().active_effect), brightness,
@@ -3079,6 +3454,18 @@ esp_err_t get_sync_status(httpd_req_t* request) {
 
     const NodeSyncStatus status = api_ptr->node_sync()->status();
     cJSON* response = cJSON_CreateObject();
+    cJSON_AddNumberToObject(response, "protocolVersion", 4);
+    cJSON_AddNumberToObject(response, "syncProtocol", 4);
+
+    DeviceConfig dev_cfg{};
+    if (api_ptr->config() && api_ptr->config()->load_config(dev_cfg) == ESP_OK) {
+        cJSON_AddBoolToObject(response, "syncEnabled", dev_cfg.sync_enabled);
+        cJSON_AddStringToObject(response, "groupLabel", dev_cfg.group_label);
+    } else {
+        cJSON_AddBoolToObject(response, "syncEnabled", false);
+        cJSON_AddStringToObject(response, "groupLabel", "");
+    }
+
     cJSON_AddStringToObject(response, "configuredRole", node_role_name(status.configured_role));
     cJSON_AddStringToObject(response, "activeRole", node_role_name(status.active_role));
     cJSON_AddBoolToObject(response, "running", status.running);
@@ -3107,14 +3494,49 @@ esp_err_t get_sync_status(httpd_req_t* request) {
         transport_str = "scene";
     } else if (status.transport == 2) {
         transport_str = "timeline";
+    } else if (status.transport == 3) {
+        transport_str = "cue";
     }
     cJSON_AddStringToObject(response, "transport", transport_str);
+    cJSON_AddNumberToObject(response, "transportGeneration", status.transport_generation);
+    cJSON_AddBoolToObject(response, "transportApplyOk", status.transport_apply_ok);
+
+    const char* err_str = "none";
+    switch (status.transport_error) {
+        case 1: err_str = "scene_missing"; break;
+        case 2: err_str = "cue_list_missing"; break;
+        case 3: err_str = "cue_index_invalid"; break;
+        case 4: err_str = "runtime_unavailable"; break;
+        case 5: err_str = "unsupported_transport"; break;
+        default: err_str = "none"; break;
+    }
+    cJSON_AddStringToObject(response, "transportError", err_str);
+
     if (status.remote_bpm == 0) {
         cJSON_AddNullToObject(response, "remoteBpm");
     } else {
         cJSON_AddNumberToObject(response, "remoteBpm", status.remote_bpm);
     }
     cJSON_AddBoolToObject(response, "remoteTimelineEnabled", status.remote_timeline_enabled);
+
+    if (status.transport == 3) {
+        cJSON* cue_obj = cJSON_CreateObject();
+        cJSON_AddBoolToObject(cue_obj, "active", true);
+        cJSON_AddNumberToObject(cue_obj, "listIndex", status.cue.list_index);
+        cJSON_AddNumberToObject(cue_obj, "cueIndex", status.cue.current_cue);
+        cJSON_AddNumberToObject(cue_obj, "nextCueIndex", status.cue.next_cue);
+        const char* c_state = "stopped";
+        if (status.cue.state == 1) c_state = "holding";
+        else if (status.cue.state == 2) c_state = "fading";
+        else if (status.cue.state == 3) c_state = "paused";
+        cJSON_AddStringToObject(cue_obj, "state", c_state);
+        cJSON_AddNumberToObject(cue_obj, "generation", status.cue.generation);
+        cJSON_AddNumberToObject(cue_obj, "elapsedMs", status.cue.paused_elapsed_ms);
+        cJSON_AddNumberToObject(cue_obj, "manualFadeQ15", status.cue.manual_fade_q15);
+        cJSON_AddItemToObject(response, "cue", cue_obj);
+    } else {
+        cJSON_AddNullToObject(response, "cue");
+    }
 
     cJSON* peers = cJSON_CreateArray();
     for (uint8_t index = 0; index < status.peer_count; ++index) {
@@ -3895,7 +4317,8 @@ esp_err_t FactoryApi::start(
     Scheduler* scheduler,
     NodeSync* node_sync,
     DmxRouter* dmx_router,
-    CueRunner* cue_runner
+    CueRunner* cue_runner,
+    ShowTransportCoordinator* show_transport
 ) {
     config_ = config;
     signage_ = signage;
@@ -3903,6 +4326,7 @@ esp_err_t FactoryApi::start(
     node_sync_ = node_sync;
     dmx_router_ = dmx_router;
     cue_runner_ = cue_runner;
+    show_transport_ = show_transport;
 
     const char* dev_name = nullptr;
     DeviceConfig cfg;
@@ -3969,12 +4393,15 @@ esp_err_t FactoryApi::start(
         { .uri = "/api/v1/schedules",         .method = HTTP_PUT,  .handler = put_calendar_schedule, .user_ctx = this },
         { .uri = "/api/v1/scene-motion",      .method = HTTP_GET,  .handler = get_scene_motion, .user_ctx = this },
         { .uri = "/api/v1/scene-motion",      .method = HTTP_PUT,  .handler = put_scene_motion, .user_ctx = this },
+        { .uri = "/api/v1/scene-motion",      .method = HTTP_DELETE,.handler = delete_scene_motion, .user_ctx = this },
         { .uri = "/api/v1/cue-lists",         .method = HTTP_GET,  .handler = get_cue_lists,    .user_ctx = this },
         { .uri = "/api/v1/cue-list",          .method = HTTP_GET,  .handler = get_cue_list,     .user_ctx = this },
         { .uri = "/api/v1/cue-list",          .method = HTTP_PUT,  .handler = put_cue_list,     .user_ctx = this },
         { .uri = "/api/v1/cue-list",          .method = HTTP_DELETE,.handler = delete_cue_list,  .user_ctx = this },
         { .uri = "/api/v1/cue/control",       .method = HTTP_POST, .handler = post_cue_control, .user_ctx = this },
         { .uri = "/api/v1/cue/status",        .method = HTTP_GET,  .handler = get_cue_status,   .user_ctx = this },
+        { .uri = "/api/v1/show/status",       .method = HTTP_GET,  .handler = get_show_status,   .user_ctx = this },
+        { .uri = "/api/v1/show/control",      .method = HTTP_POST, .handler = post_show_control,  .user_ctx = this },
         { .uri = "/api/v1/sync",              .method = HTTP_GET,  .handler = get_sync_status,     .user_ctx = this },
         { .uri = "/api/v1/show-manifest",     .method = HTTP_GET,  .handler = get_show_manifest, .user_ctx = this },
         { .uri = "/api/v1/audit",             .method = HTTP_GET,  .handler = get_audit_log,       .user_ctx = this },

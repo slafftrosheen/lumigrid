@@ -10,8 +10,22 @@
 #include <ctime>
 
 #include "CueRunner.hpp"
+#include "ShowTransport.hpp"
 
 namespace lg {
+
+enum class SyncTransportMode : uint8_t {
+    Standalone = 0,
+    Scene      = 1,
+    Timeline   = 2,
+    Cue        = 3,
+};
+
+struct SyncTransportState {
+    SyncTransportMode mode = SyncTransportMode::Standalone;
+    uint16_t bpm = 120;
+    uint32_t updated_ms = 0;
+};
 
 /// NTP time-sync, calendar trigger, and beat-sequencer evaluator.
 class Scheduler {
@@ -38,16 +52,38 @@ public:
     void set_cue_runner(CueRunner* runner) { cue_runner_ = runner; }
     CueRunner* cue_runner() { return cue_runner_; }
 
-    struct SyncTimelineTransport {
-        bool active = false;
-        bool timeline_enabled = false;
-        uint16_t bpm = 120;
-        uint32_t updated_ms = 0;
+    enum class RemoteShowMode : uint8_t {
+        None = 0,
+        Scene,
+        Timeline,
+        Cue,
     };
 
+    struct SyncTimelineTransport {
+        bool active = false;
+        RemoteShowMode mode = RemoteShowMode::None;
+        bool timeline_enabled = false;
+        uint16_t bpm = 120;
+        uint64_t updated_ms = 0;
+    };
+
+    void apply_remote_show_mode(RemoteShowMode mode, uint16_t bpm = 120, uint64_t updated_ms = 0);
+    void clear_remote_show_mode();
+    RemoteShowMode remote_show_mode() const;
+
+    // Canonical transport v2 API (Phase 0.2)
+    void apply_sync_transport(SyncTransportMode mode, uint16_t bpm, uint32_t now_ms);
     void apply_sync_transport(bool timeline_enabled, uint16_t bpm, uint32_t now_ms);
     void clear_sync_transport();
+    SyncTransportState sync_transport_state() const;
     SyncTimelineTransport sync_transport() const;
+
+    // Snapshot of current effective transport (Phase 4.2)
+    ShowTransportSnapshot transport_snapshot(uint64_t clock_ms) const;
+
+    void start_local_timeline(uint16_t bpm = 0);
+    void stop_local_timeline();
+    bool local_timeline_active() const;
 
 private:
     static void task_entry(void* arg);
@@ -75,14 +111,15 @@ private:
     };
     bool calendar_sequence_active_ = false;
     uint64_t calendar_sequence_started_ms_ = 0;
+    bool local_timeline_running_ = false;
+    uint16_t local_timeline_bpm_ = 120;
 
     TaskHandle_t task_handle_ = nullptr;
     bool running_ = false;
-    /// Signalled by the task just before it calls vTaskDelete.
-    /// stop() waits on this to guarantee the task has exited before returning.
     SemaphoreHandle_t shutdown_sem_ = nullptr;
 
     mutable portMUX_TYPE sync_transport_mutex_ = portMUX_INITIALIZER_UNLOCKED;
+    SyncTransportState transport_state_{};
     SyncTimelineTransport sync_transport_{};
 };
 

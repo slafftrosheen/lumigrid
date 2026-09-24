@@ -4,6 +4,10 @@ import {
   getShowManifest,
   generateSyncToken,
   compareShowManifest,
+  comparePlaybackManifest,
+  compareScheduleManifest,
+  compareFullShowManifest,
+  evaluateClusterTopology,
   buildClusterPlan,
   type ShowManifest,
   type SyncStatus,
@@ -219,6 +223,138 @@ describe('sync API module', () => {
     it('fails if no nodes provided', () => {
       const r = buildClusterPlan([], 'auto');
       expect(r.error).toContain('No nodes selected');
+    });
+  });
+
+  describe('evaluateClusterTopology', () => {
+    it('returns NO_LEADER when 0 nodes have activeRole master', () => {
+      const topo = evaluateClusterTopology([
+        { ip: '192.168.1.10', status: { activeRole: 'worker', masterAddress: '192.168.1.5' } as any },
+        { ip: '192.168.1.11', status: { activeRole: 'worker', masterAddress: '192.168.1.5' } as any },
+      ]);
+      expect(topo.state).toBe('NO_LEADER');
+      expect(topo.leaderIp).toBeNull();
+      expect(topo.isReady).toBe(false);
+      expect(topo.error).toContain('NO LEADER');
+    });
+
+    it('returns VALID_LEADER when exactly 1 master and workers track that master', () => {
+      const topo = evaluateClusterTopology([
+        { ip: '192.168.1.10', status: { activeRole: 'master', masterAddress: null, transportApplyOk: true } as any },
+        { ip: '192.168.1.11', status: { activeRole: 'worker', masterAddress: '192.168.1.10', transportApplyOk: true } as any },
+      ]);
+      expect(topo.state).toBe('VALID_LEADER');
+      expect(topo.leaderIp).toBe('192.168.1.10');
+      expect(topo.isReady).toBe(true);
+      expect(topo.error).toBeUndefined();
+    });
+
+    it('returns SPLIT_BRAIN when multiple nodes report activeRole master', () => {
+      const topo = evaluateClusterTopology([
+        { ip: '192.168.1.10', status: { activeRole: 'master' } as any },
+        { ip: '192.168.1.11', status: { activeRole: 'master' } as any },
+      ]);
+      expect(topo.state).toBe('SPLIT_BRAIN');
+      expect(topo.leaderIp).toBeNull();
+      expect(topo.isReady).toBe(false);
+      expect(topo.error).toContain('SPLIT BRAIN (2 masters detected)');
+    });
+
+    it('returns LEADER_DISAGREEMENT when a worker tracks a different master', () => {
+      const topo = evaluateClusterTopology([
+        { ip: '192.168.1.10', status: { activeRole: 'master' } as any },
+        { ip: '192.168.1.11', status: { activeRole: 'worker', masterAddress: '192.168.1.99' } as any },
+      ]);
+      expect(topo.state).toBe('LEADER_DISAGREEMENT');
+      expect(topo.leaderIp).toBe('192.168.1.10');
+      expect(topo.isReady).toBe(false);
+      expect(topo.error).toContain('LEADER DISAGREEMENT');
+    });
+
+    it('marks isReady false when any follower reports transportApplyOk false', () => {
+      const topo = evaluateClusterTopology([
+        { ip: '192.168.1.10', status: { activeRole: 'master', transportApplyOk: true } as any },
+        { ip: '192.168.1.11', status: { activeRole: 'worker', masterAddress: '192.168.1.10', transportApplyOk: false } as any },
+      ]);
+      expect(topo.state).toBe('VALID_LEADER');
+      expect(topo.isReady).toBe(false);
+      expect(topo.error).toContain('transport apply error');
+    });
+  });
+
+  describe('Playback vs Schedule Parity', () => {
+    const baseManifest: ShowManifest = {
+      schema: 2,
+      protocol: 4,
+      playbackHash: 11111,
+      scheduleHash: 22222,
+      showHash: 33333,
+      scenes: [{ index: 0, name: 'Brand', checksum: 100, motionChecksum: 200 }],
+      timeline: { enabled: true, bpm: 120, checksum: 300 },
+      cueLists: [{ index: 0, name: 'Main Cue', checksum: 400 }],
+      schedules: { checksum: 500 },
+    };
+
+    it('comparePlaybackManifest returns MATCHED even if schedules differ', () => {
+      const targetManifest: ShowManifest = {
+        ...baseManifest,
+        scheduleHash: 99999, // Schedule difference
+        showHash: 88888,
+        schedules: { checksum: 900 },
+      };
+
+      const res = comparePlaybackManifest(baseManifest, targetManifest);
+      expect(res.status).toBe('MATCHED');
+      expect(res.diffs.find((d) => d.category === 'scene')?.state).toBe('match');
+      expect(res.diffs.find((d) => d.category === 'timeline')?.state).toBe('match');
+      expect(res.diffs.find((d) => d.category === 'cueList')?.state).toBe('match');
+      // Schedule diff should not even be in playback manifest diffs
+      expect(res.diffs.find((d) => d.category === 'schedules')).toBeUndefined();
+    });
+
+    it('comparePlaybackManifest returns DRIFT if scenes or cue lists differ', () => {
+      const targetManifest: ShowManifest = {
+        ...baseManifest,
+        playbackHash: 44444,
+        scenes: [{ index: 0, name: 'Brand', checksum: 999, motionChecksum: 200 }],
+      };
+
+      const res = comparePlaybackManifest(baseManifest, targetManifest);
+      expect(res.status).toBe('DRIFT');
+      expect(res.diffs.find((d) => d.category === 'scene')?.state).toBe('changed');
+    });
+
+    it('compareScheduleManifest detects schedule diffs', () => {
+      const targetManifest: ShowManifest = {
+        ...baseManifest,
+        schedules: { checksum: 999 },
+      };
+
+      const match = compareScheduleManifest(baseManifest, baseManifest);
+      expect(match.status).toBe('MATCHED');
+
+      const drift = compareScheduleManifest(baseManifest, targetManifest);
+      expect(drift.status).toBe('DRIFT');
+      expect(drift.diffs[0].state).toBe('changed');
+    });
+  });
+
+  describe('generateSyncToken', () => {
+    it('generates non-zero 32-bit integer when crypto available', () => {
+      const token = generateSyncToken();
+      expect(token).toBeGreaterThan(0);
+      expect(token).toBeLessThanOrEqual(0xffffffff);
+    });
+
+    it('throws error when crypto is unavailable', () => {
+      const origCrypto = globalThis.crypto;
+      try {
+        // @ts-ignore
+        delete globalThis.crypto;
+        expect(() => generateSyncToken()).toThrow('Secure random generation unavailable in this browser');
+      } finally {
+        globalThis.crypto = origCrypto;
+      }
     });
   });
 });

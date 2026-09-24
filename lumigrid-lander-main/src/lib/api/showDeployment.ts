@@ -1,4 +1,4 @@
-import { getPreset, savePreset, deletePreset } from './scenes';
+import { getPreset, savePreset, deletePreset, deleteSceneMotion } from './scenes';
 import { getSceneMotion, saveSceneMotion } from './sceneMotion';
 import { getCueList, saveCueList, deleteCueList } from './cues';
 import { getSequence, saveSequence } from './timeline';
@@ -176,6 +176,24 @@ async function deploySingleTarget(
         await saveSceneMotion(targetIp, idx, motion);
         assetsWrittenCount++;
       }
+
+      // Exact mirror: delete stale target motion records where source scene has no motion
+      if (options.mirrorExactly && targetPreManifest?.scenes) {
+        for (const tScene of targetPreManifest.scenes) {
+          const sScene = sourceManifest.scenes.find((s) => s.index === tScene.index);
+          const sMotionCs = sScene?.motionChecksum ?? 0;
+          const tMotionCs = tScene.motionChecksum ?? 0;
+          if (tMotionCs > 0 && sMotionCs === 0) {
+            updateState({
+              ip: targetIp,
+              state: 'deploying',
+              currentAsset: `Delete Scene Motion ${tScene.index}`,
+            });
+            await deleteSceneMotion(targetIp, tScene.index);
+            assetsWrittenCount++;
+          }
+        }
+      }
     }
 
     // ── 3. Cue Lists ──────────────────────────────────────────────────────────
@@ -229,53 +247,15 @@ async function deploySingleTarget(
     updateState({ ip: targetIp, state: 'verifying', currentAsset: 'Verifying show manifest' });
     const postManifest = await getShowManifest(targetIp);
 
-    // If mirrorExactly was checked and all main categories were selected, we expect exact hash match
-    if (options.mirrorExactly && options.scenes && options.sceneMotion && options.timeline && options.cueLists) {
-      const parity = compareShowManifest(sourceManifest, postManifest);
-      if (parity.status === 'MATCHED') {
-        updateState({ ip: targetIp, state: 'complete' });
-        return;
-      } else {
-        updateState({
-          ip: targetIp,
-          state: 'partial',
-          error: `Manifest verification failed: ${parity.reason || parity.status}`,
-        });
-        return;
-      }
-    }
+    const verification = verifyShowDeployment(sourceManifest, postManifest, options);
 
-    // For partial category deployment, verify specific deployed components
-    let verified = true;
-    const errors: string[] = [];
-
-    if (options.scenes) {
-      const postScenes = new Map(postManifest.scenes.map((s) => [s.index, s.checksum]));
-      for (const s of sourceManifest.scenes) {
-        if (postScenes.get(s.index) !== s.checksum) {
-          verified = false;
-          errors.push(`Scene ${s.index} checksum mismatch`);
-          break;
-        }
-      }
-    }
-
-    if (options.timeline) {
-      const sCs = sourceManifest.timeline?.checksum ?? 0;
-      const tCs = postManifest.timeline?.checksum ?? 0;
-      if (sCs !== tCs) {
-        verified = false;
-        errors.push('Timeline sequence checksum mismatch');
-      }
-    }
-
-    if (verified) {
+    if (verification.complete) {
       updateState({ ip: targetIp, state: 'complete' });
     } else {
       updateState({
         ip: targetIp,
         state: 'partial',
-        error: `Verification failed: ${errors.join(', ')}`,
+        error: `Verification failed: ${verification.errors.join(', ')}`,
       });
     }
   } catch (err: any) {
@@ -287,3 +267,143 @@ async function deploySingleTarget(
     });
   }
 }
+
+export interface DeploymentVerification {
+  complete: boolean;
+  isComplete: boolean;
+  categoryStatus: {
+    scenes?: 'match' | 'mismatch' | 'ignored';
+    sceneMotion?: 'match' | 'mismatch' | 'ignored';
+    timeline?: 'match' | 'mismatch' | 'ignored';
+    cueLists?: 'match' | 'mismatch' | 'ignored';
+    schedules?: 'match' | 'mismatch' | 'ignored';
+  };
+  errors: string[];
+}
+
+/**
+ * Structurally verifies show deployment against every selected category.
+ *
+ * Exact default Show deployment (Scenes, Motion, Timeline, CueLists = true; Schedules = false; MirrorExactly = true)
+ * is considered COMPLETE when all four selected playback categories match even if schedules differ.
+ */
+export function verifyShowDeployment(
+  source: ShowManifest,
+  target: ShowManifest,
+  options: Partial<ShowDeploymentOptions> = {}
+): DeploymentVerification {
+  const errors: string[] = [];
+  const categoryStatus: DeploymentVerification['categoryStatus'] = {
+    scenes: options.scenes ? 'match' : 'ignored',
+    sceneMotion: options.sceneMotion ? 'match' : 'ignored',
+    timeline: options.timeline ? 'match' : 'ignored',
+    cueLists: options.cueLists ? 'match' : 'ignored',
+    schedules: options.schedules ? 'match' : 'ignored',
+  };
+
+  // 1. Scenes
+  if (options.scenes) {
+    const postScenes = new Map(target.scenes.map((s) => [s.index, s]));
+    for (const s of source.scenes) {
+      const t = postScenes.get(s.index);
+      if (!t) {
+        errors.push(`Scene ${s.index} missing on target`);
+        categoryStatus.scenes = 'mismatch';
+      } else if (t.checksum !== s.checksum) {
+        errors.push(`Scene ${s.index} checksum mismatch`);
+        categoryStatus.scenes = 'mismatch';
+      }
+    }
+    if (options.mirrorExactly) {
+      const sourceIndices = new Set(source.scenes.map((s) => s.index));
+      for (const t of target.scenes) {
+        if (!sourceIndices.has(t.index)) {
+          errors.push(`Extra stale target Scene ${t.index}`);
+          categoryStatus.scenes = 'mismatch';
+        }
+      }
+    }
+  }
+
+  // 2. Scene Motion
+  if (options.sceneMotion) {
+    const targetMotionMap = new Map(target.scenes.map((s) => [s.index, s.motionChecksum ?? 0]));
+    for (const s of source.scenes) {
+      const sMotionCs = s.motionChecksum ?? 0;
+      if (sMotionCs > 0) {
+        const tMotionCs = targetMotionMap.get(s.index) ?? 0;
+        if (tMotionCs !== sMotionCs) {
+          errors.push(`Scene Motion ${s.index} checksum mismatch`);
+          categoryStatus.sceneMotion = 'mismatch';
+        }
+      }
+    }
+    if (options.mirrorExactly) {
+      for (const t of target.scenes) {
+        const s = source.scenes.find((sc) => sc.index === t.index);
+        const sMotionCs = s?.motionChecksum ?? 0;
+        const tMotionCs = t.motionChecksum ?? 0;
+        if (tMotionCs > 0 && sMotionCs === 0) {
+          errors.push(`Stale target Scene Motion ${t.index}`);
+          categoryStatus.sceneMotion = 'mismatch';
+        }
+      }
+    }
+  }
+
+  // 3. Cue Lists
+  if (options.cueLists) {
+    const targetCues = new Map((target.cueLists ?? []).map((c) => [c.index, c]));
+    for (const s of source.cueLists ?? []) {
+      const t = targetCues.get(s.index);
+      if (!t) {
+        errors.push(`Cue List ${s.index} missing on target`);
+        categoryStatus.cueLists = 'mismatch';
+      } else if (t.checksum !== s.checksum) {
+        errors.push(`Cue List ${s.index} checksum mismatch`);
+        categoryStatus.cueLists = 'mismatch';
+      }
+    }
+    if (options.mirrorExactly) {
+      const sourceCueIndices = new Set((source.cueLists ?? []).map((c) => c.index));
+      for (const t of target.cueLists ?? []) {
+        if (!sourceCueIndices.has(t.index)) {
+          errors.push(`Extra stale target Cue List ${t.index}`);
+          categoryStatus.cueLists = 'mismatch';
+        }
+      }
+    }
+  }
+
+  // 4. Timeline
+  if (options.timeline) {
+    const sCs = source.timeline?.checksum ?? 0;
+    const tCs = target.timeline?.checksum ?? 0;
+    if (sCs !== tCs) {
+      errors.push('Timeline sequence checksum mismatch');
+      categoryStatus.timeline = 'mismatch';
+    }
+  }
+
+  // 5. Schedules (only when options.schedules === true)
+  if (options.schedules) {
+    const sCs = source.schedules?.checksum ?? source.calendar?.checksum ?? 0;
+    const tCs = target.schedules?.checksum ?? target.calendar?.checksum ?? 0;
+    if (sCs !== tCs) {
+      errors.push('Calendar schedule checksum mismatch');
+      categoryStatus.schedules = 'mismatch';
+    }
+  }
+
+  const isComplete = errors.length === 0;
+
+  return {
+    complete: isComplete,
+    isComplete,
+    categoryStatus,
+    errors,
+  };
+}
+
+export const verifyDeployment = verifyShowDeployment;
+

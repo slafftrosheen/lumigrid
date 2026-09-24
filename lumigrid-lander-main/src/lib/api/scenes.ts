@@ -328,3 +328,10 @@ export function deletePreset(ip: string, index: number): Promise<{ deleted: bool
   });
 }
 
+export function deleteSceneMotion(ip: string, index: number): Promise<{ deleted: boolean; index: number }> {
+  return apiJson<{ deleted: boolean; index: number }>(ip, `/api/v1/scene-motion?index=${encodeURIComponent(index)}`, {
+    method: 'DELETE',
+  });
+}
+
+

@@ -19,6 +19,7 @@
   import { getPresets, type ScenePreset } from '$lib/api/node';
   import { TRANSITION_CURVES, type TransitionCurve } from '$lib/runtime/curves';
   import { getSelectedNodeIp } from '$lib/auth/storage';
+  import { getSyncStatus, type SyncStatus } from '$lib/api/sync';
   import { nodeStore, commandTracker } from '$lib/state/nodeStore';
 
   let nodeIp = $state('');
@@ -32,6 +33,14 @@
   let toast = $state('');
   let deleteListDialogOpen = $state(false);
   let deletingList = $state(false);
+  let nodeSyncStatus = $state<SyncStatus | null>(null);
+
+  const isFollower = $derived(
+    nodeSyncStatus?.activeRole === 'worker' &&
+    Boolean(nodeSyncStatus.masterAddress) &&
+    (nodeSyncStatus.lastPacketAgeMs === null || nodeSyncStatus.lastPacketAgeMs < 10000)
+  );
+  const syncMasterAddress = $derived(nodeSyncStatus?.masterAddress || 'Leader');
 
   // Live telemetry from nodeStore
   let liveStatus = $derived($nodeStore.status);
@@ -70,12 +79,14 @@
     loading = true;
     error = '';
     try {
-      const [lists, pres] = await Promise.all([
+      const [lists, pres, syncSt] = await Promise.all([
         getCueLists(nodeIp).catch(() => []),
         getPresets(nodeIp).catch(() => []),
+        getSyncStatus(nodeIp).catch(() => null),
       ]);
       cueLists = lists;
       presets = pres;
+      nodeSyncStatus = syncSt;
 
       if (cueLists.length > 0) {
         await selectList(cueLists[0].index);
@@ -274,6 +285,17 @@
       <p>Loading cue workspace…</p>
     </div>
   {:else}
+    {#if isFollower}
+      <div class="sync-follower-banner" role="alert">
+        <span class="banner-icon">ℹ</span>
+        <div class="banner-content">
+          <strong>Playback Controlled by Sync Leader ({syncMasterAddress})</strong>
+          <p>This node is an active follower in a synchronized cluster. Local cue transport and manual crossfade on this follower node are suppressed to preserve cluster frame lock. To run cue lists across the group, use Sync Studio.</p>
+        </div>
+        <a href="/dashboard/sync" class="banner-action-btn">Open Sync Studio →</a>
+      </div>
+    {/if}
+
     <!-- LIVE SHOW MONITOR -->
     <div class="cue-surface monitor-card">
       <div class="monitor-header">
@@ -305,23 +327,23 @@
       <!-- Transport Controls -->
       <div class="transport-row">
         <div class="transport-buttons">
-          <button class="btn-transport" onclick={() => sendTransport('start')} title="Start Show">
+          <button class="btn-transport" disabled={isFollower} onclick={() => sendTransport('start')} title={isFollower ? `Playback controlled by Sync Leader (${syncMasterAddress})` : "Start Show"}>
             ▶ START
           </button>
-          <button class="btn-transport" onclick={() => sendTransport('pause')} title="Pause Show">
+          <button class="btn-transport" disabled={isFollower} onclick={() => sendTransport('pause')} title={isFollower ? `Playback controlled by Sync Leader (${syncMasterAddress})` : "Pause Show"}>
             ⏸ PAUSE
           </button>
-          <button class="btn-transport" onclick={() => sendTransport('resume')} title="Resume Show">
+          <button class="btn-transport" disabled={isFollower} onclick={() => sendTransport('resume')} title={isFollower ? `Playback controlled by Sync Leader (${syncMasterAddress})` : "Resume Show"}>
             ⏯ RESUME
           </button>
-          <button class="btn-transport" onclick={() => sendTransport('stop')} title="Stop Show">
+          <button class="btn-transport" disabled={isFollower} onclick={() => sendTransport('stop')} title={isFollower ? `Playback controlled by Sync Leader (${syncMasterAddress})` : "Stop Show"}>
             ⏹ STOP
           </button>
           <div class="btn-divider"></div>
-          <button class="btn-transport" onclick={() => sendTransport('previous')} title="Previous Cue">
+          <button class="btn-transport" disabled={isFollower} onclick={() => sendTransport('previous')} title={isFollower ? `Playback controlled by Sync Leader (${syncMasterAddress})` : "Previous Cue"}>
             ⏮ PREV
           </button>
-          <button class="btn-transport" onclick={() => sendTransport('next')} title="Next Cue">
+          <button class="btn-transport" disabled={isFollower} onclick={() => sendTransport('next')} title={isFollower ? `Playback controlled by Sync Leader (${syncMasterAddress})` : "Next Cue"}>
             ⏭ NEXT
           </button>
         </div>
@@ -336,6 +358,7 @@
             max="1"
             step="0.01"
             value={manualFadeValue}
+            disabled={isFollower}
             oninput={onManualFadeInput}
             class="tbar-slider"
           />
@@ -428,7 +451,7 @@
                 {#each currentList.cues as cue, idx}
                   <tr class="cue-row" class:active-row={isRunning && currentCueIdx === idx}>
                     <td class="cue-num" data-label="Cue">
-                      <button class="jump-btn" onclick={() => jumpToCue(idx)} title="Jump directly to this cue">
+                      <button class="jump-btn" disabled={isFollower} onclick={() => jumpToCue(idx)} title={isFollower ? `Playback controlled by Sync Leader (${syncMasterAddress})` : "Jump directly to this cue"}>
                         {idx + 1}
                       </button>
                     </td>
@@ -1232,4 +1255,47 @@
     .toast-pill { width: 100%; text-align: center; }
   }
 
+  .sync-follower-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    background: rgba(59, 130, 246, 0.12);
+    border: 1px solid rgba(59, 130, 246, 0.35);
+    border-radius: 8px;
+    padding: 0.85rem 1.25rem;
+    margin-bottom: 1.25rem;
+    color: #e2e8f0;
+  }
+  .banner-icon {
+    font-size: 1.4rem;
+    color: #60a5fa;
+  }
+  .banner-content strong {
+    color: #93c5fd;
+    display: block;
+    font-size: 0.95rem;
+    margin-bottom: 0.2rem;
+  }
+  .banner-content p {
+    margin: 0;
+    font-size: 0.82rem;
+    color: #94a3b8;
+  }
+  .banner-action-btn {
+    white-space: nowrap;
+    padding: 0.45rem 0.9rem;
+    background: rgba(59, 130, 246, 0.25);
+    border: 1px solid rgba(59, 130, 246, 0.5);
+    color: #93c5fd;
+    border-radius: 6px;
+    text-decoration: none;
+    font-size: 0.82rem;
+    font-weight: 600;
+    transition: all 0.15s ease;
+  }
+  .banner-action-btn:hover {
+    background: rgba(59, 130, 246, 0.45);
+    color: #ffffff;
+  }
 </style>

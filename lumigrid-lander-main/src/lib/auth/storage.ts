@@ -103,6 +103,11 @@ export function unlockDashboardSession(role: 'admin' | 'operator' | 'installer')
   }
 }
 
+/** Return the current auth role ('admin', 'operator', 'installer', or empty). */
+export function getAuthRole(): string {
+  return readString(AUTH_ROLE_KEY, '').trim();
+}
+
 // ── Fleet Node & Topology Model (Control Plane v3) ───────────────────────────
 
 export type DiscoverySource = 'mdns' | 'sync' | 'mqtt' | 'manual';

@@ -14,17 +14,21 @@ A centralized Apple-inspired design system (`design/tokens.json`) generates styl
 
 ## Web UI Architecture
 
-The operator interface is organized into five primary destinations, visually separating operation from maintenance:
+The operator interface is organized into primary destinations, visually separating operation from maintenance:
 
 ### Operate
 1. **Overview:** System status, confidence layer, and quick actions.
-2. **Sync (Sync Studio v1):** Multi-node cluster orchestration and show deployment:
-   - **Cluster Health & Topology:** Real-time visibility into cluster leader, active follower topology, bounded clock discipline (offset, jitter, RTT), and content parity.
-   - **Show Parity vs. Clock Synchronization:** Clear visual differentiation between locked clocks (`clockLocked`) and content parity (`MATCHED` vs `DRIFT`).
-   - **Show Diff Inspector:** Manifest-based drilldown of differences across Scene presets, motions, timeline sequences, and cue lists without heavy full asset downloads.
-   - **Show Deployment Engine:** Admin workflow to push Show assets sequentially across targets (max 2 concurrent nodes) with verification gating and exact mirror cleanup.
-   - **Synchronized Operator Playback:** Single-click Scene and Timeline playback actions directed exclusively to the Leader node, using NodeSync for frame-locked cluster derivation.
-   - **Cue List Disclaimer:** Clear messaging that Cue Lists can be mirrored across the cluster, but live Cue transport is not synchronized in Sync v1.
+2. **Sync (Sync Studio v2):** Multi-node cluster orchestration and Show Transport v2 coordination:
+   - **Cluster Health & Topology Truth:** Real-time visibility into authoritative cluster leader (`activeRole === 'master'`), active follower topology, bounded clock discipline (offset, jitter, RTT), and topology health evaluation (`VALID_LEADER`, `NO_LEADER`, `SPLIT_BRAIN`, `LEADER_DISAGREEMENT`). Transport controls are automatically disabled on topology conflicts.
+   - **Group Filtering:** Dedicated group filter by `groupLabel`. Readiness gate and parity calculations are scoped exclusively to nodes within the active group.
+   - **Playback Parity vs. Schedule Parity:** Clear visual differentiation between real-time playback assets (`playbackHash`: scenes, motions, timeline, cues) and optional calendar schedules (`scheduleHash`). `playbackHash` matching is required for group synchronization readiness; schedule divergence does not block playback.
+   - **Show Diff Inspector:** Manifest-based drilldown of differences across Scene presets, motions, timeline sequences, cue lists, and calendar schedules.
+   - **Show Deployment Engine:** Admin workflow to push Show assets sequentially across targets with verification gating and exact mirror cleanup (including stale scene motion tracks).
+   - **Synchronized Show Transport Controls:**
+     - **Scene Transport:** Single-click preset activation on group via Show Transport coordinator.
+     - **Timeline Transport:** Coordinated timeline playback start/stop with shared BPM and clock lock.
+     - **Synchronized Cue Playback:** Complete cue list selection, live hold/fade telemetry, transport advance/pause/resume/stop/jump, and interactive manual crossfade (T-Bar) throttled to 10 Hz targeting leader only.
+   - **Follower Protection Banners:** Follower nodes display prominent info banners on Scenes, Timeline, and Cues pages ("Playback Controlled by Sync Leader") with links to Sync Studio, disabling local playback/activate buttons while preserving local content editing.
 3. **Live (Live Desk v1):** Real-time operator surface for transient, channel-scoped output control and live arbitration:
    - **Hardened Session Model (`ManualSession`):** All manual overrides operate through an explicit, server-authoritative state machine (`idle` → `acquiring` → `active` → `lost` / `releasing` / `error`). Heartbeats (5 s repeat, 15 s lease) only start after firmware confirms acquisition and matches the requested channel mask. Heartbeat failures or telemetry reporting an inactive lease immediately fail closed and transition the session to `lost`/`error`, clearing local control assumptions without auto-reacquiring.
    - **Selection vs. Controlled Scope Split:** UI selection (`selectedIndices`) is strictly decoupled from active hardware ownership (`controlledIndices`). Selecting or deselecting channels in the matrix while active never silently leaks or expands the hardware lease mask.
@@ -32,10 +36,11 @@ The operator interface is organized into five primary destinations, visually sep
    - **Telemetry-Authoritative Ownership UI:** Per-channel buttons display telemetry truth for output arbitration. When manual control is armed for a channel but preempted by higher priority (e.g., `LiveDmx`), the UI clearly distinguishes `Manual armed · DMX owns` rather than assuming exclusive output. Telemetry badges display active lease channels and countdowns directly from node status.
    - **Controls:** A1–A8 addressable controls (color wheel, RGB inputs, palette swatches, master brightness) and P1–P8 PWM faders (0–100%, preset step buttons), throttled at 10 Hz with immediate trailing flush, plus single-click scene capture into any available preset slot.
 4. **Channels:** Physical output (A1–A8 addressable and P1–P8 PWM) status, live control, and group assignment with Admin-only configuration persistence.
-5. **Scenes:** Scene Studio (motion, transitions, cue lists, effect parameters).
-6. **Timeline:** 16-channel visual step sequencer.
-7. **Schedules:** Day/time calendar automation.
-8. **Devices:** Sync and network configuration.
+5. **Scenes:** Scene Studio (motion, transitions, effect parameters). Follower nodes disable direct activation.
+6. **Timeline:** 16-channel visual step sequencer. Follower nodes disable local playback.
+7. **Cues:** Cue Studio (timed playlist show builder). Follower nodes disable local transport controls.
+8. **Schedules:** Day/time calendar automation.
+9. **Devices:** Sync and network configuration.
 
 ### Service
 - **Diagnostics & System:** Unified maintenance hub featuring live health telemetry, real-time node system logs, security/config audit trails, firmware OTA flashing, and backup/restore. Includes a dedicated section for Factory Output Testing (e.g., Burn-in, Lane Chase, Color Wash) time-bounded by the firmware.

@@ -14,19 +14,29 @@ The node serves a WebSocket endpoint at `ws://<ip>/ws`.
 ## Transport Responsibilities: HTTP vs WebSocket
 
 LumiGrid strictly separates control mutation from state propagation:
-- **HTTP (`PUT` / `DELETE` / `POST`):** Authoritative transport for state mutations and control leases, including acquiring, updating targets for, renewing (heartbeating), and releasing manual control (`/api/v1/manual`). HTTP provides synchronous acknowledgement, error status codes (`400`, `401`, `403`, `409`, `503`), and atomic contract negotiation (lease duration, verified acquired channel mask).
-- **WebSocket (`ws://<ip>/ws`):** Strictly read-only event telemetry and state broadcast stream. Transmits periodic node telemetry (`status`, `health`, per-channel arbitration owners, and manual lease state).
+- **HTTP (`PUT` / `DELETE` / `POST`):** Authoritative transport for state mutations and control leases, including acquiring, updating targets for, renewing (heartbeating), and releasing manual control (`/api/v1/manual`), activating scenes, and controlling Show Transport. HTTP provides synchronous acknowledgement, error status codes (`400`, `401`, `403`, `409`, `503`), and atomic contract negotiation (lease duration, verified acquired channel mask).
+- **WebSocket (`ws://<ip>/ws`):** Strictly read-only event telemetry and state broadcast stream. Transmits periodic node telemetry (`status`, `health`, per-channel arbitration owners, show transport state, and manual lease state).
 - **Manual State Non-Modeling:** Manual control state must **never** be modeled as a command channel or mutated over WebSocket. WebSockets only reflect the authoritative runtime state currently resolved on the hardware node. Clients must never infer control lease ownership from WebSocket broadcast messages; leases are established exclusively through synchronous HTTP responses and reconciled against read-only telemetry.
 
-## Sync Protocol (UDP port 6455)
+## Sync Protocol (UDP port 6455) — NodeSync Protocol v4
 
-The LumiGrid sync protocol ensures coordinated playback across multiple nodes using UDP broadcasts on port 6455.
-- **Leader Election:** Nodes in `auto` role elect a leader using priority and MAC address tie-breakers. Explicit `master` and `worker` roles bypass election.
+The LumiGrid sync protocol ensures frame-accurate, coordinated show playback across multiple nodes using UDP broadcasts on port 6455.
+- **Leader Election:** Nodes in `auto` role elect a leader using priority and MAC address tie-breakers. Explicit `master` and `worker` roles bypass election. Cluster topology truth is evaluated by verifying exactly one active master node (`activeRole === 'master'`).
+- **Packet Structure (60 Bytes Packed):**
+  - Header: Magic (`0x4C4D4753`), `version = 4`, `group_token`, sender MAC address, role (`0=Auto, 1=Master, 2=Worker`), priority, cluster time (`uint64_t ms`), monotonic sequence counter.
+  - Clocks & Network: `epoch_id`, `rtt_hint_us`, `rtt_peer_mac`.
+  - Show Transport v2 Payload:
+    - `transport_mode`: `0 = Standalone`, `1 = Scene`, `2 = Timeline`, `3 = Cue`.
+    - `transport_generation`: Monotonic generation counter preventing stale / out-of-order execution.
+    - Scene mode: `scene_index`.
+    - Timeline mode: `timeline_enabled`, `bpm`.
+    - Cue mode: `cue_active`, `cue_list_index`, `cue_state` (1=Holding, 2=Fading, 3=Paused), `current_cue`, `next_cue`, `manual_fade_q15` (0..32768).
 - **Clock Discipline:** Followers discipline local microsecond clocks against leader timestamps, maintaining bounded clock offset (< 5 ms) and tracking round-trip latency (RTT).
-- **Scene Synchronization:** When Timeline sequence is inactive (`sequence_enabled == 0`), the leader broadcasts the active Scene slot number. Followers automatically activate their matching local preset in that slot.
-- **Timeline Synchronization:** When Timeline sequence is active (`sequence_enabled == 1`), the leader broadcasts shared clock, BPM, and Timeline enabled state. Followers do **not** fight the scheduler with scene slot activations; instead, followers apply transient transport state to evaluate their local identical Timeline against the synchronized clock.
-- **Show Parity vs. Clock Synchronization:** Clock synchronization (`clockLocked`) guarantees synchronized timing, but does **not** guarantee identical content. Full cluster `READY` state requires both clock lock and show manifest checksum parity (`showHash`).
-- **Cue Lists Transport Exclusion:** Cue Lists are deployed as part of Show content, but live Cue transport is not synchronized over UDP in Sync v1. UI and operators must use synchronized Scene or Timeline transport for multi-node coordinated playback.
+- **Scene Synchronization:** When transport mode is `Scene`, followers acquire `ControlSource::ScenePlayback` on mask `0xFFFF` and display the synchronized scene preset.
+- **Timeline Synchronization:** When transport mode is `Timeline`, the leader broadcasts shared clock and BPM. Followers suppress local scene and cue runners, and evaluate their identical local Timeline sequence against the synchronized cluster clock.
+- **Synchronized Cue Playback:** When transport mode is `Cue`, the leader is authoritative for cue sequencing, crossfade progression, hold durations, random cue choice, and manual crossfade progress. Followers apply incoming cue snapshots into their local `CueRunner` and render frame-locked crossfades without running independent timers.
+- **Follower Suppression & Guard:** Followers enforce read-only playback (`409 sync_follower_read_only` on `/api/v1/activate`, `/api/v1/cue-control`, and `/api/v1/show/control`) and release competing local owners when remote transport is active.
+- **Playback Parity vs. Schedule Parity:** Cluster synchronization readiness requires `playbackHash` match (Scenes, Motions, Timeline, Cue Lists). `scheduleHash` (calendar events) is evaluated independently and does not block group playback.
 
 ## DMX Input
 

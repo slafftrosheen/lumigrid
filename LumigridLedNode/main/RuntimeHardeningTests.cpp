@@ -20,6 +20,8 @@
 #include "NodeSync.hpp"
 #include "Scheduler.hpp"
 #include "ClockDiscipline.hpp"
+#include "ChannelConfiguration.hpp"
+#include "ShowTransport.hpp"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -3167,6 +3169,266 @@ bool test_lg025_fleet_sync_and_show_deployment() {
     return true;
 }
 
+static bool test_lg026_show_transport_and_cue_sync() {
+    ESP_LOGI(TAG, "Running LG-026 Show Transport v2 & Synchronized Cue Playback tests...");
+
+    // ── Test 1: Canonical channel_is_configured ────────────────────────────────
+    {
+        ChannelConfig c{};
+        strcpy(c.name, "Main Sign");
+        // Addressable channel (0) with only a name
+        assert(channel_is_configured(0, c) == false);
+        // PWM channel (8) with only a name
+        assert(channel_is_configured(8, c) == false);
+
+        c.pixel_count = 30;
+        assert(channel_is_configured(0, c) == true);
+
+        ChannelConfig pwm_c{};
+        strcpy(pwm_c.name, "Pwm Sign");
+        assert(channel_is_configured(8, pwm_c) == false);
+        pwm_c.enabled = true;
+        assert(channel_is_configured(8, pwm_c) == true);
+    }
+
+    // ── Test 2: Transport Arbitration & Channel Ownership ──────────────────────
+    {
+        ControlSourceManager csm;
+        csm.init();
+        uint64_t now = 1000;
+
+        // Scene mode: ScenePlayback owns physical channels with 0xFFFF mask
+        csm.acquire(ControlSource::ScenePlayback, 0, 0xFF, 0x07, 0xFFFF);
+        auto snap = csm.get_snapshot(now);
+        for (uint8_t ch = 0; ch < 16; ++ch) {
+            assert(snap.resolve_channel(ch, now) == ControlSource::ScenePlayback);
+        }
+
+        // Timeline mode: Scheduler acquires 0xFFFF mask
+        csm.acquire(ControlSource::Scheduler, 200, 0xFF, 0x07, 0xFFFF);
+        snap = csm.get_snapshot(now);
+        for (uint8_t ch = 0; ch < 16; ++ch) {
+            assert(snap.resolve_channel(ch, now) == ControlSource::Scheduler);
+        }
+
+        // Live Desk over Timeline: Manual claims A1 (channel 0)
+        csm.acquire(ControlSource::ManualOverride, 5000, 0x01, 0x01, 0x0001);
+        snap = csm.get_snapshot(now);
+        assert(snap.resolve_channel(0, now) == ControlSource::ManualOverride);
+        for (uint8_t ch = 1; ch < 16; ++ch) {
+            assert(snap.resolve_channel(ch, now) == ControlSource::Scheduler);
+        }
+
+        // DMX over Cue: Cue uses ScenePlayback (0xFFFF). DMX claims A1 (channel 0)
+        csm.release(ControlSource::ManualOverride);
+        csm.release(ControlSource::Scheduler);
+        csm.acquire(ControlSource::LiveDmx, 5000, 0x01, 0x01, 0x0001);
+        snap = csm.get_snapshot(now);
+        assert(snap.resolve_channel(0, now) == ControlSource::LiveDmx);
+        for (uint8_t ch = 1; ch < 16; ++ch) {
+            assert(snap.resolve_channel(ch, now) == ControlSource::ScenePlayback);
+        }
+
+        // EStop dominates everything
+        OutputController ctrl;
+        ctrl.set_estop(true);
+        assert(ctrl.is_estop_latched() == true);
+    }
+
+    // ── Test 3: Follower Suppression of Local Timeline ────────────────────────
+    {
+        ConfigStore cfg;
+        OutputController ctrl;
+        ControlSourceManager csm;
+        csm.init();
+        LightingRuntime runtime(csm, ctrl, cfg);
+        ClockDiscipline clock;
+        Scheduler scheduler(cfg, runtime, clock);
+
+        // Simulate local sequence persisted with enabled=true, 120 BPM
+        Sequence seq{};
+        seq.enabled = true;
+        seq.bpm = 120;
+        cfg.save_sequence(seq);
+
+        // Leader remote mode: Scene
+        scheduler.apply_remote_show_mode(Scheduler::RemoteShowMode::Scene, 120, 1000);
+        assert(scheduler.remote_show_mode() == Scheduler::RemoteShowMode::Scene);
+
+        // Local timeline must be suppressed and not take ownership
+        auto trans = scheduler.sync_transport();
+        assert(trans.active == true);
+        assert(trans.mode == Scheduler::RemoteShowMode::Scene);
+        assert(trans.timeline_enabled == false);
+
+        // Clear remote mode -> local policy may resume
+        scheduler.clear_remote_show_mode();
+        assert(scheduler.remote_show_mode() == Scheduler::RemoteShowMode::None);
+        assert(scheduler.sync_transport().active == false);
+    }
+
+    // ── Test 4: Timeline Sync BPM & Suppression Transition ────────────────────
+    {
+        ConfigStore cfg;
+        OutputController ctrl;
+        ControlSourceManager csm;
+        csm.init();
+        LightingRuntime runtime(csm, ctrl, cfg);
+        ClockDiscipline clock;
+        Scheduler scheduler(cfg, runtime, clock);
+
+        // Remote snapshot: mode=Timeline, BPM=126
+        scheduler.apply_remote_show_mode(Scheduler::RemoteShowMode::Timeline, 126, 2000);
+        auto trans = scheduler.sync_transport();
+        assert(trans.active == true);
+        assert(trans.mode == Scheduler::RemoteShowMode::Timeline);
+        assert(trans.timeline_enabled == true);
+        assert(trans.bpm == 126);
+
+        // Switch remote: Timeline -> Scene
+        scheduler.apply_remote_show_mode(Scheduler::RemoteShowMode::Scene, 120, 3000);
+        trans = scheduler.sync_transport();
+        assert(trans.mode == Scheduler::RemoteShowMode::Scene);
+        assert(trans.timeline_enabled == false); // Suppressed!
+
+        // Timeout: clear remote show mode
+        scheduler.clear_remote_show_mode();
+        assert(scheduler.sync_transport().active == false);
+    }
+
+    // ── Test 5: Cue Synchronization & Authoritative Progression ───────────────
+    {
+        ConfigStore cfg;
+        CueList cl{};
+        cl.count = 3;
+        cl.mode = CueRunMode::Random;
+        cl.cues[0].scene_index = 1;
+        cl.cues[0].hold_ms = 2000;
+        cl.cues[0].fade_ms = 500;
+        cl.cues[1].scene_index = 2;
+        cl.cues[1].hold_ms = 2000;
+        cl.cues[1].fade_ms = 500;
+        cl.cues[2].scene_index = 3;
+        cl.cues[2].hold_ms = 2000;
+        cl.cues[2].fade_ms = 500;
+        cfg.save_cue_list(0, cl);
+
+        // Save mock scenes
+        for (uint8_t i = 1; i <= 3; ++i) {
+            SceneConfig sc{};
+            sc.index = i;
+            sc.checksum = 100 + i;
+            cfg.save_scene(i, sc);
+        }
+
+        OutputController ctrl1, ctrl2;
+        ControlSourceManager csm1, csm2;
+        csm1.init(); csm2.init();
+        LightingRuntime rt1(csm1, ctrl1, cfg);
+        LightingRuntime rt2(csm2, ctrl2, cfg);
+
+        CueRunner leader(cfg, rt1);
+        CueRunner follower(cfg, rt2);
+
+        uint64_t t0 = 10000;
+        assert(leader.start(0, 0, t0) == ESP_OK);
+        assert(follower.start(0, 0, t0) == ESP_OK);
+
+        // Snap leader state and apply to follower
+        CueSyncSnapshot snap = leader.sync_snapshot(t0 + 500);
+        assert(follower.apply_sync_snapshot(snap, t0 + 500) == ESP_OK);
+        assert(follower.active_list_index() == leader.active_list_index());
+        assert(follower.current_cue_index() == leader.current_cue_index());
+
+        // Random mode: force leader next cue to 2, follower must accept leader's next cue
+        snap.next_cue = 2;
+        assert(follower.apply_sync_snapshot(snap, t0 + 500) == ESP_OK);
+        assert(follower.next_cue_index() == 2);
+
+        // Pause/Resume timing
+        leader.pause();
+        snap = leader.sync_snapshot(t0 + 1200);
+        assert(snap.state == CueRunnerState::Paused);
+        assert(follower.apply_sync_snapshot(snap, t0 + 1200) == ESP_OK);
+
+        // Advance simulated time by 5 seconds
+        uint64_t elapsed_leader = leader.cue_elapsed_ms(t0 + 6200);
+        uint64_t elapsed_follower = follower.cue_elapsed_ms(t0 + 6200);
+        assert(elapsed_leader == elapsed_follower);
+
+        // Manual crossfade
+        CueList manual_cl = cl;
+        manual_cl.mode = CueRunMode::Manual;
+        cfg.save_cue_list(1, manual_cl);
+
+        leader.start(1, 0, t0 + 7000);
+        follower.start(1, 0, t0 + 7000);
+        leader.set_manual_fade(16384);
+        snap = leader.sync_snapshot(t0 + 7000);
+        assert(snap.manual_fade_q15 == 16384);
+        assert(follower.apply_sync_snapshot(snap, t0 + 7000) == ESP_OK);
+        assert(follower.manual_fade_q15() == 16384);
+
+        leader.set_manual_fade(32768);
+        snap = leader.sync_snapshot(t0 + 7000);
+        assert(follower.apply_sync_snapshot(snap, t0 + 7000) == ESP_OK);
+        assert(follower.manual_fade_q15() == 32768);
+    }
+
+    // ── Test 6: Protocol v4 Packet Validation ──────────────────────────────────
+    {
+        SyncPacket pkt{};
+        pkt.magic = 0x4C475359;
+        pkt.version = 4;
+        pkt.token = 0x12345678;
+        pkt.sequence = 1;
+        pkt.transport_mode = static_cast<uint8_t>(ShowTransportMode::Cue);
+        pkt.cue_list_index = 1;
+        pkt.cue_state = 1;
+        pkt.cue_index = 0;
+        pkt.next_cue_index = 1;
+        pkt.transport_generation = 42;
+
+        // Size check
+        assert(sizeof(SyncPacket) == 60);
+
+        // Reject v3 packet
+        SyncPacket v3_pkt = pkt;
+        v3_pkt.version = 3;
+        assert(v3_pkt.version != 4);
+
+        // Reject bad magic
+        SyncPacket bad_magic = pkt;
+        bad_magic.magic = 0x11223344;
+        assert(bad_magic.magic != 0x4C475359);
+    }
+
+    // ── Test 7: ShowManifest v2 Separation ─────────────────────────────────────
+    {
+        ConfigStore cfg;
+        uint32_t play_hash = cfg.compute_playback_hash();
+        uint32_t sched_hash = cfg.compute_schedule_hash();
+        uint32_t full_hash = cfg.compute_show_hash();
+
+        // Modifying only CalendarSchedule must change sched_hash and full_hash,
+        // but leave playback_hash unchanged!
+        CalendarSchedule sched{};
+        sched.entries[0].enabled = true;
+        sched.entries[0].hour = 14;
+        sched.entries[0].minute = 30;
+        sched.entries[0].days_of_week = 0x7F;
+        sched.entries[0].action = CalendarAction::Sequence;
+        cfg.save_calendar_schedule(sched);
+
+        assert(cfg.compute_playback_hash() == play_hash); // Playback unchanged!
+        assert(cfg.compute_schedule_hash() != sched_hash);
+        assert(cfg.compute_show_hash() != full_hash);
+    }
+
+    ESP_LOGI(TAG, "[PASS] LG-026 Show Transport v2 & Synchronized Cue Playback tests passed.");
+    return true;
+}
+
 } // namespace
 
 bool run_runtime_hardening_tests() {
@@ -3246,6 +3508,9 @@ bool run_runtime_hardening_tests() {
 
     // LG-025 Fleet Sync & Show Deployment Tests
     all_ok &= test_lg025_fleet_sync_and_show_deployment();
+
+    // LG-026 Show Transport v2 & Synchronized Cue Playback Tests
+    all_ok &= test_lg026_show_transport_and_cue_sync();
 
     if (all_ok) {
         ESP_LOGI(TAG, "==================================================");

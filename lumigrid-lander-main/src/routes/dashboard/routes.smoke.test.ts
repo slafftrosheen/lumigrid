@@ -216,4 +216,10 @@ describe('dashboard routes smoke & contract tests', () => {
       expect(() => render(r.component)).not.toThrow();
     }
   });
+
+  it('enforces LumiGrid dash tokens in Sync Studio and forbids raw slate/emerald/amber palette', () => {
+    const forbiddenHexCodes = /#0f172a|#1e293b|#334155|#38bdf8|#a78bfa|#10b981|#34d399|#fbbf24/i;
+    expect(sourceFor('./sync/+page.svelte')).not.toMatch(forbiddenHexCodes);
+  });
 });
+

@@ -40,7 +40,17 @@ NodeSync::NodeSync(
     LightingRuntime& engine,
     ConfigStore& config,
     ClockDiscipline& clock
-) : engine_(engine), config_(config), clock_(clock) {}
+) : engine_(engine), config_(config), clock_(clock) {
+    shutdown_sem_ = xSemaphoreCreateBinary();
+}
+
+NodeSync::~NodeSync() {
+    stop(1500);
+    if (shutdown_sem_) {
+        vSemaphoreDelete(shutdown_sem_);
+        shutdown_sem_ = nullptr;
+    }
+}
 
 void NodeSync::refresh_config_cache() {
     const uint32_t now = now_ms();
@@ -52,8 +62,23 @@ void NodeSync::refresh_config_cache() {
     last_config_cache_ms_ = now;
 }
 
+void NodeSync::reset_config_cache() {
+    portENTER_CRITICAL(&status_mutex_);
+    last_config_cache_ms_ = 0;
+    cached_sync_token_ = 0;
+    cached_sync_enabled_ = false;
+    portEXIT_CRITICAL(&status_mutex_);
+    refresh_config_cache();
+}
+
 esp_err_t NodeSync::start(NodeRole role) {
     if (task_handle_ != nullptr) return ESP_ERR_INVALID_STATE;
+
+    if (shutdown_sem_ == nullptr) {
+        shutdown_sem_ = xSemaphoreCreateBinary();
+    }
+
+    reset_config_cache();
 
     portENTER_CRITICAL(&status_mutex_);
     configured_role_ = role;
@@ -65,6 +90,9 @@ esp_err_t NodeSync::start(NodeRole role) {
     has_sequence_ = false;
     packets_received_ = 0;
     packets_missed_ = 0;
+    remote_transport_snapshot_ = {};
+    transport_apply_ok_ = true;
+    transport_error_ = 0;
     for (auto& peer : peers_) peer = Peer{};
     running_ = true;
     portEXIT_CRITICAL(&status_mutex_);
@@ -85,6 +113,7 @@ esp_err_t NodeSync::start(NodeRole role) {
     if (ok != pdPASS) {
         portENTER_CRITICAL(&status_mutex_);
         running_ = false;
+        task_handle_ = nullptr;
         portEXIT_CRITICAL(&status_mutex_);
         return ESP_ERR_NO_MEM;
     }
@@ -96,32 +125,78 @@ esp_err_t NodeSync::start(NodeRole role) {
     return ESP_OK;
 }
 
-void NodeSync::stop() {
-    // The task owns and closes its socket after the short receive timeout.
-    // Avoid force-deleting a task while it is in a socket call.
-    TransportCallback cb;
+esp_err_t NodeSync::stop(uint32_t timeout_ms) {
     portENTER_CRITICAL(&status_mutex_);
+    if (!running_ && task_handle_ == nullptr) {
+        portEXIT_CRITICAL(&status_mutex_);
+        return ESP_OK;
+    }
     running_ = false;
-    remote_timeline_enabled_ = false;
-    remote_bpm_ = 0;
-    cb = transport_callback_;
     portEXIT_CRITICAL(&status_mutex_);
 
-    if (cb) cb(false, 120);
+    // Unblock socket
+    if (sock_ >= 0) {
+        ::shutdown(sock_, SHUT_RDWR);
+    }
+
+    // Wait bounded for task exit
+    if (task_handle_ && shutdown_sem_) {
+        if (xSemaphoreTake(shutdown_sem_, pdMS_TO_TICKS(timeout_ms)) != pdTRUE) {
+            ESP_LOGW(TAG, "NodeSync task did not exit within %ums", (unsigned)timeout_ms);
+        }
+    }
+    task_handle_ = nullptr;
+
+    portENTER_CRITICAL(&status_mutex_);
+    remote_timeline_enabled_ = false;
+    remote_bpm_ = 0;
+    remote_transport_snapshot_ = {};
+    transport_apply_ok_ = true;
+    transport_error_ = 0;
+    last_config_cache_ms_ = 0;
+    cached_sync_token_ = 0;
+    cached_sync_enabled_ = false;
+    auto cb = transport_callback_;
+    auto legacy_cb = legacy_transport_callback_;
+    portEXIT_CRITICAL(&status_mutex_);
+
+    if (cb) {
+        ShowTransportSnapshot empty_snap{};
+        empty_snap.mode = ShowTransportMode::Standalone;
+        cb(empty_snap);
+    }
+    if (legacy_cb) legacy_cb(false, 120);
+
+    return ESP_OK;
 }
 
 void NodeSync::master_task_entry(void* arg) {
-    static_cast<NodeSync*>(arg)->master_task();
+    auto* self = static_cast<NodeSync*>(arg);
+    self->master_task();
+    self->task_handle_ = nullptr;
+    if (self->shutdown_sem_) {
+        xSemaphoreGive(self->shutdown_sem_);
+    }
     vTaskDelete(nullptr);
 }
 
 void NodeSync::worker_task_entry(void* arg) {
-    static_cast<NodeSync*>(arg)->worker_task();
+    auto* self = static_cast<NodeSync*>(arg);
+    self->worker_task();
+    self->task_handle_ = nullptr;
+    if (self->shutdown_sem_) {
+        xSemaphoreGive(self->shutdown_sem_);
+    }
     vTaskDelete(nullptr);
 }
 
 void NodeSync::auto_task_entry(void* arg) {
-    static_cast<NodeSync*>(arg)->auto_task();
+    auto* self = static_cast<NodeSync*>(arg);
+    self->auto_task();
+    self->task_handle_ = nullptr;
+    if (self->shutdown_sem_) {
+        xSemaphoreGive(self->shutdown_sem_);
+    }
     vTaskDelete(nullptr);
 }
 
@@ -136,6 +211,7 @@ bool NodeSync::open_socket(int& socket, bool broadcast) {
     setsockopt(socket, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
     if (broadcast) {
         int enabled = 1;
+        setsockopt(socket, SOL_SOCKET, SO_REUSEADDR, &enabled, sizeof(enabled));
         setsockopt(socket, SOL_SOCKET, SO_BROADCAST, &enabled, sizeof(enabled));
     }
 
@@ -143,17 +219,28 @@ bool NodeSync::open_socket(int& socket, bool broadcast) {
     bind_addr.sin_family = AF_INET;
     bind_addr.sin_port = htons(kSyncPort);
     bind_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    if (bind(socket, reinterpret_cast<const sockaddr*>(&bind_addr), sizeof(bind_addr)) < 0) {
-        ESP_LOGE(TAG, "Bind failed on port %u", kSyncPort);
+
+    timeval timeout{};
+    timeout.tv_sec = 0;
+    timeout.tv_usec = 100000; // 100 ms
+    setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+
+    if (bind(socket, reinterpret_cast<sockaddr*>(&bind_addr), sizeof(bind_addr)) < 0) {
+        ESP_LOGE(TAG, "Failed to bind socket to port %u", kSyncPort);
         close(socket);
         socket = -1;
         return false;
     }
-
-    timeval timeout{};
-    timeout.tv_usec = 50000;
-    setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
     return true;
+}
+
+void NodeSync::reset_master() {
+    portENTER_CRITICAL(&status_mutex_);
+    master_address_ = 0;
+    std::memset(master_mac_, 0, sizeof(master_mac_));
+    last_packet_ms_ = 0;
+    has_sequence_ = false;
+    portEXIT_CRITICAL(&status_mutex_);
 }
 
 void NodeSync::master_task() {
@@ -228,28 +315,52 @@ NodeRole NodeSync::master_loop(int socket, bool auto_mode) {
 
         const uint32_t now = now_ms();
         if (static_cast<int32_t>(now - next_heartbeat_ms) >= 0) {
-            Sequence sequence_state{};
-            config_.load_sequence(sequence_state);
             refresh_config_cache();
+
+            ShowTransportSnapshot transport{};
+            if (transport_provider_) {
+                transport = transport_provider_(clock_.now_ms());
+            } else {
+                transport.active_scene = engine_.active_scene_index();
+                transport.mode = ShowTransportMode::Scene;
+            }
 
             SyncPacket packet{};
             packet.magic = kMagic;
             packet.version = kPacketVersion;
             packet.type = PacketType::Heartbeat;
             packet.sequence = sequence++;
-            packet.bpm = sequence_state.bpm;
-            packet.sequence_enabled = sequence_state.enabled;
-            const uint8_t active_preset = engine_.active_scene_index();
+
+            packet.transport = static_cast<uint8_t>(transport.mode);
+            packet.active_scene = transport.active_scene;
+            packet.bpm = transport.bpm;
+
+            packet.cue_list = transport.cue_list;
+            packet.cue_index = transport.cue_index;
+            packet.cue_next = transport.cue_next;
+            packet.cue_state = static_cast<uint8_t>(transport.cue_state);
+
+            packet.cue_generation = transport.cue_generation;
+            packet.cue_elapsed_ms = transport.cue_elapsed_ms;
+            packet.manual_fade_q15 = transport.manual_fade_q15;
+
             packet.flags = (clock_.has_epoch() ? 0x01 : 0x00) |
-                           (cached_sync_enabled_ ? (0x02 | ((active_preset & 0x1F) << 2)) : 0x00);
+                           (cached_sync_enabled_ ? 0x02 : 0x00);
+            packet.reserved = 0;
+
             packet.global_clock_ms = clock_.now_ms();
             packet.sent_monotonic_ms = now;
-            packet.token = cached_sync_token_;
             std::memcpy(packet.sender_mac, local_mac, sizeof(local_mac));
+            packet.token = cached_sync_token_;
 
             sendto(socket, &packet, sizeof(packet), 0,
                    reinterpret_cast<const sockaddr*>(&destination), sizeof(destination));
-            next_heartbeat_ms = now + kSyncIntervalMs;
+
+            // Phase 5.6: Heartbeat cadence increases to 20 Hz during manual crossfade
+            const uint32_t interval = (transport.mode == ShowTransportMode::Cue && transport.cue_state == CueRunnerState::Manual)
+                ? kSyncManualIntervalMs
+                : kSyncIntervalMs;
+            next_heartbeat_ms = now + interval;
         }
 
         SyncPacket packet{};
@@ -324,7 +435,7 @@ NodeRole NodeSync::worker_loop(int socket, bool auto_mode) {
             packet.version == kPacketVersion &&
             packet.type == PacketType::Heartbeat &&
             std::memcmp(packet.sender_mac, local_mac, sizeof(local_mac)) != 0) {
-            
+
             refresh_config_cache();
             if (packet.token == cached_sync_token_ && handle_heartbeat(packet, sender)) {
                 send_ack(socket, packet, sender, cached_sync_token_);
@@ -332,16 +443,36 @@ NodeRole NodeSync::worker_loop(int socket, bool auto_mode) {
         }
 
         const uint32_t now = now_ms();
-        TransportCallback timeout_cb;
         portENTER_CRITICAL(&status_mutex_);
         const bool timed_out = (last_packet_ms_ != 0 && elapsed_ms(now, last_packet_ms_) > kPeerTimeoutMs);
-        if (timed_out && remote_timeline_enabled_) {
+        if (timed_out && (master_address_ != 0 || remote_timeline_enabled_ || transport_apply_ok_)) {
+            // Phase 0.6: Timeout must clear every remote transport
+            master_address_ = 0;
+            std::memset(master_mac_, 0, sizeof(master_mac_));
             remote_timeline_enabled_ = false;
             remote_bpm_ = 0;
-            timeout_cb = transport_callback_;
+            remote_transport_snapshot_ = {};
+            transport_apply_ok_ = false;
+            transport_error_ = 0;
+            portEXIT_CRITICAL(&status_mutex_);
+
+            if (remote_transport_callback_) {
+                uint8_t dummy = 0;
+                ShowTransportSnapshot empty_snap{};
+                empty_snap.mode = ShowTransportMode::Standalone;
+                remote_transport_callback_(empty_snap, dummy);
+            }
+            if (transport_callback_) {
+                ShowTransportSnapshot empty_snap{};
+                empty_snap.mode = ShowTransportMode::Standalone;
+                transport_callback_(empty_snap);
+            }
+            if (legacy_transport_callback_) {
+                legacy_transport_callback_(false, 120);
+            }
+        } else {
+            portEXIT_CRITICAL(&status_mutex_);
         }
-        portEXIT_CRITICAL(&status_mutex_);
-        if (timeout_cb) timeout_cb(false, 120);
 
         if (auto_mode) {
             portENTER_CRITICAL(&status_mutex_);
@@ -403,41 +534,58 @@ bool NodeSync::handle_heartbeat(
 
     if (!accepted) return false;
 
-    TransportCallback cb;
-    portENTER_CRITICAL(&status_mutex_);
-    remote_bpm_ = packet.bpm;
-    remote_timeline_enabled_ = (packet.sequence_enabled != 0);
-    cb = transport_callback_;
-    portEXIT_CRITICAL(&status_mutex_);
-
     clock_.discipline(packet.global_clock_ms, (packet.flags & 0x01) != 0);
     engine_.feed_watchdog();
 
-    // Scene vs Timeline sync semantics (LG-025 Phase 5)
-    if (packet.sequence_enabled != 0) {
-        // Leader has timeline enabled: follower scheduler evaluates timeline steps
-        // Do NOT overwrite scene slot or activate scene
-        if (cb) cb(true, packet.bpm);
-    } else {
-        // Timeline inactive: notify scheduler to clear sync transport
-        if (cb) cb(false, packet.bpm);
+    ShowTransportSnapshot remote_snap{};
+    remote_snap.mode = static_cast<ShowTransportMode>(packet.transport);
+    remote_snap.active_scene = packet.active_scene;
+    remote_snap.bpm = packet.bpm;
+    remote_snap.cue_list = packet.cue_list;
+    remote_snap.cue_index = packet.cue_index;
+    remote_snap.cue_next = packet.cue_next;
+    remote_snap.cue_state = static_cast<CueRunnerState>(packet.cue_state);
+    remote_snap.cue_generation = packet.cue_generation;
+    remote_snap.cue_elapsed_ms = packet.cue_elapsed_ms;
+    remote_snap.manual_fade_q15 = packet.manual_fade_q15;
 
-        // Multi-node fleet preset synchronization
-        // Do not ACK a master state that this worker could not actually apply.
-        if ((packet.flags & 0x02) != 0) {
-            const uint8_t master_preset = (packet.flags >> 2) & 0x1F;
-            if (master_preset >= kMaxPresets) {
-                ESP_LOGW(TAG, "Rejected master preset %u: out of range", master_preset);
-                return false;
-            }
-            if (engine_.active_scene_index() != master_preset &&
-                !engine_.activate_scene_checked(master_preset)) {
-                ESP_LOGW(TAG, "Rejected master preset %u: scene unavailable or runtime stopping", master_preset);
-                return false;
+    // Backward-compat cue struct
+    remote_snap.cue.active = (packet.cue_state != 0);
+    remote_snap.cue.list_index = packet.cue_list;
+    remote_snap.cue.state = packet.cue_state;
+    remote_snap.cue.current_cue = packet.cue_index;
+    remote_snap.cue.next_cue = packet.cue_next;
+    remote_snap.cue.manual_fade_q15 = packet.manual_fade_q15;
+    remote_snap.cue.cue_anchor_ms = packet.global_clock_ms;
+    remote_snap.cue.paused_elapsed_ms = packet.cue_elapsed_ms;
+    remote_snap.cue.generation = packet.cue_generation;
+
+    uint8_t err_code = 0;
+    bool apply_ok = true;
+
+    if (remote_transport_callback_) {
+        apply_ok = remote_transport_callback_(remote_snap, err_code);
+    } else {
+        if (remote_snap.mode == ShowTransportMode::Timeline) {
+            if (legacy_transport_callback_) legacy_transport_callback_(true, remote_snap.bpm);
+        } else {
+            if (legacy_transport_callback_) legacy_transport_callback_(false, remote_snap.bpm);
+            if (!engine_.activate_scene_checked(remote_snap.active_scene)) {
+                apply_ok = false;
+                err_code = static_cast<uint8_t>(SyncTransportError::SceneMissing);
             }
         }
     }
-    return true;
+
+    portENTER_CRITICAL(&status_mutex_);
+    remote_transport_snapshot_ = remote_snap;
+    transport_apply_ok_ = apply_ok;
+    transport_error_ = err_code;
+    remote_bpm_ = packet.bpm;
+    remote_timeline_enabled_ = (remote_snap.mode == ShowTransportMode::Timeline);
+    portEXIT_CRITICAL(&status_mutex_);
+
+    return apply_ok;
 }
 
 void NodeSync::send_ack(
@@ -458,6 +606,8 @@ void NodeSync::send_ack(
     acknowledgement.global_clock_ms = clock_.now_ms();
     acknowledgement.sent_monotonic_ms = heartbeat.sent_monotonic_ms;
     acknowledgement.token = token;
+    acknowledgement.transport = heartbeat.transport;
+    acknowledgement.cue_generation = heartbeat.cue_generation;
     std::memcpy(acknowledgement.sender_mac, local_mac, sizeof(local_mac));
 
     sendto(socket, &acknowledgement, sizeof(acknowledgement), 0,
@@ -478,33 +628,13 @@ void NodeSync::update_peer(const sockaddr_in& sender, uint16_t latency_ms) {
             available = &peer;
         }
     }
-    if (available == nullptr) {
-        available = &peers_[0];
-        for (Peer& peer : peers_) {
-            if (peer.last_seen_ms < available->last_seen_ms) available = &peer;
-        }
+
+    if (available != nullptr) {
+        available->address = sender.sin_addr.s_addr;
+        available->last_seen_ms = now;
+        available->latency_ms = latency_ms;
     }
-
-    available->address = sender.sin_addr.s_addr;
-    available->last_seen_ms = now;
-    available->latency_ms = latency_ms;
     portEXIT_CRITICAL(&status_mutex_);
-}
-
-void NodeSync::reset_master() {
-    TransportCallback cb;
-    portENTER_CRITICAL(&status_mutex_);
-    master_address_ = 0;
-    std::memset(master_mac_, 0, sizeof(master_mac_));
-    last_packet_ms_ = 0;
-    last_sequence_ = 0;
-    has_sequence_ = false;
-    remote_timeline_enabled_ = false;
-    remote_bpm_ = 0;
-    cb = transport_callback_;
-    portEXIT_CRITICAL(&status_mutex_);
-
-    if (cb) cb(false, 120);
 }
 
 NodeRole NodeSync::active_role() const {
@@ -530,15 +660,37 @@ NodeSyncStatus NodeSync::status() const {
         : elapsed_ms(now, last_packet_ms_);
 
     result.master_address = (active_role_ == NodeRole::Master) ? 0 : master_address_;
-    result.remote_bpm = remote_bpm_;
-    result.remote_timeline_enabled = remote_timeline_enabled_;
 
     if (!running_) {
         result.transport = 0; // standalone
-    } else if (remote_timeline_enabled_) {
-        result.transport = 2; // timeline
+    } else if (active_role_ == NodeRole::Master) {
+        if (transport_provider_) {
+            auto local_snap = transport_provider_(clock_.now_ms());
+            result.transport = static_cast<uint8_t>(local_snap.mode);
+            result.transport_generation = local_snap.cue_generation;
+            result.remote_bpm = local_snap.bpm;
+            result.remote_timeline_enabled = (local_snap.mode == ShowTransportMode::Timeline);
+            result.cue.active = (local_snap.mode == ShowTransportMode::Cue);
+            result.cue.list_index = local_snap.cue_list;
+            result.cue.state = static_cast<uint8_t>(local_snap.cue_state);
+            result.cue.current_cue = local_snap.cue_index;
+            result.cue.next_cue = local_snap.cue_next;
+            result.cue.generation = local_snap.cue_generation;
+            result.cue.paused_elapsed_ms = local_snap.cue_elapsed_ms;
+            result.cue.manual_fade_q15 = local_snap.manual_fade_q15;
+        } else {
+            result.transport = 1; // scene
+        }
+        result.transport_apply_ok = true;
+        result.transport_error = 0;
     } else {
-        result.transport = 1; // scene
+        result.transport = static_cast<uint8_t>(remote_transport_snapshot_.mode);
+        result.transport_generation = remote_transport_snapshot_.cue_generation;
+        result.remote_bpm = remote_transport_snapshot_.bpm;
+        result.remote_timeline_enabled = (remote_transport_snapshot_.mode == ShowTransportMode::Timeline);
+        result.transport_apply_ok = transport_apply_ok_;
+        result.transport_error = transport_error_;
+        result.cue = remote_transport_snapshot_.cue;
     }
 
     for (const Peer& peer : peers_) {

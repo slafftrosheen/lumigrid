@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { deployShowToNodes, DEFAULT_SHOW_DEPLOYMENT_OPTIONS } from './showDeployment';
+import { deployShowToNodes, verifyShowDeployment, DEFAULT_SHOW_DEPLOYMENT_OPTIONS } from './showDeployment';
 import * as syncApi from './sync';
 import * as scenesApi from './scenes';
 import * as sceneMotionApi from './sceneMotion';
@@ -56,7 +56,8 @@ describe('showDeployment service', () => {
       zones: [] as any,
     });
     vi.spyOn(scenesApi, 'savePreset').mockResolvedValue({ saved: true });
-    vi.spyOn(scenesApi, 'deletePreset').mockResolvedValue({ deleted: true });
+    vi.spyOn(scenesApi, 'deletePreset').mockResolvedValue({ deleted: true, index: 0 });
+    vi.spyOn(scenesApi, 'deleteSceneMotion').mockResolvedValue({ deleted: true, index: 0 });
 
     vi.spyOn(sceneMotionApi, 'getSceneMotion').mockResolvedValue({
       schema_version: 1,
@@ -178,5 +179,87 @@ describe('showDeployment service', () => {
     expect(results[targetIp1].state).toBe('complete');
     expect(results[targetIp2].state).toBe('complete');
     expect(progressReports.length).toBeGreaterThan(0);
+  });
+
+  describe('verifyShowDeployment', () => {
+    it('returns isComplete true when all selected categories match, ignoring unselected schedules', () => {
+      const source: syncApi.ShowManifest = {
+        schema: 2,
+        protocol: 4,
+        playbackHash: 1234,
+        scheduleHash: 5678,
+        showHash: 9999,
+        scenes: [{ index: 0, checksum: 100 }],
+        timeline: { enabled: true, bpm: 120, checksum: 200 },
+        cueLists: [{ index: 0, checksum: 300 }],
+        schedules: { checksum: 400 },
+      };
+
+      const target: syncApi.ShowManifest = {
+        ...source,
+        scheduleHash: 8888, // Schedules differ
+        schedules: { checksum: 999 },
+      };
+
+      // Options: verify only playback categories (default)
+      const res = verifyShowDeployment(source, target, {
+        scenes: true,
+        timeline: true,
+        cueLists: true,
+        sceneMotion: false,
+        schedules: false,
+      });
+
+      expect(res.isComplete).toBe(true);
+      expect(res.categoryStatus.scenes).toBe('match');
+      expect(res.categoryStatus.timeline).toBe('match');
+      expect(res.categoryStatus.cueLists).toBe('match');
+      expect(res.categoryStatus.schedules).toBe('ignored');
+    });
+
+    it('returns isComplete false when any selected category differs', () => {
+      const source: syncApi.ShowManifest = {
+        schema: 2,
+        showHash: 1111,
+        scenes: [{ index: 0, checksum: 100 }],
+        cueLists: [{ index: 0, checksum: 200 }],
+      };
+
+      const target: syncApi.ShowManifest = {
+        schema: 2,
+        showHash: 2222,
+        scenes: [{ index: 0, checksum: 100 }],
+        cueLists: [{ index: 0, checksum: 999 }], // Differs
+      };
+
+      const res = verifyShowDeployment(source, target, {
+        scenes: true,
+        cueLists: true,
+      });
+
+      expect(res.isComplete).toBe(false);
+      expect(res.categoryStatus.scenes).toBe('match');
+      expect(res.categoryStatus.cueLists).toBe('mismatch');
+    });
+  });
+
+  it('deletes stale motion tracks on target when mirrorExactly is enabled', async () => {
+    // Target has scene 0 with motionChecksum 999, but source has motionChecksum 0
+    const sourceWithNoMotion: syncApi.ShowManifest = {
+      ...mockSourceManifest,
+      scenes: [{ index: 0, checksum: 100, motionChecksum: 0 }],
+    };
+    const targetWithStaleMotion: syncApi.ShowManifest = {
+      ...mockTargetPreManifest,
+      scenes: [{ index: 0, checksum: 100, motionChecksum: 999 }],
+    };
+
+    vi.spyOn(syncApi, 'getShowManifest').mockImplementation(async (ip) => {
+      if (ip === sourceIp) return sourceWithNoMotion;
+      return targetWithStaleMotion;
+    });
+
+    await deployShowToNodes(sourceIp, [targetIp1], { mirrorExactly: true, sceneMotion: true });
+    expect(scenesApi.deleteSceneMotion).toHaveBeenCalledWith(targetIp1, 0);
   });
 });

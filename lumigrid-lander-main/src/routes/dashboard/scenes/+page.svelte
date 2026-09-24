@@ -18,6 +18,7 @@
   } from '$lib/api/scenes';
   import { getChannels, type HardwareChannel } from '$lib/api/channels';
   import { getSelectedNodeIp } from '$lib/auth/storage';
+  import { getSyncStatus, type SyncStatus } from '$lib/api/sync';
   import { nodeStore, commandTracker } from '$lib/state/nodeStore';
   import {
     getSceneMotion,
@@ -38,6 +39,14 @@
   let loading = $state(true);
   let saving = $state(false);
   let activating = $state(false);
+  let nodeSyncStatus = $state<SyncStatus | null>(null);
+
+  const isFollower = $derived(
+    nodeSyncStatus?.activeRole === 'worker' &&
+    Boolean(nodeSyncStatus.masterAddress) &&
+    (nodeSyncStatus.lastPacketAgeMs === null || nodeSyncStatus.lastPacketAgeMs < 10000)
+  );
+  const syncMasterAddress = $derived(nodeSyncStatus?.masterAddress || 'Leader');
   let error = $state('');
   let toast = $state('');
   let clearSceneIdx = $state<number | null>(null);
@@ -274,16 +283,18 @@
     editScene = null;
     savedSnapshot = null;
     try {
-      const [p, e, status, chList] = await Promise.all([
+      const [p, e, status, chList, syncSt] = await Promise.all([
         getPresets(targetIp),
         getEffects(targetIp),
         getSignageStatus(targetIp),
         getChannels(targetIp).catch(() => [] as HardwareChannel[]),
+        getSyncStatus(targetIp).catch(() => null),
       ]);
       if (gen !== loadGen) return;
       presets = p;
       effects = e;
       hwChannels = chList;
+      nodeSyncStatus = syncSt;
       observeSignageStatus(status);
       if (presets.length > 0 && selectedIdx === null) {
         selectPreset(presets[0].index);
@@ -389,6 +400,17 @@
 
     <!-- Scene Editor Workspace -->
     <section class="editor">
+      {#if isFollower}
+        <div class="sync-follower-banner" role="alert">
+          <span class="banner-icon">ℹ</span>
+          <div class="banner-content">
+            <strong>Playback Controlled by Sync Leader ({syncMasterAddress})</strong>
+            <p>This node is an active follower in a synchronized cluster. Direct preset activation on this follower node is suppressed to preserve cluster frame lock. To trigger scenes across the group, use Sync Studio.</p>
+          </div>
+          <a href="/dashboard/sync" class="banner-action-btn">Open Sync Studio →</a>
+        </div>
+      {/if}
+
       {#if editScene}
         <!-- Top Toolbar -->
         <div class="ed-toolbar">
@@ -441,11 +463,11 @@
               class="btn-activate"
               class:is-active-btn={isActive}
               onclick={() => doActivate(editScene!.index)}
-              disabled={activating}
-              title="Activate scene on the selected node"
+              disabled={activating || isFollower}
+              title={isFollower ? `Playback controlled by Sync Leader (${syncMasterAddress})` : "Activate scene on the selected node"}
               type="button"
             >
-              {activating ? 'Activating...' : isActive ? 'Re-Activate' : 'Activate'}
+              {activating ? 'Activating...' : isFollower ? 'Controlled by Leader' : isActive ? 'Re-Activate' : 'Activate'}
             </button>
 
             <button
@@ -1558,5 +1580,48 @@
     .ed-actions button { flex: 1; min-height: 40px; }
     .preview-strip { grid-template-columns: repeat(2, 1fr); }
     .zone-card { border-radius: var(--dash-radius-md); }
+  }
+  .sync-follower-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    background: rgba(59, 130, 246, 0.12);
+    border: 1px solid rgba(59, 130, 246, 0.35);
+    border-radius: 8px;
+    padding: 0.85rem 1.25rem;
+    margin-bottom: 1.25rem;
+    color: #e2e8f0;
+  }
+  .banner-icon {
+    font-size: 1.4rem;
+    color: #60a5fa;
+  }
+  .banner-content strong {
+    color: #93c5fd;
+    display: block;
+    font-size: 0.95rem;
+    margin-bottom: 0.2rem;
+  }
+  .banner-content p {
+    margin: 0;
+    font-size: 0.82rem;
+    color: #94a3b8;
+  }
+  .banner-action-btn {
+    white-space: nowrap;
+    padding: 0.45rem 0.9rem;
+    background: rgba(59, 130, 246, 0.25);
+    border: 1px solid rgba(59, 130, 246, 0.5);
+    color: #93c5fd;
+    border-radius: 6px;
+    text-decoration: none;
+    font-size: 0.82rem;
+    font-weight: 600;
+    transition: all 0.15s ease;
+  }
+  .banner-action-btn:hover {
+    background: rgba(59, 130, 246, 0.45);
+    color: #ffffff;
   }
 </style>

@@ -17,6 +17,7 @@ struct CapabilitiesManifest {
     static constexpr uint8_t kCuesPerList = kMaxCuesPerList;
     static constexpr uint8_t kAutomationTracks = kAutomationTracksPerScene;
     static constexpr uint8_t kAutomationPoints = kAutomationPointsPerTrack;
+    static constexpr uint8_t kSyncPeers = 8;
 
     // Feature flags
     static constexpr bool kFeatureAddressable = true;
@@ -32,11 +33,16 @@ struct CapabilitiesManifest {
     static constexpr bool kFeatureSceneMotion = true;
     static constexpr bool kFeatureCueLists = true;
     static constexpr bool kFeatureTransitionEngineV2 = true;
+    static constexpr bool kFeatureShowTransportV2 = true;
+    static constexpr bool kFeatureSyncCueTransport = true;
+    static constexpr bool kFeatureSyncTimelineTransport = true;
+    static constexpr bool kFeatureShowManifest = true;
+    static constexpr bool kFeaturePlaybackManifest = true;
 
     // Protocol versions
     static constexpr uint8_t kProtocolHttpApi = 1;
     static constexpr uint8_t kProtocolWebsocket = 2;
-    static constexpr uint8_t kProtocolSync = 1;
+    static constexpr uint8_t kProtocolSync = 4;
 };
 
 } // namespace lg

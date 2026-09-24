@@ -54,6 +54,7 @@ public:
         );
 
         if (accepted) {
+            source_manager_.acquire(ControlSource::ScenePlayback, 0, 0, 0, 0xFFFF);
             const uint32_t next_generation =
                 requested_scene_generation_.fetch_add(1, std::memory_order_acq_rel) + 1;
             requested_scene_index_.store(index, std::memory_order_release);
@@ -82,6 +83,7 @@ public:
         );
 
         if (accepted) {
+            source_manager_.acquire(ControlSource::ScenePlayback, 0, 0, 0, 0xFFFF);
             const uint32_t next_generation =
                 requested_scene_generation_.fetch_add(1, std::memory_order_acq_rel) + 1;
             requested_scene_index_.store(index, std::memory_order_release);

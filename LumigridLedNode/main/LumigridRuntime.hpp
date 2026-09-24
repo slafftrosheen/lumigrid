@@ -12,6 +12,7 @@
 #include "SacnReceiver.hpp"
 #include "DmxRouter.hpp"
 #include "CueRunner.hpp"
+#include "ShowTransport.hpp"
 #include "MqttService.hpp"
 #include "FactoryRunner.hpp"
 #include "FactoryApi.hpp"
@@ -125,6 +126,7 @@ public:
     OutputController& output() { return output_; }
     LightingRuntime& lighting() { return lighting_; }
     CueRunner& cue_runner() { return cue_runner_; }
+    ShowTransportCoordinator& show_transport() { return show_transport_; }
     FactoryRunner& factory_runner() { return factory_runner_; }
     DmxRouter& dmx_router() { return dmx_router_; }
     ConfigStore& config() { return config_; }
@@ -144,6 +146,7 @@ private:
     SacnReceiver sacn_;
     LightingRuntime lighting_;
     CueRunner cue_runner_;
+    ShowTransportCoordinator show_transport_;
     DmxRouter dmx_router_;
     ClockDiscipline clock_;
     Scheduler scheduler_;

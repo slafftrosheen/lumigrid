@@ -1,19 +1,27 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
+  import OperatorPanelDialog from '$lib/components/dashboard/OperatorPanelDialog.svelte';
   import {
     getSavedNodes,
     getSelectedNodeIp,
     getAuthRole,
+    NODE_REGISTRY_CHANGED_EVENT,
     type SavedNodeInfo,
   } from '$lib/auth/storage';
   import {
     getSyncStatus,
     getShowManifest,
-    compareShowManifest,
+    comparePlaybackManifest,
+    compareScheduleManifest,
+    compareFullShowManifest,
+    evaluateClusterTopology,
+    generateSyncToken,
     buildClusterPlan,
     type SyncStatus,
     type ShowManifest,
     type ShowParityResult,
+    type ClusterTopology,
+    type ReachabilityState,
   } from '$lib/api/sync';
   import {
     deployShowToNodes,
@@ -22,28 +30,54 @@
     DEFAULT_SHOW_DEPLOYMENT_OPTIONS,
   } from '$lib/api/showDeployment';
   import { getDeviceConfig, saveDeviceConfig } from '$lib/api/config';
-  import { activateScene, getPresets, type ScenePreset } from '$lib/api/scenes';
-  import { getSequence, saveSequence, type Sequence } from '$lib/api/timeline';
+  import { getPresets, type ScenePreset } from '$lib/api/scenes';
+  import { getSequence, type Sequence } from '$lib/api/timeline';
+  import {
+    getCueLists,
+    type CueListSummary,
+  } from '$lib/api/cues';
+  import {
+    getShowTransportStatus,
+    runScene,
+    startTimeline,
+    stopTimeline,
+    startCueList,
+    stopCue,
+    pauseCue,
+    resumeCue,
+    nextCue,
+    previousCue,
+    jumpCue,
+    setCueCrossfade,
+    type ShowTransportStatus,
+  } from '$lib/api/showTransport';
 
   interface FleetNodeSyncData {
     node: SavedNodeInfo;
     online: boolean;
+    reachabilityState: ReachabilityState;
     syncStatus?: SyncStatus;
     manifest?: ShowManifest;
-    parity?: ShowParityResult;
+    playbackParity?: ShowParityResult;
+    scheduleParity?: ShowParityResult;
     error?: string;
   }
 
   let nodes = $state<SavedNodeInfo[]>([]);
   let fleetData = $state<Record<string, FleetNodeSyncData>>({});
-  let selectedLeaderIp = $state<string>('');
-  let leaderNodeData = $state<FleetNodeSyncData | null>(null);
+  let loadedLeaderIp = $state<string>('');
   let availablePresets = $state<ScenePreset[]>([]);
   let leaderTimeline = $state<Sequence | null>(null);
+  let availableCueLists = $state<CueListSummary[]>([]);
+  let leaderShowTransport = $state<ShowTransportStatus | null>(null);
 
+  let refreshGeneration = 0;
   let loading = $state(false);
   let pollInterval: ReturnType<typeof setInterval> | null = null;
   let isAdmin = $state(false);
+
+  // Group filtering
+  let selectedGroupLabel = $state<string>('All');
 
   // Modals & Panels
   let showConfigureModal = $state(false);
@@ -58,6 +92,7 @@
   let configSaving = $state(false);
   let configError = $state('');
   let configSuccess = $state('');
+  let configCryptoError = $state('');
 
   // Deploy Show form state
   let deploySourceIp = $state('');
@@ -67,29 +102,75 @@
   let deployResults = $state<Record<string, ShowDeploymentNodeResult>>({});
   let deployError = $state('');
 
-  // Synchronized Scene / Timeline control state
+  // Synchronized Transport Control state
+  let activeTransportTab = $state<'scene' | 'timeline' | 'cue'>('scene');
   let selectedSceneIndex = $state<number>(0);
   let sceneTriggerPending = $state(false);
   let timelineTriggerPending = $state(false);
+
+  // Cue transport state
+  let selectedCueListIndex = $state<number>(0);
+  let cueJumpIndex = $state<number>(0);
+  let manualCrossfadeValue = $state<number>(0);
+  let manualCrossfadeThrottler: ReturnType<typeof setTimeout> | null = null;
+  let cueTriggerPending = $state(false);
+
   let controlFeedback = $state('');
 
-  // Derived cluster aggregates
-  let onlineNodes = $derived(Object.values(fleetData).filter((d) => d.online));
-  let totalCount = $derived(nodes.length);
+  // Available groups detected across fleet
+  let availableGroups = $derived.by(() => {
+    const labels = new Set<string>();
+    for (const d of Object.values(fleetData)) {
+      if (d.syncStatus?.groupLabel) {
+        labels.add(d.syncStatus.groupLabel);
+      }
+    }
+    return Array.from(labels).sort();
+  });
+
+  // Partition nodes by active group
+  let activeGroupNodes = $derived.by(() => {
+    const all = Object.values(fleetData);
+    if (selectedGroupLabel === 'All') return all;
+    return all.filter((d) => d.syncStatus?.groupLabel === selectedGroupLabel);
+  });
+
+  let otherFleetNodes = $derived.by(() => {
+    if (selectedGroupLabel === 'All') return [];
+    return Object.values(fleetData).filter((d) => d.syncStatus?.groupLabel !== selectedGroupLabel);
+  });
+
+  let onlineNodes = $derived(activeGroupNodes.filter((d) => d.online));
+  let totalCount = $derived(activeGroupNodes.length);
   let onlineCount = $derived(onlineNodes.length);
   let clockLockedCount = $derived(onlineNodes.filter((d) => d.syncStatus?.clockLocked).length);
 
-  // Parity evaluated against current leader
-  let showParityCount = $derived(
-    onlineNodes.filter((d) => d.parity?.status === 'MATCHED').length
+  // Evaluated topology across active group ONLY
+  let clusterTopology = $derived.by(() => {
+    const groupData = activeGroupNodes.filter((d) => d.online && d.syncStatus);
+    return evaluateClusterTopology(
+      groupData.map((d) => ({ ip: d.node.ip, status: d.syncStatus }))
+    );
+  });
+
+  let leaderIp = $derived(clusterTopology.leaderIp || '');
+  let leaderNodeData = $derived(leaderIp ? fleetData[leaderIp] || null : null);
+
+  let playbackParityCount = $derived(
+    onlineNodes.filter((d) => d.playbackParity?.status === 'MATCHED').length
+  );
+  let scheduleParityCount = $derived(
+    onlineNodes.filter((d) => d.scheduleParity?.status === 'MATCHED').length
   );
 
   let clusterTransport = $derived.by(() => {
-    if (!leaderNodeData?.syncStatus) return 'Standalone';
-    const t = leaderNodeData.syncStatus.transport;
-    if (t === 'timeline') return 'Timeline';
-    if (t === 'scene') return 'Scene';
-    return 'Standalone';
+    if (leaderShowTransport?.mode) {
+      return leaderShowTransport.mode.toUpperCase();
+    }
+    if (leaderNodeData?.syncStatus?.transport) {
+      return leaderNodeData.syncStatus.transport.toUpperCase();
+    }
+    return 'STANDALONE';
   });
 
   let worstOffsetMs = $derived.by(() => {
@@ -128,20 +209,29 @@
     return maxRtt;
   });
 
-  // Cluster Ready Gate: all online, sync running, clock locked, matched
+  // Cluster Ready Gate:
+  // 1. All nodes in active group are online
+  // 2. Topology is VALID_LEADER and ready (no split-brain, no leader disagreement)
+  // 3. All followers are sync running and clock locked
+  // 4. Playback parity is MATCHED (schedule differences do not gate group playback)
   let isClusterReady = $derived.by(() => {
-    if (onlineCount === 0 || onlineCount < totalCount) return false;
-    if (!leaderNodeData?.online) return false;
+    if (totalCount === 0 || onlineCount < totalCount) return false;
+    if (clusterTopology.state !== 'VALID_LEADER' || !clusterTopology.isReady) return false;
+    if (!leaderNodeData?.online || leaderNodeData.syncStatus?.activeRole !== 'master') return false;
     for (const d of onlineNodes) {
       if (!d.syncStatus?.running || !d.syncStatus.clockLocked) return false;
-      if (d.parity?.status !== 'MATCHED') return false;
+      if (d.playbackParity?.status !== 'MATCHED') return false;
     }
     return true;
   });
 
   let followers = $derived(
-    onlineNodes.filter((d) => d.node.ip !== leaderNodeData?.node.ip)
+    onlineNodes.filter((d) => d.node.ip !== leaderIp)
   );
+
+  function handleRegistryChange() {
+    refreshCluster();
+  }
 
   onMount(async () => {
     isAdmin = getAuthRole() === 'admin';
@@ -152,51 +242,122 @@
       deploySourceIp = nodes[0].ip;
       deployTargetIps = nodes.slice(1).map((n) => n.ip);
     }
+    if (typeof window !== 'undefined') {
+      window.addEventListener(NODE_REGISTRY_CHANGED_EVENT, handleRegistryChange);
+    }
     await refreshCluster();
     pollInterval = setInterval(refreshCluster, 3000);
   });
 
   onDestroy(() => {
     if (pollInterval) clearInterval(pollInterval);
+    if (manualCrossfadeThrottler) clearTimeout(manualCrossfadeThrottler);
+    if (typeof window !== 'undefined') {
+      window.removeEventListener(NODE_REGISTRY_CHANGED_EVENT, handleRegistryChange);
+    }
   });
 
+  async function loadLeaderAssets(ip: string) {
+    try {
+      const [presets, seq, cues, transportStatus] = await Promise.all([
+        getPresets(ip).catch(() => []),
+        getSequence(ip).catch(() => null),
+        getCueLists(ip).catch(() => []),
+        getShowTransportStatus(ip).catch(() => null),
+      ]);
+      if (loadedLeaderIp === ip) {
+        availablePresets = presets;
+        leaderTimeline = seq;
+        availableCueLists = cues;
+        leaderShowTransport = transportStatus;
+        if (cues.length > 0 && selectedCueListIndex === 0) {
+          selectedCueListIndex = cues[0].index;
+        }
+      }
+    } catch {
+      // Ignored in background refresh
+    }
+  }
+
   async function refreshCluster() {
+    const myGen = ++refreshGeneration;
     nodes = getSavedNodes();
     if (nodes.length === 0) {
       fleetData = {};
       return;
     }
 
-    // Query nodes concurrently with max 4 concurrency
     const nextData: Record<string, FleetNodeSyncData> = {};
     const queue = [...nodes];
     const concurrency = 4;
 
     async function fetchNode(item: SavedNodeInfo) {
       try {
-        const [syncStatus, manifest] = await Promise.all([
-          getSyncStatus(item.ip).catch(() => null),
-          getShowManifest(item.ip).catch(() => null),
-        ]);
+        let syncStatus: SyncStatus | null = null;
+        let manifest: ShowManifest | null = null;
+        let reachabilityState: ReachabilityState = 'OFFLINE';
 
-        if (syncStatus && manifest) {
+        try {
+          syncStatus = await getSyncStatus(item.ip);
+        } catch {
+          syncStatus = null;
+        }
+
+        if (syncStatus) {
+          if (syncStatus.syncProtocol !== undefined && syncStatus.syncProtocol !== 4 && syncStatus.protocolVersion !== 4) {
+            reachabilityState = 'ONLINE / SYNC INCOMPATIBLE';
+          } else if (!syncStatus.syncEnabled) {
+            reachabilityState = 'ONLINE / SYNC DISABLED';
+          } else {
+            try {
+              manifest = await getShowManifest(item.ip);
+            } catch {
+              manifest = null;
+            }
+            if (!manifest) {
+              reachabilityState = 'ONLINE / MANIFEST UNAVAILABLE';
+            } else {
+              reachabilityState = 'ONLINE';
+            }
+          }
           nextData[item.ip] = {
             node: item,
             online: true,
+            reachabilityState,
             syncStatus,
-            manifest,
+            manifest: manifest || undefined,
           };
-        } else {
-          nextData[item.ip] = {
-            node: item,
-            online: false,
-            error: 'Node unreachable or sync endpoint offline',
-          };
+          return;
         }
+
+        // Try probing basic device config to determine if node is reachable
+        try {
+          const cfg = await getDeviceConfig(item.ip);
+          if (cfg) {
+            reachabilityState = 'ONLINE / SYNC DISABLED';
+            nextData[item.ip] = {
+              node: item,
+              online: true,
+              reachabilityState,
+              error: 'Node reachable, sync service disabled',
+            };
+            return;
+          }
+        } catch {
+          // Node truly offline
+        }
+
+        nextData[item.ip] = {
+          node: item,
+          online: false,
+          reachabilityState: 'OFFLINE',
+          error: 'Node unreachable',
+        };
       } catch (err: any) {
         nextData[item.ip] = {
           node: item,
           online: false,
+          reachabilityState: 'OFFLINE',
           error: err?.message || 'Connection failed',
         };
       }
@@ -211,56 +372,54 @@
 
     await Promise.all(Array.from({ length: Math.min(concurrency, nodes.length) }, () => worker()));
 
-    // Identify current leader (activeRole === 'master' or first online)
-    let leaderIp = '';
-    for (const [ip, data] of Object.entries(nextData)) {
-      if (data.online && data.syncStatus?.activeRole === 'master') {
-        leaderIp = ip;
-        break;
-      }
-    }
+    if (myGen !== refreshGeneration) return;
 
-    if (!leaderIp) {
-      // Fallback: node marked as master by address in worker nodes
+    // Evaluate cluster topology to find the real leader
+    const onlineList = Object.values(nextData).filter((d) => d.online && d.syncStatus);
+    const topo = evaluateClusterTopology(
+      onlineList.map((d) => ({ ip: d.node.ip, status: d.syncStatus }))
+    );
+    const discoveredLeaderIp = topo.leaderIp;
+
+    // Evaluate playback and schedule parity against authoritative leader
+    if (discoveredLeaderIp && nextData[discoveredLeaderIp]?.manifest) {
+      const leaderManifest = nextData[discoveredLeaderIp].manifest!;
       for (const data of Object.values(nextData)) {
-        if (data.online && data.syncStatus?.masterAddress) {
-          leaderIp = data.syncStatus.masterAddress;
-          break;
-        }
-      }
-    }
-
-    if (!leaderIp) {
-      const activeIp = getSelectedNodeIp();
-      leaderIp = nextData[activeIp]?.online ? activeIp : (nodes[0]?.ip ?? '');
-    }
-
-    selectedLeaderIp = leaderIp;
-    const leaderData = nextData[leaderIp] ?? null;
-    leaderNodeData = leaderData;
-
-    // Evaluate parity of all nodes against leader
-    if (leaderData?.manifest) {
-      for (const [ip, data] of Object.entries(nextData)) {
         if (data.online && data.manifest) {
-          data.parity = compareShowManifest(leaderData.manifest, data.manifest);
+          data.playbackParity = comparePlaybackManifest(leaderManifest, data.manifest);
+          data.scheduleParity = compareScheduleManifest(leaderManifest, data.manifest);
         } else {
-          data.parity = { status: 'UNAVAILABLE', diffs: [] };
+          data.playbackParity = { playbackStatus: 'UNAVAILABLE', scheduleStatus: 'UNAVAILABLE', status: 'UNAVAILABLE', diffs: [] };
+          data.scheduleParity = { playbackStatus: 'UNAVAILABLE', scheduleStatus: 'UNAVAILABLE', status: 'UNAVAILABLE', diffs: [] };
         }
       }
     }
 
     fleetData = nextData;
 
-    // Load presets and timeline from leader for synchronized operator actions
-    if (leaderData?.online && availablePresets.length === 0) {
-      try {
-        availablePresets = await getPresets(leaderIp);
-        leaderTimeline = await getSequence(leaderIp).catch(() => null);
-      } catch {
-        // Ignored in background refresh
-      }
+    // Leader change handling: reset leader cache and reload assets
+    if (discoveredLeaderIp && discoveredLeaderIp !== loadedLeaderIp) {
+      loadedLeaderIp = discoveredLeaderIp;
+      availablePresets = [];
+      leaderTimeline = null;
+      availableCueLists = [];
+      leaderShowTransport = null;
+      await loadLeaderAssets(discoveredLeaderIp);
+    } else if (discoveredLeaderIp && availablePresets.length === 0) {
+      await loadLeaderAssets(discoveredLeaderIp);
     }
+  }
+
+  function openConfigureModal() {
+    configCryptoError = '';
+    configError = '';
+    configSuccess = '';
+    try {
+      generateSyncToken();
+    } catch (err: any) {
+      configCryptoError = 'Web Crypto is not available in this browser. Secure sync token cannot be generated.';
+    }
+    showConfigureModal = true;
   }
 
   async function handleSaveClusterConfig() {
@@ -337,12 +496,17 @@
   }
 
   async function handleTriggerSceneOnLeader() {
-    if (!leaderNodeData?.online) return;
+    if (!leaderIp || !isClusterReady) return;
     sceneTriggerPending = true;
     controlFeedback = '';
     try {
-      await activateScene(leaderNodeData.node.ip, selectedSceneIndex);
-      controlFeedback = `Scene ${selectedSceneIndex} triggered on Leader (${leaderNodeData.node.name || leaderNodeData.node.ip}). Follower nodes will synchronize automatically via NodeSync.`;
+      const res = await runScene(leaderIp, selectedSceneIndex);
+      if (res.accepted) {
+        controlFeedback = `Scene ${selectedSceneIndex + 1} activated via Show Transport on Leader (${leaderNodeData?.node.name || leaderIp}). Followers locked via NodeSync.`;
+      } else {
+        controlFeedback = `Transport response: ${res.error || 'rejected'}`;
+      }
+      await refreshCluster();
     } catch (err: any) {
       controlFeedback = `Error triggering scene: ${err?.message || err}`;
     } finally {
@@ -351,17 +515,16 @@
   }
 
   async function handleToggleTimelineOnLeader(enable: boolean) {
-    if (!leaderNodeData?.online) return;
+    if (!leaderIp || !isClusterReady) return;
     timelineTriggerPending = true;
     controlFeedback = '';
     try {
-      const currentSeq = await getSequence(leaderNodeData.node.ip);
-      await saveSequence(leaderNodeData.node.ip, {
-        ...currentSeq,
-        enabled: enable,
-      });
-      leaderTimeline = { ...currentSeq, enabled: enable };
-      controlFeedback = `Timeline ${enable ? 'Started' : 'Stopped'} on Leader. Followers are synchronized against shared clock & BPM.`;
+      const res = enable ? await startTimeline(leaderIp) : await stopTimeline(leaderIp);
+      if (res.accepted) {
+        controlFeedback = `Timeline ${enable ? 'Started' : 'Stopped'} via Show Transport on Leader. Followers synchronized against shared BPM.`;
+      } else {
+        controlFeedback = `Transport response: ${res.error || 'rejected'}`;
+      }
       await refreshCluster();
     } catch (err: any) {
       controlFeedback = `Error updating timeline: ${err?.message || err}`;
@@ -369,41 +532,181 @@
       timelineTriggerPending = false;
     }
   }
+
+  async function handleStartCueList() {
+    if (!leaderIp || !isClusterReady) return;
+    cueTriggerPending = true;
+    controlFeedback = '';
+    try {
+      const res = await startCueList(leaderIp, selectedCueListIndex);
+      controlFeedback = res.accepted ? `Cue List #${selectedCueListIndex + 1} started on Leader.` : `Error: ${res.error || 'rejected'}`;
+      await refreshCluster();
+    } catch (err: any) {
+      controlFeedback = `Error starting cue: ${err?.message || err}`;
+    } finally {
+      cueTriggerPending = false;
+    }
+  }
+
+  async function handleStopCue() {
+    if (!leaderIp || !isClusterReady) return;
+    try {
+      await stopCue(leaderIp);
+      controlFeedback = 'Cue playback stopped.';
+      await refreshCluster();
+    } catch (err: any) {
+      controlFeedback = `Error stopping cue: ${err?.message || err}`;
+    }
+  }
+
+  async function handlePauseCue() {
+    if (!leaderIp || !isClusterReady) return;
+    try {
+      await pauseCue(leaderIp);
+      controlFeedback = 'Cue playback paused.';
+      await refreshCluster();
+    } catch (err: any) {
+      controlFeedback = `Error pausing cue: ${err?.message || err}`;
+    }
+  }
+
+  async function handleResumeCue() {
+    if (!leaderIp || !isClusterReady) return;
+    try {
+      await resumeCue(leaderIp);
+      controlFeedback = 'Cue playback resumed.';
+      await refreshCluster();
+    } catch (err: any) {
+      controlFeedback = `Error resuming cue: ${err?.message || err}`;
+    }
+  }
+
+  async function handleNextCue() {
+    if (!leaderIp || !isClusterReady) return;
+    try {
+      await nextCue(leaderIp);
+      controlFeedback = 'Advanced to next cue.';
+      await refreshCluster();
+    } catch (err: any) {
+      controlFeedback = `Error stepping cue: ${err?.message || err}`;
+    }
+  }
+
+  async function handlePreviousCue() {
+    if (!leaderIp || !isClusterReady) return;
+    try {
+      await previousCue(leaderIp);
+      controlFeedback = 'Stepped to previous cue.';
+      await refreshCluster();
+    } catch (err: any) {
+      controlFeedback = `Error stepping cue: ${err?.message || err}`;
+    }
+  }
+
+  async function handleJumpCue() {
+    if (!leaderIp || !isClusterReady) return;
+    try {
+      await jumpCue(leaderIp, cueJumpIndex);
+      controlFeedback = `Jumped to cue #${cueJumpIndex + 1}.`;
+      await refreshCluster();
+    } catch (err: any) {
+      controlFeedback = `Error jumping cue: ${err?.message || err}`;
+    }
+  }
+
+  function handleManualCrossfade(e: Event) {
+    if (!leaderIp || !isClusterReady) return;
+    const target = e.target as HTMLInputElement;
+    const val = parseFloat(target.value);
+    manualCrossfadeValue = val;
+    if (manualCrossfadeThrottler) return;
+    manualCrossfadeThrottler = setTimeout(async () => {
+      manualCrossfadeThrottler = null;
+      try {
+        await setCueCrossfade(leaderIp, manualCrossfadeValue);
+      } catch {
+        // Throttled
+      }
+    }, 100);
+  }
 </script>
 
 <div class="sync-root">
-  <!-- Disclaimer Notice -->
-  <div class="sync-cue-banner" role="note">
-    <span class="sync-banner-icon">ℹ</span>
-    <span class="sync-banner-text">
-      Cue Lists can be deployed across the cluster, but synchronized live Cue transport is not supported in Sync v1. Use synchronized Scene or Timeline transport for frame-locked multi-node playback.
-    </span>
-  </div>
+  <!-- Cluster Topology Error & Conflict Banners -->
+  {#if clusterTopology.state === 'NO_LEADER'}
+    <div class="sync-alert-banner alert-warn" role="alert">
+      <span class="sync-banner-icon">⚠</span>
+      <div class="sync-banner-body">
+        <strong>Topology Error: No Active Leader Detected</strong>
+        <p>No node in the active group has reported role <code>master</code>. Group playback controls are suppressed until a leader is elected or explicitly configured.</p>
+      </div>
+    </div>
+  {:else if clusterTopology.state === 'SPLIT_BRAIN'}
+    <div class="sync-alert-banner alert-danger" role="alert">
+      <span class="sync-banner-icon">⛔</span>
+      <div class="sync-banner-body">
+        <strong>Topology Conflict: Split Brain Detected</strong>
+        <p>{clusterTopology.error}. Multiple nodes are broadcasting authority simultaneously. Group playback is locked to prevent hardware conflicts.</p>
+      </div>
+    </div>
+  {:else if clusterTopology.state === 'LEADER_DISAGREEMENT'}
+    <div class="sync-alert-banner alert-danger" role="alert">
+      <span class="sync-banner-icon">⛔</span>
+      <div class="sync-banner-body">
+        <strong>Topology Conflict: Leader Disagreement</strong>
+        <p>{clusterTopology.error}. Follower nodes are tracking different leader addresses.</p>
+      </div>
+    </div>
+  {/if}
+
+  {#if clusterTopology.state === 'VALID_LEADER' && !clusterTopology.isReady}
+    <div class="sync-alert-banner alert-warn" role="alert">
+      <span class="sync-banner-icon">⚠</span>
+      <div class="sync-banner-body">
+        <strong>Follower Transport Notice</strong>
+        <p>{clusterTopology.error || 'One or more follower nodes reported transport apply error.'}</p>
+      </div>
+    </div>
+  {/if}
 
   <!-- Header & Actions -->
   <header class="sync-header">
     <div class="sync-header-info">
       <div class="sync-badge-row">
-        <span class="sync-tag">FLEET SYNC STUDIO</span>
+        <span class="sync-tag">SHOW TRANSPORT v2</span>
         {#if isClusterReady}
           <span class="sync-status-pill sync-ready">● READY FOR SYNC</span>
         {:else if onlineCount < totalCount}
           <span class="sync-status-pill sync-warn">● NODES OFFLINE</span>
-        {:else if showParityCount < totalCount}
-          <span class="sync-status-pill sync-warn">● SHOW CONTENT DRIFT</span>
+        {:else if playbackParityCount < totalCount}
+          <span class="sync-status-pill sync-warn">● PLAYBACK CONTENT DRIFT</span>
+        {:else if clusterTopology.state !== 'VALID_LEADER'}
+          <span class="sync-status-pill sync-danger">● TOPOLOGY CONFLICT</span>
         {:else}
           <span class="sync-status-pill sync-neutral">● INITIALIZING</span>
+        {/if}
+
+        {#if availableGroups.length > 0}
+          <div class="sync-group-filter-wrap">
+            <label for="group-filter-select" class="sync-filter-label">Group:</label>
+            <select id="group-filter-select" class="sync-filter-select" bind:value={selectedGroupLabel}>
+              <option value="All">All Groups ({Object.keys(fleetData).length} nodes)</option>
+              {#each availableGroups as grp}
+                <option value={grp}>{grp}</option>
+              {/each}
+            </select>
+          </div>
         {/if}
       </div>
       <h1 class="sync-title">Multi-Node Cluster Management</h1>
       <p class="sync-desc">
-        Real-time telemetry, bounded clock discipline, and show content parity across distributed LumiGrid nodes.
+        Unified Scene, Timeline, and Cue transport coordination across distributed LumiGrid nodes with authoritative clock discipline.
       </p>
     </div>
 
     <div class="sync-actions">
       {#if isAdmin}
-        <button class="sync-action-btn sync-btn-secondary" onclick={() => (showConfigureModal = true)}>
+        <button class="sync-action-btn sync-btn-secondary" onclick={openConfigureModal}>
           ⚙ Configure Group
         </button>
         <button class="sync-action-btn sync-btn-primary" onclick={() => (showDeployModal = true)}>
@@ -416,15 +719,15 @@
     </div>
   </header>
 
-  <!-- Section 1: Cluster Summary -->
+  <!-- Section 1: Cluster Summary Tiles -->
   <section class="sync-summary-grid" aria-label="Cluster Metrics Summary">
     <div class="sync-metric-tile">
       <div class="sync-metric-label">LEADER NODE</div>
       <div class="sync-metric-val highlight">
-        {leaderNodeData?.node.name || leaderNodeData?.node.ip || 'No Leader'}
+        {leaderNodeData?.syncStatus?.activeRole === 'master' ? (leaderNodeData?.node.name || leaderNodeData?.node.ip) : (clusterTopology.state === 'NO_LEADER' ? 'Electing / None' : 'Conflict')}
       </div>
       <div class="sync-metric-sub">
-        {leaderNodeData?.node.ip ?? '—'}
+        {leaderNodeData?.node.ip ?? (clusterTopology.state === 'SPLIT_BRAIN' ? 'Multiple Masters' : '—')}
       </div>
     </div>
 
@@ -449,12 +752,22 @@
     </div>
 
     <div class="sync-metric-tile">
-      <div class="sync-metric-label">SHOW PARITY</div>
-      <div class="sync-metric-val" class:success={showParityCount === onlineCount && onlineCount > 0} class:warn={showParityCount < onlineCount}>
-        {showParityCount} <span class="sync-metric-denom">/ {onlineCount}</span>
+      <div class="sync-metric-label">PLAYBACK PARITY</div>
+      <div class="sync-metric-val" class:success={playbackParityCount === onlineCount && onlineCount > 0} class:warn={playbackParityCount < onlineCount}>
+        {playbackParityCount} <span class="sync-metric-denom">/ {onlineCount}</span>
       </div>
       <div class="sync-metric-sub">
-        {showParityCount === onlineCount ? 'All show hashes match' : 'Content drift detected'}
+        {playbackParityCount === onlineCount ? 'Scenes, cues, & timeline match' : 'Playback drift detected'}
+      </div>
+    </div>
+
+    <div class="sync-metric-tile">
+      <div class="sync-metric-label">SCHEDULE PARITY</div>
+      <div class="sync-metric-val" class:success={scheduleParityCount === onlineCount && onlineCount > 0} class:warn={scheduleParityCount < onlineCount}>
+        {scheduleParityCount} <span class="sync-metric-denom">/ {onlineCount}</span>
+      </div>
+      <div class="sync-metric-sub">
+        {scheduleParityCount === onlineCount ? 'Calendar schedules match' : 'Schedules differ (optional)'}
       </div>
     </div>
 
@@ -469,17 +782,17 @@
     </div>
   </section>
 
-  <!-- Section 2: Restrained Topology Visualizer -->
+  <!-- Section 2: Topology Visualizer -->
   <section class="sync-section-card" aria-label="Sync Topology Map">
     <div class="sync-card-header">
       <div>
-        <h2 class="sync-section-title">Sync Topology</h2>
-        <p class="sync-section-desc">UDP clock discipline hierarchy and peer latency.</p>
+        <h2 class="sync-section-title">Sync Topology & Protocol v4</h2>
+        <p class="sync-section-desc">UDP clock discipline hierarchy and peer latency. Commands target Leader only.</p>
       </div>
     </div>
 
     <div class="sync-topology-container">
-      {#if leaderNodeData}
+      {#if leaderNodeData && leaderNodeData.syncStatus?.activeRole === 'master'}
         <div class="sync-topo-leader">
           <div class="sync-topo-node-badge is-leader">
             <div class="sync-topo-icon">★</div>
@@ -497,7 +810,7 @@
 
         <div class="sync-topo-followers">
           {#if followers.length === 0}
-            <div class="sync-topo-empty">No active followers registered. Cluster is operating in single-node mode.</div>
+            <div class="sync-topo-empty">No active followers registered. Cluster operating in standalone leader mode.</div>
           {:else}
             {#each followers as follower}
               <div class="sync-topo-follower-card">
@@ -518,6 +831,11 @@
                         ? `${follower.syncStatus.peers[0].latencyMs}ms RTT`
                         : '—'}
                     </span>
+                    {#if follower.syncStatus?.transportApplyOk === false}
+                      <span class="sync-pill-tag err" title={follower.syncStatus.transportError || 'Transport apply error'}>
+                        APPLY ERR
+                      </span>
+                    {/if}
                   </div>
                 </div>
               </div>
@@ -525,21 +843,60 @@
           {/if}
         </div>
       {:else}
-        <div class="sync-empty-state">No cluster leader identified. Configure nodes to form a sync group.</div>
+        <div class="sync-empty-state">
+          {clusterTopology.state === 'NO_LEADER'
+            ? 'No cluster leader identified. Configure nodes to form a sync group.'
+            : 'Cluster topology in conflict. Resolve node roles before proceeding.'}
+        </div>
       {/if}
     </div>
   </section>
 
-  <!-- Section 3: Synchronized Playback Control (Gated on Parity) -->
+  <!-- Section 3: Show Transport v2 & Synchronized Playback Control -->
   <section class="sync-section-card" aria-label="Synchronized Cluster Controls">
     <div class="sync-card-header">
       <div>
-        <h2 class="sync-section-title">Synchronized Cluster Playback</h2>
-        <p class="sync-section-desc">Commands are sent to the Leader only; followers derive output locally via NodeSync.</p>
+        <h2 class="sync-section-title">Synchronized Show Transport</h2>
+        <p class="sync-section-desc">
+          Unified transport controls sent to Leader ({leaderNodeData?.syncStatus?.activeRole === 'master' ? (leaderNodeData.node.name || leaderIp) : 'NO LEADER'}). Followers derive output locally via NodeSync protocol v4.
+        </p>
       </div>
+
+      <!-- Mode Selector Tabs -->
+      <div class="transport-tabs">
+        <button
+          class="transport-tab-btn"
+          class:active={activeTransportTab === 'scene'}
+          class:is-active-mode={clusterTransport === 'SCENE'}
+          onclick={() => (activeTransportTab = 'scene')}
+        >
+          Scene Transport
+        </button>
+        <button
+          class="transport-tab-btn"
+          class:active={activeTransportTab === 'timeline'}
+          class:is-active-mode={clusterTransport === 'TIMELINE'}
+          onclick={() => (activeTransportTab = 'timeline')}
+        >
+          Timeline Transport
+        </button>
+        <button
+          class="transport-tab-btn"
+          class:active={activeTransportTab === 'cue'}
+          class:is-active-mode={clusterTransport === 'CUE'}
+          onclick={() => (activeTransportTab = 'cue')}
+        >
+          Cue Playback
+        </button>
+      </div>
+
       {#if !isClusterReady}
         <div class="sync-gate-notice">
-          ⚠ Show content or clock lock not ready across all nodes. Align content before starting synchronized playback.
+          {#if clusterTopology.state !== 'VALID_LEADER'}
+            ⚠ Group transport locked due to topology state: {clusterTopology.state}.
+          {:else}
+            ⚠ Playback parity or clock lock not ready across all group members. Align content before starting synchronized playback.
+          {/if}
         </div>
       {/if}
     </div>
@@ -548,71 +905,193 @@
       <div class="sync-control-banner">{controlFeedback}</div>
     {/if}
 
-    <div class="sync-control-row">
-      <!-- Scene trigger -->
-      <div class="sync-control-block">
-        <label for="scene-select" class="sync-ctrl-label">Synchronized Scene</label>
-        <div class="sync-ctrl-input-group">
-          <select id="scene-select" class="sync-ctrl-select" bind:value={selectedSceneIndex} disabled={!isClusterReady}>
-            {#if availablePresets.length === 0}
-              <option value={0}>Scene 0 (Default)</option>
-            {:else}
-              {#each availablePresets as p}
-                <option value={p.index}>Scene {String(p.index).padStart(2, '0')}: {p.name}</option>
-              {/each}
-            {/if}
-          </select>
-          <button
-            class="sync-action-btn sync-btn-primary"
-            disabled={!isClusterReady || sceneTriggerPending}
-            onclick={handleTriggerSceneOnLeader}
-          >
-            {sceneTriggerPending ? 'Activating…' : 'Activate on Sync Group'}
-          </button>
+    <!-- TAB 1: SCENE TRANSPORT -->
+    {#if activeTransportTab === 'scene'}
+      <div class="sync-control-row">
+        <div class="sync-control-block">
+          <label for="scene-select" class="sync-ctrl-label">Synchronized Scene Activation</label>
+          <div class="sync-ctrl-input-group">
+            <select id="scene-select" class="sync-ctrl-select" bind:value={selectedSceneIndex} disabled={!isClusterReady}>
+              {#if availablePresets.length === 0}
+                <option value={-1} disabled selected>No scenes available</option>
+              {:else}
+                {#each availablePresets as p}
+                  <option value={p.index}>Scene {String(p.index + 1).padStart(2, '0')}: {p.name}</option>
+                {/each}
+              {/if}
+            </select>
+            <button
+              class="sync-action-btn sync-btn-primary"
+              disabled={!isClusterReady || sceneTriggerPending}
+              onclick={handleTriggerSceneOnLeader}
+            >
+              {sceneTriggerPending ? 'Activating…' : 'Activate on Sync Group'}
+            </button>
+          </div>
+          <p class="sync-ctrl-hint">
+            Acquires Scene Playback on leader and broadcasts scene index to all followers via NodeSync.
+          </p>
         </div>
       </div>
 
-      <!-- Timeline trigger -->
-      <div class="sync-control-block">
-        <span class="sync-ctrl-label">Synchronized Timeline</span>
-        <div class="sync-ctrl-input-group">
-          <div class="sync-timeline-status-badge">
-            BPM: {leaderTimeline?.bpm ?? 120} · {leaderTimeline?.enabled ? 'RUNNING' : 'STOPPED'}
+    <!-- TAB 2: TIMELINE TRANSPORT -->
+    {:else if activeTransportTab === 'timeline'}
+      <div class="sync-control-row">
+        <div class="sync-control-block">
+          <span class="sync-ctrl-label">Synchronized Timeline Playback</span>
+          <div class="sync-ctrl-input-group">
+            <div class="sync-timeline-status-badge">
+              BPM: {leaderShowTransport?.timeline?.bpm ?? leaderTimeline?.bpm ?? 120} · {leaderShowTransport?.timeline?.running ?? leaderTimeline?.enabled ? 'RUNNING' : 'STOPPED'}
+            </div>
+            {#if leaderShowTransport?.timeline?.running ?? leaderTimeline?.enabled}
+              <button
+                class="sync-action-btn sync-btn-secondary"
+                disabled={!isClusterReady || timelineTriggerPending}
+                onclick={() => handleToggleTimelineOnLeader(false)}
+              >
+                Stop Timeline
+              </button>
+            {:else}
+              <button
+                class="sync-action-btn sync-btn-primary"
+                disabled={!isClusterReady || timelineTriggerPending}
+                onclick={() => handleToggleTimelineOnLeader(true)}
+              >
+                Start Timeline
+              </button>
+            {/if}
           </div>
-          {#if leaderTimeline?.enabled}
-            <button
-              class="sync-action-btn sync-btn-secondary"
-              disabled={!isClusterReady || timelineTriggerPending}
-              onclick={() => handleToggleTimelineOnLeader(false)}
-            >
-              Stop Timeline
-            </button>
-          {:else}
-            <button
-              class="sync-action-btn sync-btn-primary"
-              disabled={!isClusterReady || timelineTriggerPending}
-              onclick={() => handleToggleTimelineOnLeader(true)}
-            >
-              Start Timeline
-            </button>
-          {/if}
+          <p class="sync-ctrl-hint">
+            Broadcasts shared timeline BPM and beat clock. Follower local timelines yield control to cluster transport.
+          </p>
         </div>
       </div>
-    </div>
+
+    <!-- TAB 3: CUE LIST TRANSPORT -->
+    {:else if activeTransportTab === 'cue'}
+      <div class="sync-cue-transport-panel">
+        <div class="sync-cue-monitor-bar">
+          <div class="sync-cue-status-group">
+            <span class="sync-cue-state-badge {leaderShowTransport?.cue?.state || leaderNodeData?.syncStatus?.cue?.state || 'idle'}">
+              {(leaderShowTransport?.cue?.state || leaderNodeData?.syncStatus?.cue?.state || 'IDLE').toUpperCase()}
+            </span>
+            <span class="sync-cue-num">
+              Current: Cue #{(leaderShowTransport?.cue?.cueIndex ?? leaderNodeData?.syncStatus?.cue?.cueIndex ?? 0) + 1}
+            </span>
+            <span class="sync-cue-arrow">➔</span>
+            <span class="sync-cue-num next">
+              Next: Cue #{(leaderShowTransport?.cue?.nextCueIndex ?? leaderNodeData?.syncStatus?.cue?.nextCueIndex ?? 0) + 1}
+            </span>
+          </div>
+
+          <div class="sync-cue-time">
+            {#if leaderShowTransport?.cue?.remainingMs !== undefined}
+              <span>{(leaderShowTransport.cue.remainingMs / 1000).toFixed(1)}s remaining</span>
+            {/if}
+          </div>
+        </div>
+
+        <div class="sync-cue-controls-grid">
+          <!-- Cue list selection & start -->
+          <div class="sync-cue-select-col">
+            <label for="cue-list-select" class="sync-ctrl-label">Select Cue List</label>
+            <div class="sync-ctrl-input-group">
+              <select id="cue-list-select" class="sync-ctrl-select" bind:value={selectedCueListIndex} disabled={!isClusterReady}>
+                {#if availableCueLists.length === 0}
+                  <option value={0}>Cue List 0 (Default)</option>
+                {:else}
+                  {#each availableCueLists as cl}
+                    <option value={cl.index}>List {cl.index + 1}: {cl.name} ({cl.mode})</option>
+                  {/each}
+                {/if}
+              </select>
+              <button
+                class="sync-action-btn sync-btn-primary"
+                disabled={!isClusterReady || cueTriggerPending}
+                onclick={handleStartCueList}
+              >
+                {cueTriggerPending ? 'Starting…' : '▶ Start List'}
+              </button>
+            </div>
+          </div>
+
+          <!-- Transport buttons -->
+          <div class="sync-cue-buttons-col">
+            <span class="sync-ctrl-label">Transport Controls</span>
+            <div class="sync-cue-btn-row">
+              <button class="sync-action-btn sync-btn-secondary" disabled={!isClusterReady} onclick={handlePauseCue} title="Pause Cue">
+                ⏸ Pause
+              </button>
+              <button class="sync-action-btn sync-btn-secondary" disabled={!isClusterReady} onclick={handleResumeCue} title="Resume Cue">
+                ⏯ Resume
+              </button>
+              <button class="sync-action-btn sync-btn-secondary" disabled={!isClusterReady} onclick={handleStopCue} title="Stop Cue">
+                ⏹ Stop
+              </button>
+              <button class="sync-action-btn sync-btn-secondary" disabled={!isClusterReady} onclick={handlePreviousCue} title="Previous Cue">
+                ⏮ Prev
+              </button>
+              <button class="sync-action-btn sync-btn-secondary" disabled={!isClusterReady} onclick={handleNextCue} title="Next Cue">
+                ⏭ Next
+              </button>
+            </div>
+          </div>
+
+          <!-- Jump to Cue -->
+          <div class="sync-cue-jump-col">
+            <label for="cue-jump-input" class="sync-ctrl-label">Jump to Cue</label>
+            <div class="sync-ctrl-input-group">
+              <input
+                id="cue-jump-input"
+                type="number"
+                min="0"
+                max="31"
+                class="sync-ctrl-number"
+                bind:value={cueJumpIndex}
+                disabled={!isClusterReady}
+              />
+              <button class="sync-action-btn sync-btn-secondary" disabled={!isClusterReady} onclick={handleJumpCue}>
+                Jump
+              </button>
+            </div>
+          </div>
+
+          <!-- Manual Crossfade Slider -->
+          <div class="sync-cue-fader-col">
+            <label for="sync-manual-fader" class="sync-ctrl-label">
+              Manual Crossfade (T-Bar): {Math.round(manualCrossfadeValue * 100)}%
+            </label>
+            <input
+              id="sync-manual-fader"
+              type="range"
+              min="0"
+              max="1"
+              step="0.01"
+              value={manualCrossfadeValue}
+              oninput={handleManualCrossfade}
+              disabled={!isClusterReady}
+              class="sync-fader-slider"
+            />
+          </div>
+        </div>
+      </div>
+    {/if}
   </section>
 
   <!-- Section 4: Fleet Member Detail List -->
   <section class="sync-section-card" aria-label="Fleet Nodes Parity and Clock Status">
     <div class="sync-card-header">
       <div>
-        <h2 class="sync-section-title">Fleet Nodes & Parity</h2>
-        <p class="sync-section-desc">Individual node clock locks, network jitter, and manifest parity.</p>
+        <h2 class="sync-section-title">
+          {selectedGroupLabel === 'All' ? 'Fleet Members & Parity' : `Group Members: ${selectedGroupLabel}`}
+        </h2>
+        <p class="sync-section-desc">Clock locks, network jitter, playback manifest parity, and schedule parity.</p>
       </div>
     </div>
 
     <div class="sync-node-list">
-      {#each nodes as node}
-        {@const data = fleetData[node.ip]}
+      {#each activeGroupNodes as data}
+        {@const node = data.node}
         <div class="sync-node-row" class:offline={!data?.online}>
           <div class="sync-node-main">
             <div class="sync-node-title-row">
@@ -624,6 +1103,14 @@
                 <span class="sync-role-pill follower-pill">FOLLOWER</span>
               {:else}
                 <span class="sync-role-pill standalone-pill">STANDALONE</span>
+              {/if}
+              {#if data?.syncStatus?.groupLabel}
+                <span class="sync-group-tag">{data.syncStatus.groupLabel}</span>
+              {/if}
+              {#if data?.reachabilityState && data.reachabilityState !== 'ONLINE'}
+                <span class="sync-role-pill reachability-pill" class:reachability-offline={data.reachabilityState === 'OFFLINE'}>
+                  {data.reachabilityState}
+                </span>
               {/if}
             </div>
 
@@ -653,284 +1140,349 @@
 
                 {#if data.syncStatus?.activeRole === 'worker' && data.syncStatus.masterAddress}
                   <span class="sync-metric-item">
-                    Leader: <strong>{data.syncStatus.masterAddress}</strong>
+                    Tracking: <strong>{data.syncStatus.masterAddress}</strong>
+                  </span>
+                {/if}
+
+                {#if data.syncStatus?.transportApplyOk === false}
+                  <span class="sync-metric-item text-warn">
+                    Transport Apply Error ({data.syncStatus.transportError || 'Failed'})
                   </span>
                 {/if}
               {:else}
-                <span class="sync-metric-item text-warn">Node Unreachable ({data?.error || 'Offline'})</span>
+                <span class="sync-metric-item text-warn">Node Unreachable ({data?.reachabilityState || data?.error || 'Offline'})</span>
               {/if}
             </div>
           </div>
 
-          <div class="sync-node-parity">
-            {#if !data?.online}
-              <span class="sync-parity-badge offline">OFFLINE</span>
-            {:else if data.parity?.status === 'MATCHED'}
-              <span class="sync-parity-badge matched">MATCHED</span>
-            {:else if data.parity?.status === 'DRIFT'}
-              <div class="sync-drift-col">
-                <span class="sync-parity-badge drift">SHOW DRIFT</span>
-                <button class="sync-diff-link" onclick={() => (diffTargetNode = data)}>
-                  Inspect Diff
-                </button>
-              </div>
-            {:else if data.parity?.status === 'INCOMPATIBLE'}
-              <span class="sync-parity-badge incompatible" title={data.parity.reason}>INCOMPATIBLE</span>
-            {:else}
-              <span class="sync-parity-badge unavailable">UNAVAILABLE</span>
+          <div class="sync-node-parity-group">
+            <!-- Playback parity badge -->
+            <div class="sync-parity-item">
+              <span class="sync-parity-title">Playback:</span>
+              {#if !data?.online}
+                <span class="sync-parity-badge offline">{data?.reachabilityState === 'OFFLINE' ? 'OFFLINE' : 'UNREACHABLE'}</span>
+              {:else if data.playbackParity?.status === 'MATCHED'}
+                <span class="sync-parity-badge matched">MATCHED</span>
+              {:else if data.playbackParity?.status === 'DRIFT'}
+                <span class="sync-parity-badge drift">DRIFT</span>
+              {:else if data.playbackParity?.status === 'INCOMPATIBLE'}
+                <span class="sync-parity-badge incompatible" title={data.playbackParity.reason}>INCOMPATIBLE</span>
+              {:else}
+                <span class="sync-parity-badge unavailable">UNAVAILABLE</span>
+              {/if}
+            </div>
+
+            <!-- Schedule parity badge -->
+            <div class="sync-parity-item">
+              <span class="sync-parity-title">Schedule:</span>
+              {#if !data?.online}
+                <span class="sync-parity-badge offline">{data?.reachabilityState === 'OFFLINE' ? 'OFFLINE' : 'UNREACHABLE'}</span>
+              {:else if data.scheduleParity?.status === 'MATCHED'}
+                <span class="sync-parity-badge matched">MATCHED</span>
+              {:else if data.scheduleParity?.status === 'DRIFT'}
+                <span class="sync-parity-badge drift sched">DIFF</span>
+              {:else}
+                <span class="sync-parity-badge unavailable">—</span>
+              {/if}
+            </div>
+
+            {#if data.playbackParity?.status === 'DRIFT' || data.scheduleParity?.status === 'DRIFT'}
+              <button class="sync-diff-link" onclick={() => (diffTargetNode = data)}>
+                Inspect Diff
+              </button>
             {/if}
           </div>
         </div>
       {/each}
     </div>
+
+    <!-- Section for nodes not in this group -->
+    {#if otherFleetNodes.length > 0}
+      <div class="sync-other-nodes-header">
+        <h3 class="sync-other-title">Other Fleet Nodes (Not in {selectedGroupLabel})</h3>
+        <p class="sync-other-desc">These nodes do not participate in the active group's sync protocol or readiness gate.</p>
+      </div>
+
+      <div class="sync-node-list">
+        {#each otherFleetNodes as data}
+          {@const node = data.node}
+          <div class="sync-node-row is-other">
+            <div class="sync-node-main">
+              <div class="sync-node-title-row">
+                <span class="sync-node-name">{node.name || 'Unnamed Node'}</span>
+                <span class="sync-node-ip">{node.ip}</span>
+                <span class="sync-role-pill standalone-pill">
+                  {data?.syncStatus?.groupLabel ? `Group: ${data.syncStatus.groupLabel}` : 'No Group'}
+                </span>
+                {#if data?.reachabilityState && data.reachabilityState !== 'ONLINE'}
+                  <span class="sync-role-pill reachability-pill" class:reachability-offline={data.reachabilityState === 'OFFLINE'}>
+                    {data.reachabilityState}
+                  </span>
+                {/if}
+              </div>
+            </div>
+          </div>
+        {/each}
+      </div>
+    {/if}
   </section>
 </div>
 
 <!-- Modal 1: Configure Sync Group (Admin Only) -->
-{#if showConfigureModal}
-  <div class="sync-modal-backdrop" onclick={() => (showConfigureModal = false)}>
-    <div class="sync-modal-box" onclick={(e) => e.stopPropagation()}>
-      <div class="sync-modal-header">
-        <h3 class="sync-modal-title">Configure Sync Group</h3>
-        <button class="sync-modal-close" onclick={() => (showConfigureModal = false)}>✕</button>
-      </div>
+<OperatorPanelDialog
+  open={showConfigureModal}
+  title="Configure Sync Group"
+  description="Manage cluster election mode, group label, and cluster membership."
+  maxWidth="560px"
+  onclose={() => (showConfigureModal = false)}
+>
+  {#snippet children()}
+    {#if configCryptoError}
+      <div class="sync-modal-alert error">{configCryptoError}</div>
+    {/if}
+    {#if configError}
+      <div class="sync-modal-alert error">{configError}</div>
+    {/if}
+    {#if configSuccess}
+      <div class="sync-modal-alert success">{configSuccess}</div>
+    {/if}
 
-      <div class="sync-modal-body">
-        {#if configError}
-          <div class="sync-modal-alert error">{configError}</div>
-        {/if}
-        {#if configSuccess}
-          <div class="sync-modal-alert success">{configSuccess}</div>
-        {/if}
+    <div class="sync-form-group">
+      <label for="cfg-group-name" class="sync-form-label">Cluster Group Label</label>
+      <input
+        id="cfg-group-name"
+        type="text"
+        class="sync-form-input"
+        bind:value={configGroupName}
+        placeholder="e.g. Main Façade"
+      />
+    </div>
 
-        <div class="sync-form-group">
-          <label for="cfg-group-name" class="sync-form-label">Cluster Group Label</label>
-          <input
-            id="cfg-group-name"
-            type="text"
-            class="sync-form-input"
-            bind:value={configGroupName}
-            placeholder="e.g. Main Façade"
-          />
-        </div>
-
-        <div class="sync-form-group">
-          <span class="sync-form-label">Election Mode</span>
-          <div class="sync-radio-group">
-            <label class="sync-radio-opt">
-              <input type="radio" bind:group={configMode} value="auto" />
-              <span>Automatic Election (Nodes elect highest priority leader)</span>
-            </label>
-            <label class="sync-radio-opt">
-              <input type="radio" bind:group={configMode} value="explicit" />
-              <span>Explicit Leader (Designate one authoritative master node)</span>
-            </label>
-          </div>
-        </div>
-
-        {#if configMode === 'explicit'}
-          <div class="sync-form-group">
-            <label for="cfg-explicit-leader" class="sync-form-label">Designated Leader Node</label>
-            <select id="cfg-explicit-leader" class="sync-form-select" bind:value={configLeaderIp}>
-              {#each nodes as n}
-                <option value={n.ip}>{n.name || n.ip} ({n.ip})</option>
-              {/each}
-            </select>
-          </div>
-        {/if}
-
-        <div class="sync-form-group">
-          <span class="sync-form-label">Cluster Member Nodes</span>
-          <div class="sync-checkbox-list">
-            {#each nodes as n}
-              <label class="sync-checkbox-opt">
-                <input
-                  type="checkbox"
-                  checked={configSelectedIps.includes(n.ip)}
-                  onchange={(e) => {
-                    const target = e.currentTarget;
-                    if (target.checked) {
-                      configSelectedIps = [...configSelectedIps, n.ip];
-                    } else {
-                      configSelectedIps = configSelectedIps.filter((ip) => ip !== n.ip);
-                    }
-                  }}
-                />
-                <span>{n.name || n.ip} ({n.ip})</span>
-              </label>
-            {/each}
-          </div>
-        </div>
-
-        <p class="sync-form-hint">
-          A cryptographically secure cluster sync token will be generated and distributed to all selected nodes.
-        </p>
-      </div>
-
-      <div class="sync-modal-footer">
-        <button class="sync-action-btn sync-btn-secondary" onclick={() => (showConfigureModal = false)}>
-          Cancel
-        </button>
-        <button
-          class="sync-action-btn sync-btn-primary"
-          disabled={configSaving}
-          onclick={handleSaveClusterConfig}
-        >
-          {configSaving ? 'Applying to Fleet…' : 'Save & Distribute Sync Config'}
-        </button>
+    <div class="sync-form-group">
+      <span class="sync-form-label">Election Mode</span>
+      <div class="sync-radio-group">
+        <label class="sync-radio-opt">
+          <input type="radio" bind:group={configMode} value="auto" />
+          <span>Automatic Election (Nodes elect highest priority leader)</span>
+        </label>
+        <label class="sync-radio-opt">
+          <input type="radio" bind:group={configMode} value="explicit" />
+          <span>Explicit Leader (Designate one authoritative master node)</span>
+        </label>
       </div>
     </div>
-  </div>
-{/if}
+
+    {#if configMode === 'explicit'}
+      <div class="sync-form-group">
+        <label for="cfg-explicit-leader" class="sync-form-label">Designated Leader Node</label>
+        <select id="cfg-explicit-leader" class="sync-form-select" bind:value={configLeaderIp}>
+          {#each nodes as n}
+            <option value={n.ip}>{n.name || n.ip} ({n.ip})</option>
+          {/each}
+        </select>
+      </div>
+    {/if}
+
+    <div class="sync-form-group">
+      <span class="sync-form-label">Cluster Member Nodes</span>
+      <div class="sync-checkbox-list">
+        {#each nodes as n}
+          <label class="sync-checkbox-opt">
+            <input
+              type="checkbox"
+              checked={configSelectedIps.includes(n.ip)}
+              onchange={(e) => {
+                const target = e.currentTarget;
+                if (target.checked) {
+                  configSelectedIps = [...configSelectedIps, n.ip];
+                } else {
+                  configSelectedIps = configSelectedIps.filter((ip) => ip !== n.ip);
+                }
+              }}
+            />
+            <span>{n.name || n.ip} ({n.ip})</span>
+          </label>
+        {/each}
+      </div>
+    </div>
+
+    <p class="sync-form-hint">
+      A cryptographically secure cluster sync token will be generated via Web Crypto and distributed to all selected nodes.
+    </p>
+  {/snippet}
+
+  {#snippet footer()}
+    <button class="sync-action-btn sync-btn-secondary" onclick={() => (showConfigureModal = false)}>
+      Cancel
+    </button>
+    <button
+      class="sync-action-btn sync-btn-primary"
+      disabled={configSaving || Boolean(configCryptoError)}
+      onclick={handleSaveClusterConfig}
+    >
+      {configSaving ? 'Applying to Fleet…' : 'Save & Distribute Sync Config'}
+    </button>
+  {/snippet}
+</OperatorPanelDialog>
 
 <!-- Modal 2: Deploy Show Content (Admin Only) -->
-{#if showDeployModal}
-  <div class="sync-modal-backdrop" onclick={() => !deployRunning && (showDeployModal = false)}>
-    <div class="sync-modal-box sync-modal-lg" onclick={(e) => e.stopPropagation()}>
-      <div class="sync-modal-header">
-        <h3 class="sync-modal-title">Deploy Show Content Across Fleet</h3>
-        <button class="sync-modal-close" disabled={deployRunning} onclick={() => (showDeployModal = false)}>✕</button>
-      </div>
+<OperatorPanelDialog
+  open={showDeployModal}
+  title="Deploy Show Content Across Fleet"
+  description="Mirror show configuration and content from golden master across fleet members."
+  maxWidth="640px"
+  allowBackdropClose={!deployRunning}
+  onclose={() => !deployRunning && (showDeployModal = false)}
+>
+  {#snippet children()}
+    {#if deployError}
+      <div class="sync-modal-alert error">{deployError}</div>
+    {/if}
 
-      <div class="sync-modal-body">
-        {#if deployError}
-          <div class="sync-modal-alert error">{deployError}</div>
-        {/if}
+    <div class="sync-form-group">
+      <label for="dep-source" class="sync-form-label">Source Node (Golden Master)</label>
+      <select id="dep-source" class="sync-form-select" bind:value={deploySourceIp} disabled={deployRunning}>
+        {#each nodes as n}
+          <option value={n.ip}>{n.name || n.ip} ({n.ip})</option>
+        {/each}
+      </select>
+    </div>
 
-        <div class="sync-form-group">
-          <label for="dep-source" class="sync-form-label">Source Node (Golden Master)</label>
-          <select id="dep-source" class="sync-form-select" bind:value={deploySourceIp} disabled={deployRunning}>
-            {#each nodes as n}
-              <option value={n.ip}>{n.name || n.ip} ({n.ip})</option>
-            {/each}
-          </select>
-        </div>
-
-        <div class="sync-form-group">
-          <span class="sync-form-label">Target Nodes to Deploy</span>
-          <div class="sync-checkbox-list">
-            {#each nodes.filter((n) => n.ip !== deploySourceIp) as n}
-              <label class="sync-checkbox-opt">
-                <input
-                  type="checkbox"
-                  disabled={deployRunning}
-                  checked={deployTargetIps.includes(n.ip)}
-                  onchange={(e) => {
-                    const target = e.currentTarget;
-                    if (target.checked) {
-                      deployTargetIps = [...deployTargetIps, n.ip];
-                    } else {
-                      deployTargetIps = deployTargetIps.filter((ip) => ip !== n.ip);
-                    }
-                  }}
-                />
-                <span>{n.name || n.ip} ({n.ip})</span>
-              </label>
-            {/each}
-          </div>
-        </div>
-
-        <div class="sync-form-group">
-          <span class="sync-form-label">Content Categories to Synchronize</span>
-          <div class="sync-cat-grid">
-            <label class="sync-checkbox-opt">
-              <input type="checkbox" bind:checked={deployOptions.scenes} disabled={deployRunning} />
-              <span>Scene Presets</span>
-            </label>
-            <label class="sync-checkbox-opt">
-              <input type="checkbox" bind:checked={deployOptions.sceneMotion} disabled={deployRunning} />
-              <span>Scene Motion Tracks</span>
-            </label>
-            <label class="sync-checkbox-opt">
-              <input type="checkbox" bind:checked={deployOptions.timeline} disabled={deployRunning} />
-              <span>Timeline Sequence</span>
-            </label>
-            <label class="sync-checkbox-opt">
-              <input type="checkbox" bind:checked={deployOptions.cueLists} disabled={deployRunning} />
-              <span>Cue Lists</span>
-            </label>
-            <label class="sync-checkbox-opt">
-              <input type="checkbox" bind:checked={deployOptions.schedules} disabled={deployRunning} />
-              <span>Calendar Schedules (Optional)</span>
-            </label>
-          </div>
-        </div>
-
-        <div class="sync-form-group">
-          <label class="sync-checkbox-opt highlight-opt">
-            <input type="checkbox" bind:checked={deployOptions.mirrorExactly} disabled={deployRunning} />
-            <span><strong>Mirror Exactly:</strong> Delete obsolete presets or cue lists on targets not present on source. (Does not affect device hardware or networking).</span>
+    <div class="sync-form-group">
+      <span class="sync-form-label">Target Nodes to Deploy</span>
+      <div class="sync-checkbox-list">
+        {#each nodes.filter((n) => n.ip !== deploySourceIp) as n}
+          <label class="sync-checkbox-opt">
+            <input
+              type="checkbox"
+              disabled={deployRunning}
+              checked={deployTargetIps.includes(n.ip)}
+              onchange={(e) => {
+                const target = e.currentTarget;
+                if (target.checked) {
+                  deployTargetIps = [...deployTargetIps, n.ip];
+                } else {
+                  deployTargetIps = deployTargetIps.filter((ip) => ip !== n.ip);
+                }
+              }}
+            />
+            <span>{n.name || n.ip} ({n.ip})</span>
           </label>
-        </div>
-
-        {#if Object.keys(deployResults).length > 0}
-          <div class="sync-deploy-progress-box">
-            <h4 class="sync-progress-title">Deployment Progress</h4>
-            {#each Object.entries(deployResults) as [ip, res]}
-              <div class="sync-progress-row">
-                <span class="sync-progress-ip">{ip}</span>
-                <span class="sync-progress-state {res.state}">
-                  {res.state.toUpperCase()} {res.currentAsset ? `· ${res.currentAsset}` : ''}
-                </span>
-                {#if res.error}
-                  <span class="sync-progress-err">{res.error}</span>
-                {/if}
-              </div>
-            {/each}
-          </div>
-        {/if}
-      </div>
-
-      <div class="sync-modal-footer">
-        <button class="sync-action-btn sync-btn-secondary" disabled={deployRunning} onclick={() => (showDeployModal = false)}>
-          Close
-        </button>
-        <button class="sync-action-btn sync-btn-primary" disabled={deployRunning} onclick={handleDeployShow}>
-          {deployRunning ? 'Deploying Content…' : 'Start Deployment'}
-        </button>
+        {/each}
       </div>
     </div>
-  </div>
-{/if}
+
+    <div class="sync-form-group">
+      <span class="sync-form-label">Content Categories to Synchronize</span>
+      <div class="sync-cat-grid">
+        <label class="sync-checkbox-opt">
+          <input type="checkbox" bind:checked={deployOptions.scenes} disabled={deployRunning} />
+          <span>Scene Presets</span>
+        </label>
+        <label class="sync-checkbox-opt">
+          <input type="checkbox" bind:checked={deployOptions.sceneMotion} disabled={deployRunning} />
+          <span>Scene Motion Tracks</span>
+        </label>
+        <label class="sync-checkbox-opt">
+          <input type="checkbox" bind:checked={deployOptions.timeline} disabled={deployRunning} />
+          <span>Timeline Sequence</span>
+        </label>
+        <label class="sync-checkbox-opt">
+          <input type="checkbox" bind:checked={deployOptions.cueLists} disabled={deployRunning} />
+          <span>Cue Lists</span>
+        </label>
+        <label class="sync-checkbox-opt">
+          <input type="checkbox" bind:checked={deployOptions.schedules} disabled={deployRunning} />
+          <span>Calendar Schedules (Optional)</span>
+        </label>
+      </div>
+    </div>
+
+    <div class="sync-form-group">
+      <label class="sync-checkbox-opt highlight-opt">
+        <input type="checkbox" bind:checked={deployOptions.mirrorExactly} disabled={deployRunning} />
+        <span><strong>Mirror Exactly:</strong> Delete obsolete presets, motion tracks, or cue lists on targets not present on source.</span>
+      </label>
+    </div>
+
+    {#if Object.keys(deployResults).length > 0}
+      <div class="sync-deploy-progress-box">
+        <h4 class="sync-progress-title">Deployment Progress</h4>
+        {#each Object.entries(deployResults) as [ip, res]}
+          <div class="sync-progress-row">
+            <span class="sync-progress-ip">{ip}</span>
+            <span class="sync-progress-state {res.state}">
+              {res.state.toUpperCase()} {res.currentAsset ? `· ${res.currentAsset}` : ''}
+            </span>
+            {#if res.error}
+              <span class="sync-progress-err">{res.error}</span>
+            {/if}
+          </div>
+        {/each}
+      </div>
+    {/if}
+  {/snippet}
+
+  {#snippet footer()}
+    <button class="sync-action-btn sync-btn-secondary" disabled={deployRunning} onclick={() => (showDeployModal = false)}>
+      Close
+    </button>
+    <button class="sync-action-btn sync-btn-primary" disabled={deployRunning} onclick={handleDeployShow}>
+      {deployRunning ? 'Deploying Content…' : 'Start Deployment'}
+    </button>
+  {/snippet}
+</OperatorPanelDialog>
 
 <!-- Modal 3: Show Diff Inspector -->
-{#if diffTargetNode}
-  <div class="sync-modal-backdrop" onclick={() => (diffTargetNode = null)}>
-    <div class="sync-modal-box" onclick={(e) => e.stopPropagation()}>
-      <div class="sync-modal-header">
-        <h3 class="sync-modal-title">
-          Show Content Diff: {diffTargetNode.node.name || diffTargetNode.node.ip}
-        </h3>
-        <button class="sync-modal-close" onclick={() => (diffTargetNode = null)}>✕</button>
+<OperatorPanelDialog
+  open={Boolean(diffTargetNode)}
+  title={`Show Content Diff: ${diffTargetNode?.node.name || diffTargetNode?.node.ip || ''}`}
+  description={`Comparing against current Leader (${leaderNodeData?.node.name || leaderIp || 'None'}).`}
+  maxWidth="640px"
+  onclose={() => (diffTargetNode = null)}
+>
+  {#snippet children()}
+    {#if diffTargetNode}
+      <p class="sync-diff-desc">
+        Comparing against current Leader ({leaderNodeData?.node.name || leaderNodeData?.node.ip}).
+      </p>
+
+      <h4 class="sync-diff-subheading">Playback Assets ({diffTargetNode.playbackParity?.status || 'UNAVAILABLE'})</h4>
+      <div class="sync-diff-table">
+        {#if diffTargetNode.playbackParity?.diffs && diffTargetNode.playbackParity.diffs.length > 0}
+          {#each diffTargetNode.playbackParity.diffs as diff}
+            <div class="sync-diff-row state-{diff.state}">
+              <span class="sync-diff-label">{diff.label}</span>
+              <span class="sync-diff-status badge-{diff.state}">{diff.state.toUpperCase()}</span>
+            </div>
+          {/each}
+        {:else}
+          <div class="sync-diff-empty">All playback assets matched.</div>
+        {/if}
       </div>
 
-      <div class="sync-modal-body">
-        <p class="sync-diff-desc">
-          Comparing against current Leader ({leaderNodeData?.node.name || leaderNodeData?.node.ip}).
-        </p>
-
-        <div class="sync-diff-table">
-          {#if diffTargetNode.parity?.diffs && diffTargetNode.parity.diffs.length > 0}
-            {#each diffTargetNode.parity.diffs as diff}
-              <div class="sync-diff-row state-{diff.state}">
-                <span class="sync-diff-label">{diff.label}</span>
-                <span class="sync-diff-status badge-{diff.state}">{diff.state.toUpperCase()}</span>
-              </div>
-            {/each}
-          {:else}
-            <div class="sync-diff-empty">No detailed difference items available.</div>
-          {/if}
-        </div>
+      <h4 class="sync-diff-subheading" style="margin-top: 1rem;">Calendar Schedules ({diffTargetNode.scheduleParity?.status || 'UNAVAILABLE'})</h4>
+      <div class="sync-diff-table">
+        {#if diffTargetNode.scheduleParity?.diffs && diffTargetNode.scheduleParity.diffs.length > 0}
+          {#each diffTargetNode.scheduleParity.diffs as diff}
+            <div class="sync-diff-row state-{diff.state}">
+              <span class="sync-diff-label">{diff.label}</span>
+              <span class="sync-diff-status badge-{diff.state}">{diff.state.toUpperCase()}</span>
+            </div>
+          {/each}
+        {:else}
+          <div class="sync-diff-empty">No schedule differences.</div>
+        {/if}
       </div>
+    {/if}
+  {/snippet}
 
-      <div class="sync-modal-footer">
-        <button class="sync-action-btn sync-btn-secondary" onclick={() => (diffTargetNode = null)}>
-          Done
-        </button>
-      </div>
-    </div>
-  </div>
-{/if}
+  {#snippet footer()}
+    <button class="sync-action-btn sync-btn-secondary" onclick={() => (diffTargetNode = null)}>
+      Done
+    </button>
+  {/snippet}
+</OperatorPanelDialog>
 
 <style>
   /* ── Layout & Typography ───────────────────────────────────────── */
@@ -944,21 +1496,48 @@
     margin: 0 auto;
   }
 
-  .sync-cue-banner {
+  .sync-alert-banner {
     display: flex;
     align-items: center;
-    gap: 0.75rem;
-    padding: 0.85rem 1.25rem;
-    background: rgba(16, 185, 129, 0.08);
-    border: 1px solid rgba(16, 185, 129, 0.25);
+    gap: 1rem;
+    padding: 1rem 1.25rem;
     border-radius: 8px;
     font-size: 0.875rem;
-    color: #a7f3d0;
+  }
+
+  .sync-alert-banner.alert-warn {
+    background: rgba(245, 158, 11, 0.12);
+    border: 1px solid rgba(245, 158, 11, 0.35);
+    color: #fde68a;
+  }
+
+  .sync-alert-banner.alert-danger {
+    background: rgba(239, 68, 68, 0.12);
+    border: 1px solid rgba(239, 68, 68, 0.35);
+    color: #fca5a5;
   }
 
   .sync-banner-icon {
+    font-size: 1.4rem;
     font-weight: 700;
-    color: #10b981;
+  }
+
+  .sync-banner-body strong {
+    display: block;
+    font-size: 0.95rem;
+    margin-bottom: 0.25rem;
+  }
+
+  .sync-banner-body p {
+    margin: 0;
+    font-size: 0.82rem;
+  }
+
+  .sync-banner-body code {
+    background: rgba(0, 0, 0, 0.3);
+    padding: 0.1rem 0.35rem;
+    border-radius: 4px;
+    font-family: monospace;
   }
 
   .sync-header {
@@ -967,13 +1546,14 @@
     align-items: flex-start;
     flex-wrap: wrap;
     gap: 1rem;
-    border-bottom: 1px solid #1e293b;
+    border-bottom: 1px solid var(--dash-surface, rgba(255, 255, 255, 0.05));
     padding-bottom: 1.25rem;
   }
 
   .sync-badge-row {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 0.5rem;
     margin-bottom: 0.5rem;
   }
@@ -983,7 +1563,7 @@
     font-weight: 700;
     letter-spacing: 0.08em;
     padding: 0.2rem 0.5rem;
-    background: #1e293b;
+    background: var(--dash-surface, rgba(255, 255, 255, 0.05));
     border-radius: 4px;
     color: #94a3b8;
   }
@@ -997,17 +1577,44 @@
 
   .sync-status-pill.sync-ready {
     background: rgba(16, 185, 129, 0.2);
-    color: #34d399;
+    color: var(--dash-ok, #30d158);
   }
 
   .sync-status-pill.sync-warn {
     background: rgba(245, 158, 11, 0.2);
-    color: #fbbf24;
+    color: var(--dash-warm, #ff9500);
+  }
+
+  .sync-status-pill.sync-danger {
+    background: rgba(239, 68, 68, 0.2);
+    color: #f87171;
   }
 
   .sync-status-pill.sync-neutral {
     background: rgba(148, 163, 184, 0.2);
     color: #cbd5e1;
+  }
+
+  .sync-group-filter-wrap {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    margin-left: 0.5rem;
+  }
+
+  .sync-filter-label {
+    font-size: 0.75rem;
+    color: #94a3b8;
+    font-weight: 600;
+  }
+
+  .sync-filter-select {
+    background: var(--dash-surface, rgba(255, 255, 255, 0.05));
+    color: #f8fafc;
+    border: 1px solid var(--dash-border, rgba(255, 255, 255, 0.12));
+    padding: 0.2rem 0.5rem;
+    border-radius: 4px;
+    font-size: 0.75rem;
   }
 
   .sync-title {
@@ -1040,11 +1647,11 @@
   }
 
   .sync-btn-primary {
-    background: #10b981;
+    background: var(--dash-ok, #30d158);
     color: #022c22;
   }
   .sync-btn-primary:hover:not(:disabled) {
-    background: #34d399;
+    background: var(--dash-ok, #30d158);
   }
   .sync-btn-primary:disabled {
     opacity: 0.5;
@@ -1052,31 +1659,35 @@
   }
 
   .sync-btn-secondary {
-    background: #1e293b;
+    background: var(--dash-surface, rgba(255, 255, 255, 0.05));
     color: #e2e8f0;
-    border: 1px solid #334155;
+    border: 1px solid var(--dash-border, rgba(255, 255, 255, 0.12));
   }
   .sync-btn-secondary:hover:not(:disabled) {
-    background: #334155;
+    background: var(--dash-border, rgba(255, 255, 255, 0.12));
+  }
+  .sync-btn-secondary:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 
   .sync-btn-icon {
-    background: #1e293b;
+    background: var(--dash-surface, rgba(255, 255, 255, 0.05));
     color: #e2e8f0;
-    border: 1px solid #334155;
+    border: 1px solid var(--dash-border, rgba(255, 255, 255, 0.12));
     padding: 0.55rem 0.85rem;
   }
 
   /* ── Metric Summary Tiles ───────────────────────────────────────── */
   .sync-summary-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
     gap: 1rem;
   }
 
   .sync-metric-tile {
-    background: #0f172a;
-    border: 1px solid #1e293b;
+    background: var(--dash-surface-muted, #111114);
+    border: 1px solid var(--dash-surface, rgba(255, 255, 255, 0.05));
     border-radius: 8px;
     padding: 1rem;
     display: flex;
@@ -1098,20 +1709,20 @@
   }
 
   .sync-metric-val.highlight {
-    color: #38bdf8;
+    color: var(--dash-led, #00d4ff);
     font-size: 1.25rem;
   }
 
   .sync-metric-val.success {
-    color: #34d399;
+    color: var(--dash-ok, #30d158);
   }
 
   .sync-metric-val.warn {
-    color: #fbbf24;
+    color: var(--dash-warm, #ff9500);
   }
 
   .sync-metric-val.mode {
-    color: #a78bfa;
+    color: var(--dash-accent, #ff2d55);
   }
 
   .sync-metric-denom {
@@ -1126,8 +1737,8 @@
 
   /* ── Section Cards ─────────────────────────────────────────────── */
   .sync-section-card {
-    background: #0f172a;
-    border: 1px solid #1e293b;
+    background: var(--dash-surface-muted, #111114);
+    border: 1px solid var(--dash-surface, rgba(255, 255, 255, 0.05));
     border-radius: 8px;
     padding: 1.25rem;
     display: flex;
@@ -1140,7 +1751,7 @@
     justify-content: space-between;
     align-items: center;
     flex-wrap: wrap;
-    gap: 0.5rem;
+    gap: 0.75rem;
   }
 
   .sync-section-title {
@@ -1158,7 +1769,7 @@
 
   .sync-gate-notice {
     font-size: 0.8rem;
-    color: #fbbf24;
+    color: var(--dash-warm, #ff9500);
     background: rgba(245, 158, 11, 0.1);
     padding: 0.4rem 0.75rem;
     border-radius: 6px;
@@ -1183,18 +1794,18 @@
     align-items: center;
     gap: 0.75rem;
     padding: 0.6rem 1rem;
-    background: #1e293b;
-    border: 1px solid #334155;
+    background: var(--dash-surface, rgba(255, 255, 255, 0.05));
+    border: 1px solid var(--dash-border, rgba(255, 255, 255, 0.12));
     border-radius: 8px;
   }
 
   .sync-topo-node-badge.is-leader {
-    border-color: #10b981;
+    border-color: var(--dash-ok, #30d158);
     background: rgba(16, 185, 129, 0.1);
   }
 
   .sync-topo-icon {
-    color: #10b981;
+    color: var(--dash-ok, #30d158);
     font-size: 1.2rem;
   }
 
@@ -1224,17 +1835,25 @@
 
   .leader-pill {
     background: rgba(16, 185, 129, 0.2);
-    color: #34d399;
+    color: var(--dash-ok, #30d158);
   }
 
   .follower-pill {
     background: rgba(56, 189, 248, 0.2);
-    color: #38bdf8;
+    color: var(--dash-led, #00d4ff);
   }
 
   .standalone-pill {
     background: rgba(148, 163, 184, 0.2);
     color: #94a3b8;
+  }
+
+  .sync-group-tag {
+    font-size: 0.65rem;
+    background: var(--dash-border, rgba(255, 255, 255, 0.12));
+    color: #cbd5e1;
+    padding: 0.15rem 0.4rem;
+    border-radius: 4px;
   }
 
   .sync-topo-bus {
@@ -1250,7 +1869,7 @@
     left: 10%;
     right: 10%;
     height: 2px;
-    background: #334155;
+    background: var(--dash-border, rgba(255, 255, 255, 0.12));
   }
 
   .sync-topo-followers {
@@ -1270,7 +1889,7 @@
   .sync-topo-drop-line {
     width: 2px;
     height: 16px;
-    background: #334155;
+    background: var(--dash-border, rgba(255, 255, 255, 0.12));
   }
 
   .sync-topo-stats {
@@ -1280,15 +1899,20 @@
 
   .sync-pill-tag {
     font-size: 0.7rem;
-    background: #0f172a;
+    background: var(--dash-surface-muted, #111114);
     padding: 0.15rem 0.4rem;
     border-radius: 4px;
-    color: #34d399;
+    color: var(--dash-ok, #30d158);
     font-family: monospace;
   }
 
   .sync-pill-tag.rtt {
-    color: #38bdf8;
+    color: var(--dash-led, #00d4ff);
+  }
+
+  .sync-pill-tag.err {
+    background: rgba(239, 68, 68, 0.2);
+    color: #f87171;
   }
 
   .sync-topo-empty,
@@ -1299,7 +1923,37 @@
     text-align: center;
   }
 
-  /* ── Synchronized Controls ─────────────────────────────────────── */
+  /* ── Transport Tabs & Controls ─────────────────────────────────── */
+  .transport-tabs {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+  }
+
+  .transport-tab-btn {
+    font-size: 0.8rem;
+    font-weight: 600;
+    padding: 0.4rem 0.85rem;
+    background: var(--dash-surface, rgba(255, 255, 255, 0.05));
+    color: #94a3b8;
+    border: 1px solid var(--dash-border, rgba(255, 255, 255, 0.12));
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+
+  .transport-tab-btn.active {
+    background: var(--dash-border, rgba(255, 255, 255, 0.12));
+    color: #f8fafc;
+    border-color: #475569;
+  }
+
+  .transport-tab-btn.is-active-mode {
+    border-color: var(--dash-accent, #ff2d55);
+    color: #c4b5fd;
+    box-shadow: 0 0 8px rgba(167, 139, 250, 0.25);
+  }
+
   .sync-control-row {
     display: flex;
     flex-wrap: wrap;
@@ -1319,6 +1973,12 @@
     color: #cbd5e1;
   }
 
+  .sync-ctrl-hint {
+    font-size: 0.75rem;
+    color: #64748b;
+    margin: 0;
+  }
+
   .sync-ctrl-input-group {
     display: flex;
     gap: 0.5rem;
@@ -1327,20 +1987,30 @@
 
   .sync-ctrl-select {
     flex: 1;
-    background: #1e293b;
+    background: var(--dash-surface, rgba(255, 255, 255, 0.05));
     color: #f8fafc;
-    border: 1px solid #334155;
+    border: 1px solid var(--dash-border, rgba(255, 255, 255, 0.12));
     padding: 0.55rem;
     border-radius: 6px;
   }
 
+  .sync-ctrl-number {
+    width: 70px;
+    background: var(--dash-surface, rgba(255, 255, 255, 0.05));
+    color: #f8fafc;
+    border: 1px solid var(--dash-border, rgba(255, 255, 255, 0.12));
+    padding: 0.55rem;
+    border-radius: 6px;
+    text-align: center;
+  }
+
   .sync-timeline-status-badge {
     padding: 0.55rem 0.75rem;
-    background: #1e293b;
-    border: 1px solid #334155;
+    background: var(--dash-surface, rgba(255, 255, 255, 0.05));
+    border: 1px solid var(--dash-border, rgba(255, 255, 255, 0.12));
     border-radius: 6px;
     font-size: 0.8rem;
-    color: #a78bfa;
+    color: var(--dash-accent, #ff2d55);
     font-weight: 600;
   }
 
@@ -1350,7 +2020,105 @@
     border: 1px solid rgba(56, 189, 248, 0.3);
     border-radius: 6px;
     font-size: 0.85rem;
-    color: #38bdf8;
+    color: var(--dash-led, #00d4ff);
+  }
+
+  /* ── Synchronized Cue Playback Panel ───────────────────────────── */
+  .sync-cue-transport-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+  }
+
+  .sync-cue-monitor-bar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: var(--dash-surface, rgba(255, 255, 255, 0.05));
+    border: 1px solid var(--dash-border, rgba(255, 255, 255, 0.12));
+    border-radius: 6px;
+    padding: 0.75rem 1rem;
+  }
+
+  .sync-cue-status-group {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+  }
+
+  .sync-cue-state-badge {
+    font-size: 0.7rem;
+    font-weight: 800;
+    padding: 0.2rem 0.55rem;
+    border-radius: 4px;
+    letter-spacing: 0.05em;
+    background: var(--dash-border, rgba(255, 255, 255, 0.12));
+    color: #94a3b8;
+  }
+
+  .sync-cue-state-badge.holding {
+    background: rgba(59, 130, 246, 0.2);
+    color: #60a5fa;
+  }
+
+  .sync-cue-state-badge.fading {
+    background: rgba(16, 185, 129, 0.2);
+    color: var(--dash-ok, #30d158);
+  }
+
+  .sync-cue-state-badge.paused {
+    background: rgba(245, 158, 11, 0.2);
+    color: var(--dash-warm, #ff9500);
+  }
+
+  .sync-cue-num {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: #f8fafc;
+  }
+
+  .sync-cue-num.next {
+    color: #94a3b8;
+  }
+
+  .sync-cue-arrow {
+    color: #64748b;
+  }
+
+  .sync-cue-time {
+    font-size: 0.8rem;
+    color: #94a3b8;
+  }
+
+  .sync-cue-controls-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 1.25rem;
+    background: rgba(15, 23, 42, 0.6);
+    border: 1px solid var(--dash-surface, rgba(255, 255, 255, 0.05));
+    border-radius: 6px;
+    padding: 1rem;
+  }
+
+  .sync-cue-select-col,
+  .sync-cue-buttons-col,
+  .sync-cue-jump-col,
+  .sync-cue-fader-col {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+  }
+
+  .sync-cue-btn-row {
+    display: flex;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+  }
+
+  .sync-fader-slider {
+    width: 100%;
+    accent-color: var(--dash-ok, #30d158);
+    margin-top: 0.35rem;
   }
 
   /* ── Fleet List ────────────────────────────────────────────────── */
@@ -1364,8 +2132,8 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
-    background: #1e293b;
-    border: 1px solid #334155;
+    background: var(--dash-surface, rgba(255, 255, 255, 0.05));
+    border: 1px solid var(--dash-border, rgba(255, 255, 255, 0.12));
     border-radius: 6px;
     padding: 0.85rem 1.25rem;
     flex-wrap: wrap;
@@ -1377,6 +2145,12 @@
     border-color: #27272a;
   }
 
+  .sync-node-row.is-other {
+    background: var(--dash-surface-muted, #111114);
+    border-style: dashed;
+    border-color: var(--dash-border, rgba(255, 255, 255, 0.12));
+  }
+
   .sync-node-main {
     display: flex;
     flex-direction: column;
@@ -1386,7 +2160,8 @@
   .sync-node-title-row {
     display: flex;
     align-items: center;
-    gap: 0.75rem;
+    flex-wrap: wrap;
+    gap: 0.6rem;
   }
 
   .sync-node-name {
@@ -1398,142 +2173,119 @@
   .sync-node-ip {
     font-size: 0.8rem;
     color: #94a3b8;
-    font-family: monospace;
   }
 
   .sync-node-metrics {
     display: flex;
-    gap: 1rem;
-    font-size: 0.78rem;
-    color: #94a3b8;
     flex-wrap: wrap;
+    gap: 1rem;
+    font-size: 0.8rem;
+    color: #cbd5e1;
+  }
+
+  .sync-metric-item strong {
+    font-weight: 600;
   }
 
   .text-success {
-    color: #34d399;
-  }
-  .text-warn {
-    color: #fbbf24;
+    color: var(--dash-ok, #30d158);
   }
 
-  .sync-node-parity {
+  .text-warn {
+    color: var(--dash-warm, #ff9500);
+  }
+
+  .sync-node-parity-group {
     display: flex;
     align-items: center;
-    gap: 0.75rem;
+    gap: 1rem;
+  }
+
+  .sync-parity-item {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+
+  .sync-parity-title {
+    font-size: 0.75rem;
+    color: #64748b;
+    text-transform: uppercase;
   }
 
   .sync-parity-badge {
-    font-size: 0.75rem;
+    font-size: 0.7rem;
     font-weight: 700;
-    padding: 0.3rem 0.7rem;
+    padding: 0.2rem 0.5rem;
     border-radius: 4px;
     letter-spacing: 0.05em;
   }
 
   .sync-parity-badge.matched {
-    background: rgba(16, 185, 129, 0.2);
-    color: #34d399;
+    background: rgba(16, 185, 129, 0.15);
+    color: var(--dash-ok, #30d158);
   }
 
   .sync-parity-badge.drift {
-    background: rgba(245, 158, 11, 0.2);
-    color: #fbbf24;
+    background: rgba(245, 158, 11, 0.15);
+    color: var(--dash-warm, #ff9500);
+  }
+
+  .sync-parity-badge.drift.sched {
+    background: rgba(148, 163, 184, 0.15);
+    color: #cbd5e1;
   }
 
   .sync-parity-badge.incompatible {
-    background: rgba(244, 63, 94, 0.2);
-    color: #fb7185;
+    background: rgba(239, 68, 68, 0.2);
+    color: #f87171;
   }
 
   .sync-parity-badge.offline,
   .sync-parity-badge.unavailable {
-    background: rgba(148, 163, 184, 0.2);
+    background: var(--dash-border, rgba(255, 255, 255, 0.12));
     color: #94a3b8;
-  }
-
-  .sync-drift-col {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-end;
-    gap: 0.25rem;
   }
 
   .sync-diff-link {
     background: none;
     border: none;
-    color: #38bdf8;
-    font-size: 0.75rem;
+    color: var(--dash-led, #00d4ff);
     text-decoration: underline;
+    font-size: 0.75rem;
     cursor: pointer;
     padding: 0;
   }
 
-  /* ── Modals ────────────────────────────────────────────────────── */
-  .sync-modal-backdrop {
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.75);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 999;
-    padding: 1rem;
+  .sync-other-nodes-header {
+    margin-top: 1rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--dash-surface, rgba(255, 255, 255, 0.05));
   }
 
-  .sync-modal-box {
-    background: #0f172a;
-    border: 1px solid #334155;
-    border-radius: 8px;
-    width: 100%;
-    max-width: 520px;
-    max-height: 90vh;
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-  }
-
-  .sync-modal-lg {
-    max-width: 680px;
-  }
-
-  .sync-modal-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 1rem 1.25rem;
-    border-bottom: 1px solid #1e293b;
-  }
-
-  .sync-modal-title {
-    font-size: 1.1rem;
+  .sync-other-title {
+    font-size: 0.95rem;
     font-weight: 600;
-    color: #f8fafc;
+    color: #94a3b8;
     margin: 0;
   }
 
-  .sync-modal-close {
-    background: none;
-    border: none;
-    color: #94a3b8;
-    font-size: 1.2rem;
-    cursor: pointer;
+  .sync-other-desc {
+    font-size: 0.75rem;
+    color: #64748b;
+    margin: 0.2rem 0 0 0;
   }
 
-  .sync-modal-body {
-    padding: 1.25rem;
-    display: flex;
-    flex-direction: column;
-    gap: 1.25rem;
-    overflow-y: auto;
+  /* ── Modals & Reachability Pills ──────────────────────────────────── */
+  .sync-role-pill.reachability-pill {
+    background: rgba(255, 149, 0, 0.15);
+    color: var(--dash-warm, #ff9500);
+    border: 1px solid rgba(255, 149, 0, 0.35);
   }
-
-  .sync-modal-footer {
-    display: flex;
-    justify-content: flex-end;
-    gap: 0.75rem;
-    padding: 1rem 1.25rem;
-    border-top: 1px solid #1e293b;
-    background: #090e1a;
+  .sync-role-pill.reachability-pill.reachability-offline {
+    background: rgba(255, 45, 85, 0.15);
+    color: var(--dash-accent, #ff2d55);
+    border: 1px solid rgba(255, 45, 85, 0.35);
   }
 
   .sync-modal-alert {
@@ -1541,15 +2293,17 @@
     border-radius: 6px;
     font-size: 0.85rem;
   }
+
   .sync-modal-alert.error {
-    background: rgba(244, 63, 94, 0.15);
-    border: 1px solid rgba(244, 63, 94, 0.3);
-    color: #fb7185;
+    background: rgba(255, 45, 85, 0.15);
+    border: 1px solid rgba(255, 45, 85, 0.4);
+    color: var(--dash-accent, #ff2d55);
   }
+
   .sync-modal-alert.success {
-    background: rgba(16, 185, 129, 0.15);
-    border: 1px solid rgba(16, 185, 129, 0.3);
-    color: #34d399;
+    background: rgba(48, 209, 88, 0.15);
+    border: 1px solid rgba(48, 209, 88, 0.4);
+    color: var(--dash-ok, #30d158);
   }
 
   .sync-form-group {
@@ -1566,117 +2320,153 @@
 
   .sync-form-input,
   .sync-form-select {
-    background: #1e293b;
+    background: var(--dash-surface, rgba(255, 255, 255, 0.05));
+    border: 1px solid var(--dash-border, rgba(255, 255, 255, 0.12));
     color: #f8fafc;
-    border: 1px solid #334155;
     padding: 0.55rem;
     border-radius: 6px;
+    font-size: 0.875rem;
   }
 
   .sync-form-hint {
     font-size: 0.75rem;
-    color: #94a3b8;
+    color: #64748b;
     margin: 0;
   }
 
-  .sync-radio-group,
-  .sync-checkbox-list {
+  .sync-radio-group {
     display: flex;
     flex-direction: column;
-    gap: 0.5rem;
-  }
-
-  .sync-cat-grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
     gap: 0.5rem;
   }
 
   .sync-radio-opt,
   .sync-checkbox-opt {
     display: flex;
-    align-items: flex-start;
+    align-items: center;
     gap: 0.5rem;
     font-size: 0.85rem;
     color: #cbd5e1;
     cursor: pointer;
   }
 
-  .highlight-opt {
+  .sync-checkbox-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    max-height: 150px;
+    overflow-y: auto;
+    background: var(--dash-surface, rgba(255, 255, 255, 0.05));
     padding: 0.75rem;
-    background: rgba(245, 158, 11, 0.08);
-    border: 1px solid rgba(245, 158, 11, 0.25);
     border-radius: 6px;
+    border: 1px solid var(--dash-border, rgba(255, 255, 255, 0.12));
   }
 
-  /* ── Diff Inspector Table ──────────────────────────────────────── */
+  .sync-cat-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.5rem;
+    background: var(--dash-surface, rgba(255, 255, 255, 0.05));
+    padding: 0.75rem;
+    border-radius: 6px;
+    border: 1px solid var(--dash-border, rgba(255, 255, 255, 0.12));
+  }
+
+  .sync-checkbox-opt.highlight-opt {
+    background: rgba(245, 158, 11, 0.08);
+    border: 1px solid rgba(245, 158, 11, 0.25);
+    padding: 0.5rem;
+    border-radius: 6px;
+    font-size: 0.8rem;
+  }
+
+  /* ── Diff Table ────────────────────────────────────────────────── */
   .sync-diff-desc {
-    font-size: 0.85rem;
+    font-size: 0.8rem;
     color: #94a3b8;
     margin: 0;
+  }
+
+  .sync-diff-subheading {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: #cbd5e1;
+    margin: 0.5rem 0 0.25rem 0;
   }
 
   .sync-diff-table {
     display: flex;
     flex-direction: column;
-    gap: 0.4rem;
-    max-height: 400px;
+    gap: 0.35rem;
+    max-height: 200px;
     overflow-y: auto;
+    background: var(--dash-surface, rgba(255, 255, 255, 0.05));
+    padding: 0.5rem;
+    border-radius: 6px;
   }
 
   .sync-diff-row {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 0.55rem 0.85rem;
-    background: #1e293b;
+    padding: 0.4rem 0.6rem;
     border-radius: 4px;
-    font-size: 0.825rem;
+    font-size: 0.8rem;
   }
 
-  .sync-diff-row.state-missing {
-    border-left: 3px solid #fb7185;
+  .sync-diff-row.state-match {
+    background: rgba(16, 185, 129, 0.08);
   }
   .sync-diff-row.state-changed {
-    border-left: 3px solid #fbbf24;
+    background: rgba(245, 158, 11, 0.15);
+  }
+  .sync-diff-row.state-missing {
+    background: rgba(239, 68, 68, 0.15);
   }
   .sync-diff-row.state-extra {
-    border-left: 3px solid #38bdf8;
-  }
-  .sync-diff-row.state-match {
-    border-left: 3px solid #34d399;
+    background: rgba(56, 189, 248, 0.15);
   }
 
-  .badge-missing {
-    color: #fb7185;
+  .sync-diff-status {
+    font-size: 0.7rem;
     font-weight: 700;
+    padding: 0.15rem 0.4rem;
+    border-radius: 4px;
+  }
+
+  .badge-match {
+    color: var(--dash-ok, #30d158);
   }
   .badge-changed {
-    color: #fbbf24;
-    font-weight: 700;
+    color: var(--dash-warm, #ff9500);
+  }
+  .badge-missing {
+    color: #f87171;
   }
   .badge-extra {
-    color: #38bdf8;
-    font-weight: 700;
+    color: var(--dash-led, #00d4ff);
   }
-  .badge-match {
-    color: #34d399;
-    font-weight: 600;
+
+  .sync-diff-empty {
+    font-size: 0.8rem;
+    color: #64748b;
+    padding: 0.5rem;
+    text-align: center;
   }
 
   .sync-deploy-progress-box {
-    background: #090e1a;
-    border: 1px solid #1e293b;
-    border-radius: 6px;
-    padding: 0.85rem;
     display: flex;
     flex-direction: column;
-    gap: 0.5rem;
+    gap: 0.4rem;
+    background: var(--dash-surface, rgba(255, 255, 255, 0.05));
+    padding: 0.75rem;
+    border-radius: 6px;
+    border: 1px solid var(--dash-border, rgba(255, 255, 255, 0.12));
   }
 
   .sync-progress-title {
     font-size: 0.8rem;
-    font-weight: 700;
+    font-weight: 600;
     color: #94a3b8;
     margin: 0;
   }
@@ -1684,27 +2474,30 @@
   .sync-progress-row {
     display: flex;
     justify-content: space-between;
-    align-items: center;
     font-size: 0.8rem;
     padding: 0.25rem 0;
+    border-bottom: 1px solid var(--dash-border, rgba(255, 255, 255, 0.12));
   }
 
   .sync-progress-ip {
-    font-family: monospace;
-    color: #e2e8f0;
+    color: #f8fafc;
   }
 
   .sync-progress-state.complete {
-    color: #34d399;
-    font-weight: 700;
+    color: var(--dash-ok, #30d158);
   }
-  .sync-progress-state.deploying,
-  .sync-progress-state.verifying {
-    color: #38bdf8;
+  .sync-progress-state.deploying {
+    color: var(--dash-led, #00d4ff);
   }
-  .sync-progress-state.partial,
+  .sync-progress-state.partial {
+    color: var(--dash-warm, #ff9500);
+  }
   .sync-progress-state.failed {
-    color: #fb7185;
-    font-weight: 700;
+    color: #f87171;
+  }
+
+  .sync-progress-err {
+    font-size: 0.75rem;
+    color: #f87171;
   }
 </style>

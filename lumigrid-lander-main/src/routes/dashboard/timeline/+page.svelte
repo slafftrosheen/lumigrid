@@ -15,12 +15,21 @@
     CHANNEL_PORTS,
   } from '$lib/api/timeline';
   import { getSelectedNodeIp } from '$lib/auth/storage';
+  import { getSyncStatus, type SyncStatus } from '$lib/api/sync';
   import { nodeStore } from '$lib/state/nodeStore';
 
   let nodeIp = $state('');
   let loading = $state(true);
   let saving = $state(false);
   let activating = $state(false);
+  let nodeSyncStatus = $state<SyncStatus | null>(null);
+
+  const isFollower = $derived(
+    nodeSyncStatus?.activeRole === 'worker' &&
+    Boolean(nodeSyncStatus.masterAddress) &&
+    (nodeSyncStatus.lastPacketAgeMs === null || nodeSyncStatus.lastPacketAgeMs < 10000)
+  );
+  const syncMasterAddress = $derived(nodeSyncStatus?.masterAddress || 'Leader');
   let error = $state('');
   let toast = $state('');
 
@@ -55,11 +64,13 @@
     savedSnapshot = null;
     presets = [];
     try {
-      const [s, p] = await Promise.all([
+      const [s, p, syncSt] = await Promise.all([
         getSequence(targetIp).catch(() => null),
         getPresets(targetIp).catch(() => [] as ScenePreset[]),
+        getSyncStatus(targetIp).catch(() => null),
       ]);
       if (gen !== loadGen) return;
+      nodeSyncStatus = syncSt;
 
       if (s && s.tracks) {
         for (let i = 0; i < TRACK_COUNT; i++) {
@@ -168,6 +179,17 @@
   </div>
 {:else if seq}
   <div class="tl-root">
+    {#if isFollower}
+      <div class="sync-follower-banner" role="alert">
+        <span class="banner-icon">ℹ</span>
+        <div class="banner-content">
+          <strong>Playback Controlled by Sync Leader ({syncMasterAddress})</strong>
+          <p>This node is an active follower in a synchronized cluster. Local timeline playback on this follower node is suppressed to preserve cluster frame lock. To run timeline across the group, use Sync Studio.</p>
+        </div>
+        <a href="/dashboard/sync" class="banner-action-btn">Open Sync Studio →</a>
+      </div>
+    {/if}
+
     <!-- Top Transport Header -->
     <header class="tl-transport">
       <div class="transport-left">
@@ -196,12 +218,14 @@
           class="btn-playback"
           class:is-playing={isPlaying}
           onclick={togglePlay}
-          disabled={activating}
+          disabled={activating || isFollower}
           type="button"
-          title={isPlaying ? 'Stop timeline playback' : 'Start timeline playback on node'}
+          title={isFollower ? `Playback controlled by Sync Leader (${syncMasterAddress})` : (isPlaying ? 'Stop timeline playback' : 'Start timeline playback on node')}
         >
           {#if activating}
             <span>...</span>
+          {:else if isFollower}
+            <span>LOCK</span>
           {:else if isPlaying}
             <span>⏹ STOP</span>
           {:else}
@@ -1062,5 +1086,48 @@
     }
     .editor-fields, .track-fields { align-items: stretch; flex-direction: column; }
     .field select, .field input[type='number'] { width: 100%; min-width: 0; }
+  }
+  .sync-follower-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    background: rgba(59, 130, 246, 0.12);
+    border: 1px solid rgba(59, 130, 246, 0.35);
+    border-radius: 8px;
+    padding: 0.85rem 1.25rem;
+    margin-bottom: 1.25rem;
+    color: #e2e8f0;
+  }
+  .banner-icon {
+    font-size: 1.4rem;
+    color: #60a5fa;
+  }
+  .banner-content strong {
+    color: #93c5fd;
+    display: block;
+    font-size: 0.95rem;
+    margin-bottom: 0.2rem;
+  }
+  .banner-content p {
+    margin: 0;
+    font-size: 0.82rem;
+    color: #94a3b8;
+  }
+  .banner-action-btn {
+    white-space: nowrap;
+    padding: 0.45rem 0.9rem;
+    background: rgba(59, 130, 246, 0.25);
+    border: 1px solid rgba(59, 130, 246, 0.5);
+    color: #93c5fd;
+    border-radius: 6px;
+    text-decoration: none;
+    font-size: 0.82rem;
+    font-weight: 600;
+    transition: all 0.15s ease;
+  }
+  .banner-action-btn:hover {
+    background: rgba(59, 130, 246, 0.45);
+    color: #ffffff;
   }
 </style>

@@ -103,6 +103,9 @@ public:
     bool      scene_exists(uint8_t index) const;
     uint8_t   scene_count();
     uint32_t  compute_show_hash() const;
+    uint32_t  compute_playback_hash() const;
+    uint32_t  compute_schedule_hash() const;
+    uint32_t  compute_full_show_hash() const;
 
     // ── Device config ──
     esp_err_t save_config(const DeviceConfig& config);

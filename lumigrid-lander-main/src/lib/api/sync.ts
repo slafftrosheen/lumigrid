@@ -9,6 +9,11 @@ export interface SyncPeer {
 }
 
 export interface SyncStatus {
+  protocolVersion?: number;
+  syncProtocol?: number;
+  syncEnabled?: boolean;
+  groupLabel?: string;
+
   configuredRole: SyncRole;
   activeRole: SyncRole;
   running: boolean;
@@ -27,9 +32,21 @@ export interface SyncStatus {
   clockOffsetMs: number;
   clockJitterUs: number;
 
-  transport: 'standalone' | 'scene' | 'timeline';
+  transport: 'standalone' | 'scene' | 'timeline' | 'cue';
+  transportGeneration?: number;
+  transportApplyOk?: boolean;
+  transportError?: string;
+
   remoteBpm: number | null;
   remoteTimelineEnabled: boolean;
+
+  cue?: {
+    listIndex: number;
+    state: string;
+    cueIndex: number;
+    nextCueIndex: number;
+    manualFade: number;
+  };
 
   peers: SyncPeer[];
 }
@@ -53,6 +70,8 @@ export interface ShowManifest {
   schemaVersion?: number;
   firmware?: string;
   protocol?: number;
+  playbackHash?: number;
+  scheduleHash?: number;
   showHash: number;
   scenes: ShowManifestScene[];
   timeline?: {
@@ -69,6 +88,13 @@ export interface ShowManifest {
   cueLists?: ShowManifestCueList[];
 }
 
+export type ReachabilityState =
+  | 'ONLINE'
+  | 'ONLINE / SYNC DISABLED'
+  | 'ONLINE / SYNC INCOMPATIBLE'
+  | 'ONLINE / MANIFEST UNAVAILABLE'
+  | 'OFFLINE';
+
 export type ParityStatus = 'MATCHED' | 'DRIFT' | 'INCOMPATIBLE' | 'UNAVAILABLE';
 
 export interface ShowDiffItem {
@@ -79,6 +105,8 @@ export interface ShowDiffItem {
 }
 
 export interface ShowParityResult {
+  playbackStatus?: ParityStatus;
+  scheduleStatus?: ParityStatus;
   status: ParityStatus;
   reason?: string;
   diffs: ShowDiffItem[];
@@ -96,7 +124,7 @@ export async function getShowManifest(ip: string): Promise<ShowManifest> {
 
 /**
  * Generates a cryptographically strong 32-bit unsigned sync token.
- * Never returns 0.
+ * Never returns 0. Throws if Web Crypto is unavailable.
  */
 export function generateSyncToken(): number {
   if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
@@ -104,7 +132,7 @@ export function generateSyncToken(): number {
     crypto.getRandomValues(values);
     return values[0] || 1;
   }
-  return (Math.floor(Math.random() * 0xffffffff) >>> 0) || 1;
+  throw new Error('Secure random generation unavailable in this browser. Sync group configuration cannot continue.');
 }
 
 /**
@@ -116,6 +144,8 @@ export function compareShowManifest(
 ): ShowParityResult {
   if (!source || !target) {
     return {
+      playbackStatus: 'UNAVAILABLE',
+      scheduleStatus: 'UNAVAILABLE',
       status: 'UNAVAILABLE',
       reason: 'Manifest data unavailable',
       diffs: [],
@@ -127,6 +157,8 @@ export function compareShowManifest(
   const targetSchema = target.schema ?? target.schemaVersion ?? 1;
   if (sourceSchema !== targetSchema) {
     return {
+      playbackStatus: 'INCOMPATIBLE',
+      scheduleStatus: 'INCOMPATIBLE',
       status: 'INCOMPATIBLE',
       reason: `Schema version mismatch: source schema ${sourceSchema} vs target ${targetSchema}`,
       diffs: [],
@@ -135,6 +167,8 @@ export function compareShowManifest(
 
   if (source.protocol !== undefined && target.protocol !== undefined && source.protocol !== target.protocol) {
     return {
+      playbackStatus: 'INCOMPATIBLE',
+      scheduleStatus: 'INCOMPATIBLE',
       status: 'INCOMPATIBLE',
       reason: `Protocol version mismatch: source ${source.protocol} vs target ${target.protocol}`,
       diffs: [],
@@ -221,17 +255,17 @@ export function compareShowManifest(
     }
   }
 
-  // Check showHash
-  if (source.showHash === target.showHash) {
-    return {
-      status: 'MATCHED',
-      diffs,
-    };
-  }
+  const playbackDiffs = diffs.filter((d) => d.category !== 'schedules');
+  const scheduleDiffs = diffs.filter((d) => d.category === 'schedules');
+  const pStatus: ParityStatus = playbackDiffs.some((d) => d.state !== 'match') ? 'DRIFT' : 'MATCHED';
+  const sStatus: ParityStatus = scheduleDiffs.some((d) => d.state !== 'match') ? 'DRIFT' : 'MATCHED';
+  const overallStatus: ParityStatus = (pStatus === 'MATCHED' && sStatus === 'MATCHED') ? 'MATCHED' : 'DRIFT';
 
   return {
-    status: 'DRIFT',
-    reason: `Show content differs (hash ${source.showHash} vs ${target.showHash})`,
+    playbackStatus: pStatus,
+    scheduleStatus: sStatus,
+    status: overallStatus,
+    reason: overallStatus === 'DRIFT' ? (pStatus === 'DRIFT' ? 'Playback content differs' : 'Schedule content differs') : undefined,
     diffs,
   };
 }
@@ -293,4 +327,239 @@ export function buildClusterPlan(
   }
 
   return { plan: {}, error: `Unknown mode ${mode}` };
+}
+
+/**
+ * Compares only playback assets (Scenes, Scene Motion, Timeline content, Cue Lists)
+ * ignoring local calendar schedules.
+ */
+export function comparePlaybackManifest(
+  source: ShowManifest | null | undefined,
+  target: ShowManifest | null | undefined
+): ShowParityResult {
+  if (!source || !target) {
+    return {
+      playbackStatus: 'UNAVAILABLE',
+      scheduleStatus: 'UNAVAILABLE',
+      status: 'UNAVAILABLE',
+      reason: 'Manifest data unavailable',
+      diffs: [],
+    };
+  }
+
+  const diffs: ShowDiffItem[] = [];
+
+  // Scenes & Motion diff
+  const sourceScenes = new Map(source.scenes.map((s) => [s.index, s]));
+  const targetScenes = new Map(target.scenes.map((s) => [s.index, s]));
+
+  for (const [idx, sScene] of sourceScenes.entries()) {
+    const tScene = targetScenes.get(idx);
+    const label = sScene.name ? `Scene ${String(idx).padStart(2, '0')} (${sScene.name})` : `Scene ${String(idx).padStart(2, '0')}`;
+    if (!tScene) {
+      diffs.push({ category: 'scene', index: idx, label, state: 'missing' });
+    } else if (tScene.checksum !== sScene.checksum) {
+      diffs.push({ category: 'scene', index: idx, label, state: 'changed' });
+    } else {
+      diffs.push({ category: 'scene', index: idx, label, state: 'match' });
+    }
+
+    const sMotionCs = sScene.motionChecksum ?? 0;
+    const tMotionCs = tScene?.motionChecksum ?? 0;
+    if (sMotionCs !== 0 || tMotionCs !== 0) {
+      const motionLabel = `Scene Motion ${String(idx).padStart(2, '0')}`;
+      if (sMotionCs !== 0 && tMotionCs === 0) {
+        diffs.push({ category: 'sceneMotion', index: idx, label: motionLabel, state: 'missing' });
+      } else if (sMotionCs !== tMotionCs) {
+        diffs.push({ category: 'sceneMotion', index: idx, label: motionLabel, state: 'changed' });
+      } else {
+        diffs.push({ category: 'sceneMotion', index: idx, label: motionLabel, state: 'match' });
+      }
+    }
+  }
+
+  for (const [idx, tScene] of targetScenes.entries()) {
+    if (!sourceScenes.has(idx)) {
+      const label = tScene.name ? `Scene ${String(idx).padStart(2, '0')} (${tScene.name})` : `Scene ${String(idx).padStart(2, '0')}`;
+      diffs.push({ category: 'scene', index: idx, label, state: 'extra' });
+    }
+  }
+
+  // Timeline
+  const sTimelineCs = source.timeline?.checksum ?? 0;
+  const tTimelineCs = target.timeline?.checksum ?? 0;
+  diffs.push({
+    category: 'timeline',
+    label: 'Timeline Sequence',
+    state: sTimelineCs === tTimelineCs ? 'match' : 'changed',
+  });
+
+  // Cue Lists
+  const sourceCues = new Map((source.cueLists ?? []).map((c) => [c.index, c]));
+  const targetCues = new Map((target.cueLists ?? []).map((c) => [c.index, c]));
+
+  for (const [idx, sCue] of sourceCues.entries()) {
+    const tCue = targetCues.get(idx);
+    const label = sCue.name ? `Cue List ${String(idx).padStart(2, '0')} (${sCue.name})` : `Cue List ${String(idx).padStart(2, '0')}`;
+    if (!tCue) {
+      diffs.push({ category: 'cueList', index: idx, label, state: 'missing' });
+    } else if (tCue.checksum !== sCue.checksum) {
+      diffs.push({ category: 'cueList', index: idx, label, state: 'changed' });
+    } else {
+      diffs.push({ category: 'cueList', index: idx, label, state: 'match' });
+    }
+  }
+
+  for (const [idx, tCue] of targetCues.entries()) {
+    if (!sourceCues.has(idx)) {
+      const label = tCue.name ? `Cue List ${String(idx).padStart(2, '0')} (${tCue.name})` : `Cue List ${String(idx).padStart(2, '0')}`;
+      diffs.push({ category: 'cueList', index: idx, label, state: 'extra' });
+    }
+  }
+
+  if (source.playbackHash !== undefined && target.playbackHash !== undefined) {
+    if (source.playbackHash === target.playbackHash) {
+      return { playbackStatus: 'MATCHED', scheduleStatus: 'MATCHED', status: 'MATCHED', diffs };
+    }
+    return {
+      playbackStatus: 'DRIFT',
+      scheduleStatus: 'MATCHED',
+      status: 'DRIFT',
+      reason: `Playback content differs (hash ${source.playbackHash} vs ${target.playbackHash})`,
+      diffs,
+    };
+  }
+
+  const hasDrift = diffs.some((d) => d.state !== 'match');
+  const pStatus: ParityStatus = hasDrift ? 'DRIFT' : 'MATCHED';
+  return {
+    playbackStatus: pStatus,
+    scheduleStatus: 'MATCHED',
+    status: pStatus,
+    reason: hasDrift ? 'Playback content differs' : undefined,
+    diffs,
+  };
+}
+
+/**
+ * Compares only schedule/calendar assets.
+ */
+export function compareScheduleManifest(
+  source: ShowManifest | null | undefined,
+  target: ShowManifest | null | undefined
+): ShowParityResult {
+  if (!source || !target) {
+    return {
+      playbackStatus: 'UNAVAILABLE',
+      scheduleStatus: 'UNAVAILABLE',
+      status: 'UNAVAILABLE',
+      reason: 'Manifest data unavailable',
+      diffs: [],
+    };
+  }
+
+  const sSchedCs = source.schedules?.checksum ?? source.calendar?.checksum ?? 0;
+  const tSchedCs = target.schedules?.checksum ?? target.calendar?.checksum ?? 0;
+  const isDiff = sSchedCs !== tSchedCs ||
+    (source.scheduleHash !== undefined && target.scheduleHash !== undefined && source.scheduleHash !== target.scheduleHash);
+
+  const diffs: ShowDiffItem[] = [
+    {
+      category: 'schedules',
+      label: 'Calendar Schedules',
+      state: !isDiff ? 'match' : 'changed',
+    },
+  ];
+
+  const schedStatus: ParityStatus = !isDiff ? 'MATCHED' : 'DRIFT';
+
+  return {
+    playbackStatus: 'MATCHED',
+    scheduleStatus: schedStatus,
+    status: schedStatus,
+    reason: isDiff ? 'Schedule content differs' : undefined,
+    diffs,
+  };
+}
+
+/**
+ * Compares full show manifest including schedules.
+ */
+export function compareFullShowManifest(
+  source: ShowManifest | null | undefined,
+  target: ShowManifest | null | undefined
+): ShowParityResult {
+  return compareShowManifest(source, target);
+}
+
+export type ClusterTopologyState =
+  | 'NO_LEADER'
+  | 'VALID_LEADER'
+  | 'SPLIT_BRAIN'
+  | 'LEADER_DISAGREEMENT';
+
+export interface ClusterTopology {
+  masterCount: number;
+  leaderIp: string | null;
+  state: ClusterTopologyState;
+  error?: string;
+  isReady: boolean;
+}
+
+/**
+ * Evaluates real cluster topology truth from reported node statuses.
+ * NEVER infers authority from selected or first node.
+ */
+export function evaluateClusterTopology(
+  nodes: { ip: string; status?: SyncStatus | null }[]
+): ClusterTopology {
+  const activeMasters = nodes.filter((n) => n.status?.activeRole === 'master');
+  const masterCount = activeMasters.length;
+
+  if (masterCount === 0) {
+    return {
+      masterCount: 0,
+      leaderIp: null,
+      state: 'NO_LEADER',
+      error: 'ELECTING / NO LEADER',
+      isReady: false,
+    };
+  }
+
+  if (masterCount > 1) {
+    return {
+      masterCount,
+      leaderIp: null,
+      state: 'SPLIT_BRAIN',
+      error: `SPLIT BRAIN (${masterCount} masters detected)`,
+      isReady: false,
+    };
+  }
+
+  const leaderIp = activeMasters[0].ip;
+
+  // Check workers for leader disagreement
+  const activeWorkers = nodes.filter((n) => n.status?.activeRole === 'worker');
+  for (const worker of activeWorkers) {
+    if (worker.status?.masterAddress && worker.status.masterAddress !== leaderIp) {
+      return {
+        masterCount: 1,
+        leaderIp,
+        state: 'LEADER_DISAGREEMENT',
+        error: `LEADER DISAGREEMENT (worker ${worker.ip} tracking ${worker.status.masterAddress} instead of leader ${leaderIp})`,
+        isReady: false,
+      };
+    }
+  }
+
+  // All active followers must also have transportApplyOk !== false
+  const hasTransportError = activeWorkers.some((w) => w.status?.transportApplyOk === false);
+
+  return {
+    masterCount: 1,
+    leaderIp,
+    state: 'VALID_LEADER',
+    isReady: !hasTransportError,
+    error: hasTransportError ? 'One or more followers report transport apply error' : undefined,
+  };
 }

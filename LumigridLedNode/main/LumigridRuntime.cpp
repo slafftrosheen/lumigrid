@@ -497,7 +497,8 @@ esp_err_t LumigridRuntime::start() {
     std::memcpy(node.mac, mac, 6);
 
     ESP_LOGI("lumigrid", "Step 6: api.start(80, 8080)...");
-    err = api_.start(80, 8080, &config_, &lighting_, &scheduler_, &node_sync_, &dmx_router_, &cue_runner_);
+    api_.set_show_clock_provider([this]() { return clock_.now_ms(); });
+    err = api_.start(80, 8080, &config_, &lighting_, &scheduler_, &node_sync_, &dmx_router_, &cue_runner_, &show_transport_);
     if (err != ESP_OK) {
         ESP_LOGE("lumigrid", "api.start() FAILED: %s", esp_err_to_name(err));
         rollback_services(StartupStage::NetworkConfigured, err);
@@ -518,14 +519,14 @@ esp_err_t LumigridRuntime::start() {
 
         if (!new_cfg.sync_enabled) {
             if (started_subsystems_.node_sync) {
-                node_sync_.stop();
+                node_sync_.stop(1000);
                 started_subsystems_.node_sync = false;
             }
             return ESP_OK;
         }
 
         if (started_subsystems_.node_sync) {
-            node_sync_.stop();
+            node_sync_.stop(1000);
             started_subsystems_.node_sync = false;
         }
 
@@ -536,11 +537,71 @@ esp_err_t LumigridRuntime::start() {
         return start_err;
     });
 
-    node_sync_.set_transport_callback([this](bool timeline_enabled, uint16_t bpm) {
-        if (timeline_enabled) {
-            scheduler_.apply_sync_transport(true, bpm, static_cast<uint32_t>(clock_.now_ms()));
+    node_sync_.set_transport_provider([this](uint64_t now_ms) {
+        return scheduler_.transport_snapshot(now_ms);
+    });
+
+    node_sync_.set_remote_transport_callback([this](const ShowTransportSnapshot& remote_snap, uint8_t& out_error) -> bool {
+        if (remote_snap.mode == ShowTransportMode::Scene) {
+            if (cue_runner_.is_running()) cue_runner_.stop(clock_.now_ms());
+            scheduler_.apply_remote_show_mode(Scheduler::RemoteShowMode::Scene, remote_snap.bpm, clock_.now_ms());
+            if (!config_.scene_exists(remote_snap.active_scene)) {
+                out_error = static_cast<uint8_t>(SyncTransportError::SceneMissing);
+                return false;
+            }
+            if (lighting_.active_scene_index() != remote_snap.active_scene) {
+                if (!lighting_.activate_scene_checked(remote_snap.active_scene)) {
+                    out_error = static_cast<uint8_t>(SyncTransportError::RuntimeUnavailable);
+                    return false;
+                }
+            }
+            return true;
+        } else if (remote_snap.mode == ShowTransportMode::Timeline) {
+            if (cue_runner_.is_running()) cue_runner_.stop(clock_.now_ms());
+            scheduler_.apply_remote_show_mode(Scheduler::RemoteShowMode::Timeline, remote_snap.bpm, clock_.now_ms());
+            return true;
+        } else if (remote_snap.mode == ShowTransportMode::Cue) {
+            scheduler_.apply_remote_show_mode(Scheduler::RemoteShowMode::Cue, remote_snap.bpm, clock_.now_ms());
+            if (remote_snap.cue.list_index >= kMaxCueLists) {
+                out_error = static_cast<uint8_t>(SyncTransportError::CueListMissing);
+                return false;
+            }
+            CueSyncSnapshot cue_snap{};
+            cue_snap.active = remote_snap.cue.active;
+            cue_snap.state = static_cast<CueRunnerState>(remote_snap.cue.state);
+            cue_snap.list_index = remote_snap.cue.list_index;
+            cue_snap.current_cue = remote_snap.cue.current_cue;
+            cue_snap.next_cue = remote_snap.cue.next_cue;
+            cue_snap.cue_anchor_ms = remote_snap.cue.cue_anchor_ms;
+            cue_snap.paused_elapsed_ms = remote_snap.cue.paused_elapsed_ms;
+            cue_snap.manual_fade_q15 = remote_snap.cue.manual_fade_q15;
+            cue_snap.generation = remote_snap.cue.generation;
+
+            esp_err_t cue_err = cue_runner_.apply_sync_snapshot(cue_snap, clock_.now_ms());
+            if (cue_err != ESP_OK) {
+                if (cue_err == ESP_ERR_NOT_FOUND) out_error = static_cast<uint8_t>(SyncTransportError::SceneMissing);
+                else if (cue_err == ESP_ERR_INVALID_ARG) out_error = static_cast<uint8_t>(SyncTransportError::CueIndexInvalid);
+                else out_error = static_cast<uint8_t>(SyncTransportError::CueListMissing);
+                return false;
+            }
+            return true;
         } else {
-            scheduler_.clear_sync_transport();
+            // Heartbeat timeout / release
+            scheduler_.clear_remote_show_mode();
+            cue_runner_.clear_remote_sync();
+            return true;
+        }
+    });
+
+    node_sync_.set_transport_callback([this](const ShowTransportSnapshot& snap) {
+        if (snap.mode == ShowTransportMode::Timeline) {
+            scheduler_.apply_remote_show_mode(Scheduler::RemoteShowMode::Timeline, snap.bpm, clock_.now_ms());
+        } else if (snap.mode == ShowTransportMode::Scene) {
+            scheduler_.apply_remote_show_mode(Scheduler::RemoteShowMode::Scene, snap.bpm, clock_.now_ms());
+        } else if (snap.mode == ShowTransportMode::Cue) {
+            scheduler_.apply_remote_show_mode(Scheduler::RemoteShowMode::Cue, snap.bpm, clock_.now_ms());
+        } else {
+            scheduler_.clear_remote_show_mode();
         }
     });
 

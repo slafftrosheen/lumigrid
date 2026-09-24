@@ -31,6 +31,10 @@
 | **Observability** | Real-time diagnostic startup state (`startup_state`, `startup_stage`, `failing_stage`, `failing_error`) | `[PASS]` | Compile Verified, Integration |
 | **Security** | Production credentials policy: non-universal AP recovery credential (no static `"lumigrid123"`) | `[PASS]` | Compile Verified, Static CI |
 | **Hardware** | Factory recovery button: 3s grace period, 20ms debounce, stuck pin protection, safe blackout | `[PASS]` | Compile Verified, Simulated |
+| **Transport** | Show Transport v2 explicit state machine: Scene, Timeline, Cue preemption with generation tracking | `[PASS]` | Compile Verified, Unit Test |
+| **Transport** | NodeSync protocol v4 (60-byte packed frame): leader-authoritative cues, remote BPM, clock sync | `[PASS]` | Compile Verified, Unit Test |
+| **Transport** | Follower local playback suppression and 409 `sync_follower_read_only` guard | `[PASS]` | Compile Verified, Unit Test |
+| **Parity** | Manifest schema 2: separation of playback parity (`playbackHash`) from optional schedule parity | `[PASS]` | Compile Verified, Unit Test |
 
 ---
 
@@ -53,6 +57,11 @@
 ### 2.3 Output & Safety Architecture
 - **Output Transaction RAII**: All frame staging occurs inside `OutputTransaction` objects acquiring the hardware lock once. Staging methods (`pixels()`, `pwm()`) are scoped to the transaction, and `commit()` invokes the physical driver commit pipeline.
 - **Unified Fault State Transition**: Physical commit failures immediately trigger the `CommitObserver`, advancing `LightingRuntime` output state to `Faulted` and recording distinct metrics for failed commits and fault events.
+
+### 2.4 Show Transport v2 & NodeSync v4
+- **Single Explicit Transport Coordinator**: `ShowTransportCoordinator` models explicit Scene, Timeline, and Cue List playback, eliminating hidden competing playback sources.
+- **NodeSync Protocol v4**: Transmits packed 60-byte UDP packets with leader-authoritative cue lists, random progression, hold/fade duration, and manual crossfade progress.
+- **Follower Guard**: Active followers reject direct playback activations with HTTP 409 `sync_follower_read_only` while permitting show asset editing.
 
 ---
 
@@ -85,7 +94,7 @@ The software architecture and simulation boundaries are fully hardened. The runt
 
 ---
 
-## 5. Multi-Node Fleet Sync & Show Hardware Test Matrix (LG-025)
+## 4. Multi-Node Fleet Sync & Show Transport Hardware Test Matrix (LG-025 & LG-026)
 
 > **Hardware Requirements:** Minimum 2 physical nodes required; 3 physical nodes preferred.
 > **Timing Certification Gate:** Do NOT mark cluster timing accuracy certified until physical frame-to-frame offset is measured on physical oscilloscope/logic analyzer probes across multiple hardware nodes.
@@ -102,14 +111,19 @@ The software architecture and simulation boundaries are fully hardened. The runt
 | **SYNC-HW-08** | Timeline Transport Coherence | Start Timeline (120 BPM) on Leader | Follower scheduler tasks execute local sequences against synchronized clock. Measure beat phase alignment across nodes. | `[PENDING BENCH]` |
 | **SYNC-HW-09** | Show Content Drift Detection | Alter Scene 3 on Node B | Sync Studio identifies `DRIFT` on Node B; Leader and Node A remain `MATCHED`. | `[PENDING BENCH]` |
 | **SYNC-HW-10** | Show Deployment & Parity Repair | Deploy Show from Node A to Node B | Show assets transferred sequentially, verified via `/api/v1/show-manifest`, and Node B transitions from `DRIFT` to `MATCHED`. | `[PENDING BENCH]` |
-| **SYNC-HW-11** | Exact Mirror Pruning | Target has extra scenes / cues | Exact mirror purge removes orphaned target assets without affecting network or hardware config. | `[PENDING BENCH]` |
+| **SYNC-HW-11** | Exact Mirror Pruning | Target has extra scenes / cues | Exact mirror purge removes orphaned target assets (presets, cue lists, scene motion tracks) without affecting network or hardware config. | `[PENDING BENCH]` |
 | **SYNC-HW-12** | Firmware / Protocol Mismatch | Node with differing schema | Node reports `INCOMPATIBLE` rather than content drift. Cluster blocks synchronized execution. | `[PENDING BENCH]` |
+| **SYNC-HW-13** | Synchronized Cue List Progression | Start Cue List on Leader | Followers receive leader-authoritative cue transitions (hold, fade, next cue). Measure physical output optical crossfade alignment. | `[PENDING BENCH]` |
+| **SYNC-HW-14** | Synchronized Manual Crossfade | T-Bar slider moved on Leader | Leader broadcasts `manual_fade_q15` at 10 Hz; followers render matching crossfade mix in real time. | `[PENDING BENCH]` |
+| **SYNC-HW-15** | Follower Suppression & 409 Guard | Direct POST /api/v1/activate on Follower | Follower responds 409 `sync_follower_read_only`. Follower UI displays leader-controlled lock banner. | `[PENDING BENCH]` |
+| **SYNC-HW-16** | Show Transport Mode Preemption | Switch Scene -> Timeline -> Cue on Leader | Coordinator transitions modes cleanly. Channel masks (0xFFFF) and control owners hand off without collision. | `[PENDING BENCH]` |
+| **SYNC-HW-17** | Playback vs Schedule Parity | Target has differing calendar schedule | Cluster reports `PLAYBACK PARITY: MATCHED`, `SCHEDULE PARITY: DIFF`. Cluster READY state permits group playback. | `[PENDING BENCH]` |
 
 ---
 
-## 6. Stop Condition Notice
+## 5. Stop Condition Notice
 
-With the completion of LG-024 (Live Desk Hardening) and LG-025 (Fleet Sync Studio & Show Deployment v1):
+With the completion of LG-024 (Live Desk Hardening), LG-025 (Fleet Sync Studio & Show Deployment v1), and LG-026 (Show Transport v2 & Synchronized Cue Playback):
 - **Architecture is frozen** across firmware services, state machines, and API contracts.
 - **No new feature families** will be introduced before physical hardware validation.
 - Timing certification requires completion of the bench test matrices above on physical LumiGrid LED Node hardware.

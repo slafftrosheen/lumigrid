@@ -53,21 +53,87 @@ esp_err_t Scheduler::start(const char* timezone) {
     return ESP_OK;
 }
 
-void Scheduler::apply_sync_transport(bool timeline_enabled, uint16_t bpm, uint32_t now_ms) {
+void Scheduler::apply_sync_transport(SyncTransportMode mode, uint16_t bpm, uint32_t now_ms) {
     portENTER_CRITICAL(&sync_transport_mutex_);
-    sync_transport_.active = true;
-    sync_transport_.timeline_enabled = timeline_enabled;
+    transport_state_.mode = mode;
+    transport_state_.bpm = bpm;
+    transport_state_.updated_ms = now_ms;
+
+    sync_transport_.active = (mode != SyncTransportMode::Standalone);
+    if (mode == SyncTransportMode::Scene) {
+        sync_transport_.mode = RemoteShowMode::Scene;
+        sync_transport_.timeline_enabled = false;
+    } else if (mode == SyncTransportMode::Timeline) {
+        sync_transport_.mode = RemoteShowMode::Timeline;
+        sync_transport_.timeline_enabled = true;
+    } else if (mode == SyncTransportMode::Cue) {
+        sync_transport_.mode = RemoteShowMode::Cue;
+        sync_transport_.timeline_enabled = false;
+    } else {
+        sync_transport_.mode = RemoteShowMode::None;
+        sync_transport_.timeline_enabled = false;
+    }
     sync_transport_.bpm = bpm;
     sync_transport_.updated_ms = now_ms;
     portEXIT_CRITICAL(&sync_transport_mutex_);
+
+    // Phase 0.3: Stop local CueRunner when switching to remote transport if it was local-driven
+    if (mode != SyncTransportMode::Standalone && cue_runner_) {
+        if (mode != SyncTransportMode::Cue && cue_runner_->is_running() && !cue_runner_->is_remote_sync_active()) {
+            cue_runner_->stop(clock_.now_ms());
+        }
+    }
+}
+
+void Scheduler::apply_sync_transport(bool timeline_enabled, uint16_t bpm, uint32_t now_ms) {
+    apply_sync_transport(
+        timeline_enabled ? SyncTransportMode::Timeline : SyncTransportMode::Scene,
+        bpm,
+        now_ms
+    );
 }
 
 void Scheduler::clear_sync_transport() {
     portENTER_CRITICAL(&sync_transport_mutex_);
+    transport_state_.mode = SyncTransportMode::Standalone;
+    transport_state_.bpm = 120;
+    transport_state_.updated_ms = 0;
+
     sync_transport_.active = false;
+    sync_transport_.mode = RemoteShowMode::None;
     sync_transport_.timeline_enabled = false;
     sync_transport_.bpm = 120;
     portEXIT_CRITICAL(&sync_transport_mutex_);
+
+    if (cue_runner_) {
+        cue_runner_->clear_remote_sync(clock_.now_ms());
+    }
+}
+
+SyncTransportState Scheduler::sync_transport_state() const {
+    portENTER_CRITICAL(&sync_transport_mutex_);
+    SyncTransportState st = transport_state_;
+    portEXIT_CRITICAL(&sync_transport_mutex_);
+    return st;
+}
+
+void Scheduler::apply_remote_show_mode(RemoteShowMode mode, uint16_t bpm, uint64_t updated_ms) {
+    SyncTransportMode m = SyncTransportMode::Standalone;
+    if (mode == RemoteShowMode::Scene) m = SyncTransportMode::Scene;
+    else if (mode == RemoteShowMode::Timeline) m = SyncTransportMode::Timeline;
+    else if (mode == RemoteShowMode::Cue) m = SyncTransportMode::Cue;
+    apply_sync_transport(m, bpm, static_cast<uint32_t>(updated_ms));
+}
+
+void Scheduler::clear_remote_show_mode() {
+    clear_sync_transport();
+}
+
+Scheduler::RemoteShowMode Scheduler::remote_show_mode() const {
+    portENTER_CRITICAL(&sync_transport_mutex_);
+    RemoteShowMode m = sync_transport_.mode;
+    portEXIT_CRITICAL(&sync_transport_mutex_);
+    return m;
 }
 
 Scheduler::SyncTimelineTransport Scheduler::sync_transport() const {
@@ -75,6 +141,52 @@ Scheduler::SyncTimelineTransport Scheduler::sync_transport() const {
     SyncTimelineTransport copy = sync_transport_;
     portEXIT_CRITICAL(&sync_transport_mutex_);
     return copy;
+}
+
+ShowTransportSnapshot Scheduler::transport_snapshot(uint64_t clock_ms) const {
+    ShowTransportSnapshot snap{};
+
+    portENTER_CRITICAL(&sync_transport_mutex_);
+    const SyncTransportState remote = transport_state_;
+    portEXIT_CRITICAL(&sync_transport_mutex_);
+
+    // Phase 4.1: Deterministic Show transport precedence:
+    // Cue active -> Cue; else Timeline active -> Timeline; else Scene
+    if (cue_runner_ && cue_runner_->is_running()) {
+        snap.mode = ShowTransportMode::Cue;
+        snap.cue_list = cue_runner_->active_list_index();
+        snap.cue_index = cue_runner_->current_cue_index();
+        snap.cue_next = cue_runner_->next_cue_index();
+        snap.cue_state = cue_runner_->state();
+        snap.cue_generation = cue_runner_->transport_generation();
+        snap.cue_elapsed_ms = cue_runner_->cue_elapsed_ms(clock_ms);
+        snap.manual_fade_q15 = cue_runner_->manual_fade_q15();
+        snap.bpm = sequence_.bpm > 0 ? sequence_.bpm : 120;
+        snap.active_scene = engine_.active_scene_index();
+
+        snap.cue.active = true;
+        snap.cue.list_index = snap.cue_list;
+        snap.cue.state = static_cast<uint8_t>(snap.cue_state);
+        snap.cue.current_cue = snap.cue_index;
+        snap.cue.next_cue = snap.cue_next;
+        snap.cue.generation = snap.cue_generation;
+        snap.cue.paused_elapsed_ms = snap.cue_elapsed_ms;
+        snap.cue.manual_fade_q15 = snap.manual_fade_q15;
+    } else if ((sequence_.enabled || local_timeline_running_ || calendar_sequence_active_) &&
+               (remote.mode == SyncTransportMode::Standalone || remote.mode == SyncTransportMode::Timeline)) {
+        snap.mode = ShowTransportMode::Timeline;
+        snap.bpm = local_timeline_running_
+            ? (local_timeline_bpm_ > 0 ? local_timeline_bpm_ : 120)
+            : (remote.mode == SyncTransportMode::Timeline ? remote.bpm : (sequence_.bpm > 0 ? sequence_.bpm : 120));
+        snap.active_scene = engine_.active_scene_index();
+        snap.cue_state = CueRunnerState::Stopped;
+    } else {
+        snap.mode = ShowTransportMode::Scene;
+        snap.active_scene = engine_.active_scene_index();
+        snap.bpm = sequence_.bpm > 0 ? sequence_.bpm : 120;
+        snap.cue_state = CueRunnerState::Stopped;
+    }
+    return snap;
 }
 
 esp_err_t Scheduler::stop() {
@@ -144,21 +256,38 @@ void Scheduler::task() {
         const uint64_t clock_ms = clock_.now_ms();
         refresh_config(clock_ms);
         if (cue_runner_) {
-            cue_runner_->update(static_cast<uint32_t>(clock_ms));
+            cue_runner_->update(clock_ms);
         }
         evaluate_calendar(calendar_, clock_ms);
 
+        // Phase 10: Local precedence: if CueRunner is running, do not evaluate Timeline this tick
+        if (cue_runner_ && cue_runner_->is_running()) {
+            engine_.release_control(ControlSource::Scheduler);
+            continue;
+        }
+
         bool seq_enabled = sequence_.enabled;
         uint16_t seq_bpm = sequence_.bpm;
+        bool suppress_timeline = false;
 
         portENTER_CRITICAL(&sync_transport_mutex_);
-        if (sync_transport_.active) {
-            seq_enabled = sync_transport_.timeline_enabled;
-            seq_bpm = sync_transport_.bpm;
+        if (transport_state_.mode != SyncTransportMode::Standalone) {
+            if (transport_state_.mode == SyncTransportMode::Scene ||
+                transport_state_.mode == SyncTransportMode::Cue) {
+                // Phase 0.1 & 0.2: Remote Scene and Cue explicitly suppress follower Timeline
+                suppress_timeline = true;
+                seq_enabled = false;
+            } else if (transport_state_.mode == SyncTransportMode::Timeline) {
+                seq_enabled = true;
+                seq_bpm = transport_state_.bpm;
+            }
+        } else if (local_timeline_running_) {
+            seq_enabled = true;
+            seq_bpm = local_timeline_bpm_ > 0 ? local_timeline_bpm_ : 120;
         }
         portEXIT_CRITICAL(&sync_transport_mutex_);
 
-        if (seq_bpm == 0 ||
+        if (suppress_timeline || seq_bpm == 0 ||
             (!seq_enabled && !calendar_sequence_active_)) {
             engine_.release_control(ControlSource::Scheduler);
             continue;
@@ -201,6 +330,12 @@ void Scheduler::evaluate_calendar(
 ) {
     if (!clock_.has_epoch()) return;
 
+    // Phase 0.2: Suppress follower-local calendar triggers when under remote transport
+    portENTER_CRITICAL(&sync_transport_mutex_);
+    const bool is_remote = (transport_state_.mode != SyncTransportMode::Standalone);
+    portEXIT_CRITICAL(&sync_transport_mutex_);
+    if (is_remote) return;
+
     const time_t epoch = static_cast<time_t>(clock_ms / 1000ULL);
     struct tm local_time;
     localtime_r(&epoch, &local_time);
@@ -231,7 +366,7 @@ void Scheduler::evaluate_calendar(
             engine_.release_control(ControlSource::Scheduler);
             engine_.release_control(ControlSource::ManualOverride);
             if (cue_runner_) {
-                cue_runner_->start(entry.cue_list_index, 0, static_cast<uint32_t>(clock_ms));
+                cue_runner_->start(entry.cue_list_index, 0, clock_ms);
                 ESP_LOGI(TAG, "Calendar triggered cue list %u", entry.cue_list_index);
             }
         } else {
@@ -316,6 +451,26 @@ void Scheduler::evaluate(const Sequence& seq, uint64_t clock_ms) {
     } else {
         engine_.release_control(ControlSource::Scheduler);
     }
+}
+
+void Scheduler::start_local_timeline(uint16_t bpm) {
+    portENTER_CRITICAL(&sync_transport_mutex_);
+    local_timeline_running_ = true;
+    local_timeline_bpm_ = bpm > 0 ? bpm : 120;
+    portEXIT_CRITICAL(&sync_transport_mutex_);
+}
+
+void Scheduler::stop_local_timeline() {
+    portENTER_CRITICAL(&sync_transport_mutex_);
+    local_timeline_running_ = false;
+    portEXIT_CRITICAL(&sync_transport_mutex_);
+}
+
+bool Scheduler::local_timeline_active() const {
+    portENTER_CRITICAL(&sync_transport_mutex_);
+    bool active = local_timeline_running_;
+    portEXIT_CRITICAL(&sync_transport_mutex_);
+    return active;
 }
 
 } // namespace lg
