@@ -9,8 +9,6 @@
 export const NODE_IP_KEY = 'lg_node_ip';
 export const NODE_LIST_KEY = 'lg_nodes';
 export const API_TOKEN_KEY = 'lg_api_token';
-export const AUTH_TIMESTAMP_KEY = 'lg_auth_ts';
-export const AUTH_ROLE_KEY = 'lg_auth_role';
 
 export const NODE_META_KEY = 'lg_nodes_meta';
 export const NODE_REGISTRY_KEY = 'lg_nodes_v3';
@@ -75,37 +73,16 @@ export function clearApiToken(): void {
   removeValue(API_TOKEN_KEY);
 }
 
+// ── Session Management (Node-authoritative per LG-029) ───────────────────────
+
+import { nodeAuthStore } from './nodeAuth';
+
 /**
- * Atomically lock the local dashboard session:
- * Clears dashboard auth timestamp, dashboard role, and active API token.
+ * Atomically lock/clear all local dashboard sessions.
  */
 export function lockDashboardSession(): void {
-  removeValue(AUTH_TIMESTAMP_KEY);
-  removeValue(AUTH_ROLE_KEY);
   removeValue(API_TOKEN_KEY);
-}
-
-/**
- * Atomically unlock the local dashboard session with a specific role and corresponding API token:
- * Admin -> 'lumigrid_admin'
- * Operator -> 'lumigrid_op'
- * Installer -> 'lumigrid_install'
- */
-export function unlockDashboardSession(role: 'admin' | 'operator' | 'installer'): void {
-  writeString(AUTH_TIMESTAMP_KEY, String(Date.now()));
-  writeString(AUTH_ROLE_KEY, role);
-  if (role === 'admin') {
-    setApiToken('lumigrid_admin');
-  } else if (role === 'installer') {
-    setApiToken('lumigrid_install');
-  } else {
-    setApiToken('lumigrid_op');
-  }
-}
-
-/** Return the current auth role ('admin', 'operator', 'installer', or empty). */
-export function getAuthRole(): string {
-  return readString(AUTH_ROLE_KEY, '').trim();
+  nodeAuthStore.clearAllSessions();
 }
 
 // ── Fleet Node & Topology Model (Control Plane v3) ───────────────────────────

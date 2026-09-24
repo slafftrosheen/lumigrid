@@ -14,19 +14,23 @@ import {
   BUF_SIZE,
 } from './nodeStore';
 import { setSelectedNodeIp, getSelectedNodeIp } from '../auth/storage';
+import { nodeAuthStore } from '../auth/nodeAuth';
+import * as authApi from '../api/auth';
 
 class MockWebSocket {
   static instances: MockWebSocket[] = [];
   readyState = 0;
   binaryType = 'blob';
   url: string;
+  protocols?: string | string[];
   onopen: (() => void) | null = null;
   onclose: (() => void) | null = null;
   onerror: (() => void) | null = null;
   onmessage: ((event: { data: unknown }) => void) | null = null;
 
-  constructor(url: string) {
+  constructor(url: string, protocols?: string | string[]) {
     this.url = url;
+    this.protocols = protocols;
     MockWebSocket.instances.push(this);
     // Automatic open for testing unless manually controlled
     setTimeout(() => {
@@ -66,12 +70,31 @@ describe('unified dashboard node live state and lifecycle', () => {
     vi.useFakeTimers();
     MockWebSocket.instances = [];
     vi.stubGlobal('WebSocket', MockWebSocket);
+    nodeAuthStore.clearAllSessions();
+
+    const testIps = ['192.168.1.50', '192.168.1.60', '192.168.1.75', '192.168.1.80', '192.168.1.10', '192.168.1.20', '192.168.1.100'];
+    for (const ip of testIps) {
+      nodeAuthStore.setSession({
+        address: ip,
+        nodeId: `node-${ip.replace(/\./g, '-')}`,
+        role: 'operator',
+        sessionToken: `tok-${ip}`,
+        expiresAt: Date.now() + 3600000,
+      });
+    }
+
+    vi.spyOn(authApi, 'createWsTicket').mockImplementation(async (ip: string) => {
+      return { ticket: `ticket-${ip.replace(/\./g, '-')}`, expiresInMs: 15000 };
+    });
+
     _resetForTesting();
   });
 
   afterEach(() => {
     _resetForTesting();
+    nodeAuthStore.clearAllSessions();
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
     vi.useRealTimers();
   });
 
@@ -87,39 +110,59 @@ describe('unified dashboard node live state and lifecycle', () => {
     });
   });
 
+  describe('WebSocket Authentication & Tickets (LG-029)', () => {
+    it('obtains one-time ticket before connect and passes in Sec-WebSocket-Protocol', async () => {
+      const ticketSpy = vi.spyOn(authApi, 'createWsTicket');
+      await connect('192.168.1.50');
+
+      expect(ticketSpy).toHaveBeenCalledWith('192.168.1.50');
+      expect(MockWebSocket.instances.length).toBe(1);
+      expect(MockWebSocket.instances[0].protocols).toEqual(['lumigrid-ticket.ticket-192-168-1-50']);
+    });
+
+    it('rejects connect without active session and does not open socket', async () => {
+      nodeAuthStore.clearSession('192.168.1.50');
+      await connect('192.168.1.50');
+
+      expect(MockWebSocket.instances.length).toBe(0);
+      expect(getNodeLiveSnapshot().connection).toBe('disconnected');
+      expect(getNodeLiveSnapshot().error).toBe('Authentication required');
+    });
+  });
+
   describe('Connection and Reconnect lifecycle (Cases A - F)', () => {
-    it('Case A: connect("192.168.1.50") connects to exactly that IP', () => {
-      connect('192.168.1.50');
+    it('Case A: connect("192.168.1.50") connects to exactly that IP', async () => {
+      await connect('192.168.1.50');
       expect(MockWebSocket.instances.length).toBe(1);
       expect(MockWebSocket.instances[0].url).toContain('192.168.1.50');
       expect(getNodeLiveSnapshot().nodeIp).toBe('192.168.1.50');
     });
 
-    it('Case B: reconnect("192.168.1.60") disconnects existing socket and connects to new IP', () => {
-      connect('192.168.1.50');
+    it('Case B: reconnect("192.168.1.60") disconnects existing socket and connects to new IP', async () => {
+      await connect('192.168.1.50');
       const ws1 = MockWebSocket.instances[0];
       ws1.triggerOpen();
 
-      reconnect('192.168.1.60');
+      await reconnect('192.168.1.60');
       expect(ws1.readyState).toBe(3); // closed
       expect(MockWebSocket.instances.length).toBe(2);
       expect(MockWebSocket.instances[1].url).toContain('192.168.1.60');
       expect(getNodeLiveSnapshot().nodeIp).toBe('192.168.1.60');
     });
 
-    it('Case C: reconnect() with no args uses the currently selected node', () => {
-      connect('192.168.1.75');
+    it('Case C: reconnect() with no args uses the currently selected node', async () => {
+      await connect('192.168.1.75');
       const ws1 = MockWebSocket.instances[0];
       ws1.triggerOpen();
 
-      reconnect();
+      await reconnect();
       expect(ws1.readyState).toBe(3);
       expect(MockWebSocket.instances.length).toBe(2);
       expect(MockWebSocket.instances[1].url).toContain('192.168.1.75');
     });
 
-    it('Case D: unexpected socket close triggers automatic reconnect to same node', () => {
-      connect('192.168.1.80');
+    it('Case D: unexpected socket close triggers automatic reconnect to same node', async () => {
+      await connect('192.168.1.80');
       const ws1 = MockWebSocket.instances[0];
       ws1.triggerOpen();
 
@@ -128,18 +171,18 @@ describe('unified dashboard node live state and lifecycle', () => {
       expect(getNodeLiveSnapshot().connection).toBe('disconnected');
 
       // Fast-forward reconnect timer
-      vi.advanceTimersByTime(600);
+      await vi.advanceTimersByTimeAsync(600);
       expect(MockWebSocket.instances.length).toBe(2);
       expect(MockWebSocket.instances[1].url).toContain('192.168.1.80');
     });
 
-    it('Case E: switching node prevents old socket events from corrupting new node', () => {
-      connect('192.168.1.10');
+    it('Case E: switching node prevents old socket events from corrupting new node', async () => {
+      await connect('192.168.1.10');
       const ws1 = MockWebSocket.instances[0];
       ws1.triggerOpen();
 
       // Switch to node 2
-      connect('192.168.1.20');
+      await connect('192.168.1.20');
       const ws2 = MockWebSocket.instances[1];
       ws2.triggerOpen();
 
@@ -151,12 +194,12 @@ describe('unified dashboard node live state and lifecycle', () => {
 
       // Stale close from old socket does not trigger reconnect for node 1
       ws1.triggerClose();
-      vi.advanceTimersByTime(2000);
+      await vi.advanceTimersByTimeAsync(2000);
       expect(MockWebSocket.instances.length).toBe(2); // no extra reconnect spawned
     });
 
-    it('Case F: explicit disconnect disables automatic reconnect', () => {
-      connect('192.168.1.50');
+    it('Case F: explicit disconnect disables automatic reconnect', async () => {
+      await connect('192.168.1.50');
       const ws1 = MockWebSocket.instances[0];
       ws1.triggerOpen();
 
@@ -164,14 +207,14 @@ describe('unified dashboard node live state and lifecycle', () => {
       expect(getNodeLiveSnapshot().connection).toBe('disconnected');
 
       // Advancing time should not trigger any reconnect
-      vi.advanceTimersByTime(30000);
+      await vi.advanceTimersByTimeAsync(30000);
       expect(MockWebSocket.instances.length).toBe(1);
     });
   });
 
   describe('Protocol message handling & validation', () => {
-    it('updates status on valid status frame with recognized fields', () => {
-      connect('192.168.1.50');
+    it('updates status on valid status frame with recognized fields', async () => {
+      await connect('192.168.1.50');
       const ws = MockWebSocket.instances[0];
       ws.triggerOpen();
 
@@ -190,8 +233,8 @@ describe('unified dashboard node live state and lifecycle', () => {
       expect(snap.lastMessageAt).toBeGreaterThan(0);
     });
 
-    it('handles partial status message without erasing other fields', () => {
-      connect('192.168.1.50');
+    it('handles partial status message without erasing other fields', async () => {
+      await connect('192.168.1.50');
       const ws = MockWebSocket.instances[0];
       ws.triggerOpen();
 
@@ -203,8 +246,8 @@ describe('unified dashboard node live state and lifecycle', () => {
       expect(snap.status?.brightness).toBe(180);
     });
 
-    it('parses schema2 status frame with per-channel owner and manual override block', () => {
-      connect('192.168.1.50');
+    it('parses schema2 status frame with per-channel owner and manual override block', async () => {
+      await connect('192.168.1.50');
       const ws = MockWebSocket.instances[0];
       ws.triggerOpen();
 
@@ -241,8 +284,8 @@ describe('unified dashboard node live state and lifecycle', () => {
       });
     });
 
-    it('ignores unrelated JSON objects without status fields', () => {
-      connect('192.168.1.50');
+    it('ignores unrelated JSON objects without status fields', async () => {
+      await connect('192.168.1.50');
       const ws = MockWebSocket.instances[0];
       ws.triggerOpen();
 
@@ -257,8 +300,8 @@ describe('unified dashboard node live state and lifecycle', () => {
       expect(snap.lastMessageAt).toBe(msgAt); // unchanged
     });
 
-    it('defensively ignores malformed JSON', () => {
-      connect('192.168.1.50');
+    it('defensively ignores malformed JSON', async () => {
+      await connect('192.168.1.50');
       const ws = MockWebSocket.instances[0];
       ws.triggerOpen();
 
@@ -266,8 +309,8 @@ describe('unified dashboard node live state and lifecycle', () => {
       expect(getNodeLiveSnapshot().connection).toBe('connected');
     });
 
-    it('processes valid binary pixel frame with header 1', () => {
-      connect('192.168.1.50');
+    it('processes valid binary pixel frame with header 1', async () => {
+      await connect('192.168.1.50');
       const ws = MockWebSocket.instances[0];
       ws.triggerOpen();
 
@@ -281,8 +324,8 @@ describe('unified dashboard node live state and lifecycle', () => {
       expect(snap.pixels[2]).toBe(200);
     });
 
-    it('ignores binary frames with unrecognized header byte', () => {
-      connect('192.168.1.50');
+    it('ignores binary frames with unrecognized header byte', async () => {
+      await connect('192.168.1.50');
       const ws = MockWebSocket.instances[0];
       ws.triggerOpen();
 
@@ -294,8 +337,8 @@ describe('unified dashboard node live state and lifecycle', () => {
       expect(snap.pixels[0]).toBe(0);
     });
 
-    it('handles oversized binary pixel frames gracefully', () => {
-      connect('192.168.1.50');
+    it('handles oversized binary pixel frames gracefully', async () => {
+      await connect('192.168.1.50');
       const ws = MockWebSocket.instances[0];
       ws.triggerOpen();
 
@@ -313,18 +356,18 @@ describe('unified dashboard node live state and lifecycle', () => {
   });
 
   describe('Health polling and failure reporting', () => {
-    it('cleans up previous poll timer and maintains exactly one interval', () => {
+    it('cleans up previous poll timer and maintains exactly one interval', async () => {
       const setIntervalSpy = vi.spyOn(globalThis, 'setInterval');
       const clearIntervalSpy = vi.spyOn(globalThis, 'clearInterval');
 
-      connect('192.168.1.50');
+      await connect('192.168.1.50');
       const ws1 = MockWebSocket.instances[0];
       ws1.triggerOpen();
 
       expect(setIntervalSpy).toHaveBeenCalledTimes(1);
 
       // Reconnect to same or different node
-      reconnect('192.168.1.60');
+      await reconnect('192.168.1.60');
       const ws2 = MockWebSocket.instances[1];
       ws2.triggerOpen();
 
@@ -366,8 +409,8 @@ describe('unified dashboard node live state and lifecycle', () => {
   });
 
   describe('WebSocket Schema 2 ingestion and sequence tracking', () => {
-    it('parses Schema 2 snapshot and populates extended state', () => {
-      connect('192.168.1.50');
+    it('parses Schema 2 snapshot and populates extended state', async () => {
+      await connect('192.168.1.50');
       const ws = MockWebSocket.instances[0];
       ws.triggerOpen();
 
@@ -438,8 +481,8 @@ describe('unified dashboard node live state and lifecycle', () => {
       expect(snap.status?.job?.progress).toBe(55);
     });
 
-    it('detects dropped sequence numbers and transitions connection to degraded', () => {
-      connect('192.168.1.50');
+    it('detects dropped sequence numbers and transitions connection to degraded', async () => {
+      await connect('192.168.1.50');
       const ws = MockWebSocket.instances[0];
       ws.triggerOpen();
 

@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { deployShowToNodes, verifyShowDeployment, DEFAULT_SHOW_DEPLOYMENT_OPTIONS } from './showDeployment';
+import { nodeAuthStore } from '../auth/nodeAuth';
 import * as syncApi from './sync';
 import * as scenesApi from './scenes';
 import * as sceneMotionApi from './sceneMotion';
@@ -42,6 +43,10 @@ describe('showDeployment service', () => {
 
   beforeEach(() => {
     vi.restoreAllMocks();
+    nodeAuthStore.clearAllSessions();
+    nodeAuthStore.setSession({ address: sourceIp, nodeId: 'src', role: 'admin', sessionToken: 's-tok', expiresAt: Date.now() + 3600000 });
+    nodeAuthStore.setSession({ address: targetIp1, nodeId: 't1', role: 'admin', sessionToken: 't1-tok', expiresAt: Date.now() + 3600000 });
+    nodeAuthStore.setSession({ address: targetIp2, nodeId: 't2', role: 'admin', sessionToken: 't2-tok', expiresAt: Date.now() + 3600000 });
 
     vi.spyOn(syncApi, 'getShowManifest').mockImplementation(async (ip) => {
       if (ip === sourceIp) return mockSourceManifest;
@@ -261,5 +266,21 @@ describe('showDeployment service', () => {
 
     await deployShowToNodes(sourceIp, [targetIp1], { mirrorExactly: true, sceneMotion: true });
     expect(scenesApi.deleteSceneMotion).toHaveBeenCalledWith(targetIp1, 0);
+  });
+
+  it('reports AUTH REQUIRED per target if session is missing or unauthorized', async () => {
+    nodeAuthStore.clearSession(targetIp2);
+    vi.spyOn(syncApi, 'getShowManifest').mockImplementation(async (ip) => {
+      if (ip === sourceIp) return mockSourceManifest;
+      return { ...mockSourceManifest };
+    });
+
+    const results = await deployShowToNodes(sourceIp, [targetIp1, targetIp2]);
+    expect(results[targetIp2]).toEqual({
+      ip: targetIp2,
+      state: 'failed',
+      error: 'AUTH REQUIRED',
+    });
+    expect(results[targetIp1].state).toBe('complete');
   });
 });

@@ -1,19 +1,28 @@
 // components/api/include/ApiAuth.hpp
 #pragma once
 #include "esp_http_server.h"
+#include "AuthTypes.hpp"
+#include "AuthManager.hpp"
 
 namespace lg::api {
 
-enum class ApiRole : uint8_t {
-    Operator = 0,
-    Installer = 1,
-    Admin = 2
+using ApiRole = lg::auth::AuthRole;
+using AuthMethod = lg::auth::AuthMethod;
+
+struct AuthPrincipal {
+    bool authenticated = false;
+    ApiRole role = ApiRole::Operator;
+    AuthMethod method = AuthMethod::None;
 };
 
-// Validates Bearer token from Authorization header against NVS storage
+void set_auth_manager(lg::auth::AuthManager* manager);
+lg::auth::AuthManager* get_auth_manager();
+
+AuthPrincipal authenticate(httpd_req_t* request);
 bool authorize(httpd_req_t* request, ApiRole minimum_role = ApiRole::Admin);
 
-// Updates the cached tokens in memory after an NVS write
-void update_tokens(const char* admin, const char* installer, const char* op);
+inline bool role_satisfies(ApiRole actual, ApiRole minimum) {
+    return static_cast<uint8_t>(actual) >= static_cast<uint8_t>(minimum);
+}
 
 } // namespace lg::api

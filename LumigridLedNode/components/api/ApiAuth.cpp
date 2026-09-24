@@ -7,126 +7,134 @@ namespace lg::api {
 namespace {
 
 static const char* TAG = "api_auth";
-static char s_admin_token[32] = "lumigrid_admin";
-static char s_installer_token[32] = "lumigrid_install";
-static char s_operator_token[32] = "lumigrid_op";
+static lg::auth::AuthManager* s_auth_manager = nullptr;
 
+} // namespace
+
+void set_auth_manager(lg::auth::AuthManager* manager) {
+    s_auth_manager = manager;
 }
 
-void update_tokens(const char* admin, const char* installer, const char* op) {
-    if (admin && admin[0] != '\0') {
-        std::strncpy(s_admin_token, admin, sizeof(s_admin_token) - 1);
-        s_admin_token[sizeof(s_admin_token) - 1] = '\0';
-    }
-    if (installer && installer[0] != '\0') {
-        std::strncpy(s_installer_token, installer, sizeof(s_installer_token) - 1);
-        s_installer_token[sizeof(s_installer_token) - 1] = '\0';
-    }
-    if (op && op[0] != '\0') {
-        std::strncpy(s_operator_token, op, sizeof(s_operator_token) - 1);
-        s_operator_token[sizeof(s_operator_token) - 1] = '\0';
-    }
+lg::auth::AuthManager* get_auth_manager() {
+    return s_auth_manager;
 }
 
-bool authorize(httpd_req_t* request, ApiRole minimum_role) {
+AuthPrincipal authenticate(httpd_req_t* request) {
+    AuthPrincipal principal{};
+    if (!s_auth_manager) {
+        return principal;
+    }
+
     char header[128] = {};
-    bool token_found = false;
 
-    // 1. Try Authorization header
+    // 1. Try Authorization header: Bearer <session-token>
     size_t hdr_len = httpd_req_get_hdr_value_len(request, "Authorization");
     if (hdr_len > 0 && hdr_len < sizeof(header)) {
         if (httpd_req_get_hdr_value_str(request, "Authorization", header, sizeof(header)) == ESP_OK) {
-            token_found = true;
-        }
-    }
-
-    // 2. Try X-Auth-Token or X-API-Key header if Authorization header absent
-    if (!token_found) {
-        hdr_len = httpd_req_get_hdr_value_len(request, "X-Auth-Token");
-        if (hdr_len > 0 && hdr_len < sizeof(header)) {
-            if (httpd_req_get_hdr_value_str(request, "X-Auth-Token", header, sizeof(header)) == ESP_OK) {
-                token_found = true;
+            char* token = header;
+            if (strncasecmp(token, "Bearer ", 7) == 0) {
+                token += 7;
             }
-        }
-    }
-    if (!token_found) {
-        hdr_len = httpd_req_get_hdr_value_len(request, "X-API-Key");
-        if (hdr_len > 0 && hdr_len < sizeof(header)) {
-            if (httpd_req_get_hdr_value_str(request, "X-API-Key", header, sizeof(header)) == ESP_OK) {
-                token_found = true;
+            while (*token == ' ' || *token == '\t') {
+                token++;
             }
-        }
-    }
+            size_t len = std::strlen(token);
+            while (len > 0 && (token[len - 1] == ' ' || token[len - 1] == '\r' || token[len - 1] == '\n' || token[len - 1] == '\t')) {
+                token[len - 1] = '\0';
+                len--;
+            }
 
-    // 3. Try query string fallback (?token=... or ?auth=...)
-    if (!token_found) {
-        size_t query_len = httpd_req_get_url_query_len(request);
-        if (query_len > 0 && query_len < sizeof(header)) {
-            char query[128] = {};
-            if (httpd_req_get_url_query_str(request, query, sizeof(query)) == ESP_OK) {
-                if (httpd_query_key_value(query, "token", header, sizeof(header)) == ESP_OK ||
-                    httpd_query_key_value(query, "auth", header, sizeof(header)) == ESP_OK) {
-                    token_found = true;
-                }
+            auto res = s_auth_manager->validate_session(token);
+            if (res.valid) {
+                principal.authenticated = true;
+                principal.role = res.role;
+                principal.method = AuthMethod::Session;
+                return principal;
             }
         }
     }
 
-    if (!token_found || header[0] == '\0') {
+    // 2. Try X-API-Key header (explicit automation / long-lived credential)
+    hdr_len = httpd_req_get_hdr_value_len(request, "X-API-Key");
+    if (hdr_len > 0 && hdr_len < sizeof(header)) {
+        if (httpd_req_get_hdr_value_str(request, "X-API-Key", header, sizeof(header)) == ESP_OK) {
+            char* token = header;
+            while (*token == ' ' || *token == '\t') {
+                token++;
+            }
+            size_t len = std::strlen(token);
+            while (len > 0 && (token[len - 1] == ' ' || token[len - 1] == '\r' || token[len - 1] == '\n' || token[len - 1] == '\t')) {
+                token[len - 1] = '\0';
+                len--;
+            }
+
+            lg::auth::AuthRole role = lg::auth::AuthRole::Operator;
+            if (s_auth_manager->verify_api_key(token, &role)) {
+                principal.authenticated = true;
+                principal.role = role;
+                principal.method = AuthMethod::ApiKey;
+                return principal;
+            }
+        }
+    }
+
+    // Explicit rejection: persistent credentials are NOT accepted via query strings or X-Auth-Token.
+    return principal;
+}
+
+bool authorize(httpd_req_t* request, ApiRole minimum_role) {
+    if (!s_auth_manager) {
+        httpd_resp_set_status(request, "503 Service Unavailable");
+        httpd_resp_set_type(request, "application/json");
+        httpd_resp_sendstr(request, R"({"error":"auth_unavailable"})");
+        return false;
+    }
+
+    // Check if session token was provided but expired
+    char auth_hdr[128] = {};
+    size_t hdr_len = httpd_req_get_hdr_value_len(request, "Authorization");
+    bool session_expired = false;
+    if (hdr_len > 0 && hdr_len < sizeof(auth_hdr)) {
+        if (httpd_req_get_hdr_value_str(request, "Authorization", auth_hdr, sizeof(auth_hdr)) == ESP_OK) {
+            char* token = auth_hdr;
+            if (strncasecmp(token, "Bearer ", 7) == 0) token += 7;
+            while (*token == ' ' || *token == '\t') token++;
+            size_t len = std::strlen(token);
+            while (len > 0 && (token[len - 1] == ' ' || token[len - 1] == '\r' || token[len - 1] == '\n' || token[len - 1] == '\t')) {
+                token[len - 1] = '\0';
+                len--;
+            }
+            auto res = s_auth_manager->inspect_session(token);
+            if (res.expired) {
+                session_expired = true;
+            }
+        }
+    }
+
+    AuthPrincipal principal = authenticate(request);
+
+    if (!principal.authenticated) {
         httpd_resp_set_status(request, "401 Unauthorized");
         httpd_resp_set_type(request, "application/json");
         httpd_resp_set_hdr(request, "WWW-Authenticate", "Bearer");
         httpd_resp_set_hdr(request, "Access-Control-Allow-Origin", "*");
-        httpd_resp_set_hdr(request, "Access-Control-Allow-Headers", "Authorization, Content-Type, X-Auth-Token, X-API-Key");
-        httpd_resp_sendstr(request, R"({"error":"authorization_required"})");
+        httpd_resp_set_hdr(request, "Access-Control-Allow-Headers", "Authorization, Content-Type, X-API-Key");
+        if (session_expired) {
+            httpd_resp_sendstr(request, R"({"error":"session_expired"})");
+        } else {
+            httpd_resp_sendstr(request, R"({"error":"authorization_required"})");
+        }
         return false;
     }
 
-    // Strip "Bearer " or "bearer " prefix if present
-    char* provided_token = header;
-    if (strncasecmp(provided_token, "Bearer ", 7) == 0) {
-        provided_token += 7;
-    }
-
-    // Trim leading whitespace
-    while (*provided_token == ' ' || *provided_token == '\t') {
-        provided_token++;
-    }
-    
-    // Trim trailing whitespace/newlines
-    size_t len = std::strlen(provided_token);
-    while (len > 0 && (provided_token[len - 1] == ' ' || provided_token[len - 1] == '\r' || provided_token[len - 1] == '\n' || provided_token[len - 1] == '\t')) {
-        provided_token[len - 1] = '\0';
-        len--;
-    }
-
-    ApiRole provided_role;
-
-    if ((s_admin_token[0] != '\0' && std::strcmp(provided_token, s_admin_token) == 0) ||
-        std::strcmp(provided_token, "admin") == 0 ||
-        std::strcmp(provided_token, "lumigrid_admin") == 0) {
-        provided_role = ApiRole::Admin;
-    } else if ((s_installer_token[0] != '\0' && std::strcmp(provided_token, s_installer_token) == 0) ||
-               std::strcmp(provided_token, "installer") == 0 ||
-               std::strcmp(provided_token, "lumigrid_install") == 0) {
-        provided_role = ApiRole::Installer;
-    } else if ((s_operator_token[0] != '\0' && std::strcmp(provided_token, s_operator_token) == 0) ||
-               std::strcmp(provided_token, "operator") == 0 ||
-               std::strcmp(provided_token, "lumigrid_op") == 0) {
-        provided_role = ApiRole::Operator;
-    } else {
-        ESP_LOGW(TAG, "Auth failed! Invalid token provided");
+    if (static_cast<uint8_t>(principal.role) < static_cast<uint8_t>(minimum_role)) {
+        ESP_LOGW(TAG, "Auth failed: Insufficient role (%d < %d)",
+                 static_cast<int>(principal.role), static_cast<int>(minimum_role));
+        httpd_resp_set_status(request, "403 Forbidden");
+        httpd_resp_set_type(request, "application/json");
         httpd_resp_set_hdr(request, "Access-Control-Allow-Origin", "*");
-        httpd_resp_set_hdr(request, "Access-Control-Allow-Headers", "Authorization, Content-Type, X-Auth-Token, X-API-Key");
-        httpd_resp_send_err(request, HTTPD_403_FORBIDDEN, "Invalid factory token");
-        return false;
-    }
-
-    if (static_cast<uint8_t>(provided_role) < static_cast<uint8_t>(minimum_role)) {
-        ESP_LOGW(TAG, "Auth failed! Insufficient role.");
-        httpd_resp_set_hdr(request, "Access-Control-Allow-Origin", "*");
-        httpd_resp_set_hdr(request, "Access-Control-Allow-Headers", "Authorization, Content-Type, X-Auth-Token, X-API-Key");
-        httpd_resp_send_err(request, HTTPD_403_FORBIDDEN, "Insufficient permissions");
+        httpd_resp_set_hdr(request, "Access-Control-Allow-Headers", "Authorization, Content-Type, X-API-Key");
+        httpd_resp_sendstr(request, R"({"error":"insufficient_permissions"})");
         return false;
     }
 

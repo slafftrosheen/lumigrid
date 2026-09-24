@@ -56,9 +56,18 @@ esp_err_t send_json(httpd_req_t* request,
     httpd_resp_set_type(request, "application/json");
     httpd_resp_set_hdr(request, "Cache-Control", "no-store");
     httpd_resp_set_hdr(request, "Access-Control-Allow-Origin", "*");
-    httpd_resp_set_hdr(request, "Access-Control-Allow-Headers", "Authorization, Content-Type, X-Auth-Token, X-API-Key");
+    httpd_resp_set_hdr(request, "Access-Control-Allow-Headers", "Authorization, Content-Type, X-API-Key");
     httpd_resp_set_hdr(request, "Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
     return httpd_resp_sendstr(request, body);
+}
+
+esp_err_t send_json(httpd_req_t* request, cJSON* json, const char* status = "200 OK") {
+    char* body = cJSON_PrintUnformatted(json);
+    cJSON_Delete(json);
+    if (!body) return ESP_FAIL;
+    esp_err_t res = send_json(request, body, status);
+    cJSON_free(body);
+    return res;
 }
 
 esp_err_t send_error(httpd_req_t* request,
@@ -469,6 +478,41 @@ esp_err_t post_auto_loop(httpd_req_t* request) {
 
 esp_err_t ws_handler(httpd_req_t* request) {
     if (request->method == HTTP_GET) {
+        char proto_hdr[128] = {};
+        if (httpd_req_get_hdr_value_str(request, "Sec-WebSocket-Protocol", proto_hdr, sizeof(proto_hdr)) != ESP_OK) {
+            api::AuditLog::instance().log(api::ApiRole::Operator, "ws_auth_failed", "WebSocket missing ticket protocol");
+            httpd_resp_send_err(request, HTTPD_401_UNAUTHORIZED, "Missing Sec-WebSocket-Protocol");
+            return ESP_FAIL;
+        }
+
+        const char* prefix = "lumigrid-ticket.";
+        char* ticket_pos = strstr(proto_hdr, prefix);
+        if (!ticket_pos) {
+            api::AuditLog::instance().log(api::ApiRole::Operator, "ws_auth_failed", "WebSocket invalid ticket protocol");
+            httpd_resp_send_err(request, HTTPD_401_UNAUTHORIZED, "Invalid WebSocket ticket protocol");
+            return ESP_FAIL;
+        }
+        ticket_pos += strlen(prefix);
+        char ticket[33] = {};
+        size_t t_len = 0;
+        while (ticket_pos[t_len] && ticket_pos[t_len] != ',' && ticket_pos[t_len] != ' ' && t_len < 32) {
+            ticket[t_len] = ticket_pos[t_len];
+            t_len++;
+        }
+        ticket[t_len] = '\0';
+
+        auto* auth_mgr = api::get_auth_manager();
+        auth::AuthRole role = auth::AuthRole::Operator;
+        if (!auth_mgr || !auth_mgr->consume_ws_ticket(ticket, &role)) {
+            api::AuditLog::instance().log(api::ApiRole::Operator, "ws_auth_failed", "WebSocket invalid or expired ticket");
+            httpd_resp_send_err(request, HTTPD_401_UNAUTHORIZED, "Invalid or expired ticket");
+            return ESP_FAIL;
+        }
+
+        // Echo the negotiated subprotocol back so client completes handshake
+        char subproto_resp[64];
+        snprintf(subproto_resp, sizeof(subproto_resp), "lumigrid-ticket.%s", ticket);
+        httpd_resp_set_hdr(request, "Sec-WebSocket-Protocol", subproto_resp);
         return ESP_OK;
     }
     // Read and discard to prevent state leak
@@ -486,6 +530,21 @@ esp_err_t ws_handler(httpd_req_t* request) {
         }
     }
     return ESP_OK;
+}
+
+esp_err_t get_info(httpd_req_t* request) {
+    FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+    DeviceConfig cfg;
+    const char* dev_name = nullptr;
+    if (api_ptr->config() && api_ptr->config()->load_config(cfg)) {
+        dev_name = cfg.device_name;
+    }
+    NodeIdentity id = get_node_identity(dev_name);
+    char body[384];
+    snprintf(body, sizeof(body),
+        "{\"id\":\"%s\",\"name\":\"%s\",\"family\":\"%s\",\"model\":\"%s\",\"hardwareRevision\":\"%s\",\"firmwareVersion\":\"%s\"}",
+        id.id, id.name, id.family, id.model, id.hw_revision, id.fw_version);
+    return send_json(request, body);
 }
 
 } // namespace
@@ -670,61 +729,311 @@ esp_err_t get_logs(httpd_req_t* request) {
     httpd_resp_set_type(request, "text/plain");
     httpd_resp_set_hdr(request, "Cache-Control", "no-store");
     httpd_resp_set_hdr(request, "Access-Control-Allow-Origin", "*");
-    httpd_resp_set_hdr(request, "Access-Control-Allow-Headers", "Authorization, Content-Type, X-Auth-Token, X-API-Key");
+    httpd_resp_set_hdr(request, "Access-Control-Allow-Headers", "Authorization, Content-Type, X-API-Key");
     esp_err_t err = httpd_resp_sendstr(request, logs);
     
     delete[] logs;
     return err;
 }
 
-esp_err_t post_auth_update(httpd_req_t* request) {
-    if (!api::authorize(request, api::ApiRole::Admin)) return ESP_OK;
+esp_err_t get_auth_status(httpd_req_t* request) {
+    auto* auth_mgr = api::get_auth_manager();
+    bool prov = auth_mgr ? auth_mgr->is_provisioned() : false;
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "provisioned", prov);
+    cJSON_AddBoolToObject(root, "bootstrapAllowed", !prov);
+    return send_json(request, root, "200 OK");
+}
 
-    FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
-    if (!api_ptr->config()) return send_error(request, "503 Service Unavailable", "config_not_ready");
+esp_err_t post_auth_bootstrap(httpd_req_t* request) {
+    auto* auth_mgr = api::get_auth_manager();
+    if (!auth_mgr || auth_mgr->is_provisioned()) {
+        return send_error(request, "400 Bad Request", "already_provisioned");
+    }
 
     cJSON* root = nullptr;
-    if (read_json(request, &root) != ESP_OK) {
+    if (read_json(request, &root) != ESP_OK || !root) {
         return send_error(request, "400 Bad Request", "invalid_json");
     }
 
-    DeviceConfig cfg;
-    api_ptr->config()->load_config(cfg);
-
-    const cJSON* admin = cJSON_GetObjectItemCaseSensitive(root, "adminToken");
-    const cJSON* installer = cJSON_GetObjectItemCaseSensitive(root, "installerToken");
-    const cJSON* op = cJSON_GetObjectItemCaseSensitive(root, "operatorToken");
-    const cJSON* new_tok = cJSON_GetObjectItemCaseSensitive(root, "newToken");
-
-    auto validate_and_copy = [](const cJSON* item, char* dest, size_t max_len) {
-        if (cJSON_IsString(item) && strlen(item->valuestring) >= 4 && strlen(item->valuestring) < max_len) {
-            strncpy(dest, item->valuestring, max_len - 1);
-            dest[max_len - 1] = '\0';
-            return true;
-        }
-        return false;
-    };
-
-    bool updated = false;
-    if (new_tok && validate_and_copy(new_tok, cfg.admin_token, sizeof(cfg.admin_token))) updated = true;
-    if (admin && validate_and_copy(admin, cfg.admin_token, sizeof(cfg.admin_token))) updated = true;
-    if (installer && validate_and_copy(installer, cfg.installer_token, sizeof(cfg.installer_token))) updated = true;
-    if (op && validate_and_copy(op, cfg.operator_token, sizeof(cfg.operator_token))) updated = true;
-
-    if (!updated) {
+    cJSON* tok = cJSON_GetObjectItem(root, "adminToken");
+    if (!tok || !cJSON_IsString(tok) || strlen(tok->valuestring) < 16 || strlen(tok->valuestring) > 64) {
         cJSON_Delete(root);
-        return send_error(request, "400 Bad Request", "invalid_token_format");
+        return send_error(request, "400 Bad Request", "invalid_token_length");
     }
 
-    if (api_ptr->config()->save_config(cfg) == ESP_OK) {
-        api::update_tokens(cfg.admin_token, cfg.installer_token, cfg.operator_token);
-        api::AuditLog::instance().log(api::ApiRole::Admin, "auth_update", "Tokens updated");
-        cJSON_Delete(root);
-        return send_json(request, R"({"updated":true})", "200 OK");
-    }
-
+    esp_err_t err = auth_mgr->bootstrap(tok->valuestring);
     cJSON_Delete(root);
-    return send_error(request, "500 Internal Server Error", "nvs_write_failed");
+
+    if (err != ESP_OK) {
+        return send_error(request, "500 Internal Server Error", "bootstrap_failed");
+    }
+
+    api::AuditLog::instance().log(api::ApiRole::Admin, "auth_bootstrap", "Admin credential bootstrapped");
+
+    cJSON* resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "success", true);
+    cJSON_AddBoolToObject(resp, "provisioned", true);
+    return send_json(request, resp, "200 OK");
+}
+
+esp_err_t post_auth_session(httpd_req_t* request) {
+    auto* auth_mgr = api::get_auth_manager();
+    if (!auth_mgr) {
+        return send_error(request, "503 Service Unavailable", "auth_unavailable");
+    }
+
+    if (auth_mgr->is_rate_limited()) {
+        return send_error(request, "429 Too Many Requests", "rate_limited");
+    }
+
+    cJSON* root = nullptr;
+    if (read_json(request, &root) != ESP_OK || !root) {
+        return send_error(request, "400 Bad Request", "invalid_json");
+    }
+
+    cJSON* tok = cJSON_GetObjectItem(root, "token");
+    if (!tok || !cJSON_IsString(tok)) {
+        cJSON_Delete(root);
+        return send_error(request, "400 Bad Request", "token_required");
+    }
+
+    char session_hex[65] = {};
+    lg::auth::AuthRole role = lg::auth::AuthRole::Operator;
+    uint32_t expires_in = 0;
+
+    esp_err_t err = auth_mgr->create_session(tok->valuestring, session_hex, &role, &expires_in);
+    cJSON_Delete(root);
+
+    if (err != ESP_OK) {
+        auth_mgr->record_failed_attempt();
+        api::AuditLog::instance().log(api::ApiRole::Operator, "auth_login_failed", "Invalid credentials");
+        return send_error(request, "401 Unauthorized", "invalid_credentials");
+    }
+
+    auth_mgr->record_successful_attempt();
+    api::AuditLog::instance().log(static_cast<api::ApiRole>(role), "auth_login_success", "Session established");
+
+    const char* role_str = (role == lg::auth::AuthRole::Admin) ? "admin"
+                         : (role == lg::auth::AuthRole::Installer) ? "installer"
+                         : "operator";
+
+    cJSON* resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "authenticated", true);
+    cJSON_AddStringToObject(resp, "role", role_str);
+    cJSON_AddStringToObject(resp, "sessionToken", session_hex);
+    cJSON_AddNumberToObject(resp, "expiresIn", expires_in);
+    return send_json(request, resp, "200 OK");
+}
+
+esp_err_t get_auth_session(httpd_req_t* request) {
+    if (!api::authorize(request, api::ApiRole::Operator)) return ESP_OK;
+
+    auto principal = api::authenticate(request);
+    const char* role_str = (principal.role == api::ApiRole::Admin) ? "admin"
+                         : (principal.role == api::ApiRole::Installer) ? "installer"
+                         : "operator";
+
+    uint32_t rem = 1800;
+    char auth_hdr[128] = {};
+    size_t hdr_len = httpd_req_get_hdr_value_len(request, "Authorization");
+    if (hdr_len > 0 && hdr_len < sizeof(auth_hdr)) {
+        if (httpd_req_get_hdr_value_str(request, "Authorization", auth_hdr, sizeof(auth_hdr)) == ESP_OK) {
+            char* token = auth_hdr;
+            if (strncasecmp(token, "Bearer ", 7) == 0) token += 7;
+            while (*token == ' ' || *token == '\t') token++;
+            size_t len = std::strlen(token);
+            while (len > 0 && (token[len - 1] == ' ' || token[len - 1] == '\r' || token[len - 1] == '\n' || token[len - 1] == '\t')) {
+                token[len - 1] = '\0';
+                len--;
+            }
+            auto* auth_mgr = api::get_auth_manager();
+            if (auth_mgr) {
+                auto res = auth_mgr->inspect_session(token);
+                if (res.valid) rem = res.remaining_s;
+            }
+        }
+    }
+
+    cJSON* resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "authenticated", true);
+    cJSON_AddStringToObject(resp, "role", role_str);
+    cJSON_AddNumberToObject(resp, "expiresIn", rem);
+    return send_json(request, resp, "200 OK");
+}
+
+esp_err_t delete_auth_session(httpd_req_t* request) {
+    if (!api::authorize(request, api::ApiRole::Operator)) return ESP_OK;
+
+    char auth_hdr[128] = {};
+    size_t hdr_len = httpd_req_get_hdr_value_len(request, "Authorization");
+    if (hdr_len > 0 && hdr_len < sizeof(auth_hdr)) {
+        if (httpd_req_get_hdr_value_str(request, "Authorization", auth_hdr, sizeof(auth_hdr)) == ESP_OK) {
+            char* token = auth_hdr;
+            if (strncasecmp(token, "Bearer ", 7) == 0) token += 7;
+            while (*token == ' ' || *token == '\t') token++;
+            size_t len = std::strlen(token);
+            while (len > 0 && (token[len - 1] == ' ' || token[len - 1] == '\r' || token[len - 1] == '\n' || token[len - 1] == '\t')) {
+                token[len - 1] = '\0';
+                len--;
+            }
+            auto* auth_mgr = api::get_auth_manager();
+            if (auth_mgr) {
+                auth_mgr->delete_session(token);
+            }
+        }
+    }
+
+    api::AuditLog::instance().log(api::ApiRole::Operator, "auth_logout", "Session ended");
+
+    cJSON* resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "success", true);
+    cJSON_AddBoolToObject(resp, "loggedOut", true);
+    return send_json(request, resp, "200 OK");
+}
+
+esp_err_t post_auth_ws_ticket(httpd_req_t* request) {
+    if (!api::authorize(request, api::ApiRole::Operator)) return ESP_OK;
+
+    auto principal = api::authenticate(request);
+    auto* auth_mgr = api::get_auth_manager();
+    if (!auth_mgr) {
+        return send_error(request, "503 Service Unavailable", "auth_unavailable");
+    }
+
+    char ticket_hex[33] = {};
+    uint32_t expires_in_ms = 0;
+    esp_err_t err = auth_mgr->create_ws_ticket(static_cast<lg::auth::AuthRole>(principal.role), ticket_hex, &expires_in_ms);
+    if (err != ESP_OK) {
+        return send_error(request, "500 Internal Server Error", "ticket_generation_failed");
+    }
+
+    cJSON* resp = cJSON_CreateObject();
+    cJSON_AddStringToObject(resp, "ticket", ticket_hex);
+    cJSON_AddNumberToObject(resp, "expiresInMs", expires_in_ms);
+    return send_json(request, resp, "200 OK");
+}
+
+esp_err_t get_auth_credentials(httpd_req_t* request) {
+    if (!api::authorize(request, api::ApiRole::Admin)) return ESP_OK;
+
+    auto* auth_mgr = api::get_auth_manager();
+    bool admin_en = false, inst_en = false, op_en = false;
+    if (auth_mgr) {
+        auth_mgr->get_credential_status(admin_en, inst_en, op_en);
+    }
+
+    cJSON* resp = cJSON_CreateObject();
+    cJSON* a = cJSON_CreateObject();
+    cJSON_AddBoolToObject(a, "enabled", admin_en);
+    cJSON_AddItemToObject(resp, "admin", a);
+
+    cJSON* i = cJSON_CreateObject();
+    cJSON_AddBoolToObject(i, "enabled", inst_en);
+    cJSON_AddItemToObject(resp, "installer", i);
+
+    cJSON* o = cJSON_CreateObject();
+    cJSON_AddBoolToObject(o, "enabled", op_en);
+    cJSON_AddItemToObject(resp, "operator", o);
+
+    return send_json(request, resp, "200 OK");
+}
+
+esp_err_t post_auth_credentials(httpd_req_t* request) {
+    if (!api::authorize(request, api::ApiRole::Admin)) return ESP_OK;
+
+    cJSON* root = nullptr;
+    if (read_json(request, &root) != ESP_OK || !root) {
+        return send_error(request, "400 Bad Request", "invalid_json");
+    }
+
+    cJSON* role_item = cJSON_GetObjectItem(root, "role");
+    cJSON* token_item = cJSON_GetObjectItem(root, "token");
+    if (!role_item || !cJSON_IsString(role_item) || !token_item || !cJSON_IsString(token_item)) {
+        cJSON_Delete(root);
+        return send_error(request, "400 Bad Request", "missing_role_or_token");
+    }
+
+    if (strlen(token_item->valuestring) < 16 || strlen(token_item->valuestring) > 64) {
+        cJSON_Delete(root);
+        return send_error(request, "400 Bad Request", "invalid_token_length");
+    }
+
+    lg::auth::AuthRole role = lg::auth::AuthRole::Operator;
+    if (strcmp(role_item->valuestring, "admin") == 0) {
+        role = lg::auth::AuthRole::Admin;
+    } else if (strcmp(role_item->valuestring, "installer") == 0) {
+        role = lg::auth::AuthRole::Installer;
+    } else if (strcmp(role_item->valuestring, "operator") == 0) {
+        role = lg::auth::AuthRole::Operator;
+    } else {
+        cJSON_Delete(root);
+        return send_error(request, "400 Bad Request", "invalid_role");
+    }
+
+    auto* auth_mgr = api::get_auth_manager();
+    esp_err_t err = auth_mgr ? auth_mgr->rotate_credential(role, token_item->valuestring) : ESP_ERR_INVALID_STATE;
+    cJSON_Delete(root);
+
+    if (err != ESP_OK) {
+        return send_error(request, "500 Internal Server Error", "credential_rotation_failed");
+    }
+
+    api::AuditLog::instance().log(api::ApiRole::Admin, "auth_key_rotated", role_item->valuestring);
+
+    cJSON* resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "success", true);
+    cJSON_AddStringToObject(resp, "role", role_item->valuestring);
+    cJSON_AddBoolToObject(resp, "updated", true);
+    return send_json(request, resp, "200 OK");
+}
+
+esp_err_t delete_auth_credentials(httpd_req_t* request) {
+    if (!api::authorize(request, api::ApiRole::Admin)) return ESP_OK;
+
+    char query[64] = {};
+    char role_str[32] = {};
+    if (httpd_req_get_url_query_len(request) > 0 && httpd_req_get_url_query_len(request) < sizeof(query)) {
+        if (httpd_req_get_url_query_str(request, query, sizeof(query)) == ESP_OK) {
+            httpd_query_key_value(query, "role", role_str, sizeof(role_str));
+        }
+    }
+
+    if (role_str[0] == '\0') {
+        cJSON* root = nullptr;
+        if (read_json(request, &root) == ESP_OK && root) {
+            cJSON* r = cJSON_GetObjectItem(root, "role");
+            if (r && cJSON_IsString(r)) {
+                strncpy(role_str, r->valuestring, sizeof(role_str) - 1);
+            }
+            cJSON_Delete(root);
+        }
+    }
+
+    lg::auth::AuthRole role = lg::auth::AuthRole::Operator;
+    if (strcmp(role_str, "installer") == 0) {
+        role = lg::auth::AuthRole::Installer;
+    } else if (strcmp(role_str, "operator") == 0) {
+        role = lg::auth::AuthRole::Operator;
+    } else if (strcmp(role_str, "admin") == 0) {
+        return send_error(request, "400 Bad Request", "cannot_disable_admin");
+    } else {
+        return send_error(request, "400 Bad Request", "invalid_role");
+    }
+
+    auto* auth_mgr = api::get_auth_manager();
+    esp_err_t err = auth_mgr ? auth_mgr->disable_credential(role) : ESP_ERR_INVALID_STATE;
+    if (err != ESP_OK) {
+        return send_error(request, "500 Internal Server Error", "disable_credential_failed");
+    }
+
+    api::AuditLog::instance().log(api::ApiRole::Admin, "auth_role_disabled", role_str);
+
+    cJSON* resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "success", true);
+    cJSON_AddStringToObject(resp, "role", role_str);
+    cJSON_AddBoolToObject(resp, "disabled", true);
+    return send_json(request, resp, "200 OK");
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -830,7 +1139,7 @@ esp_err_t get_presets(httpd_req_t* request) {
     httpd_resp_set_status(request, "200 OK");
     httpd_resp_set_hdr(request, "Cache-Control", "no-store");
     httpd_resp_set_hdr(request, "Access-Control-Allow-Origin", "*");
-    httpd_resp_set_hdr(request, "Access-Control-Allow-Headers", "Authorization, Content-Type, X-Auth-Token, X-API-Key");
+    httpd_resp_set_hdr(request, "Access-Control-Allow-Headers", "Authorization, Content-Type, X-API-Key");
     httpd_resp_set_hdr(request, "Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
     httpd_resp_send_chunk(request, "[", 1);
 
@@ -3994,7 +4303,7 @@ esp_err_t get_backup(httpd_req_t* request) {
     }
 
     cJSON* root = cJSON_CreateObject();
-    cJSON_AddNumberToObject(root, "version", 2);
+    cJSON_AddNumberToObject(root, "version", 3);
     
     // Config
     DeviceConfig cfg;
@@ -4022,11 +4331,14 @@ esp_err_t get_backup(httpd_req_t* request) {
     cJSON_AddNumberToObject(prot_json, "liveStreamLayer", cfg.protocol.live_stream_layer);
     cJSON_AddItemToObject(cfg_json, "protocol", prot_json);
 
-    // Tokens
+    // Auth status (provisioned only, no secrets/hashes/salts)
+    bool is_prov = false;
+    auto* auth_mgr = api::get_auth_manager();
+    if (auth_mgr) {
+        is_prov = auth_mgr->is_provisioned();
+    }
     cJSON* auth_json = cJSON_CreateObject();
-    cJSON_AddStringToObject(auth_json, "adminToken", cfg.admin_token);
-    cJSON_AddStringToObject(auth_json, "installerToken", cfg.installer_token);
-    cJSON_AddStringToObject(auth_json, "operatorToken", cfg.operator_token);
+    cJSON_AddBoolToObject(auth_json, "provisioned", is_prov);
     cJSON_AddItemToObject(cfg_json, "auth", auth_json);
 
     // Channels
@@ -4276,12 +4588,7 @@ esp_err_t post_restore(httpd_req_t* request) {
             lg::json::get_number(prot, "liveStreamLayer", cfg.protocol.live_stream_layer);
         }
 
-        cJSON* auth = cJSON_GetObjectItem(cfg_json, "auth");
-        if (auth) {
-            lg::json::get_string(auth, "adminToken", cfg.admin_token, sizeof(cfg.admin_token));
-            lg::json::get_string(auth, "installerToken", cfg.installer_token, sizeof(cfg.installer_token));
-            lg::json::get_string(auth, "operatorToken", cfg.operator_token, sizeof(cfg.operator_token));
-        }
+        // Explicitly ignore legacy auth secrets during restore (Requirement 21)
 
         cJSON* ch_arr = cJSON_GetObjectItem(cfg_json, "channels");
         if (ch_arr && cJSON_IsArray(ch_arr)) {
@@ -4338,7 +4645,6 @@ esp_err_t post_restore(httpd_req_t* request) {
         }
         
         api_ptr->config()->save_config(cfg);
-        api::update_tokens(cfg.admin_token, cfg.installer_token, cfg.operator_token);
     }
 
     // Presets
@@ -4588,7 +4894,7 @@ static esp_err_t options_handler(httpd_req_t* request) {
     httpd_resp_set_status(request, "204 No Content");
     httpd_resp_set_hdr(request, "Access-Control-Allow-Origin", "*");
     httpd_resp_set_hdr(request, "Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-    httpd_resp_set_hdr(request, "Access-Control-Allow-Headers", "Authorization, Content-Type, X-Auth-Token, X-API-Key");
+    httpd_resp_set_hdr(request, "Access-Control-Allow-Headers", "Authorization, Content-Type, X-API-Key");
     httpd_resp_set_hdr(request, "Access-Control-Max-Age", "86400");
     return httpd_resp_send(request, nullptr, 0);
 }
@@ -4652,8 +4958,22 @@ esp_err_t FactoryApi::start(
         { .uri = "/favicon.ico",.method = HTTP_GET,     .handler = get_favicon,     .user_ctx = this },
         { .uri = "/api/v1/*",   .method = HTTP_OPTIONS, .handler = options_handler, .user_ctx = nullptr },
         
-        // ── Signage endpoints ──
+        // ── Identity & Info ──
+        { .uri = "/api/v1/info",              .method = HTTP_GET,  .handler = get_info,           .user_ctx = this },
         { .uri = "/api/v1/identity",          .method = HTTP_GET,  .handler = get_identity,       .user_ctx = this },
+
+        // ── Auth endpoints (LG-029) ──
+        { .uri = "/api/v1/auth/status",       .method = HTTP_GET,  .handler = get_auth_status,   .user_ctx = this },
+        { .uri = "/api/v1/auth/bootstrap",    .method = HTTP_POST, .handler = post_auth_bootstrap,.user_ctx = this },
+        { .uri = "/api/v1/auth/session",      .method = HTTP_POST, .handler = post_auth_session,  .user_ctx = this },
+        { .uri = "/api/v1/auth/session",      .method = HTTP_GET,  .handler = get_auth_session,   .user_ctx = this },
+        { .uri = "/api/v1/auth/session",      .method = HTTP_DELETE,.handler = delete_auth_session,.user_ctx = this },
+        { .uri = "/api/v1/auth/ws-ticket",    .method = HTTP_POST, .handler = post_auth_ws_ticket,.user_ctx = this },
+        { .uri = "/api/v1/auth/credentials",  .method = HTTP_GET,  .handler = get_auth_credentials,.user_ctx = this },
+        { .uri = "/api/v1/auth/credentials",  .method = HTTP_POST, .handler = post_auth_credentials,.user_ctx = this },
+        { .uri = "/api/v1/auth/credentials",  .method = HTTP_DELETE,.handler = delete_auth_credentials,.user_ctx = this },
+
+        // ── Signage endpoints ──
         { .uri = "/api/v1/capabilities",      .method = HTTP_GET,  .handler = get_capabilities,   .user_ctx = this },
         { .uri = "/api/v1/jobs/current",      .method = HTTP_GET,  .handler = get_current_job,    .user_ctx = this },
         { .uri = "/api/v1/channels",          .method = HTTP_GET,  .handler = get_channels,       .user_ctx = this },
@@ -4661,7 +4981,6 @@ esp_err_t FactoryApi::start(
         { .uri = "/api/v1/presets",           .method = HTTP_GET,  .handler = get_presets,      .user_ctx = this },
         { .uri = "/api/v1/presets",           .method = HTTP_PUT,  .handler = put_preset,       .user_ctx = this },
         { .uri = "/api/v1/presets",           .method = HTTP_DELETE,.handler = delete_preset,    .user_ctx = this },
-        { .uri = "/api/v1/auth/update",       .method = HTTP_POST, .handler = post_auth_update, .user_ctx = this },
         { .uri = "/api/v1/activate",          .method = HTTP_POST, .handler = post_activate,    .user_ctx = this },
         { .uri = "/api/v1/config",            .method = HTTP_GET,  .handler = get_device_config, .user_ctx = this },
         { .uri = "/api/v1/config",            .method = HTTP_PUT,  .handler = put_device_config, .user_ctx = this },

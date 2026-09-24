@@ -16,6 +16,8 @@
 #include "MqttService.hpp"
 #include "FactoryRunner.hpp"
 #include "FactoryApi.hpp"
+#include "AuthStore.hpp"
+#include "AuthManager.hpp"
 #include "esp_err.h"
 #include <atomic>
 
@@ -130,6 +132,7 @@ public:
     FactoryRunner& factory_runner() { return factory_runner_; }
     DmxRouter& dmx_router() { return dmx_router_; }
     ConfigStore& config() { return config_; }
+    auth::AuthManager& auth_manager() { return auth_manager_; }
 
     esp_err_t queue_network_apply(const NetworkApplyRequest& request);
     NetworkApplyState network_apply_state() const { return apply_state_.load(); }
@@ -148,6 +151,8 @@ private:
     OutputController output_;
     ControlSourceManager source_manager_;
     ConfigStore config_;
+    auth::AuthStore auth_store_;
+    auth::AuthManager auth_manager_{&auth_store_};
     FactoryRunner factory_runner_;
     FactoryApi api_;
     WifiService wifi_;

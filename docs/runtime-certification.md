@@ -1,6 +1,6 @@
 # LumiGrid Runtime Certification Status
 
-> **Target Base Commit**: `1e64f4b349150028f28c45d3464d1b904e09bfe9`
+> **Target Base Commit**: `e5e18f31034371ba8939d758ca91bc137cc79565`
 > **Date**: September 2026
 > **Scope**: Certification Hardening, Lifecycle Integrity, Concurrency Safety, and Verification Status.
 > **Certification Stage**: Pre-Hardware Verification (Architecture & Simulation Complete). Full certification is **NOT** claimed until physical hardware milestones are completed.
@@ -45,6 +45,14 @@
 | **Network** | `StaWithApFallback` bounded backoff retry (`5s -> 10s -> 30s -> 60s`) while keeping recovery AP active | `[PASS]` | Compile Verified, Unit Test |
 | **Network** | Safe-mode recovery invariant: non-recovery network apply rejected with `safe_mode_network_locked` | `[PASS]` | Compile Verified, Unit Test |
 | **Security** | Write-only credentials: passwords never logged and never exposed over GET APIs (`passwordSet: true` only) | `[PASS]` | Compile Verified, Unit Test |
+| **Auth (LG-029)** | Node-backed authentication authority: zero universal fallback tokens (`lumigrid_admin`, `DEFAULT_OP_PIN`) | `[PASS]` | Compile Verified, Static CI, Unit Test |
+| **Auth (LG-029)** | Dedicated `AuthStore` in dual-slot NVS (`node_auth` namespace): salt + SHA-256 digest, constant-time compare | `[PASS]` | Compile Verified, Unit Test |
+| **Auth (LG-029)** | One-time bootstrap commissioning (`POST /api/v1/auth/bootstrap`, 16-64 chars) unavailable once provisioned | `[PASS]` | Compile Verified, Unit Test |
+| **Auth (LG-029)** | RAM-only ephemeral session table: 8 sessions max, 256-bit entropy, 30 min idle / 8 hr absolute expiry | `[PASS]` | Compile Verified, Unit Test |
+| **Auth (LG-029)** | WebSocket pre-handshake ticket authentication (`Sec-WebSocket-Protocol: lumigrid-ticket.<ticket>`) | `[PASS]` | Compile Verified, Unit Test |
+| **Auth (LG-029)** | Explicit separation: `Authorization: Bearer <session>` for browser, `X-API-Key` for automation; query tokens rejected | `[PASS]` | Compile Verified, Static CI, Unit Test |
+| **Auth (LG-029)** | Backup schema v3: zero authentication tokens, salts, or hashes in backup; restore v2 ignores legacy secrets | `[PASS]` | Compile Verified, Static CI, Unit Test |
+| **Auth (LG-029)** | Per-node browser session state in memory and `sessionStorage` (zero tokens in `localStorage`) | `[PASS]` | Compile Verified, Unit Test |
 
 ---
 
@@ -143,9 +151,21 @@ The software architecture and simulation boundaries are fully hardened. The runt
 
 ---
 
-## 5. Stop Condition Notice
+## 5. Security & Transport Notice (LG-029)
 
-With the completion of LG-024 (Live Desk Hardening), LG-025 (Fleet Sync Studio & Show Deployment v1), and LG-026 (Show Transport v2 & Synchronized Cue Playback):
+With the completion of LG-029 (Node-Backed Authentication, Sessions & Credential Provisioning):
+- The firmware is the sole authority for authentication and authorization (`AuthStore` + `AuthManager`).
+- Browser PIN-checking authority, hardcoded dev tokens (`lumigrid_admin`), and credential restoration backdoors are permanently removed.
+- Ephemeral session management (256-bit entropy, 30 min idle / 8 hr absolute timeout) is enforced on the node.
+- WebSocket connections require single-use pre-handshake tickets (`Sec-WebSocket-Protocol: lumigrid-ticket.<ticket>`).
+
+> [!WARNING]
+> **Transport Security Limitation:**
+> HTTP on an untrusted LAN does not provide confidentiality against packet interception. Bearer tokens and API keys transmitted over plaintext HTTP are susceptible to network eavesdropping on an untrusted or open network. Production deployments requiring transport encryption require dedicated network isolation or future TLS capabilities.
+
+## 6. Stop Condition Notice
+
+With the completion of LG-024 (Live Desk Hardening), LG-025 (Fleet Sync Studio & Show Deployment v1), LG-026 (Show Transport v2 & Synchronized Cue Playback), and LG-029 (Node-Backed Authentication & Provisioning):
 - **Architecture is frozen** across firmware services, state machines, and API contracts.
 - **No new feature families** will be introduced before physical hardware validation.
 - Timing certification requires completion of the bench test matrices above on physical LumiGrid LED Node hardware.

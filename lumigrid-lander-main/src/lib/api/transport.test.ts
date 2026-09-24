@@ -1,5 +1,6 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
-import { apiFetch, apiJson, ApiError, DEV_API_TOKEN } from './transport';
+import { apiFetch, apiJson, ApiError } from './transport';
+import { nodeAuthStore } from '../auth/nodeAuth';
 
 describe('dashboard API transport', () => {
   const originalFetch = globalThis.fetch;
@@ -7,13 +8,23 @@ describe('dashboard API transport', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
     vi.stubGlobal('fetch', vi.fn());
+    nodeAuthStore.clearAllSessions();
   });
 
   afterEach(() => {
     vi.stubGlobal('fetch', originalFetch);
+    nodeAuthStore.clearAllSessions();
   });
 
-  it('uses the development admin credential by default', async () => {
+  it('transmits Bearer session token for authenticated node', async () => {
+    nodeAuthStore.setSession({
+      address: '192.168.1.10',
+      nodeId: 'node-10',
+      role: 'admin',
+      sessionToken: 'test-session-token-xyz',
+      expiresAt: Date.now() + 3600000,
+    });
+
     vi.mocked(fetch).mockResolvedValue(new Response(JSON.stringify({ ok: true }), { status: 200 }));
 
     await apiFetch('192.168.1.10', '/api/v1/health');
@@ -27,7 +38,17 @@ describe('dashboard API transport', () => {
     );
 
     const options = vi.mocked(fetch).mock.calls[0]?.[1];
-    expect((options?.headers as Headers).get('Authorization')).toBe(`Bearer ${DEV_API_TOKEN}`);
+    expect((options?.headers as Headers).get('Authorization')).toBe('Bearer test-session-token-xyz');
+  });
+
+  it('transmits X-API-Key when explicit apiKey option is provided', async () => {
+    vi.mocked(fetch).mockResolvedValue(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+
+    await apiFetch('192.168.1.10', '/api/v1/health', { apiKey: 'automation-secret-key-123' });
+
+    const options = vi.mocked(fetch).mock.calls[0]?.[1];
+    expect((options?.headers as Headers).get('X-API-Key')).toBe('automation-secret-key-123');
+    expect((options?.headers as Headers).get('Authorization')).toBeNull();
   });
 
   it('decodes successful JSON responses', async () => {
@@ -59,7 +80,22 @@ describe('dashboard API transport', () => {
     }
   });
 
-  it('handles 401 Unauthorized responses', async () => {
+  it('handles 401 Unauthorized responses and clears only affected node session', async () => {
+    nodeAuthStore.setSession({
+      address: '192.168.1.50',
+      nodeId: 'node-50',
+      role: 'admin',
+      sessionToken: 'node50-token',
+      expiresAt: Date.now() + 3600000,
+    });
+    nodeAuthStore.setSession({
+      address: '192.168.1.60',
+      nodeId: 'node-60',
+      role: 'admin',
+      sessionToken: 'node60-token',
+      expiresAt: Date.now() + 3600000,
+    });
+
     vi.mocked(fetch).mockResolvedValue(
       new Response(JSON.stringify({ error: 'invalid token' }), {
         status: 401,
@@ -69,6 +105,10 @@ describe('dashboard API transport', () => {
 
     await expect(apiJson('192.168.1.50', '/api/v1/config'))
       .rejects.toThrow('HTTP 401 Unauthorized: invalid token');
+
+    // 192.168.1.50 cleared, but 192.168.1.60 preserved
+    expect(nodeAuthStore.hasValidSession('192.168.1.50')).toBe(false);
+    expect(nodeAuthStore.hasValidSession('192.168.1.60')).toBe(true);
   });
 
   it('handles 404 Not Found responses', async () => {

@@ -136,10 +136,6 @@ import {
   apiFetch,
   apiJson,
   authHeaders,
-  clearApiToken,
-  DEV_API_TOKEN,
-  getApiToken,
-  setApiToken,
 } from './transport';
 
 export {
@@ -147,10 +143,6 @@ export {
   apiFetch,
   apiJson,
   authHeaders,
-  clearApiToken,
-  DEV_API_TOKEN,
-  getApiToken,
-  setApiToken,
 };
 
 

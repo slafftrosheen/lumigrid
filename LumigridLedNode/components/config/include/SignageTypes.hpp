@@ -592,10 +592,10 @@ struct DeviceConfigV2 {
     uint8_t  sync_role              = 0;    // 0=Auto, 1=Master, 2=Worker
     uint32_t sync_token             = 0;
     
-    // RBAC tokens
-    char     admin_token[32]        = "lumigrid_admin";
-    char     installer_token[32]    = "lumigrid_install";
-    char     operator_token[32]     = "lumigrid_op";
+    // RBAC tokens (deprecated; managed by AuthStore in LG-029)
+    char     admin_token[32]        = "";
+    char     installer_token[32]    = "";
+    char     operator_token[32]     = "";
 
     // Device Identity
     char     serial_number[32]      = "";
@@ -632,10 +632,10 @@ struct DeviceConfig {
     uint8_t  sync_role              = 0;    // 0=Auto, 1=Master, 2=Worker
     uint32_t sync_token             = 0;
     
-    // RBAC tokens
-    char     admin_token[32]        = "lumigrid_admin";
-    char     installer_token[32]    = "lumigrid_install";
-    char     operator_token[32]     = "lumigrid_op";
+    // RBAC tokens (deprecated: managed by AuthStore in LG-029)
+    char     admin_token[32]        = "";
+    char     installer_token[32]    = "";
+    char     operator_token[32]     = "";
 
     // Device Identity
     char     serial_number[32]      = "";
@@ -667,9 +667,9 @@ struct DeviceConfig {
         sync_enabled = false;
         sync_role = 0;
         sync_token = 0;
-        strncpy(admin_token, "lumigrid_admin", sizeof(admin_token) - 1);
-        strncpy(installer_token, "lumigrid_install", sizeof(installer_token) - 1);
-        strncpy(operator_token, "lumigrid_op", sizeof(operator_token) - 1);
+        admin_token[0] = '\0';
+        installer_token[0] = '\0';
+        operator_token[0] = '\0';
         serial_number[0] = '\0';
         strncpy(hardware_revision, "v1.0", sizeof(hardware_revision) - 1);
         site_label[0] = '\0';

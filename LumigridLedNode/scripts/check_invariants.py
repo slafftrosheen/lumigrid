@@ -81,6 +81,80 @@ for ext in ["*.cpp", "*.hpp", "*.h", "*.c"]:
             ]
         )
 
+# 6. LG-029: No universal credentials in production code
+universal_creds = [
+    ("lumigrid_admin", "Hardcoded universal credential 'lumigrid_admin'"),
+    ("lumigrid_install", "Hardcoded universal credential 'lumigrid_install'"),
+    ("lumigrid_op", "Hardcoded universal credential 'lumigrid_op'"),
+]
+# Scan firmware source files, allowing only AuthManager.cpp migration and test files
+for ext in ["*.cpp", "*.hpp", "*.h", "*.c"]:
+    for f in list((NODE_DIR / "main").rglob(ext)) + list((NODE_DIR / "components").rglob(ext)):
+        if f.name in ["RuntimeHardeningTests.cpp", "AuthManager.cpp"]:
+            continue
+        check_file_contains(f, universal_creds)
+
+# Scan frontend source files, allowing only test files
+FRONTEND_SRC = REPO_ROOT / "lumigrid-lander-main" / "src"
+if FRONTEND_SRC.exists():
+    for f in FRONTEND_SRC.rglob("*.*"):
+        if f.suffix in [".ts", ".svelte", ".js", ".mjs"]:
+            if ".test." in f.name:
+                continue
+            check_file_contains(f, universal_creds)
+
+# 7. LG-029: No legacy PIN or dev token symbols in production frontend
+legacy_frontend_symbols = [
+    ("DEFAULT_OP_PIN", "Legacy browser PIN symbol DEFAULT_OP_PIN"),
+    ("DEFAULT_AD_PIN", "Legacy browser PIN symbol DEFAULT_AD_PIN"),
+    ("DEV_API_TOKEN", "Legacy development token symbol DEV_API_TOKEN"),
+]
+if FRONTEND_SRC.exists():
+    for f in FRONTEND_SRC.rglob("*.*"):
+        if f.suffix in [".ts", ".svelte", ".js", ".mjs"]:
+            if ".test." in f.name:
+                continue
+            check_file_contains(f, legacy_frontend_symbols)
+
+# 8. LG-029: No query parameter token authentication (?token= or ?auth=)
+query_param_auth = [
+    ("?token=", "Forbidden query parameter authentication (?token=)"),
+    ("?auth=", "Forbidden query parameter authentication (?auth=)"),
+]
+if FRONTEND_SRC.exists():
+    for f in FRONTEND_SRC.rglob("*.*"):
+        if f.suffix in [".ts", ".svelte", ".js"]:
+            if ".test." in f.name:
+                continue
+            check_file_contains(f, query_param_auth)
+for ext in ["*.cpp", "*.hpp", "*.h", "*.c"]:
+    for f in list((NODE_DIR / "main").rglob(ext)) + list((NODE_DIR / "components").rglob(ext)):
+        if "test" in f.name.lower():
+            continue
+        check_file_contains(f, query_param_auth)
+
+# 9. LG-029: No backup serialization of authentication tokens
+backup_token_patterns = [
+    ('cJSON_AddStringToObject(auth_obj, "adminToken"', "Forbidden backup export of adminToken"),
+    ('cJSON_AddStringToObject(auth_obj, "installerToken"', "Forbidden backup export of installerToken"),
+    ('cJSON_AddStringToObject(auth_obj, "operatorToken"', "Forbidden backup export of operatorToken"),
+    ('"adminToken":', "Forbidden backup export serialization of adminToken"),
+    ('"installerToken":', "Forbidden backup export serialization of installerToken"),
+    ('"operatorToken":', "Forbidden backup export serialization of operatorToken"),
+]
+backup_files = [
+    NODE_DIR / "components" / "factory" / "FactoryApi.cpp",
+]
+for f in backup_files:
+    check_file_contains(
+        f,
+        [
+            ('cJSON_AddStringToObject(auth_obj, "adminToken"', "Forbidden backup export of adminToken"),
+            ('cJSON_AddStringToObject(auth_obj, "installerToken"', "Forbidden backup export of installerToken"),
+            ('cJSON_AddStringToObject(auth_obj, "operatorToken"', "Forbidden backup export of operatorToken"),
+        ]
+    )
+
 if errors:
     print("\nFAILED: Discovered architectural invariant violations:")
     for err in errors:

@@ -10,10 +10,9 @@
     renameSavedNode,
     removeSavedNode,
     normalizeNodeAddress,
-    readString,
-    AUTH_ROLE_KEY,
     type SavedNodeInfo,
   } from '$lib/auth/storage';
+  import { nodeAuthStore } from '$lib/auth/nodeAuth';
   import {
     getNodeLiveState,
     getNodeLiveSnapshot,
@@ -264,7 +263,7 @@
 
   onMount(() => {
     nodeIp = getSelectedNodeIp();
-    isAdmin = readString(AUTH_ROLE_KEY) === 'admin';
+    isAdmin = nodeAuthStore.getRole(nodeIp) === 'admin';
     refreshFleetList();
 
     if (!nodeIp && savedFleet.length > 0) {

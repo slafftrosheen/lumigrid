@@ -14,28 +14,72 @@ The node strictly enforces memory budgets to ensure ESP32 stability. Clients mus
 - WebSocket frame size: `< 4 KB`
 - Incoming JSON request body size: `< 8 KB`
 
-## Authentication
+## Authentication & Authorization (LG-029)
 
-Every `/api/v1/` endpoint requires:
+LumiGrid uses node-authoritative authentication. The node is the sole authority for credentials, session lifecycle, and role assignment.
 
-```http
-Authorization: ******
-```
+### Transport Security Limitation
 
-The embedded dashboard requests the token at connection time and retains it only
-for the current browser session. Use HTTPS or a trusted isolated network whenever
-credentials are in use. The current firmware token provisioning is documented as
-an open firmware-security follow-up in `PLAN.md`.
+> [!WARNING]
+> **Transport Security Limitation:**
+> HTTP on an untrusted LAN does not provide confidentiality against packet interception. Bearer tokens and API keys transmitted over plaintext HTTP are susceptible to network eavesdropping on an untrusted or open network. Production deployments requiring transport encryption require dedicated network isolation or future TLS capabilities.
+
+### Accepted Credentials
+
+1. **Browser / Web Dashboard Session:**
+   ```http
+   Authorization: Bearer <session-token>
+   ```
+   Ephemeral 256-bit random token issued by `POST /api/v1/auth/session`. Valid for 30 minutes of idle time, with an absolute 8-hour timeout.
+
+2. **Machine / Automation API Key:**
+   ```http
+   X-API-Key: <long-lived-credential>
+   ```
+   Direct persistent credential for automated tools and scripts.
+
+> [!IMPORTANT]
+> Query parameter tokens (`?token=`, `?auth=`) and legacy headers (`X-Auth-Token`) are strictly rejected by the node firmware.
+
+### Role Hierarchy
+
+Endpoints enforce the following role hierarchy:
+- **Admin**: Full control (firmware OTA, backup/restore, network settings, credential management, factory recovery).
+- **Installer**: Diagnostics, health, logs, channel bench testing, factory output tests.
+- **Operator**: Read status, trigger scene presets, manual override, timeline and cue controls, read network/diagnostics.
+- **Public**: Dashboard static assets, `GET /api/v1/info`, `GET /api/v1/auth/status`, `POST /api/v1/auth/bootstrap` (unprovisioned only), `POST /api/v1/auth/session`.
+
+### Authentication Endpoints
+
+| Method | Path | Min Role | Purpose |
+| --- | --- | --- | --- |
+| `GET` | `/api/v1/auth/status` | Public | Check if node is provisioned and if bootstrap is allowed. |
+| `POST` | `/api/v1/auth/bootstrap` | Public (Unprovisioned only) | Provision initial Admin access key (16–64 characters). |
+| `POST` | `/api/v1/auth/session` | Public | Authenticate node credential to open an ephemeral session. |
+| `GET` | `/api/v1/auth/session` | Operator+ | Authoritative check of current session role and time-to-live. |
+| `DELETE` | `/api/v1/auth/session` | Operator+ | Invalidate current session (logout). |
+| `POST` | `/api/v1/auth/ws-ticket` | Operator+ | Generate a single-use, 15-second ticket for WebSocket handshake. |
+| `GET` | `/api/v1/auth/credentials` | Admin | Query configured credential roles (no secrets exposed). |
+| `POST` | `/api/v1/auth/credentials` | Admin | Rotate a role credential (invalidates associated sessions). |
+| `DELETE` | `/api/v1/auth/credentials` | Admin | Disable an Installer or Operator credential. |
+
+### WebSocket Authentication
+
+The live telemetry WebSocket (`/ws`) requires pre-handshake ticket validation:
+1. Client requests ticket: `POST /api/v1/auth/ws-ticket` with `Authorization: Bearer <session>`
+2. Client opens WebSocket passing ticket in subprotocol:
+   ```ts
+   new WebSocket(wsUrl, [`lumigrid-ticket.${ticket}`]);
+   ```
+3. Firmware validates and consumes the ticket during pre-handshake. Unauthorized connections are rejected.
 
 Errors use this shape:
 
 ```json
-{ "error": "invalid_json" }
+{ "error": "invalid_credentials" }
 ```
 
-`400` denotes invalid input, `401` authentication failure, `409` a request
-rejected by the current runtime state or command queue, and `503` a subsystem
-that has not completed initialization.
+`400` denotes invalid input, `401` authentication failure / session expired, `403` insufficient role permissions, `409` conflict / state rejection, `429` rate limiting (failed logins), and `503` subsystem unready.
 
 ## Operator endpoints
 

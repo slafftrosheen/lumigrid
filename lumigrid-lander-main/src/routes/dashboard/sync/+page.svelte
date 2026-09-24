@@ -4,7 +4,6 @@
   import {
     getSavedNodes,
     getSelectedNodeIp,
-    getAuthRole,
     NODE_REGISTRY_CHANGED_EVENT,
     type SavedNodeInfo,
   } from '$lib/auth/storage';
@@ -234,7 +233,6 @@
   }
 
   onMount(async () => {
-    isAdmin = getAuthRole() === 'admin';
     nodes = getSavedNodes();
     if (nodes.length > 0) {
       configSelectedIps = nodes.map((n) => n.ip);

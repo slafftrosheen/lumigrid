@@ -8,14 +8,13 @@
 
 import { writable } from 'svelte/store';
 import {
-  AUTH_ROLE_KEY,
-  AUTH_TIMESTAMP_KEY,
   getSelectedNodeIp,
   setSelectedNodeIp,
-  readString,
   updateNodeLastSeen,
   recordDiscoveredNode,
 } from '../auth/storage';
+import { nodeAuthStore } from '../auth/nodeAuth';
+import { createWsTicket } from '../api/auth';
 import { getHealth, type HealthSnapshot } from '../api/node';
 import { commandTracker, type NodeStatusSnapshot } from './commandTracker';
 
@@ -173,17 +172,16 @@ let reconnectAttempt = 0;
 let manualClose = false;
 let lastSeq = 0;
 
-function getStoredRole(): NodeRole {
-  const r = readString(AUTH_ROLE_KEY);
-  if (r === 'admin') return 'admin';
-  if (r === 'installer') return 'installer';
-  if (r === 'operator') return 'operator';
+function getStoredRole(ip = latestState.nodeIp || getSelectedNodeIp()): NodeRole {
+  if (!ip) return 'unknown';
+  const session = nodeAuthStore.getSession(ip);
+  if (session) return session.role;
   return 'unknown';
 }
 
-function isStoredAuthed(): boolean {
-  const ts = Number(readString(AUTH_TIMESTAMP_KEY, '0'));
-  return Date.now() - ts < 8 * 3600 * 1000;
+function isStoredAuthed(ip = latestState.nodeIp || getSelectedNodeIp()): boolean {
+  if (!ip) return false;
+  return nodeAuthStore.hasValidSession(ip);
 }
 
 function publish(patch: Partial<NodeLiveState>) {
@@ -224,7 +222,7 @@ function recordFleetPresence(ip: string) {
 function scheduleReconnect() {
   if (manualClose || reconnectTimer) return;
   const targetIp = latestState.nodeIp || getSelectedNodeIp();
-  if (!targetIp) return;
+  if (!targetIp || !nodeAuthStore.hasValidSession(targetIp)) return;
 
   const delay = Math.min(10000, 500 * Math.pow(2, reconnectAttempt));
   reconnectAttempt = Math.min(reconnectAttempt + 1, 5);
@@ -249,7 +247,7 @@ export async function refreshHealth(nodeIp = latestState.nodeIp || getSelectedNo
   }
 }
 
-export function connect(nodeIp = getSelectedNodeIp()): void {
+export async function connect(nodeIp = getSelectedNodeIp()): Promise<void> {
   if (typeof WebSocket === 'undefined') return;
 
   const ip = nodeIp.trim();
@@ -287,8 +285,22 @@ export function connect(nodeIp = getSelectedNodeIp()): void {
   }
 
   manualClose = false;
-  const currentRole = getStoredRole();
-  const currentUnlocked = isStoredAuthed();
+  const currentRole = getStoredRole(ip);
+  const currentUnlocked = isStoredAuthed(ip);
+
+  if (!currentUnlocked) {
+    publish({
+      nodeIp: ip,
+      connection: 'disconnected',
+      dashboardRole: currentRole,
+      dashboardUnlocked: false,
+      role: currentRole,
+      authenticated: false,
+      error: 'Authentication required',
+    });
+    return;
+  }
+
   publish({
     nodeIp: ip,
     connection: 'connecting',
@@ -299,53 +311,56 @@ export function connect(nodeIp = getSelectedNodeIp()): void {
     error: '',
   });
 
-  const ws = new WebSocket(getWsUrl(ip));
-  socket = ws;
-  ws.binaryType = 'arraybuffer';
+  try {
+    const { ticket } = await createWsTicket(ip);
+    if (manualClose || latestState.nodeIp !== ip) return;
+    const ws = new WebSocket(getWsUrl(ip), [`lumigrid-ticket.${ticket}`]);
+    socket = ws;
+    ws.binaryType = 'arraybuffer';
 
-  ws.onopen = () => {
-    if (socket !== ws) return;
-    reconnectAttempt = 0;
-    const openRole = getStoredRole();
-    const openUnlocked = isStoredAuthed();
-    publish({
-      connection: 'connected',
-      dashboardRole: openRole,
-      dashboardUnlocked: openUnlocked,
-      role: openRole,
-      authenticated: openUnlocked,
-      error: '',
-    });
+      ws.onopen = () => {
+        if (socket !== ws) return;
+        reconnectAttempt = 0;
+        const openRole = getStoredRole(ip);
+        const openUnlocked = isStoredAuthed(ip);
+        publish({
+          connection: 'connected',
+          dashboardRole: openRole,
+          dashboardUnlocked: openUnlocked,
+          role: openRole,
+          authenticated: openUnlocked,
+          error: '',
+        });
 
-    // Proactively pull health snapshot on connect
-    refreshHealth(ip).catch(() => {});
-
-    // Periodic health poll while connected (every 10 seconds, single interval guaranteed)
-    if (healthPollTimer) clearInterval(healthPollTimer);
-    healthPollTimer = setInterval(() => {
-      if (socket && socket.readyState === WebSocket.OPEN) {
+        // Proactively pull health snapshot on connect
         refreshHealth(ip).catch(() => {});
-      }
-    }, 10000);
-  };
 
-  ws.onclose = () => {
-    if (socket !== ws) return;
-    socket = null;
-    if (healthPollTimer) {
-      clearInterval(healthPollTimer);
-      healthPollTimer = null;
-    }
-    publish({ connection: 'disconnected' });
-    scheduleReconnect();
-  };
+        // Periodic health poll while connected (every 10 seconds, single interval guaranteed)
+        if (healthPollTimer) clearInterval(healthPollTimer);
+        healthPollTimer = setInterval(() => {
+          if (socket && socket.readyState === WebSocket.OPEN) {
+            refreshHealth(ip).catch(() => {});
+          }
+        }, 10000);
+      };
 
-  ws.onerror = () => {
-    if (socket !== ws) return;
-    publish({ connection: 'error', error: 'WebSocket connection error' });
-  };
+      ws.onclose = () => {
+        if (socket !== ws) return;
+        socket = null;
+        if (healthPollTimer) {
+          clearInterval(healthPollTimer);
+          healthPollTimer = null;
+        }
+        publish({ connection: 'disconnected' });
+        scheduleReconnect();
+      };
 
-  ws.onmessage = event => {
+      ws.onerror = () => {
+        if (socket !== ws) return;
+        publish({ connection: 'error', error: 'WebSocket connection error' });
+      };
+
+      ws.onmessage = event => {
     if (socket !== ws) return;
     const now = Date.now();
 
@@ -490,8 +505,22 @@ export function connect(nodeIp = getSelectedNodeIp()): void {
       } catch {
         // Defensive: ignore malformed status frames; maintain last known good state.
       }
+      }
+    };
+  } catch (err) {
+    if (manualClose || latestState.nodeIp !== ip) return;
+    const msg = err instanceof Error ? err.message : String(err);
+    const isAuthErr = msg.includes('401') || msg.toLowerCase().includes('auth') || msg.toLowerCase().includes('session');
+    publish({
+      connection: 'error',
+      dashboardUnlocked: isAuthErr ? false : latestState.dashboardUnlocked,
+      authenticated: isAuthErr ? false : latestState.authenticated,
+      error: isAuthErr ? 'Authentication required' : msg,
+    });
+    if (!isAuthErr) {
+      scheduleReconnect();
     }
-  };
+  }
 }
 
 export function disconnect(): void {
@@ -512,11 +541,11 @@ export function disconnect(): void {
   publish({ connection: 'disconnected' });
 }
 
-export function reconnect(ip?: string): void {
+export async function reconnect(ip?: string): Promise<void> {
   disconnect();
   manualClose = false;
   const target = ip ?? latestState.nodeIp ?? getSelectedNodeIp();
-  connect(target);
+  await connect(target);
 }
 
 export const nodeStore = state;
@@ -555,3 +584,32 @@ export function _resetForTesting(): void {
   nodePixelStore.set(new Uint8Array(BUF_SIZE));
   nodeFrameCount.set(0);
 }
+
+if (typeof window !== 'undefined') {
+  nodeAuthStore.subscribe(() => {
+    const currentIp = latestState.nodeIp;
+    if (!currentIp) return;
+    const hasSession = nodeAuthStore.hasValidSession(currentIp);
+    const role = getStoredRole(currentIp);
+    if (hasSession && (latestState.connection === 'disconnected' || latestState.connection === 'idle' || latestState.error === 'Authentication required')) {
+      connect(currentIp);
+    } else if (!hasSession && (latestState.connection === 'connected' || latestState.connection === 'connecting')) {
+      disconnect();
+      publish({
+        dashboardRole: 'unknown',
+        dashboardUnlocked: false,
+        role: 'unknown',
+        authenticated: false,
+        error: 'Authentication required',
+      });
+    } else if (hasSession) {
+      publish({
+        dashboardRole: role,
+        dashboardUnlocked: true,
+        role,
+        authenticated: true,
+      });
+    }
+  });
+}
+

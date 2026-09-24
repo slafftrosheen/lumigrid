@@ -1,6 +1,6 @@
 # LumiGrid Next Phase — Operator Platform v2
 
-Baseline: `1e64f4b349150028f28c45d3464d1b904e09bfe9`.
+Baseline: `e5e18f31034371ba8939d758ca91bc137cc79565`.
 
 This phase is deliberately **integration-first**. The runtime/lifecycle architecture is frozen unless a concrete defect requires change. The objective is to make the existing firmware and dashboard behave like one coherent lighting-control product before adding another large feature family.
 
@@ -21,11 +21,15 @@ These references are inspiration for architecture and UX, not code dependencies.
 Svelte Operator Console
         |
         +-- typed HTTP client ----> /api/v1/* ----> Firmware services
+        |   (Authorization: Bearer <session>)
+        |   (X-API-Key: <key> for automation)
         |
         +-- WebSocket state ------> live snapshot
+            (Sec-WebSocket-Protocol: lumigrid-ticket.<ticket>)
 
 Firmware
   FactoryApi
+    |-- auth (AuthManager & AuthStore)
     |-- scenes / effects
     |-- timeline / schedules
     |-- cue lists / show transport
@@ -53,11 +57,17 @@ Firmware
 - Standardise error objects and validation messages.
 - Verify response-size budgets for presets, health, logs, backup, and WebSocket snapshots.
 
-### 2. Session and authorization
+### 2. Session and authorization (LG-029 Complete)
 
-- Replace browser-only PIN gating with node-backed sessions/tokens.
-- Keep development credentials simple/hardcoded for now.
-- UI roles: operator / installer / admin.
+- Replaced browser-only PIN gating with node-backed sessions and credential provisioning.
+- Dedicated `AuthStore` in dual-slot NVS (`node_auth` namespace) storing salt + SHA-256 digests; zero plaintext credentials.
+- Universal backdoor credentials (`lumigrid_admin`, `lumigrid_install`, `lumigrid_op`, `DEFAULT_OP_PIN`, `DEV_API_TOKEN`) eliminated.
+- Node-authoritative session table: max 8 concurrent sessions, 256-bit entropy, 30 min idle / 8 hr absolute expiry.
+- Single-use WebSocket tickets (15 s validity) passed via `Sec-WebSocket-Protocol: lumigrid-ticket.<ticket>` pre-handshake authentication.
+- Client transport handles per-node session tokens stored in memory and `sessionStorage` (NEVER in `localStorage`).
+- Long-lived credentials supported strictly via `X-API-Key` headers for automated tooling; query parameter tokens (`?token=`, `?auth=`) rejected.
+- Physical recovery button remains the hardware trust anchor for credential recovery and factory commissioning.
+- **Transport Security Limitation:** HTTP on an untrusted LAN does not provide confidentiality against packet interception. Bearer/API-key traffic over plaintext HTTP is not cryptographically protected against eavesdropping on an untrusted network. TLS is a separate future scope.
 - Firmware remains the authority for authorization.
 
 ### 3. Live state

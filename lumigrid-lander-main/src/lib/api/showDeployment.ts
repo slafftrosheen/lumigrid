@@ -4,6 +4,7 @@ import { getCueList, saveCueList, deleteCueList } from './cues';
 import { getSequence, saveSequence } from './timeline';
 import { getCalendarSchedule, saveCalendarSchedule } from './node';
 import { getShowManifest, compareShowManifest, type ShowManifest } from './sync';
+import { nodeAuthStore } from '../auth/nodeAuth';
 
 export interface ShowDeploymentOptions {
   scenes: boolean;
@@ -64,12 +65,37 @@ export async function deployShowToNodes(
     return results;
   }
 
+  // 0. Check auth for source and targets
+  if (!nodeAuthStore.hasValidSession(sourceIp)) {
+    for (const ip of targetIps) {
+      results[ip] = { ip, state: 'failed', error: 'AUTH REQUIRED' };
+    }
+    onProgress?.({ ...results });
+    return results;
+  }
+
+  const authorizedTargets: string[] = [];
+  for (const ip of targetIps) {
+    if (!nodeAuthStore.hasValidSession(ip)) {
+      results[ip] = { ip, state: 'failed', error: 'AUTH REQUIRED' };
+    } else {
+      authorizedTargets.push(ip);
+    }
+  }
+  onProgress?.({ ...results });
+
+  if (authorizedTargets.length === 0) {
+    return results;
+  }
+
   // 1. Fetch source show manifest
   let sourceManifest: ShowManifest;
   try {
     sourceManifest = await getShowManifest(sourceIp);
   } catch (err: any) {
-    const errorMsg = `Failed to fetch source manifest from ${sourceIp}: ${err?.message || err}`;
+    const errorMsg = err?.status === 401 || err?.message?.includes('401')
+      ? 'AUTH REQUIRED'
+      : `Failed to fetch source manifest from ${sourceIp}: ${err?.message || err}`;
     for (const ip of targetIps) {
       results[ip] = { ip, state: 'failed', error: errorMsg };
     }
@@ -79,7 +105,7 @@ export async function deployShowToNodes(
 
   // Concurrency worker queue (max 2 targets at a time)
   const concurrency = 2;
-  const queue = [...targetIps];
+  const queue = [...authorizedTargets];
 
   async function worker() {
     while (queue.length > 0) {
@@ -93,7 +119,7 @@ export async function deployShowToNodes(
     }
   }
 
-  const workers = Array.from({ length: Math.min(concurrency, targetIps.length) }, () => worker());
+  const workers = Array.from({ length: Math.min(concurrency, authorizedTargets.length) }, () => worker());
   await Promise.all(workers);
 
   return results;
@@ -113,10 +139,13 @@ async function deploySingleTarget(
     targetPreManifest = await getShowManifest(targetIp);
   } catch (err: any) {
     // If manifest fails to load, mark target failed
+    const errorMsg = err?.status === 401 || err?.message?.includes('401')
+      ? 'AUTH REQUIRED'
+      : `Could not read target manifest: ${err?.message || err}`;
     updateState({
       ip: targetIp,
       state: 'failed',
-      error: `Could not read target manifest: ${err?.message || err}`,
+      error: errorMsg,
     });
     return;
   }
@@ -259,10 +288,11 @@ async function deploySingleTarget(
       });
     }
   } catch (err: any) {
-    const errorMsg = err?.message || String(err);
+    const isAuth = err?.status === 401 || err?.message?.includes('401') || err?.message?.includes('AUTH REQUIRED');
+    const errorMsg = isAuth ? 'AUTH REQUIRED' : (err?.message || String(err));
     updateState({
       ip: targetIp,
-      state: assetsWrittenCount > 0 ? 'partial' : 'failed',
+      state: assetsWrittenCount > 0 && !isAuth ? 'partial' : 'failed',
       error: errorMsg,
     });
   }

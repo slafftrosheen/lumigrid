@@ -10,11 +10,6 @@ export interface DeviceProtocolConfig {
   zoneStartChannel?: number;
 }
 
-export interface DeviceAuthConfig {
-  adminToken?: string;
-  installerToken?: string;
-  operatorToken?: string;
-}
 
 export interface DeviceZoneConfig {
   name: string;
@@ -106,7 +101,6 @@ export interface DeviceConfig {
   siteLabel?: string;
   groupLabel?: string;
   protocol: DeviceProtocolConfig;
-  auth?: DeviceAuthConfig;
   channels?: ChannelConfig[];
   groups?: ChannelGroup[];
   zones?: DeviceZoneConfig[];
@@ -152,7 +146,6 @@ export interface DeviceConfigWire {
   mqttBroker?: string;
   mqttPort?: number;
   protocol?: DeviceProtocolConfig;
-  auth?: DeviceAuthConfig;
   channels?: ChannelConfigWire[];
   groups?: ChannelGroup[];
   zones?: DeviceZoneConfig[];
@@ -251,7 +244,6 @@ export function normalizeDeviceConfig(wire: DeviceConfigWire): DeviceConfig {
       universeStart: 1,
       liveStreamLayer: 2,
     },
-    auth: wire.auth,
     channels: channels.length > 0 ? channels : undefined,
     groups: wire.groups,
     zones: wire.zones,
@@ -300,16 +292,6 @@ export function serializeDeviceConfig(config: DeviceConfig): Record<string, unkn
   if (config.mqttBroker !== undefined) payload.mqttBroker = config.mqttBroker;
   if (config.mqttPort !== undefined) payload.mqttPort = config.mqttPort;
   if (config.protocol !== undefined) payload.protocol = config.protocol;
-
-  if (config.auth) {
-    const authCopy: DeviceAuthConfig = {};
-    if (config.auth.adminToken?.trim()) authCopy.adminToken = config.auth.adminToken.trim();
-    if (config.auth.installerToken?.trim()) authCopy.installerToken = config.auth.installerToken.trim();
-    if (config.auth.operatorToken?.trim()) authCopy.operatorToken = config.auth.operatorToken.trim();
-    if (Object.keys(authCopy).length > 0) {
-      payload.auth = authCopy;
-    }
-  }
 
   if (config.channels) {
     payload.channels = config.channels.map((ch, idx) => {

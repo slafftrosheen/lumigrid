@@ -1,5 +1,5 @@
-import { getApiToken } from '../auth/storage';
-import { DEV_API_TOKEN, apiJson } from './transport';
+import { nodeAuthStore } from '../auth/nodeAuth';
+import { apiJson } from './transport';
 
 export type JobType = 'ota' | 'restore' | 'burn_in' | 'config_migrate';
 export type JobState = 'queued' | 'preparing' | 'running' | 'verifying' | 'completed' | 'failed' | 'cancelled';
@@ -31,6 +31,7 @@ export async function getCurrentJob(ip: string): Promise<OperationJob | null> {
 
 /**
  * Initiates an OTA job on the node via the control-plane endpoint.
+ * Uses the authoritative node session token.
  */
 export async function postOta(
   ip: string,
@@ -39,7 +40,7 @@ export async function postOta(
 ): Promise<OtaCommandResult> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
-    const token = getApiToken() || DEV_API_TOKEN;
+    const session = nodeAuthStore.getSession(ip);
 
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable && onProgress) {
@@ -48,6 +49,11 @@ export async function postOta(
     };
 
     xhr.onload = () => {
+      if (xhr.status === 401) {
+        nodeAuthStore.clearSession(ip);
+        reject(new Error(`[${ip}] /api/v1/ota → HTTP 401 Authentication required`));
+        return;
+      }
       if (xhr.status >= 200 && xhr.status < 300) {
         try {
           const res = JSON.parse(xhr.responseText) as OtaCommandResult;
@@ -70,10 +76,12 @@ export async function postOta(
     xhr.ontimeout = () => reject(new Error('OTA upload timed out'));
     xhr.timeout = 120000;
 
-    xhr.open('POST', `http://${ip}/api/v1/ota`, true);
+    const scheme =
+      typeof location !== 'undefined' && location.protocol === 'https:' ? 'https' : 'http';
+    xhr.open('POST', `${scheme}://${ip}/api/v1/ota`, true);
     xhr.setRequestHeader('Content-Type', 'application/octet-stream');
-    if (token) {
-      xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+    if (session?.sessionToken) {
+      xhr.setRequestHeader('Authorization', `Bearer ${session.sessionToken}`);
     }
 
     xhr.send(binary);
@@ -87,7 +95,7 @@ export function uploadFirmware(
 ): Promise<{ ok: boolean; message?: string }> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
-    const token = getApiToken() || DEV_API_TOKEN;
+    const session = nodeAuthStore.getSession(ip);
 
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable && onProgress) {
@@ -96,6 +104,11 @@ export function uploadFirmware(
     };
 
     xhr.onload = () => {
+      if (xhr.status === 401) {
+        nodeAuthStore.clearSession(ip);
+        reject(new Error(`[${ip}] /update → HTTP 401 Authentication required`));
+        return;
+      }
       if (xhr.status >= 200 && xhr.status < 300) {
         resolve({ ok: true });
       } else {
@@ -107,14 +120,15 @@ export function uploadFirmware(
     xhr.ontimeout = () => reject(new Error('Firmware upload timed out'));
     xhr.timeout = 120000;
 
-    xhr.open('POST', `http://${ip}/update`, true);
-    if (token) {
-      xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+    const scheme =
+      typeof location !== 'undefined' && location.protocol === 'https:' ? 'https' : 'http';
+    xhr.open('POST', `${scheme}://${ip}/update`, true);
+    if (session?.sessionToken) {
+      xhr.setRequestHeader('Authorization', `Bearer ${session.sessionToken}`);
     }
 
     const form = new FormData();
-    const fileObj = binary instanceof File ? binary : new File([binary], 'firmware.bin');
-    form.append('update', fileObj, fileObj.name);
+    form.append('update', binary, 'firmware.bin');
     xhr.send(form);
   });
 }

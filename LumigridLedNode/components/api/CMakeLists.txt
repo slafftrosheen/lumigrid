@@ -8,4 +8,5 @@ idf_component_register(
         esp_http_server
         nvs_flash
         esp_timer
+        auth
 )

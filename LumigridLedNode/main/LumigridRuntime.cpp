@@ -82,8 +82,21 @@ void LumigridRuntime::recovery_task(void* arg) {
                 }
                 vTaskDelay(pdMS_TO_TICKS(100));
 
+                if (self) {
+                    self->auth_manager_.factory_reset();
+                }
                 nvs_handle_t handle;
                 if (nvs_open("lumigrid", NVS_READWRITE, &handle) == ESP_OK) {
+                    nvs_erase_all(handle);
+                    nvs_commit(handle);
+                    nvs_close(handle);
+                }
+                if (nvs_open("node_auth", NVS_READWRITE, &handle) == ESP_OK) {
+                    nvs_erase_all(handle);
+                    nvs_commit(handle);
+                    nvs_close(handle);
+                }
+                if (nvs_open("network", NVS_READWRITE, &handle) == ESP_OK) {
                     nvs_erase_all(handle);
                     nvs_commit(handle);
                     nvs_close(handle);
@@ -176,17 +189,16 @@ esp_err_t LumigridRuntime::init() {
     startup_stage_ = StartupStage::ConfigStoreInitialized;
     vTaskDelay(pdMS_TO_TICKS(500));
 
+    // Initialize AuthStore and AuthManager
+    auth_store_.init();
+    auth_manager_.init();
+    api::set_auth_manager(&auth_manager_);
+
     DeviceConfig dev_cfg;
     if (config_.load_config(dev_cfg) == ESP_OK) {
         startup_stage_ = StartupStage::ConfigLoaded;
-        if (std::strcmp(dev_cfg.admin_token, "lumigrid_admin") != 0) {
-            std::strncpy(dev_cfg.admin_token, "lumigrid_admin", sizeof(dev_cfg.admin_token) - 1);
-            std::strncpy(dev_cfg.installer_token, "lumigrid_install", sizeof(dev_cfg.installer_token) - 1);
-            std::strncpy(dev_cfg.operator_token, "lumigrid_op", sizeof(dev_cfg.operator_token) - 1);
-            config_.save_config(dev_cfg);
-            ESP_LOGW("lumigrid", "Dev credentials restored (development build active)");
-        }
-        api::update_tokens(dev_cfg.admin_token, dev_cfg.installer_token, dev_cfg.operator_token);
+        // Migrate legacy credentials into AuthStore if needed (Case A: universal defaults -> unprovisioned; Case B: custom -> migrated)
+        auth_manager_.migrate_legacy_tokens(dev_cfg.admin_token, dev_cfg.installer_token, dev_cfg.operator_token);
 
         ConfigStore::ConfigValidationResult val_res;
         esp_err_t val_err = config_.validate_config(dev_cfg, &val_res);
@@ -236,7 +248,6 @@ esp_err_t LumigridRuntime::init() {
         output_.blackout();
         output_.set_output_enabled(false);
         ESP_LOGE("lumigrid", "Failed to load device config! Entering SAFE MODE!");
-        api::update_tokens("lumigrid_admin", "lumigrid_install", "lumigrid_op");
     }
 
 #if defined(CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS) && CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS
@@ -544,6 +555,7 @@ esp_err_t LumigridRuntime::start() {
 
     ESP_LOGI("lumigrid", "Step 6: Setting up network services & API...");
     api_.set_wifi(&wifi_);
+    api_.set_auth_manager(&auth_manager_);
     api_.set_show_clock_provider([this]() { return clock_.now_ms(); });
 
     api_.set_network_apply_handler(
@@ -738,6 +750,7 @@ void LumigridRuntime::start_network_services() {
     if (!started_subsystems_.api) {
         ESP_LOGI("lumigrid", "Starting api.start(80, 8080)...");
         api_.set_wifi(&wifi_);
+        api_.set_auth_manager(&auth_manager_);
         api_.set_show_clock_provider([this]() { return clock_.now_ms(); });
         esp_err_t err = api_.start(80, 8080, &config_, &lighting_, &scheduler_, &node_sync_, &dmx_router_, &cue_runner_, &show_transport_);
         if (err == ESP_OK) {

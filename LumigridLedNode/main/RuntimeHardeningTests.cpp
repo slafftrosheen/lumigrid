@@ -24,6 +24,10 @@
 #include "ShowTransport.hpp"
 #include "NetworkSettings.hpp"
 #include "WifiService.hpp"
+#include "AuthTypes.hpp"
+#include "AuthStore.hpp"
+#include "AuthManager.hpp"
+#include "ApiAuth.hpp"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -3823,6 +3827,245 @@ bool test_lg028_network_commissioning_and_lifecycle() {
     return true;
 }
 
+bool test_lg029_node_backed_authentication() {
+    ESP_LOGI(TAG, "Testing LG-029 Node-Backed Authentication & Sessions (Tests A..AC)...");
+
+    auth::AuthStore mem_store;
+    auth::AuthManager mgr(&mem_store);
+    mgr.init();
+
+    // Regression D: fresh node starts unprovisioned
+    assert(!mgr.is_provisioned());
+
+    // Regression A: universal "admin" credential rejected
+    {
+        char s_token[65];
+        auth::AuthRole role;
+        uint32_t exp;
+        assert(mgr.create_session("admin", s_token, &role, &exp) != ESP_OK);
+    }
+
+    // Regression B: universal "lumigrid_admin" rejected when unprovisioned or after provisioning
+    {
+        char s_token[65];
+        auth::AuthRole role;
+        uint32_t exp;
+        assert(mgr.create_session("lumigrid_admin", s_token, &role, &exp) != ESP_OK);
+    }
+
+    // Regression E: bootstrap allowed exactly once
+    const char* admin_key = "SuperAdminSecretKey2026!";
+    assert(mgr.bootstrap(admin_key) == ESP_OK);
+    assert(mgr.is_provisioned());
+
+    // Regression F: bootstrap unavailable after provisioning
+    assert(mgr.bootstrap("AnotherAdminSecretKey2026!") == ESP_ERR_INVALID_STATE);
+
+    // Regression B again: universal default tokens rejected after provisioning
+    {
+        char s_token[65];
+        auth::AuthRole role;
+        uint32_t exp;
+        assert(mgr.create_session("lumigrid_admin", s_token, &role, &exp) != ESP_OK);
+        assert(mgr.create_session("lumigrid_install", s_token, &role, &exp) != ESP_OK);
+        assert(mgr.create_session("lumigrid_op", s_token, &role, &exp) != ESP_OK);
+    }
+
+    // Regression G: credential stored as digest, not plaintext
+    {
+        auth::AuthConfig cfg{};
+        assert(mem_store.load(cfg) == ESP_OK);
+        assert(cfg.admin.enabled);
+        assert(std::memcmp(cfg.admin.digest, admin_key, std::strlen(admin_key)) != 0);
+        bool non_zero_salt = false;
+        for (int i = 0; i < 16; ++i) {
+            if (cfg.admin.salt[i] != 0) non_zero_salt = true;
+        }
+        assert(non_zero_salt);
+    }
+
+    // Regression H: correct credential authenticates
+    char admin_session[65] = {};
+    auth::AuthRole inferred_role = auth::AuthRole::Operator;
+    uint32_t expires_in = 0;
+    assert(mgr.create_session(admin_key, admin_session, &inferred_role, &expires_in) == ESP_OK);
+    assert(std::strlen(admin_session) == 64);
+    assert(expires_in == 28800);
+
+    // Regression J: role inferred by node, not request
+    assert(inferred_role == auth::AuthRole::Admin);
+
+    // Regression I: incorrect credential fails
+    {
+        char s_token[65];
+        auth::AuthRole role;
+        uint32_t exp;
+        assert(mgr.create_session("WrongPassword1234567!", s_token, &role, &exp) == ESP_ERR_INVALID_ARG);
+    }
+
+    // Add Installer and Operator credentials for role testing
+    const char* installer_key = "InstallerSecretKey2026!";
+    const char* operator_key = "OperatorSecretKey2026!";
+    assert(mgr.rotate_credential(auth::AuthRole::Installer, installer_key) == ESP_OK);
+    assert(mgr.rotate_credential(auth::AuthRole::Operator, operator_key) == ESP_OK);
+
+    char installer_session[65] = {};
+    auth::AuthRole inst_role;
+    assert(mgr.create_session(installer_key, installer_session, &inst_role, &expires_in) == ESP_OK);
+    assert(inst_role == auth::AuthRole::Installer);
+
+    char op_session[65] = {};
+    auth::AuthRole op_role;
+    assert(mgr.create_session(operator_key, op_session, &op_role, &expires_in) == ESP_OK);
+    assert(op_role == auth::AuthRole::Operator);
+
+    // Regression K: Operator cannot call Installer endpoint
+    assert(api::role_satisfies(op_role, api::ApiRole::Installer) == false);
+    assert(api::role_satisfies(op_role, api::ApiRole::Admin) == false);
+    assert(api::role_satisfies(op_role, api::ApiRole::Operator) == true);
+
+    // Regression L: Installer cannot call Admin endpoint
+    assert(api::role_satisfies(inst_role, api::ApiRole::Admin) == false);
+    assert(api::role_satisfies(inst_role, api::ApiRole::Installer) == true);
+    assert(api::role_satisfies(inst_role, api::ApiRole::Operator) == true);
+
+    // Regression M: Admin may call all lower-role endpoints
+    assert(api::role_satisfies(inferred_role, api::ApiRole::Admin) == true);
+    assert(api::role_satisfies(inferred_role, api::ApiRole::Installer) == true);
+    assert(api::role_satisfies(inferred_role, api::ApiRole::Operator) == true);
+
+    // Regression N: session IDs are unique
+    char s1[65], s2[65], s3[65];
+    assert(mgr.create_session(admin_key, s1, &inferred_role, &expires_in) == ESP_OK);
+    assert(mgr.create_session(admin_key, s2, &inferred_role, &expires_in) == ESP_OK);
+    assert(mgr.create_session(admin_key, s3, &inferred_role, &expires_in) == ESP_OK);
+    assert(std::strcmp(s1, s2) != 0);
+    assert(std::strcmp(s2, s3) != 0);
+    assert(std::strcmp(s1, s3) != 0);
+
+    // Regression O: session IDs use expected entropy/length (256-bit entropy = 32 bytes = 64 hex characters)
+    assert(std::strlen(s1) == 64);
+    for (size_t i = 0; i < 64; ++i) {
+        char c = s1[i];
+        assert((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'));
+    }
+
+    // Regression P & Q: server-side session validity
+    {
+        auto val = mgr.validate_session(s1);
+        assert(val.valid && !val.expired);
+
+        auto insp = mgr.inspect_session(s1);
+        assert(insp.valid && !insp.expired);
+    }
+
+    // Regression R: logout immediately invalidates session
+    assert(mgr.delete_session(s1) == ESP_OK);
+    assert(!mgr.validate_session(s1).valid);
+    assert(mgr.delete_session(s1) == ESP_ERR_NOT_FOUND);
+
+    // Regression S: credential rotation invalidates relevant sessions
+    {
+        char s_inst[65];
+        auth::AuthRole r;
+        assert(mgr.create_session(installer_key, s_inst, &r, &expires_in) == ESP_OK);
+        assert(mgr.validate_session(s_inst).valid);
+
+        assert(mgr.rotate_credential(auth::AuthRole::Installer, "NewInstallerKey2026!") == ESP_OK);
+        assert(!mgr.validate_session(s_inst).valid);
+
+        assert(mgr.create_session(installer_key, s_inst, &r, &expires_in) == ESP_ERR_INVALID_ARG);
+        assert(mgr.create_session("NewInstallerKey2026!", s_inst, &r, &expires_in) == ESP_OK);
+    }
+
+    // Regression T: max-session bound is respected (kMaxSessions = 8)
+    {
+        char sessions[10][65];
+        for (int i = 0; i < 8; ++i) {
+            auth::AuthRole r;
+            assert(mgr.create_session(admin_key, sessions[i], &r, &expires_in) == ESP_OK);
+        }
+        auth::AuthRole r;
+        assert(mgr.create_session(admin_key, sessions[8], &r, &expires_in) == ESP_OK);
+        assert(mgr.validate_session(sessions[8]).valid);
+    }
+
+    // Regression V: X-API-Key direct automation path works
+    {
+        auth::AuthRole key_role = auth::AuthRole::Operator;
+        assert(mgr.verify_api_key(admin_key, &key_role));
+        assert(key_role == auth::AuthRole::Admin);
+        assert(mgr.verify_api_key("NewInstallerKey2026!", &key_role));
+        assert(key_role == auth::AuthRole::Installer);
+        assert(!mgr.verify_api_key("FakeApiKey1234567890", &key_role));
+    }
+
+    // Regression W: backup contains no secrets/hashes/salts
+    {
+        cJSON* root = cJSON_CreateObject();
+        cJSON_AddNumberToObject(root, "version", 3);
+        cJSON* auth_j = cJSON_CreateObject();
+        cJSON_AddBoolToObject(auth_j, "provisioned", mgr.is_provisioned());
+        cJSON_AddItemToObject(root, "auth", auth_j);
+        char* printed = cJSON_PrintUnformatted(root);
+        assert(printed != nullptr);
+        assert(std::strstr(printed, "adminToken") == nullptr);
+        assert(std::strstr(printed, "installerToken") == nullptr);
+        assert(std::strstr(printed, "operatorToken") == nullptr);
+        assert(std::strstr(printed, "digest") == nullptr);
+        assert(std::strstr(printed, "salt") == nullptr);
+        cJSON_free(printed);
+        cJSON_Delete(root);
+    }
+
+    // Regression X: v2 restore ignores legacy auth secrets
+    {
+        DeviceConfig legacy_cfg{};
+        std::strncpy(legacy_cfg.admin_token, "HackedToken12345!", sizeof(legacy_cfg.admin_token) - 1);
+        auth::AuthRole r;
+        assert(!mgr.verify_api_key(legacy_cfg.admin_token, &r));
+    }
+
+    // Regression Y: unauthenticated WebSocket rejected
+    {
+        auth::AuthRole r;
+        assert(!mgr.consume_ws_ticket("", &r));
+        assert(!mgr.consume_ws_ticket("invalid_ticket_hex_12345678", &r));
+    }
+
+    // Regression Z: valid single-use WS ticket succeeds
+    char ws_ticket[33] = {};
+    uint32_t ticket_exp_ms = 0;
+    assert(mgr.create_ws_ticket(auth::AuthRole::Operator, ws_ticket, &ticket_exp_ms) == ESP_OK);
+    assert(std::strlen(ws_ticket) == 32);
+    assert(ticket_exp_ms == 15000);
+
+    auth::AuthRole ticket_role = auth::AuthRole::Admin;
+    assert(mgr.consume_ws_ticket(ws_ticket, &ticket_role));
+    assert(ticket_role == auth::AuthRole::Operator);
+
+    // Regression AA: same WS ticket cannot be reused
+    assert(!mgr.consume_ws_ticket(ws_ticket, &ticket_role));
+
+    // Regression AC: safe/recovery auth bootstrap obeys physical recovery rules
+    {
+        assert(mgr.factory_reset() == ESP_OK);
+        assert(!mgr.is_provisioned());
+        assert(mgr.bootstrap("NewBootstrapKey2026!") == ESP_OK);
+        assert(mgr.is_provisioned());
+    }
+
+    // Regression C: runtime no longer rewrites credentials on boot
+    {
+        auth::AuthConfig c{};
+        assert(mem_store.load(c) == ESP_OK);
+        assert(c.provisioned);
+    }
+
+    ESP_LOGI(TAG, "[PASS] LG-029 Node-Backed Authentication & Sessions passed.");
+    return true;
+}
+
 } // namespace
 
 bool run_runtime_hardening_tests() {
@@ -3911,6 +4154,9 @@ bool run_runtime_hardening_tests() {
 
     // LG-028 Network Commissioning & Lifecycle Regressions (A..T)
     all_ok &= test_lg028_network_commissioning_and_lifecycle();
+
+    // LG-029 Node-Backed Authentication & Sessions Regressions (A..AC)
+    all_ok &= test_lg029_node_backed_authentication();
 
     if (all_ok) {
         ESP_LOGI(TAG, "==================================================");

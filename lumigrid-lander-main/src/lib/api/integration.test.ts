@@ -13,8 +13,8 @@ import {
   saveSequence,
   getFactoryStatus,
   postFactoryAbort,
-  DEV_API_TOKEN,
 } from './node';
+import { nodeAuthStore } from '../auth/nodeAuth';
 import {
   connect,
   disconnect,
@@ -23,6 +23,7 @@ import {
 } from '../state/nodeStore';
 import { createDefaultPreset } from './scenes';
 import { createDefaultSequence } from './timeline';
+import * as authApi from './auth';
 
 class MockStorage implements Storage {
   private store: Record<string, string> = {};
@@ -44,8 +45,11 @@ class MockWebSocket {
   onerror: (() => void) | null = null;
   onmessage: ((event: { data: unknown }) => void) | null = null;
 
-  constructor(url: string) {
+  protocols?: string | string[];
+
+  constructor(url: string, protocols?: string | string[]) {
     this.url = url;
+    this.protocols = protocols;
     MockWebSocket.instances.push(this);
     setTimeout(() => {
       this.readyState = 1;
@@ -67,6 +71,18 @@ describe('dashboard contract integration tests', () => {
     MockWebSocket.instances = [];
     vi.stubGlobal('localStorage', mockStorage);
     vi.stubGlobal('WebSocket', MockWebSocket);
+    nodeAuthStore.clearAllSessions();
+    nodeAuthStore.setSession({
+      address: '192.168.1.100',
+      nodeId: 'node-100',
+      role: 'admin',
+      sessionToken: 'test-session-token-100',
+      expiresAt: Date.now() + 3600000,
+    });
+    vi.spyOn(authApi, 'createWsTicket').mockImplementation(async (ip: string) => ({
+      ticket: `ws-ticket-${ip.replace(/\./g, '-')}`,
+      expiresInMs: 15000,
+    }));
     disconnect();
   });
 
@@ -98,7 +114,7 @@ describe('dashboard contract integration tests', () => {
   });
 
   it('handles connect, disconnect, and reconnect transitions', async () => {
-    connect('192.168.1.100');
+    await connect('192.168.1.100');
     await new Promise(r => setTimeout(r, 15));
     let snap = getNodeLiveSnapshot();
     expect(snap.ip).toBe('192.168.1.100');
@@ -108,7 +124,7 @@ describe('dashboard contract integration tests', () => {
     snap = getNodeLiveSnapshot();
     expect(['disconnected', 'idle']).toContain(snap.connection);
 
-    connect('192.168.1.100');
+    await connect('192.168.1.100');
     await new Promise(r => setTimeout(r, 15));
     snap = getNodeLiveSnapshot();
     expect(snap.connection).toBe('connected');
@@ -130,7 +146,7 @@ describe('dashboard contract integration tests', () => {
     const [url, init] = fetchSpy.mock.calls[0];
     expect(url).toBe('http://192.168.1.100/api/v1/test');
     const authHeader = (init?.headers as Headers).get('Authorization');
-    expect(authHeader).toBe(`Bearer ${DEV_API_TOKEN}`);
+    expect(authHeader).toBe('Bearer test-session-token-100');
   });
 
   it('displays and types HTTP 401 / 403 errors appropriately without crashing', async () => {
@@ -158,7 +174,7 @@ describe('dashboard contract integration tests', () => {
   });
 
   it('handles malformed WebSocket messages without crashing live state', async () => {
-    connect('192.168.1.100');
+    await connect('192.168.1.100');
     await new Promise(r => setTimeout(r, 15));
 
     const ws = MockWebSocket.instances[0];

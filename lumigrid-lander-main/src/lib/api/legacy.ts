@@ -5,7 +5,7 @@
  * Legacy endpoints are isolated here to keep the rest of the application clean.
  */
 
-import { apiFetch, apiJson, getApiToken } from './transport';
+import { apiFetch, apiJson } from './transport';
 import type {
   AnimationBlock,
   ApiNode,

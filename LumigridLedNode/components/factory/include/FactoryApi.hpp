@@ -22,6 +22,9 @@ class NodeSync;
 class DmxRouter;
 class ShowTransportCoordinator;
 class WifiService;
+namespace auth {
+class AuthManager;
+}
 }
 
 namespace lg {
@@ -142,6 +145,9 @@ public:
     WifiService* wifi() { return wifi_; }
     const WifiService* wifi() const { return wifi_; }
     void set_wifi(WifiService* wifi) { wifi_ = wifi; }
+    auth::AuthManager* auth_manager() { return auth_manager_; }
+    const auth::AuthManager* auth_manager() const { return auth_manager_; }
+    void set_auth_manager(auth::AuthManager* auth) { auth_manager_ = auth; }
 
     using ShowClockProvider = std::function<uint64_t()>;
     void set_show_clock_provider(ShowClockProvider provider) { show_clock_provider_ = std::move(provider); }
@@ -188,6 +194,7 @@ public:
     class CueRunner* cue_runner_ = nullptr;
     class ShowTransportCoordinator* show_transport_ = nullptr;
     WifiService* wifi_ = nullptr;
+    auth::AuthManager* auth_manager_ = nullptr;
     ShowClockProvider show_clock_provider_{};
     std::function<StartupDiagnostics()> diagnostics_provider_{};
     RuntimeConfigApplyCallback config_apply_callback_{};

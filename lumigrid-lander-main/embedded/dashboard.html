@@ -463,8 +463,8 @@
                 <label for="experience-host" style="display:block; font-size:0.75rem; font-weight:700; color:var(--text-secondary); margin-bottom:0.4rem;">Node Host / IP Address <span style="font-weight:400; color:var(--text-muted);">(Default: auto-detected or 192.168.4.1)</span></label>
                 <input id="experience-host" type="text" placeholder="192.168.4.1" value="" style="width: 100%;">
             </div>
-            <label for="experience-token" style="display:block; font-size:0.75rem; font-weight:700; color:var(--text-secondary); margin-bottom:0.4rem;">Node Access Token <span style="font-weight:400; color:var(--text-muted);">(Default: lumigrid_admin)</span></label>
-            <input id="experience-token" type="password" autocomplete="current-password" placeholder="Enter operator or admin token" value="lumigrid_admin" required>
+            <label for="experience-token" style="display:block; font-size:0.75rem; font-weight:700; color:var(--text-secondary); margin-bottom:0.4rem;">Node Access Key</label>
+            <input id="experience-token" type="password" autocomplete="current-password" placeholder="Enter operator or admin key" value="" required>
             <button class="button-primary" type="submit" style="width: 100%; margin-top: 1.25rem; min-height: 2.5rem;">Connect to Node</button>
         </form>
     </div>
@@ -1014,30 +1014,33 @@ window.lg = (() => {
         const rawHost = state.host || (location.protocol !== 'file:' && location.host ? location.host : '192.168.4.1');
         const cleanHost = rawHost.replace(/^https?:\/\//, '').replace(/\/+$/, '');
         const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-        try {
-            ws = new WebSocket(`${proto}//${cleanHost}/ws`);
-        } catch (_) {
-            return;
-        }
-        ws.binaryType = 'arraybuffer';
-        ws.onmessage = (event) => {
-            if (event.data instanceof ArrayBuffer) {
-                const arr = new Uint8Array(event.data);
-                // Handle 0x01 or 76 ('L') preview packet
-                if (arr.length > 1 && (arr[0] === 1 || arr[0] === 76)) {
-                    const rawRgb = arr.subarray(1);
-                    state.liveBuffer.set(rawRgb.subarray(0, state.liveBuffer.length));
-                    state.liveFrameCount++;
-                    state.totalPackets++;
-                    state.dirty = true;
-                }
-            } else if (typeof event.data === 'string') {
-                try {
-                    const payload = JSON.parse(event.data);
-                    if (payload.free_heap !== undefined || payload.uptime_s !== undefined) {
-                        state.health = { ...state.health, ...payload };
-                        const stats = byId('health-stats');
-                        if (stats) {
+
+        api('/api/v1/auth/ws-ticket', 'POST').then(ticketRes => {
+            const ticket = ticketRes && ticketRes.ticket ? ticketRes.ticket : '';
+            try {
+                ws = new WebSocket(`${proto}//${cleanHost}/ws`, ticket ? ['lumigrid-ticket.' + ticket] : undefined);
+            } catch (_) {
+                return;
+            }
+            ws.binaryType = 'arraybuffer';
+            ws.onmessage = (event) => {
+                if (event.data instanceof ArrayBuffer) {
+                    const arr = new Uint8Array(event.data);
+                    // Handle 0x01 or 76 ('L') preview packet
+                    if (arr.length > 1 && (arr[0] === 1 || arr[0] === 76)) {
+                        const rawRgb = arr.subarray(1);
+                        state.liveBuffer.set(rawRgb.subarray(0, state.liveBuffer.length));
+                        state.liveFrameCount++;
+                        state.totalPackets++;
+                        state.dirty = true;
+                    }
+                } else if (typeof event.data === 'string') {
+                    try {
+                        const payload = JSON.parse(event.data);
+                        if (payload.free_heap !== undefined || payload.uptime_s !== undefined) {
+                            state.health = { ...state.health, ...payload };
+                            const stats = byId('health-stats');
+                            if (stats) {
                             stats.textContent = `Uptime: ${state.health.uptime_s || 0}s\nFree Heap: ${state.health.free_heap || 0} bytes\nMin Free Heap: ${state.health.min_free_heap || 0} bytes\nFirmware Version: 2.1.0\nChip Revision: ESP32-S3`;
                         }
                     } else {
@@ -1245,17 +1248,29 @@ window.lg = (() => {
     async function connect() {
         const tokenInput = byId('experience-token');
         const hostInput = byId('experience-host');
-        state.token = tokenInput ? tokenInput.value.trim() : '';
+        const keyVal = tokenInput ? tokenInput.value.trim() : '';
         state.host = hostInput ? hostInput.value.trim() : '';
         if (state.host) {
-            try { localStorage.setItem('lg_node_host', state.host); } catch (_) {}
+            try { sessionStorage.setItem('lg_node_host', state.host); } catch (_) {}
         }
-        if (state.token) {
-            try { localStorage.setItem('lg_node_token', state.token); } catch (_) {}
-        }
-        if (!state.token) return toast('Enter node access token.', true);
+        if (!keyVal) return toast('Enter node access key.', true);
         try {
             toast('Connecting to node...');
+            // Exchange key for node-backed session token
+            try {
+                const sessionRes = await api('/api/v1/auth/session', 'POST', { token: keyVal });
+                if (sessionRes && sessionRes.sessionToken) {
+                    state.token = sessionRes.sessionToken;
+                    state.role = sessionRes.role || 'operator';
+                } else {
+                    state.token = keyVal;
+                }
+            } catch (authErr) {
+                state.token = keyVal;
+            }
+            if (state.token) {
+                try { sessionStorage.setItem('lg_node_token', state.token); } catch (_) {}
+            }
             const status = await api('/api/v1/status');
             state.status = status;
             await refresh();
@@ -2336,7 +2351,8 @@ window.lg = (() => {
         }
         const tokenInput = byId('experience-token');
         if (tokenInput) {
-            const savedToken = localStorage.getItem('lg_node_token');
+            let savedToken = null;
+            try { savedToken = sessionStorage.getItem('lg_node_token'); } catch (_) {}
             if (savedToken) {
                 tokenInput.value = savedToken;
                 state.token = savedToken;

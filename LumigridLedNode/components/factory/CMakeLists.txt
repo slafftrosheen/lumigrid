@@ -24,4 +24,5 @@ idf_component_register(
         app_update
         show
         network
+        auth
 )

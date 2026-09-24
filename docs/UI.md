@@ -45,6 +45,12 @@ The operator interface is organized into primary destinations, visually separati
    - **Mode Selection:** Toggle between `Access Point Only`, `Join Wi-Fi with Recovery AP` (`sta_with_ap_fallback`), and `Wi-Fi Only`.
    - **Credential Hygiene:** Stored Wi-Fi passwords are never returned to or pre-filled in the browser. Blank submissions preserve existing credentials; an explicit "Clear saved password" option clears credentials for open networks.
    - **Lifecycle & Reconnect Handling:** Triggering network changes presents a clear asynchronous apply state (`Applying network settings… Connection may move to the new network. Reconnecting…`) rather than a false "Node offline" alarm. Automatic polling verifies reconnection against authoritative runtime telemetry and surfaces recovery access point state if station credentials fail.
+10. **Node-Backed Authentication & Access Control (LG-029):** Node-authoritative session gate and credential management:
+   - **Node Authority:** The local browser PIN wall (`DEFAULT_OP_PIN`, `DEFAULT_AD_PIN`) and browser-manufactured credentials are eliminated. Dashboard access and role elevation require valid node-backed authentication.
+   - **First-Boot / Factory Provisioning:** Connecting to an unprovisioned node surfaces the "Setup Admin Access" modal, allowing initial 16–64 character credential entry or cryptographic generation via `crypto.getRandomValues()`.
+   - **Node Login & Session Lifecycle:** Provisioned nodes prompt for the configured node access key. On successful authentication, the node returns an ephemeral session token with server-dictated role and expiration.
+   - **Session Storage:** Active sessions are tracked per-node address and ID in memory and `sessionStorage`. No access credentials or tokens are ever placed in `localStorage`.
+   - **Admin Access Control Surface:** Dedicated credential management panel for Admin sessions displaying configured/disabled status for Administrator, Installer, and Operator roles, with one-time copy credential generation, confirmation, and session invalidation on rotation.
 
 ### Service
 - **Diagnostics & System:** Unified maintenance hub featuring live health telemetry, real-time node system logs, security/config audit trails, firmware OTA flashing, and backup/restore. Includes a dedicated section for Factory Output Testing (e.g., Burn-in, Lane Chase, Color Wash) time-bounded by the firmware.

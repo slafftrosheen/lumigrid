@@ -1,47 +1,59 @@
-import { API_TOKEN_KEY, readString, removeValue, writeString } from '../auth/storage';
+import { nodeAuthStore } from '../auth/nodeAuth';
 
-/** Development credential matching the firmware's default ConfigStore value. */
-export const DEV_API_TOKEN = 'lumigrid_admin';
-
-export function getApiToken(): string {
-  return readString(API_TOKEN_KEY, DEV_API_TOKEN);
+export interface ApiFetchOptions extends RequestInit {
+  apiKey?: string;
 }
 
-export function setApiToken(token: string): void {
-  const value = token.trim();
-  if (value) writeString(API_TOKEN_KEY, value);
-  else removeValue(API_TOKEN_KEY);
-}
-
-export function clearApiToken(): void {
-  removeValue(API_TOKEN_KEY);
-}
-
-export function authHeaders(headers?: HeadersInit): Headers {
+export function authHeaders(
+  ip: string,
+  headers?: HeadersInit,
+  apiKey?: string
+): Headers {
   const result = new Headers(headers);
-  result.set('Authorization', `Bearer ${getApiToken()}`);
+
+  // 1. Explicit automation API Key (X-API-Key) takes priority if specified
+  if (apiKey) {
+    result.set('X-API-Key', apiKey);
+    return result;
+  }
+
+  // 2. Per-node browser session token (Authorization: Bearer <session-token>)
+  if (!result.has('Authorization') && !result.has('X-API-Key')) {
+    const session = nodeAuthStore.getSession(ip);
+    if (session && session.sessionToken) {
+      result.set('Authorization', `Bearer ${session.sessionToken}`);
+    }
+  }
+
   return result;
 }
 
 export async function apiFetch(
   ip: string,
   path: string,
-  options: RequestInit = {},
+  options: ApiFetchOptions = {},
   timeoutMs = 8000,
 ): Promise<Response> {
-  // Derive http/https from the page's own protocol so that Mixed Content errors
-  // don't block requests when the dashboard is served over HTTPS (e.g. Vercel).
   const scheme =
     typeof location !== 'undefined' && location.protocol === 'https:' ? 'https' : 'http';
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
+  const reqHeaders = authHeaders(ip, options.headers, options.apiKey);
+
   try {
-    return await fetch(`${scheme}://${ip}${path}`, {
+    const response = await fetch(`${scheme}://${ip}${path}`, {
       ...options,
-      headers: authHeaders(options.headers),
+      headers: reqHeaders,
       signal: controller.signal,
     });
+
+    // On 401: clear only the affected node's browser session
+    if (response.status === 401) {
+      nodeAuthStore.clearSession(ip);
+    }
+
+    return response;
   } finally {
     clearTimeout(timer);
   }
@@ -63,7 +75,7 @@ export class ApiError extends Error {
 export async function apiJson<T>(
   ip: string,
   path: string,
-  options: RequestInit = {},
+  options: ApiFetchOptions = {},
   timeoutMs = 8000,
 ): Promise<T> {
   let response: Response;

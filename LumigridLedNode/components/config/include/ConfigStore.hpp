@@ -58,9 +58,9 @@ struct DeviceConfigV1 {
     uint8_t  sync_role              = 0;
     uint32_t sync_token             = 0;
     
-    char     admin_token[32]        = "lumigrid_admin";
-    char     installer_token[32]    = "lumigrid_install";
-    char     operator_token[32]     = "lumigrid_op";
+    char     admin_token[32]        = "";
+    char     installer_token[32]    = "";
+    char     operator_token[32]     = "";
 
     char     serial_number[32]      = "";
     char     hardware_revision[16]  = "v1.0";

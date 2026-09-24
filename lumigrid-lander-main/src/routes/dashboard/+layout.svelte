@@ -2,17 +2,24 @@
   import { page } from '$app/stores';
   import { onMount } from 'svelte';
   import {
-    AUTH_ROLE_KEY,
-    AUTH_TIMESTAMP_KEY,
     getSelectedNodeIp,
+    setSelectedNodeIp,
     getSavedNodes,
-    readString,
-    writeString,
-    unlockDashboardSession,
-    lockDashboardSession,
     NODE_REGISTRY_CHANGED_EVENT,
     type SavedNodeInfo,
   } from '$lib/auth/storage';
+  import { nodeAuthStore, type NodeAuthSession } from '$lib/auth/nodeAuth';
+  import {
+    getAuthStatus,
+    bootstrapAuth,
+    createSession,
+    deleteSession,
+    getCredentialsStatus,
+    rotateCredential,
+    disableCredential,
+    type AuthStatusResponse,
+    type CredentialsStatusResponse,
+  } from '$lib/api/auth';
   import {
     connect,
     selectNode as selectLiveNode,
@@ -20,67 +27,204 @@
     getNodeLiveSnapshot,
   } from '$lib/state/nodeStore';
 
-  // ── Feature 5: PIN Gate ──────────────────────────────────────────────────────
-  const OPERATOR_HASH_KEY = 'lg_op_hash';
-  const ADMIN_HASH_KEY    = 'lg_ad_hash';
-  const DEFAULT_OP_PIN    = '1234';
-  const DEFAULT_AD_PIN    = '9999';
-
-  let authed      = $state(false);
-  let isAdmin     = $state(false);
-  let pinInput    = $state('');
-  let pinError    = $state('');
-  let showPinWall = $state(true);
-
-  // Node management — browser persistence is isolated in auth/storage.
+  // Active node & fleet
   let nodeIp   = $state('');
   let nodeList = $state<SavedNodeInfo[]>([]);
   let liveState = $state(getNodeLiveSnapshot());
   let navListEl = $state<HTMLUListElement | null>(null);
   let mobileMoreOpen = $state(false);
 
-  async function sha256(s: string): Promise<string> {
-    const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));
-    return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+  // Per-node authoritative session state
+  let currentSession = $state<NodeAuthSession | null>(null);
+  let authed         = $derived(currentSession !== null);
+  let userRole       = $derived(currentSession?.role ?? 'unknown');
+  let isAdmin        = $derived(userRole === 'admin');
+
+  // Node auth status & login/bootstrap form state
+  let authStatus       = $state<AuthStatusResponse | null>(null);
+  let authStatusError  = $state('');
+  let authLoading      = $state(false);
+  let authSubmitting   = $state(false);
+  let authError        = $state('');
+  let loginKeyInput    = $state('');
+  let bootstrapKeyInput = $state('');
+
+  // Access Control Modal (Admin-only)
+  let showAccessControl = $state(false);
+  let credsStatus       = $state<CredentialsStatusResponse | null>(null);
+  let credsLoading      = $state(false);
+  let credsError        = $state('');
+  let credsSuccess      = $state('');
+  let rotateRole        = $state<'admin' | 'installer' | 'operator'>('admin');
+  let newKeyInput       = $state('');
+  let keyCopied         = $state(false);
+
+  function generateSecureKey(): string {
+    const charset = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_';
+    const bytes = new Uint8Array(24);
+    crypto.getRandomValues(bytes);
+    return Array.from(bytes, b => charset[b % charset.length]).join('');
   }
 
-  async function initHashes() {
-    if (!readString(OPERATOR_HASH_KEY)) {
-      writeString(OPERATOR_HASH_KEY, await sha256(DEFAULT_OP_PIN));
+  async function checkNodeAuth(ip: string) {
+    if (!ip) {
+      authStatus = null;
+      authStatusError = '';
+      return;
     }
-    if (!readString(ADMIN_HASH_KEY)) {
-      writeString(ADMIN_HASH_KEY, await sha256(DEFAULT_AD_PIN));
+    const existing = nodeAuthStore.getSession(ip);
+    if (existing) {
+      currentSession = existing;
+      return;
     }
-  }
-
-  async function submitPin() {
-    pinError = '';
-    const h = await sha256(pinInput);
-    const opHash = readString(OPERATOR_HASH_KEY);
-    const adHash = readString(ADMIN_HASH_KEY);
-    if (h === adHash) {
-      authed = true;
-      isAdmin = true;
-      showPinWall = false;
-      unlockDashboardSession('admin');
-    } else if (h === opHash) {
-      authed = true;
-      isAdmin = false;
-      showPinWall = false;
-      unlockDashboardSession('operator');
-    } else {
-      pinError = 'Incorrect PIN';
-      pinInput = '';
+    currentSession = null;
+    authLoading = true;
+    authStatusError = '';
+    authError = '';
+    try {
+      authStatus = await getAuthStatus(ip);
+    } catch (err) {
+      authStatusError = err instanceof Error ? err.message : String(err);
+      authStatus = null;
+    } finally {
+      authLoading = false;
     }
   }
 
-  function lockDashboard() {
-    authed = false;
-    isAdmin = false;
-    showPinWall = true;
-    pinInput = '';
-    pinError = '';
-    lockDashboardSession();
+  async function submitBootstrap() {
+    if (!nodeIp) return;
+    const key = bootstrapKeyInput.trim();
+    if (key.length < 16 || key.length > 64) {
+      authError = 'Administrator key must be between 16 and 64 characters';
+      return;
+    }
+    authSubmitting = true;
+    authError = '';
+    try {
+      await bootstrapAuth(nodeIp, key);
+      const res = await createSession(nodeIp, key);
+      nodeAuthStore.setSession({
+        address: nodeIp,
+        nodeId: liveState.nodeId || '',
+        role: res.role,
+        sessionToken: res.sessionToken,
+        expiresAt: Date.now() + res.expiresIn * 1000,
+      });
+      bootstrapKeyInput = '';
+    } catch (err) {
+      authError = err instanceof Error ? err.message : String(err);
+    } finally {
+      authSubmitting = false;
+    }
+  }
+
+  async function submitLogin() {
+    if (!nodeIp) return;
+    const key = loginKeyInput.trim();
+    if (!key) {
+      authError = 'Please enter your access key';
+      return;
+    }
+    authSubmitting = true;
+    authError = '';
+    try {
+      const res = await createSession(nodeIp, key);
+      nodeAuthStore.setSession({
+        address: nodeIp,
+        nodeId: liveState.nodeId || '',
+        role: res.role,
+        sessionToken: res.sessionToken,
+        expiresAt: Date.now() + res.expiresIn * 1000,
+      });
+      loginKeyInput = '';
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      authError = msg.includes('401') || msg.includes('invalid') ? 'Invalid credentials' : msg;
+      loginKeyInput = '';
+    } finally {
+      authSubmitting = false;
+    }
+  }
+
+  async function signOutNode() {
+    if (nodeIp) {
+      await deleteSession(nodeIp).catch(() => {});
+      nodeAuthStore.clearSession(nodeIp);
+    }
+    currentSession = null;
+    if (nodeIp) checkNodeAuth(nodeIp);
+  }
+
+  async function openAccessControl() {
+    showAccessControl = true;
+    credsLoading = true;
+    credsError = '';
+    credsSuccess = '';
+    newKeyInput = '';
+    keyCopied = false;
+    try {
+      credsStatus = await getCredentialsStatus(nodeIp);
+    } catch (err) {
+      credsError = err instanceof Error ? err.message : String(err);
+    } finally {
+      credsLoading = false;
+    }
+  }
+
+  async function handleRotateKey() {
+    if (!nodeIp || !newKeyInput.trim()) return;
+    const key = newKeyInput.trim();
+    if (key.length < 16 || key.length > 64) {
+      credsError = 'Access key must be between 16 and 64 characters';
+      return;
+    }
+    credsLoading = true;
+    credsError = '';
+    credsSuccess = '';
+    try {
+      await rotateCredential(nodeIp, rotateRole, key);
+      credsSuccess = `Successfully rotated ${rotateRole} key.`;
+      newKeyInput = '';
+      keyCopied = false;
+      if (rotateRole === 'admin') {
+        // Admin rotation invalidates all sessions; require re-login
+        setTimeout(() => {
+          showAccessControl = false;
+          nodeAuthStore.clearSession(nodeIp);
+          checkNodeAuth(nodeIp);
+        }, 1500);
+      } else {
+        credsStatus = await getCredentialsStatus(nodeIp);
+      }
+    } catch (err) {
+      credsError = err instanceof Error ? err.message : String(err);
+    } finally {
+      credsLoading = false;
+    }
+  }
+
+  async function handleDisableRole(role: 'installer' | 'operator') {
+    if (!nodeIp) return;
+    credsLoading = true;
+    credsError = '';
+    credsSuccess = '';
+    try {
+      await disableCredential(nodeIp, role);
+      credsSuccess = `Disabled ${role} credential.`;
+      credsStatus = await getCredentialsStatus(nodeIp);
+    } catch (err) {
+      credsError = err instanceof Error ? err.message : String(err);
+    } finally {
+      credsLoading = false;
+    }
+  }
+
+  function copyKey(val: string) {
+    if (typeof navigator !== 'undefined' && navigator.clipboard) {
+      navigator.clipboard.writeText(val);
+      keyCopied = true;
+      setTimeout(() => { keyCopied = false; }, 2500);
+    }
   }
 
   function refreshNodeList() {
@@ -90,6 +234,7 @@
     if (stored !== nodeIp) {
       nodeIp = stored;
       selectLiveNode(stored);
+      checkNodeAuth(stored);
       return;
     }
 
@@ -97,32 +242,34 @@
       const fallback = nodeList[0]?.ip ?? '';
       nodeIp = fallback;
       selectLiveNode(fallback);
+      checkNodeAuth(fallback);
     }
   }
 
   function selectNode(ip: string) {
     nodeIp = ip;
     selectLiveNode(ip);
+    checkNodeAuth(ip);
   }
 
   onMount(() => {
     nodeIp = getSelectedNodeIp();
     nodeList = getSavedNodes();
-    initHashes();
 
-    // Re-check auth on mount (session persists for 8 h via timestamp).
-    const ts = Number(readString(AUTH_TIMESTAMP_KEY, '0'));
-    if (Date.now() - ts < 8 * 3600 * 1000) {
-      authed = true;
-      isAdmin = readString(AUTH_ROLE_KEY) === 'admin';
-      showPinWall = false;
-      unlockDashboardSession(isAdmin ? 'admin' : 'operator');
+    if (nodeIp) {
+      checkNodeAuth(nodeIp);
+      connect(nodeIp);
     }
 
-    // Keep the shared live connection warm for all dashboard routes.
-    if (nodeIp) connect(nodeIp);
+    const unsubAuth = nodeAuthStore.subscribe(() => {
+      if (nodeIp) {
+        currentSession = nodeAuthStore.getSession(nodeIp);
+      } else {
+        currentSession = null;
+      }
+    });
 
-    const unsub = getNodeLiveState().subscribe(val => {
+    const unsubLive = getNodeLiveState().subscribe(val => {
       liveState = val;
     });
 
@@ -130,7 +277,8 @@
     window.addEventListener(NODE_REGISTRY_CHANGED_EVENT, onRegistryChanged);
 
     return () => {
-      unsub();
+      unsubAuth();
+      unsubLive();
       window.removeEventListener(NODE_REGISTRY_CHANGED_EVENT, onRegistryChanged);
     };
   });
@@ -175,8 +323,6 @@
   );
 
   $effect(() => {
-    // Route changes close the mobile utility sheet and keep the active desktop
-    // sidebar destination in view when the list is taller than the viewport.
     $page.url.pathname;
     mobileMoreOpen = false;
     requestAnimationFrame(() => {
@@ -190,26 +336,87 @@
   let { children } = $props();
 </script>
 
-{#if showPinWall}
+{#if !authed}
 <div class="pin-wall">
   <div class="pin-card">
     <div class="pin-logo">⬡</div>
-    <h1>LumiGrid Operator</h1>
-    <p class="pin-sub">Enter your access PIN to continue</p>
-    <!-- svelte-ignore a11y_autofocus -->
-    <input
-      type="password"
-      inputmode="numeric"
-      maxlength="8"
-      placeholder="• • • •"
-      class="pin-input"
-      bind:value={pinInput}
-      onkeydown={(e) => e.key === 'Enter' && submitPin()}
-      autofocus
-    />
-    {#if pinError}<p class="pin-error">{pinError}</p>{/if}
-    <button class="pin-btn" onclick={submitPin}>Unlock</button>
-    <p class="pin-hint">Default operator PIN: <code>1234</code> — Admin: <code>9999</code></p>
+    <h1>LumiGrid Controller</h1>
+
+    {#if !nodeIp}
+      <p class="pin-sub">Select or enter a target node to begin</p>
+      <select class="pin-node-select" onchange={(e) => selectNode((e.target as HTMLSelectElement).value)}>
+        <option value="">— Select Node —</option>
+        {#each nodeList as node}
+          <option value={node.ip}>{node.name === node.ip ? node.ip : `${node.name} (${node.ip})`}</option>
+        {/each}
+      </select>
+    {:else if authLoading}
+      <p class="pin-sub">Connecting to node {nodeIp}...</p>
+      <div class="auth-spinner"></div>
+    {:else if authStatusError}
+      <p class="pin-sub">Node: <strong>{nodeIp}</strong></p>
+      <p class="pin-error">{authStatusError}</p>
+      <button class="pin-btn secondary" onclick={() => checkNodeAuth(nodeIp)}>Retry Connection</button>
+    {:else if authStatus && !authStatus.provisioned}
+      <!-- First-Boot Provisioning Surface -->
+      <p class="pin-sub">Node <strong>{nodeIp}</strong> is unprovisioned</p>
+      <p class="auth-desc">Provision an initial Administrator access key (16 to 64 characters) to commission this node.</p>
+      
+      <div class="key-input-row">
+        <input
+          type="text"
+          placeholder="New Admin Key (min 16 chars)"
+          class="pin-input text"
+          bind:value={bootstrapKeyInput}
+        />
+        <button
+          type="button"
+          class="gen-key-btn"
+          onclick={() => { bootstrapKeyInput = generateSecureKey(); }}
+          title="Generate random secure key"
+        >
+          🎲 Generate
+        </button>
+      </div>
+
+      {#if authError}<p class="pin-error">{authError}</p>{/if}
+      <button
+        class="pin-btn"
+        disabled={authSubmitting || bootstrapKeyInput.length < 16}
+        onclick={submitBootstrap}
+      >
+        {authSubmitting ? 'Provisioning...' : 'Provision & Sign In'}
+      </button>
+    {:else}
+      <!-- Provisioned Node Login Surface -->
+      <p class="pin-sub">Node <strong>{nodeIp}</strong></p>
+      <p class="auth-desc">Enter your Administrator, Installer, or Operator access key.</p>
+      
+      <!-- svelte-ignore a11y_autofocus -->
+      <input
+        type="password"
+        placeholder="Node Access Key"
+        class="pin-input text"
+        bind:value={loginKeyInput}
+        onkeydown={(e) => e.key === 'Enter' && submitLogin()}
+        autofocus
+      />
+
+      {#if authError}<p class="pin-error">{authError}</p>{/if}
+      <button
+        class="pin-btn"
+        disabled={authSubmitting || !loginKeyInput.trim()}
+        onclick={submitLogin}
+      >
+        {authSubmitting ? 'Authenticating...' : 'Sign In'}
+      </button>
+    {/if}
+
+    {#if nodeIp && nodeList.length > 1}
+      <div class="switch-node-row">
+        <button class="text-link" onclick={() => selectNode('')}>Switch Node</button>
+      </div>
+    {/if}
   </div>
 </div>
 
@@ -276,10 +483,15 @@
     </ul>
 
     <div class="role-badge" class:admin={isAdmin}>
-      {isAdmin ? '◈ Admin' : '◦ Operator'}
+      {isAdmin ? '◈ Admin' : userRole === 'installer' ? '⚙ Installer' : '◦ Operator'}
     </div>
-    <button class="logout-btn" onclick={lockDashboard} title="Lock dashboard">
-      Lock
+    {#if isAdmin}
+      <button class="access-ctrl-btn" onclick={openAccessControl} title="Access Control & Credentials">
+        Access Control
+      </button>
+    {/if}
+    <button class="logout-btn" onclick={signOutNode} title="Sign out of node">
+      Sign Out
     </button>
   </nav>
 
@@ -302,7 +514,7 @@
       <span class="status-dot"></span>
       <span>{liveState.connection === 'connected' ? 'Live' : liveState.connection === 'connecting' ? '…' : 'Off'}</span>
     </span>
-    <button class="mobile-lock" onclick={lockDashboard} title="Lock dashboard" aria-label="Lock dashboard">⌁</button>
+    <button class="mobile-lock" onclick={signOutNode} title="Sign out" aria-label="Sign out">⌁</button>
   </div>
 
   <nav class="mobile-bottom-nav" aria-label="Primary dashboard navigation">
@@ -379,12 +591,109 @@
     </div>
   {/if}
 
+  {#if showAccessControl}
+    <div
+      class="modal-backdrop"
+      role="presentation"
+      onclick={(e) => { if (e.target === e.currentTarget) showAccessControl = false; }}
+    >
+      <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+        <div class="modal-header">
+          <h3 id="modal-title">Access Control — {nodeIp}</h3>
+          <button class="modal-close" onclick={() => { showAccessControl = false; }}>✕</button>
+        </div>
+
+        {#if credsLoading}
+          <div class="auth-spinner"></div>
+        {:else}
+          {#if credsError}<p class="pin-error">{credsError}</p>{/if}
+          {#if credsSuccess}<p class="creds-success">{credsSuccess}</p>{/if}
+
+          {#if credsStatus}
+            <div class="creds-table">
+              <div class="cred-row">
+                <span class="cred-role">Administrator</span>
+                <span class="cred-badge enabled">Configured</span>
+              </div>
+              <div class="cred-row">
+                <span class="cred-role">Installer</span>
+                <span class="cred-badge" class:enabled={credsStatus.installerConfigured}>
+                  {credsStatus.installerConfigured ? 'Configured' : 'Disabled'}
+                </span>
+                {#if credsStatus.installerConfigured}
+                  <button class="small-btn danger" onclick={() => handleDisableRole('installer')}>Disable</button>
+                {/if}
+              </div>
+              <div class="cred-row">
+                <span class="cred-role">Operator</span>
+                <span class="cred-badge" class:enabled={credsStatus.operatorConfigured}>
+                  {credsStatus.operatorConfigured ? 'Configured' : 'Disabled'}
+                </span>
+                {#if credsStatus.operatorConfigured}
+                  <button class="small-btn danger" onclick={() => handleDisableRole('operator')}>Disable</button>
+                {/if}
+              </div>
+            </div>
+          {/if}
+
+          <div class="rotate-section">
+            <h4>Set / Rotate Credential</h4>
+            <div class="rotate-role-select">
+              <label>
+                <input type="radio" name="rotateRole" value="admin" bind:group={rotateRole} /> Admin
+              </label>
+              <label>
+                <input type="radio" name="rotateRole" value="installer" bind:group={rotateRole} /> Installer
+              </label>
+              <label>
+                <input type="radio" name="rotateRole" value="operator" bind:group={rotateRole} /> Operator
+              </label>
+            </div>
+
+            <div class="key-input-row">
+              <input
+                type="text"
+                placeholder="New key (16-64 chars)"
+                class="pin-input text"
+                bind:value={newKeyInput}
+              />
+              <button
+                type="button"
+                class="gen-key-btn"
+                onclick={() => { newKeyInput = generateSecureKey(); }}
+              >
+                🎲 Generate
+              </button>
+            </div>
+
+            {#if newKeyInput}
+              <div class="key-copy-row">
+                <button type="button" class="small-btn" onclick={() => copyKey(newKeyInput)}>
+                  {keyCopied ? '✓ Copied' : '📋 Copy Once'}
+                </button>
+                <small class="copy-note">Credentials will never be shown again after rotation.</small>
+              </div>
+            {/if}
+
+            <button
+              class="pin-btn"
+              disabled={newKeyInput.length < 16}
+              onclick={handleRotateKey}
+            >
+              Rotate {rotateRole} Key
+            </button>
+          </div>
+        {/if}
+      </div>
+    </div>
+  {/if}
+
   <main class="dash-main">
     {#if routeRequiresAdmin && !isAdmin}
       <section class="access-gate" aria-labelledby="access-gate-title">
         <div class="access-gate-icon" aria-hidden="true">◇</div>
         <h1 id="access-gate-title">Admin access required</h1>
-        <p>This maintenance workspace is hidden from Operator sessions. Lock the console and unlock with the Admin PIN to continue.</p>
+        <p>This maintenance workspace requires Administrator privileges. Sign in with the node's Admin key to continue.</p>
         <a href="/dashboard" class="access-gate-link">Return to Fleet</a>
       </section>
     {:else}
@@ -574,6 +883,214 @@
     margin-bottom: .75rem;
     box-sizing: border-box;
   }
+  .pin-input.text {
+    font-size: 1rem;
+    letter-spacing: normal;
+    text-align: left;
+    font-family: inherit;
+  }
+  .pin-node-select {
+    width: 100%;
+    padding: 0.75rem 1rem;
+    font-size: 0.95rem;
+    background: rgba(255,255,255,.06);
+    border: 1px solid rgba(255,255,255,.14);
+    border-radius: 12px;
+    color: #f5f5f7;
+    margin-bottom: 1rem;
+    box-sizing: border-box;
+  }
+  .auth-desc {
+    color: #a1a1a6;
+    font-size: 0.85rem;
+    line-height: 1.45;
+    margin: 0 0 1.25rem;
+  }
+  .key-input-row {
+    display: flex;
+    gap: 0.5rem;
+    margin-bottom: 0.75rem;
+    align-items: stretch;
+  }
+  .key-input-row .pin-input {
+    margin-bottom: 0;
+    flex: 1;
+  }
+  .gen-key-btn {
+    background: rgba(255,255,255,.08);
+    border: 1px solid rgba(255,255,255,.16);
+    border-radius: 12px;
+    color: #f5f5f7;
+    font-size: 0.8rem;
+    font-weight: 600;
+    padding: 0 0.85rem;
+    white-space: nowrap;
+    cursor: pointer;
+    transition: background .18s;
+  }
+  .gen-key-btn:hover {
+    background: rgba(255,255,255,.14);
+  }
+  .switch-node-row {
+    margin-top: 1rem;
+    border-top: 1px solid rgba(255,255,255,.08);
+    padding-top: 0.75rem;
+  }
+  .text-link {
+    background: none;
+    border: none;
+    color: #a1a1a6;
+    font-size: 0.8rem;
+    cursor: pointer;
+    text-decoration: underline;
+  }
+  .text-link:hover { color: #f5f5f7; }
+  .access-ctrl-btn {
+    background: rgba(255,149,0,.10);
+    border: 1px solid rgba(255,149,0,.25);
+    border-radius: 8px;
+    color: #ff9500;
+    font-size: 0.75rem;
+    font-weight: 600;
+    padding: 0.35rem 0.5rem;
+    cursor: pointer;
+    transition: background .2s, border-color .2s;
+  }
+  .access-ctrl-btn:hover {
+    background: rgba(255,149,0,.20);
+    border-color: rgba(255,149,0,.4);
+  }
+  .modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,.72);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+  }
+  .modal-card {
+    background: rgba(24,24,27,.96);
+    border: 1px solid rgba(255,255,255,.14);
+    border-radius: 20px;
+    width: min(480px, 92vw);
+    padding: 1.75rem;
+    box-shadow: 0 24px 64px rgba(0,0,0,.7);
+    color: #f5f5f7;
+  }
+  .modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 1.25rem;
+  }
+  .modal-header h3 {
+    margin: 0;
+    font-size: 1.15rem;
+  }
+  .modal-close {
+    background: none;
+    border: none;
+    color: #a1a1a6;
+    font-size: 1.1rem;
+    cursor: pointer;
+  }
+  .modal-close:hover { color: #f5f5f7; }
+  .creds-table {
+    display: flex;
+    flex-direction: column;
+    gap: 0.65rem;
+    margin-bottom: 1.25rem;
+    background: rgba(255,255,255,.03);
+    border: 1px solid rgba(255,255,255,.07);
+    border-radius: 12px;
+    padding: 0.85rem 1rem;
+  }
+  .cred-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 0.88rem;
+  }
+  .cred-badge {
+    font-size: 0.72rem;
+    font-weight: 600;
+    padding: 0.2rem 0.55rem;
+    border-radius: 999px;
+    background: rgba(255,255,255,.06);
+    color: #8e8e93;
+  }
+  .cred-badge.enabled {
+    background: rgba(52,199,89,.15);
+    color: #34c759;
+  }
+  .rotate-section {
+    border-top: 1px solid rgba(255,255,255,.08);
+    padding-top: 1.25rem;
+  }
+  .rotate-section h4 {
+    margin: 0 0 0.85rem;
+    font-size: 0.95rem;
+  }
+  .rotate-role-select {
+    display: flex;
+    gap: 1.25rem;
+    margin-bottom: 1rem;
+    font-size: 0.85rem;
+    color: #a1a1a6;
+  }
+  .rotate-role-select label {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    cursor: pointer;
+  }
+  .key-copy-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-bottom: 1rem;
+  }
+  .copy-note {
+    color: #8e8e93;
+    font-size: 0.75rem;
+  }
+  .small-btn {
+    background: rgba(255,255,255,.08);
+    border: 1px solid rgba(255,255,255,.16);
+    border-radius: 6px;
+    color: #f5f5f7;
+    font-size: 0.75rem;
+    padding: 0.25rem 0.6rem;
+    cursor: pointer;
+  }
+  .small-btn:hover { background: rgba(255,255,255,.14); }
+  .small-btn.danger {
+    border-color: rgba(255,69,58,.35);
+    color: #ff453a;
+    background: rgba(255,69,58,.08);
+  }
+  .small-btn.danger:hover { background: rgba(255,69,58,.16); }
+  .creds-success {
+    color: #34c759;
+    font-size: 0.85rem;
+    margin-bottom: 0.75rem;
+  }
+  .auth-spinner {
+    width: 28px;
+    height: 28px;
+    border: 2px solid rgba(255,255,255,.1);
+    border-top-color: var(--dash-accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    margin: 1.5rem auto;
+  }
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+
   .pin-input:focus-visible { border-color: var(--dash-accent); }
   .pin-error { color: #ff453a; font-size: .85rem; margin: -.4rem 0 .6rem; }
   .pin-btn {
@@ -588,11 +1105,26 @@
     cursor: pointer;
     transition: background .2s, box-shadow .2s, transform .15s;
     box-shadow: 0 4px 16px rgba(255,45,85,.40);
-    margin-bottom: 1rem;
+    margin-bottom: 0.5rem;
   }
-  .pin-btn:hover { background: #ff3b30; transform: translateY(-1px); box-shadow: 0 8px 24px rgba(255,45,85,.55); }
-  .pin-hint { color: #a1a1a6; font-size: .78rem; margin: 0; }
-  .pin-hint code { color: #f5f5f7; background: rgba(255,255,255,.08); padding: .1em .35em; border-radius: 4px; }
+  .pin-btn:hover:not(:disabled) {
+    background: #ff3b30;
+    transform: translateY(-1px);
+    box-shadow: 0 8px 24px rgba(255,45,85,.55);
+  }
+  .pin-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    box-shadow: none;
+  }
+  .pin-btn.secondary {
+    background: rgba(255,255,255,.08);
+    border: 1px solid rgba(255,255,255,.16);
+    box-shadow: none;
+  }
+  .pin-btn.secondary:hover:not(:disabled) {
+    background: rgba(255,255,255,.14);
+  }
 
   .dash-root {
     display: flex;
