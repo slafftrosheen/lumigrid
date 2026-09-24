@@ -11,6 +11,8 @@
 
 #include "FactoryApp.hpp"
 #include "ConfigStore.hpp"
+#include "NetworkSettings.hpp"
+#include "WifiService.hpp"
 #include "LightingRuntime.hpp"
 #include "SignageTypes.hpp"
 #include "ChannelHardware.hpp"
@@ -2452,6 +2454,173 @@ esp_err_t put_device_config(httpd_req_t* request) {
     return send_json(request, resp);
 }
 
+esp_err_t get_network_config(httpd_req_t* request) {
+    if (!api::authorize(request, api::ApiRole::Operator)) return ESP_OK;
+
+    FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+    if (!api_ptr->config()) return send_error(request, "503 Service Unavailable", "config_not_ready");
+
+    NetworkSettings net_settings;
+    api_ptr->config()->load_network_settings(net_settings);
+
+    cJSON* response = cJSON_CreateObject();
+    cJSON_AddStringToObject(response, "mode", network_mode_to_string(net_settings.mode));
+    cJSON_AddStringToObject(response, "ssid", net_settings.sta_ssid);
+    cJSON_AddBoolToObject(response, "passwordSet", (net_settings.sta_password[0] != '\0'));
+    cJSON_AddBoolToObject(response, "apEnabled", net_settings.ap_enabled);
+    cJSON_AddStringToObject(response, "apName", net_settings.ap_name);
+    cJSON_AddNumberToObject(response, "apChannel", net_settings.ap_channel);
+
+    char* json = cJSON_PrintUnformatted(response);
+    cJSON_Delete(response);
+    if (json == nullptr) {
+        return send_error(request, "500 Internal Server Error", "json_encode_failed");
+    }
+
+    const esp_err_t result = send_json(request, json);
+    cJSON_free(json);
+    return result;
+}
+
+esp_err_t put_network_config(httpd_req_t* request) {
+    if (!api::authorize(request, api::ApiRole::Admin)) return ESP_OK;
+
+    FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+    if (!api_ptr->config()) return send_error(request, "503 Service Unavailable", "config_not_ready");
+
+    cJSON* root = nullptr;
+    if (read_json(request, &root) != ESP_OK) {
+        return send_error(request, "400 Bad Request", "invalid_json");
+    }
+
+    NetworkSettings net_settings;
+    api_ptr->config()->load_network_settings(net_settings);
+
+    // mode
+    const cJSON* mode_item = cJSON_GetObjectItemCaseSensitive(root, "mode");
+    if (mode_item && cJSON_IsString(mode_item)) {
+        NetworkMode mode;
+        if (parse_network_mode(mode_item->valuestring, mode)) {
+            net_settings.mode = mode;
+        } else {
+            cJSON_Delete(root);
+            return send_error(request, "400 Bad Request", "invalid_mode");
+        }
+    }
+
+    // ssid
+    const cJSON* ssid_item = cJSON_GetObjectItemCaseSensitive(root, "ssid");
+    if (ssid_item && cJSON_IsString(ssid_item)) {
+        std::strncpy(net_settings.sta_ssid, ssid_item->valuestring, sizeof(net_settings.sta_ssid) - 1);
+        net_settings.sta_ssid[sizeof(net_settings.sta_ssid) - 1] = '\0';
+    }
+
+    // clearPassword check
+    const cJSON* clear_pwd = cJSON_GetObjectItemCaseSensitive(root, "clearPassword");
+    if (clear_pwd && cJSON_IsTrue(clear_pwd)) {
+        net_settings.sta_password[0] = '\0';
+    }
+
+    // password check
+    const cJSON* pwd_item = cJSON_GetObjectItemCaseSensitive(root, "password");
+    if (pwd_item && cJSON_IsString(pwd_item)) {
+        const char* pwd_str = pwd_item->valuestring;
+        // If password is provided and non-empty, update it. If empty string, DO NOT clear (rule: "Do not use empty string implicitly to destroy existing credentials")
+        if (pwd_str != nullptr && pwd_str[0] != '\0') {
+            std::strncpy(net_settings.sta_password, pwd_str, sizeof(net_settings.sta_password) - 1);
+            net_settings.sta_password[sizeof(net_settings.sta_password) - 1] = '\0';
+        }
+    }
+
+    // apEnabled
+    const cJSON* ap_en_item = cJSON_GetObjectItemCaseSensitive(root, "apEnabled");
+    if (ap_en_item && cJSON_IsBool(ap_en_item)) {
+        net_settings.ap_enabled = cJSON_IsTrue(ap_en_item);
+    }
+
+    // apName
+    const cJSON* ap_name_item = cJSON_GetObjectItemCaseSensitive(root, "apName");
+    if (ap_name_item && cJSON_IsString(ap_name_item)) {
+        std::strncpy(net_settings.ap_name, ap_name_item->valuestring, sizeof(net_settings.ap_name) - 1);
+        net_settings.ap_name[sizeof(net_settings.ap_name) - 1] = '\0';
+    }
+
+    // apChannel
+    const cJSON* ap_ch_item = cJSON_GetObjectItemCaseSensitive(root, "apChannel");
+    if (ap_ch_item && cJSON_IsNumber(ap_ch_item)) {
+        int ch = ap_ch_item->valueint;
+        if (ch >= 1 && ch <= 14) {
+            net_settings.ap_channel = static_cast<uint8_t>(ch);
+        }
+    }
+
+    cJSON_Delete(root);
+
+    uint32_t cmd_id = api_ptr->command_journal().accept(CommandDomain::Config);
+    esp_err_t err = api_ptr->config()->save_network_settings(net_settings);
+    if (err != ESP_OK) {
+        api_ptr->command_journal().failed(cmd_id, err);
+        return send_error(request, "500 Internal Server Error", "network_save_failed");
+    }
+
+    api_ptr->command_journal().applied(cmd_id);
+    api_ptr->notify_status_async();
+
+    api::AuditLog::instance().log(api::ApiRole::Admin, "network_config", "Network settings updated");
+    char resp[96];
+    snprintf(resp, sizeof(resp), "{\"saved\":true,\"accepted\":true,\"commandId\":%" PRIu32 "}", cmd_id);
+    return send_json(request, resp);
+}
+
+esp_err_t get_network_status(httpd_req_t* request) {
+    if (!api::authorize(request, api::ApiRole::Operator)) return ESP_OK;
+
+    FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+
+    cJSON* response = cJSON_CreateObject();
+    if (api_ptr->wifi()) {
+        WifiRuntimeStatus st = api_ptr->wifi()->status();
+        const char* state_str = "Idle";
+        switch (st.state) {
+            case WifiState::Idle: state_str = "Idle"; break;
+            case WifiState::Connecting: state_str = "Connecting"; break;
+            case WifiState::Connected: state_str = "Connected"; break;
+            case WifiState::ApActive: state_str = "ApActive"; break;
+            case WifiState::Failed: state_str = "Failed"; break;
+        }
+        cJSON_AddStringToObject(response, "state", state_str);
+        cJSON_AddStringToObject(response, "mode",
+            st.mode == WifiMode::StaOnly ? "sta_only" :
+            st.mode == WifiMode::ApOnly ? "ap_only" : "sta_with_ap_fallback");
+        cJSON_AddBoolToObject(response, "staConnected", st.sta_connected);
+        cJSON_AddBoolToObject(response, "apActive", st.ap_active);
+        cJSON_AddStringToObject(response, "staSsid", st.sta_ssid);
+        cJSON_AddNumberToObject(response, "staRssi", st.sta_rssi);
+
+        char sta_ip_str[16] = {};
+        snprintf(sta_ip_str, sizeof(sta_ip_str), IPSTR, IP2STR(&st.sta_ip));
+        cJSON_AddStringToObject(response, "staIp", sta_ip_str);
+
+        char ap_ip_str[16] = {};
+        snprintf(ap_ip_str, sizeof(ap_ip_str), IPSTR, IP2STR(&st.ap_ip));
+        cJSON_AddStringToObject(response, "apIp", ap_ip_str);
+
+        cJSON_AddNumberToObject(response, "retryCount", st.retry_count);
+    } else {
+        cJSON_AddStringToObject(response, "state", "Unavailable");
+    }
+
+    char* json = cJSON_PrintUnformatted(response);
+    cJSON_Delete(response);
+    if (json == nullptr) {
+        return send_error(request, "500 Internal Server Error", "json_encode_failed");
+    }
+
+    const esp_err_t result = send_json(request, json);
+    cJSON_free(json);
+    return result;
+}
+
 esp_err_t get_channels(httpd_req_t* request) {
     if (!api::authorize(request, api::ApiRole::Operator)) return ESP_OK;
 
@@ -4381,6 +4550,9 @@ esp_err_t FactoryApi::start(
         { .uri = "/api/v1/activate",          .method = HTTP_POST, .handler = post_activate,    .user_ctx = this },
         { .uri = "/api/v1/config",            .method = HTTP_GET,  .handler = get_device_config, .user_ctx = this },
         { .uri = "/api/v1/config",            .method = HTTP_PUT,  .handler = put_device_config, .user_ctx = this },
+        { .uri = "/api/v1/network/config",    .method = HTTP_GET,  .handler = get_network_config, .user_ctx = this },
+        { .uri = "/api/v1/network/config",    .method = HTTP_PUT,  .handler = put_network_config, .user_ctx = this },
+        { .uri = "/api/v1/network/status",    .method = HTTP_GET,  .handler = get_network_status, .user_ctx = this },
         { .uri = "/api/v1/status",            .method = HTTP_GET,  .handler = get_signage_status, .user_ctx = this },
         { .uri = "/api/v1/manual",            .method = HTTP_PUT,   .handler = put_manual,        .user_ctx = this },
         { .uri = "/api/v1/manual",            .method = HTTP_DELETE,.handler = delete_manual,     .user_ctx = this },

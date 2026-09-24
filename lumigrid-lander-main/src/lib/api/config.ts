@@ -394,3 +394,56 @@ export function restoreBackup(ip: string, payload: Record<string, unknown>): Pro
     body: JSON.stringify(payload),
   });
 }
+
+export type NetworkMode = 'ap_only' | 'sta_only' | 'sta_with_ap_fallback';
+
+export interface NetworkConfigWire {
+  mode: NetworkMode;
+  ssid: string;
+  passwordSet: boolean;
+  apEnabled: boolean;
+  apName?: string;
+  apChannel?: number;
+}
+
+export interface NetworkConfigUpdate {
+  mode?: NetworkMode;
+  ssid?: string;
+  password?: string;
+  clearPassword?: boolean;
+  apEnabled?: boolean;
+  apName?: string;
+  apChannel?: number;
+}
+
+export interface NetworkRuntimeStatus {
+  state: string;
+  mode: NetworkMode;
+  staConnected: boolean;
+  apActive: boolean;
+  staSsid: string;
+  staRssi: number;
+  staIp: string;
+  apIp: string;
+  retryCount: number;
+}
+
+export function getNetworkConfig(ip: string): Promise<NetworkConfigWire> {
+  return apiJson<NetworkConfigWire>(ip, '/api/v1/network/config');
+}
+
+export function saveNetworkConfig(
+  ip: string,
+  update: NetworkConfigUpdate
+): Promise<{ saved: boolean; accepted: boolean; commandId?: number }> {
+  return apiJson<{ saved: boolean; accepted: boolean; commandId?: number }>(ip, '/api/v1/network/config', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(update),
+  });
+}
+
+export function getNetworkStatus(ip: string): Promise<NetworkRuntimeStatus> {
+  return apiJson<NetworkRuntimeStatus>(ip, '/api/v1/network/status');
+}
+

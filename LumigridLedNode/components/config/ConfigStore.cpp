@@ -1151,7 +1151,7 @@ esp_err_t ConfigStore::load_config(DeviceConfig& config) {
 
     if (err == ESP_ERR_NVS_NOT_FOUND || err == ESP_ERR_NVS_INVALID_STATE || err == ESP_ERR_NVS_INVALID_LENGTH) {
         config.reset();
-        ESP_LOGI(TAG, "Default credentials active: Admin: %s", config.admin_token);
+        ESP_LOGI(TAG, "Default credentials active (Admin role configured)");
         populate_default_topology(config);
         config.schema_version = 3;
         config.checksum = calc_device_crc(config);
@@ -1396,6 +1396,98 @@ esp_err_t ConfigStore::load_active_state(uint8_t& preset_index) {
         return ESP_OK;
     }
     return err;
+}
+
+// ── Network settings (LG-027) ───────────────────────────────────────
+
+esp_err_t ConfigStore::save_network_settings(const NetworkSettings& settings) {
+    if (!handle_) return ESP_ERR_INVALID_STATE;
+
+    NetworkSettings to_save = settings;
+    to_save.schema_version = 1;
+    to_save.checksum = calc_network_settings_crc(to_save);
+
+    // 1. Write and commit primary slot ("network")
+    esp_err_t err = nvs_set_blob(handle_, "network", &to_save, sizeof(NetworkSettings));
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to write primary network settings: %s", esp_err_to_name(err));
+        return err;
+    }
+    err = nvs_commit(handle_);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to commit primary network settings: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    // 2. Read-back verification of primary
+    NetworkSettings verify_buf{};
+    size_t verify_len = sizeof(NetworkSettings);
+    err = nvs_get_blob(handle_, "network", &verify_buf, &verify_len);
+    if (err != ESP_OK || verify_len != sizeof(NetworkSettings) ||
+        verify_buf.checksum != to_save.checksum ||
+        calc_network_settings_crc(verify_buf) != to_save.checksum) {
+        ESP_LOGE(TAG, "Primary network settings read-back verification failed! Preserving backup intact.");
+        return ESP_ERR_NVS_INVALID_STATE;
+    }
+
+    // 3. Primary confirmed valid -> update backup slot ("network_b")
+    err = nvs_set_blob(handle_, "network_b", &to_save, sizeof(NetworkSettings));
+    if (err == ESP_OK) {
+        (void)nvs_commit(handle_);
+    } else {
+        ESP_LOGW(TAG, "Primary network settings committed, but writing backup slot failed: %s", esp_err_to_name(err));
+    }
+
+    return ESP_OK;
+}
+
+esp_err_t ConfigStore::load_network_settings(NetworkSettings& settings) {
+    if (!handle_) return ESP_ERR_INVALID_STATE;
+
+    auto load_from_key = [&](const char* k, NetworkSettings& out) -> esp_err_t {
+        size_t len = 0;
+        esp_err_t err = nvs_get_blob(handle_, k, nullptr, &len);
+        if (err == ESP_OK && len == sizeof(NetworkSettings)) {
+            err = nvs_get_blob(handle_, k, &out, &len);
+            if (err == ESP_OK) {
+                if (out.checksum != calc_network_settings_crc(out)) {
+                    ESP_LOGW(TAG, "NetworkSettings %s CRC mismatch", k);
+                    return ESP_ERR_NVS_INVALID_STATE;
+                }
+                return ESP_OK;
+            }
+        }
+        return (err == ESP_OK) ? ESP_ERR_NVS_INVALID_LENGTH : err;
+    };
+
+    // Try primary "network"
+    esp_err_t err = load_from_key("network", settings);
+    if (err == ESP_OK) {
+        return ESP_OK;
+    }
+
+    // Primary missing or corrupted -> attempt recovery from backup "network_b"
+    ESP_LOGW(TAG, "Restoring NetworkSettings from backup slot 'network_b'...");
+    err = load_from_key("network_b", settings);
+    if (err == ESP_OK) {
+        // Restore primary from valid backup
+        (void)nvs_set_blob(handle_, "network", &settings, sizeof(NetworkSettings));
+        (void)nvs_commit(handle_);
+        return ESP_OK;
+    }
+
+    // Neither slot valid -> populate default NetworkSettings
+    settings = NetworkSettings{};
+    settings.schema_version = 1;
+    settings.mode = NetworkMode::ApOnly;
+    settings.sta_ssid[0] = '\0';
+    settings.sta_password[0] = '\0';
+    settings.ap_enabled = true;
+    settings.ap_name[0] = '\0';
+    settings.ap_channel = 1;
+    settings.checksum = calc_network_settings_crc(settings);
+
+    return ESP_ERR_NOT_FOUND;
 }
 
 // ── Defaults ────────────────────────────────────────────────────────

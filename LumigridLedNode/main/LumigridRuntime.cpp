@@ -10,6 +10,7 @@
 #include "DiagnosticLog.hpp"
 #include "ApiAuth.hpp"
 #include "NodeIdentity.hpp"
+#include "NetworkSettings.hpp"
 #include <cstring>
 
 namespace lg {
@@ -183,7 +184,7 @@ esp_err_t LumigridRuntime::init() {
             std::strncpy(dev_cfg.installer_token, "lumigrid_install", sizeof(dev_cfg.installer_token) - 1);
             std::strncpy(dev_cfg.operator_token, "lumigrid_op", sizeof(dev_cfg.operator_token) - 1);
             config_.save_config(dev_cfg);
-            ESP_LOGW("lumigrid", "Dev credentials restored: admin_token=lumigrid_admin");
+            ESP_LOGW("lumigrid", "Dev credentials restored (development build active)");
         }
         api::update_tokens(dev_cfg.admin_token, dev_cfg.installer_token, dev_cfg.operator_token);
 
@@ -407,13 +408,36 @@ esp_err_t LumigridRuntime::start() {
         ap_ssid = "LumiGrid-Factory";
     }
 
+    NetworkSettings net_settings;
+    config_.load_network_settings(net_settings);
+    if (!safe_mode_ && net_settings.ap_name[0] != '\0') {
+        ap_ssid = net_settings.ap_name;
+    }
+
+    WifiMode wifi_mode = WifiMode::ApOnly;
+    if (!safe_mode_) {
+        switch (net_settings.mode) {
+            case NetworkMode::StaOnly:
+                wifi_mode = WifiMode::StaOnly;
+                break;
+            case NetworkMode::StaWithApFallback:
+                wifi_mode = WifiMode::StaWithApFallback;
+                break;
+            case NetworkMode::ApOnly:
+            default:
+                wifi_mode = WifiMode::ApOnly;
+                break;
+        }
+    }
+
     WifiConfig wifi_cfg{
-        .mode = WifiMode::ApOnly,
-        .sta_ssid = "",
-        .sta_password = "",
+        .mode = wifi_mode,
+        .sta_ssid = net_settings.sta_ssid,
+        .sta_password = net_settings.sta_password,
         .ap_ssid = ap_ssid,
         .ap_password = ap_pass,
-        .max_retry = 1
+        .ap_channel = net_settings.ap_channel,
+        .max_retry = 3
     };
 
     // Always delete and recreate the semaphore so no stale "give" from a previous
@@ -425,8 +449,10 @@ esp_err_t LumigridRuntime::start() {
     }
 
     startup_state_ = StartupState::StartingNetwork;
-    ESP_LOGI("lumigrid", "Step 5: wifi.start() - AP SSID: '%s', Password: '%s'...",
-             wifi_cfg.ap_ssid.c_str(), wifi_cfg.ap_password.c_str());
+    ESP_LOGI("lumigrid", "Step 5: wifi.start() - Mode: %s, AP SSID: '%s', STA SSID: '%s'...",
+             wifi_mode == WifiMode::StaOnly ? "STA" :
+             wifi_mode == WifiMode::ApOnly ? "AP" : "STA+AP Fallback",
+             wifi_cfg.ap_ssid.c_str(), wifi_cfg.sta_ssid.c_str());
     esp_err_t err = wifi_.start(
         wifi_cfg,
         [this](WifiState state) {
@@ -461,7 +487,7 @@ esp_err_t LumigridRuntime::start() {
             ESP_LOGW("lumigrid", "==================================================");
             ESP_LOGW("lumigrid", "  ACCESS POINT READY");
             ESP_LOGW("lumigrid", "  SSID:     %s", wifi_cfg.ap_ssid.c_str());
-            ESP_LOGW("lumigrid", "  Password: %s", wifi_cfg.ap_password.empty() ? "(Open / None)" : wifi_cfg.ap_password.c_str());
+            ESP_LOGW("lumigrid", "  Security: %s", wifi_cfg.ap_password.empty() ? "open" : "WPA2 configured");
             ESP_LOGW("lumigrid", "  Web UI:   http://" IPSTR, IP2STR(&ip_info.ip));
             ESP_LOGW("lumigrid", "==================================================");
         }
@@ -497,6 +523,7 @@ esp_err_t LumigridRuntime::start() {
     std::memcpy(node.mac, mac, 6);
 
     ESP_LOGI("lumigrid", "Step 6: api.start(80, 8080)...");
+    api_.set_wifi(&wifi_);
     api_.set_show_clock_provider([this]() { return clock_.now_ms(); });
     err = api_.start(80, 8080, &config_, &lighting_, &scheduler_, &node_sync_, &dmx_router_, &cue_runner_, &show_transport_);
     if (err != ESP_OK) {

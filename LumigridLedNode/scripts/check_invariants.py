@@ -70,6 +70,17 @@ for f in (NODE_DIR / "components" / "network").rglob("*.*"):
     if f.suffix in [".cpp", ".hpp", ".h", ".c"]:
         check_file_contains(f, [("lumigrid123", "Hardcoded development credentials found in network driver")])
 
+# 5. No credential logging (AP/STA passwords, tokens) in log output
+for ext in ["*.cpp", "*.hpp", "*.h", "*.c"]:
+    for f in list((NODE_DIR / "main").rglob(ext)) + list((NODE_DIR / "components").rglob(ext)):
+        check_file_contains(
+            f,
+            [
+                ("Password: %s", "Forbidden credential logging (Password: %s) in log output"),
+                ("Password: '%s'", "Forbidden credential logging (Password: '%s') in log output"),
+            ]
+        )
+
 if errors:
     print("\nFAILED: Discovered architectural invariant violations:")
     for err in errors:

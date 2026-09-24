@@ -225,5 +225,40 @@ esp_err_t WifiService::stop() {
     return ESP_OK;
 }
 
+WifiRuntimeStatus WifiService::status() const {
+    WifiRuntimeStatus st{};
+    st.state = state_;
+    st.mode = config_.mode;
+    st.retry_count = retries_;
+    st.sta_connected = (state_ == WifiState::Connected);
+    st.ap_active = (state_ == WifiState::ApActive);
+
+    std::strncpy(st.sta_ssid, config_.sta_ssid.c_str(), sizeof(st.sta_ssid) - 1);
+    st.sta_ssid[sizeof(st.sta_ssid) - 1] = '\0';
+
+    if (st.sta_connected) {
+        wifi_ap_record_t ap_info{};
+        if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) {
+            st.sta_rssi = ap_info.rssi;
+        }
+    }
+
+    if (sta_netif_) {
+        esp_netif_ip_info_t ip_info{};
+        if (esp_netif_get_ip_info(sta_netif_, &ip_info) == ESP_OK) {
+            st.sta_ip = ip_info.ip;
+        }
+    }
+
+    if (ap_netif_) {
+        esp_netif_ip_info_t ip_info{};
+        if (esp_netif_get_ip_info(ap_netif_, &ip_info) == ESP_OK) {
+            st.ap_ip = ip_info.ip;
+        }
+    }
+
+    return st;
+}
+
 } // namespace lg
 

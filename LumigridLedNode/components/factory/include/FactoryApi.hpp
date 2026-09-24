@@ -19,6 +19,7 @@ class Scheduler;
 class NodeSync;
 class DmxRouter;
 class ShowTransportCoordinator;
+class WifiService;
 }
 
 namespace lg {
@@ -136,6 +137,9 @@ public:
     void set_show_transport(class ShowTransportCoordinator* transport) { show_transport_ = transport; }
     DmxRouter* dmx_router() { return dmx_router_; }
     const DmxRouter* dmx_router() const { return dmx_router_; }
+    WifiService* wifi() { return wifi_; }
+    const WifiService* wifi() const { return wifi_; }
+    void set_wifi(WifiService* wifi) { wifi_ = wifi; }
 
     using ShowClockProvider = std::function<uint64_t()>;
     void set_show_clock_provider(ShowClockProvider provider) { show_clock_provider_ = std::move(provider); }
@@ -169,6 +173,7 @@ public:
     DmxRouter* dmx_router_ = nullptr;
     class CueRunner* cue_runner_ = nullptr;
     class ShowTransportCoordinator* show_transport_ = nullptr;
+    WifiService* wifi_ = nullptr;
     ShowClockProvider show_clock_provider_{};
     std::function<StartupDiagnostics()> diagnostics_provider_{};
     RuntimeConfigApplyCallback config_apply_callback_{};

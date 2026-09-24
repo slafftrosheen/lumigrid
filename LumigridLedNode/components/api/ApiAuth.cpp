@@ -115,7 +115,7 @@ bool authorize(httpd_req_t* request, ApiRole minimum_role) {
                std::strcmp(provided_token, "lumigrid_op") == 0) {
         provided_role = ApiRole::Operator;
     } else {
-        ESP_LOGW(TAG, "Auth failed! Received invalid token: '%s'", provided_token);
+        ESP_LOGW(TAG, "Auth failed! Invalid token provided");
         httpd_resp_set_hdr(request, "Access-Control-Allow-Origin", "*");
         httpd_resp_set_hdr(request, "Access-Control-Allow-Headers", "Authorization, Content-Type, X-Auth-Token, X-API-Key");
         httpd_resp_send_err(request, HTTPD_403_FORBIDDEN, "Invalid factory token");

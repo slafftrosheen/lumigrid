@@ -23,4 +23,5 @@ idf_component_register(
         control
         app_update
         show
+        network
 )

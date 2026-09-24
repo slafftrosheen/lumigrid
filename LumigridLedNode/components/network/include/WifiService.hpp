@@ -35,6 +35,22 @@ enum class WifiState : uint8_t {
     Failed
 };
 
+struct WifiRuntimeStatus {
+    WifiState state = WifiState::Idle;
+    WifiMode mode = WifiMode::ApOnly;
+
+    bool sta_connected = false;
+    bool ap_active = false;
+
+    char sta_ssid[33] = {};
+    int8_t sta_rssi = 0;
+
+    esp_ip4_addr_t sta_ip{};
+    esp_ip4_addr_t ap_ip{};
+
+    uint8_t retry_count = 0;
+};
+
 using WifiStateCallback = std::function<void(WifiState)>;
 
 class WifiService {
@@ -43,6 +59,7 @@ public:
     esp_err_t stop();
     WifiState state() const;
     bool has_ip() const;
+    WifiRuntimeStatus status() const;
 
 private:
     static void event_handler(

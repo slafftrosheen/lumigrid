@@ -4,6 +4,9 @@ import {
   serializeDeviceConfig,
   getDeviceConfig,
   saveDeviceConfig,
+  getNetworkConfig,
+  saveNetworkConfig,
+  getNetworkStatus,
   type DeviceConfigWire,
   type DeviceConfig,
 } from './config';
@@ -292,4 +295,70 @@ describe('config client contract', () => {
       expect(p3.syncToken).toBe(12345678);
     });
   });
+
+  describe('network api client', () => {
+    it('getNetworkConfig calls GET /api/v1/network/config and returns network wire config without password', async () => {
+      const mockConfig = {
+        mode: 'sta_with_ap_fallback',
+        ssid: 'Workshop-WiFi',
+        passwordSet: true,
+        apEnabled: true,
+        apName: 'LumiGrid-Node',
+        apChannel: 6,
+      };
+      const apiJsonSpy = vi.spyOn(transport, 'apiJson').mockResolvedValue(mockConfig);
+
+      const result = await getNetworkConfig('192.168.4.1');
+
+      expect(apiJsonSpy).toHaveBeenCalledWith('192.168.4.1', '/api/v1/network/config');
+      expect(result).toEqual(mockConfig);
+      expect((result as any).password).toBeUndefined();
+    });
+
+    it('saveNetworkConfig calls PUT /api/v1/network/config with payload', async () => {
+      const apiJsonSpy = vi.spyOn(transport, 'apiJson').mockResolvedValue({
+        saved: true,
+        accepted: true,
+        commandId: 101,
+      });
+
+      const update = {
+        mode: 'sta_with_ap_fallback' as const,
+        ssid: 'Installation-LAN',
+        password: 'NewSecretPassword',
+      };
+
+      const result = await saveNetworkConfig('192.168.4.1', update);
+
+      expect(apiJsonSpy).toHaveBeenCalledWith('192.168.4.1', '/api/v1/network/config', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(update),
+      });
+      expect(result.saved).toBe(true);
+    });
+
+    it('getNetworkStatus calls GET /api/v1/network/status and returns status', async () => {
+      const mockStatus = {
+        state: 'Connected',
+        mode: 'sta_with_ap_fallback' as const,
+        staConnected: true,
+        apActive: true,
+        staSsid: 'Workshop-WiFi',
+        staRssi: -58,
+        staIp: '192.168.1.150',
+        apIp: '192.168.4.1',
+        retryCount: 0,
+      };
+      const apiJsonSpy = vi.spyOn(transport, 'apiJson').mockResolvedValue(mockStatus);
+
+      const result = await getNetworkStatus('192.168.1.150');
+
+      expect(apiJsonSpy).toHaveBeenCalledWith('192.168.1.150', '/api/v1/network/status');
+      expect(result.staConnected).toBe(true);
+      expect(result.staIp).toBe('192.168.1.150');
+      expect((result as any).password).toBeUndefined();
+    });
+  });
 });
+

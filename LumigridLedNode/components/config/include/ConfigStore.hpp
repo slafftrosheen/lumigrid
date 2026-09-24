@@ -1,6 +1,7 @@
 // components/config/include/ConfigStore.hpp
 #pragma once
 #include "SignageTypes.hpp"
+#include "NetworkSettings.hpp"
 #include "esp_err.h"
 #include "nvs_flash.h"
 #include "nvs.h"
@@ -166,6 +167,10 @@ public:
     // ── Active state (power-loss recovery) ──
     esp_err_t save_active_state(uint8_t preset_index);
     esp_err_t load_active_state(uint8_t& preset_index);
+
+    // ── Network settings (LG-027) ──
+    esp_err_t save_network_settings(const NetworkSettings& settings);
+    esp_err_t load_network_settings(NetworkSettings& settings);
 
 private:
     nvs_handle_t handle_ = 0;

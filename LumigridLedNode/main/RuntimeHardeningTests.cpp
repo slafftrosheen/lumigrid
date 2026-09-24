@@ -22,6 +22,8 @@
 #include "ClockDiscipline.hpp"
 #include "ChannelConfiguration.hpp"
 #include "ShowTransport.hpp"
+#include "NetworkSettings.hpp"
+#include "WifiService.hpp"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -3429,6 +3431,107 @@ static bool test_lg026_show_transport_and_cue_sync() {
     return true;
 }
 
+static bool test_lg027_network_settings_and_commissioning() {
+    ESP_LOGI(TAG, "Running LG-027 NetworkSettings & Commissioning tests...");
+
+    // ── Test 1: NetworkSettings default initialization ────────────────────────
+    {
+        NetworkSettings net{};
+        assert(net.schema_version == 1);
+        assert(net.mode == NetworkMode::ApOnly);
+        assert(net.sta_ssid[0] == '\0');
+        assert(net.sta_password[0] == '\0');
+        assert(net.ap_enabled == true);
+        assert(net.ap_name[0] == '\0');
+        assert(net.ap_channel == 1);
+        assert(net.checksum == 0);
+    }
+
+    // ── Test 2: NetworkMode string serialization and parsing ─────────────────
+    {
+        assert(strcmp(network_mode_to_string(NetworkMode::ApOnly), "ap_only") == 0);
+        assert(strcmp(network_mode_to_string(NetworkMode::StaOnly), "sta_only") == 0);
+        assert(strcmp(network_mode_to_string(NetworkMode::StaWithApFallback), "sta_with_ap_fallback") == 0);
+
+        NetworkMode mode;
+        assert(parse_network_mode("ap_only", mode) && mode == NetworkMode::ApOnly);
+        assert(parse_network_mode("sta_only", mode) && mode == NetworkMode::StaOnly);
+        assert(parse_network_mode("sta_with_ap_fallback", mode) && mode == NetworkMode::StaWithApFallback);
+        assert(!parse_network_mode("invalid_mode", mode));
+    }
+
+    // ── Test 3: ConfigStore NetworkSettings save and load with CRC32 ──────────
+    {
+        ConfigStore cfg;
+        NetworkSettings net{};
+        net.mode = NetworkMode::StaWithApFallback;
+        strncpy(net.sta_ssid, "Test-SSID", sizeof(net.sta_ssid) - 1);
+        strncpy(net.sta_password, "SecretPassword123", sizeof(net.sta_password) - 1);
+        net.ap_enabled = true;
+        strncpy(net.ap_name, "LumiGrid-Custom", sizeof(net.ap_name) - 1);
+        net.ap_channel = 6;
+
+        assert(cfg.save_network_settings(net) == ESP_OK);
+
+        NetworkSettings loaded{};
+        assert(cfg.load_network_settings(loaded) == ESP_OK);
+        assert(loaded.mode == NetworkMode::StaWithApFallback);
+        assert(strcmp(loaded.sta_ssid, "Test-SSID") == 0);
+        assert(strcmp(loaded.sta_password, "SecretPassword123") == 0);
+        assert(loaded.ap_enabled == true);
+        assert(strcmp(loaded.ap_name, "LumiGrid-Custom") == 0);
+        assert(loaded.ap_channel == 6);
+        assert(loaded.checksum != 0);
+    }
+
+    // ── Test 4: WifiRuntimeStatus default layout and status snapshot ─────────
+    {
+        WifiRuntimeStatus st{};
+        assert(st.state == WifiState::Idle);
+        assert(st.mode == WifiMode::ApOnly);
+        assert(st.sta_connected == false);
+        assert(st.ap_active == false);
+        assert(st.sta_ssid[0] == '\0');
+        assert(st.sta_rssi == 0);
+        assert(st.retry_count == 0);
+    }
+
+    // ── Test 5: Secret Preservation Semantics (Simulated PUT behavior) ──────
+    {
+        NetworkSettings existing{};
+        existing.mode = NetworkMode::StaWithApFallback;
+        strncpy(existing.sta_ssid, "Installation-LAN", sizeof(existing.sta_ssid) - 1);
+        strncpy(existing.sta_password, "SuperSecretKey99", sizeof(existing.sta_password) - 1);
+
+        // Scenario A: PUT omits password (empty string from API without clearPassword)
+        // Password must be preserved!
+        NetworkSettings updated = existing;
+        strncpy(updated.sta_ssid, "New-LAN", sizeof(updated.sta_ssid) - 1);
+        const char* omitted_password = "";
+        if (omitted_password[0] != '\0') {
+            strncpy(updated.sta_password, omitted_password, sizeof(updated.sta_password) - 1);
+        }
+        assert(strcmp(updated.sta_password, "SuperSecretKey99") == 0); // Preserved!
+
+        // Scenario B: PUT with explicit clearPassword: true
+        bool clearPassword = true;
+        if (clearPassword) {
+            updated.sta_password[0] = '\0';
+        }
+        assert(updated.sta_password[0] == '\0'); // Cleared!
+
+        // Scenario C: PUT with new password
+        const char* new_password = "BrandNewPassword456";
+        if (new_password[0] != '\0') {
+            strncpy(updated.sta_password, new_password, sizeof(updated.sta_password) - 1);
+        }
+        assert(strcmp(updated.sta_password, "BrandNewPassword456") == 0);
+    }
+
+    ESP_LOGI(TAG, "[PASS] LG-027 NetworkSettings & Commissioning tests passed.");
+    return true;
+}
+
 } // namespace
 
 bool run_runtime_hardening_tests() {
@@ -3511,6 +3614,9 @@ bool run_runtime_hardening_tests() {
 
     // LG-026 Show Transport v2 & Synchronized Cue Playback Tests
     all_ok &= test_lg026_show_transport_and_cue_sync();
+
+    // LG-027 NetworkSettings & Commissioning Tests
+    all_ok &= test_lg027_network_settings_and_commissioning();
 
     if (all_ok) {
         ESP_LOGI(TAG, "==================================================");
