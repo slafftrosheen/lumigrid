@@ -2467,7 +2467,6 @@ esp_err_t get_network_config(httpd_req_t* request) {
     cJSON_AddStringToObject(response, "mode", network_mode_to_string(net_settings.mode));
     cJSON_AddStringToObject(response, "ssid", net_settings.sta_ssid);
     cJSON_AddBoolToObject(response, "passwordSet", (net_settings.sta_password[0] != '\0'));
-    cJSON_AddBoolToObject(response, "apEnabled", net_settings.ap_enabled);
     cJSON_AddStringToObject(response, "apName", net_settings.ap_name);
     cJSON_AddNumberToObject(response, "apChannel", net_settings.ap_channel);
 
@@ -2489,87 +2488,153 @@ esp_err_t put_network_config(httpd_req_t* request) {
     if (!api_ptr->config()) return send_error(request, "503 Service Unavailable", "config_not_ready");
 
     cJSON* root = nullptr;
-    if (read_json(request, &root) != ESP_OK) {
+    if (read_json(request, &root) != ESP_OK || !root || !cJSON_IsObject(root)) {
+        if (root) cJSON_Delete(root);
         return send_error(request, "400 Bad Request", "invalid_json");
     }
 
-    NetworkSettings net_settings;
-    api_ptr->config()->load_network_settings(net_settings);
-
-    // mode
-    const cJSON* mode_item = cJSON_GetObjectItemCaseSensitive(root, "mode");
-    if (mode_item && cJSON_IsString(mode_item)) {
-        NetworkMode mode;
-        if (parse_network_mode(mode_item->valuestring, mode)) {
-            net_settings.mode = mode;
-        } else {
-            cJSON_Delete(root);
-            return send_error(request, "400 Bad Request", "invalid_mode");
-        }
+    // Safe mode invariant: recovery networking cannot be disabled or altered away from recovery
+    if (api_ptr->safe_mode_check_ && api_ptr->safe_mode_check_()) {
+        cJSON_Delete(root);
+        return send_error(request, "400 Bad Request", "safe_mode_network_locked");
     }
 
-    // ssid
+    NetworkSettings previous{};
+    api_ptr->config()->load_network_settings(previous);
+    NetworkSettings desired = previous;
+
+    // mode validation
+    const cJSON* mode_item = cJSON_GetObjectItemCaseSensitive(root, "mode");
+    if (mode_item) {
+        if (!cJSON_IsString(mode_item)) {
+            cJSON_Delete(root);
+            return send_error(request, "400 Bad Request", "invalid_network_mode");
+        }
+        NetworkMode mode;
+        if (!parse_network_mode(mode_item->valuestring, mode)) {
+            cJSON_Delete(root);
+            return send_error(request, "400 Bad Request", "invalid_network_mode");
+        }
+        desired.mode = mode;
+    }
+
+    // ssid validation
     const cJSON* ssid_item = cJSON_GetObjectItemCaseSensitive(root, "ssid");
-    if (ssid_item && cJSON_IsString(ssid_item)) {
-        std::strncpy(net_settings.sta_ssid, ssid_item->valuestring, sizeof(net_settings.sta_ssid) - 1);
-        net_settings.sta_ssid[sizeof(net_settings.sta_ssid) - 1] = '\0';
+    if (ssid_item) {
+        if (!cJSON_IsString(ssid_item)) {
+            cJSON_Delete(root);
+            return send_error(request, "400 Bad Request", "invalid_ssid");
+        }
+        size_t len = std::strlen(ssid_item->valuestring);
+        if (len > 32) {
+            cJSON_Delete(root);
+            return send_error(request, "400 Bad Request", "invalid_ssid");
+        }
+        std::strncpy(desired.sta_ssid, ssid_item->valuestring, sizeof(desired.sta_ssid) - 1);
+        desired.sta_ssid[sizeof(desired.sta_ssid) - 1] = '\0';
+    }
+
+    // SSID is strictly required for sta_only and sta_with_ap_fallback
+    if (desired.mode == NetworkMode::StaOnly || desired.mode == NetworkMode::StaWithApFallback) {
+        if (desired.sta_ssid[0] == '\0') {
+            cJSON_Delete(root);
+            return send_error(request, "400 Bad Request", "invalid_ssid");
+        }
     }
 
     // clearPassword check
     const cJSON* clear_pwd = cJSON_GetObjectItemCaseSensitive(root, "clearPassword");
-    if (clear_pwd && cJSON_IsTrue(clear_pwd)) {
-        net_settings.sta_password[0] = '\0';
+    if (clear_pwd) {
+        if (!cJSON_IsBool(clear_pwd)) {
+            cJSON_Delete(root);
+            return send_error(request, "400 Bad Request", "invalid_json");
+        }
+        if (cJSON_IsTrue(clear_pwd)) {
+            desired.sta_password[0] = '\0';
+        }
     }
 
     // password check
     const cJSON* pwd_item = cJSON_GetObjectItemCaseSensitive(root, "password");
-    if (pwd_item && cJSON_IsString(pwd_item)) {
+    if (pwd_item) {
+        if (!cJSON_IsString(pwd_item)) {
+            cJSON_Delete(root);
+            return send_error(request, "400 Bad Request", "invalid_password");
+        }
         const char* pwd_str = pwd_item->valuestring;
-        // If password is provided and non-empty, update it. If empty string, DO NOT clear (rule: "Do not use empty string implicitly to destroy existing credentials")
+        // Non-empty password: validate WPA/WPA2 passphrase bounds (8..63 chars)
         if (pwd_str != nullptr && pwd_str[0] != '\0') {
-            std::strncpy(net_settings.sta_password, pwd_str, sizeof(net_settings.sta_password) - 1);
-            net_settings.sta_password[sizeof(net_settings.sta_password) - 1] = '\0';
+            size_t len = std::strlen(pwd_str);
+            if (len < 8 || len > 63) {
+                cJSON_Delete(root);
+                return send_error(request, "400 Bad Request", "invalid_password");
+            }
+            std::strncpy(desired.sta_password, pwd_str, sizeof(desired.sta_password) - 1);
+            desired.sta_password[sizeof(desired.sta_password) - 1] = '\0';
         }
     }
 
-    // apEnabled
-    const cJSON* ap_en_item = cJSON_GetObjectItemCaseSensitive(root, "apEnabled");
-    if (ap_en_item && cJSON_IsBool(ap_en_item)) {
-        net_settings.ap_enabled = cJSON_IsTrue(ap_en_item);
-    }
-
-    // apName
+    // apName validation
     const cJSON* ap_name_item = cJSON_GetObjectItemCaseSensitive(root, "apName");
-    if (ap_name_item && cJSON_IsString(ap_name_item)) {
-        std::strncpy(net_settings.ap_name, ap_name_item->valuestring, sizeof(net_settings.ap_name) - 1);
-        net_settings.ap_name[sizeof(net_settings.ap_name) - 1] = '\0';
-    }
-
-    // apChannel
-    const cJSON* ap_ch_item = cJSON_GetObjectItemCaseSensitive(root, "apChannel");
-    if (ap_ch_item && cJSON_IsNumber(ap_ch_item)) {
-        int ch = ap_ch_item->valueint;
-        if (ch >= 1 && ch <= 14) {
-            net_settings.ap_channel = static_cast<uint8_t>(ch);
+    if (ap_name_item) {
+        if (!cJSON_IsString(ap_name_item)) {
+            cJSON_Delete(root);
+            return send_error(request, "400 Bad Request", "invalid_ap_name");
         }
+        size_t len = std::strlen(ap_name_item->valuestring);
+        if (len < 1 || len > 32) {
+            cJSON_Delete(root);
+            return send_error(request, "400 Bad Request", "invalid_ap_name");
+        }
+        std::strncpy(desired.ap_name, ap_name_item->valuestring, sizeof(desired.ap_name) - 1);
+        desired.ap_name[sizeof(desired.ap_name) - 1] = '\0';
     }
 
-    cJSON_Delete(root);
+    // apChannel validation (1..13 only; 14 must be rejected)
+    const cJSON* ap_ch_item = cJSON_GetObjectItemCaseSensitive(root, "apChannel");
+    if (ap_ch_item) {
+        if (!cJSON_IsNumber(ap_ch_item)) {
+            cJSON_Delete(root);
+            return send_error(request, "400 Bad Request", "invalid_ap_channel");
+        }
+        int ch = ap_ch_item->valueint;
+        if (ch < 1 || ch > 13 || ap_ch_item->valuedouble != static_cast<double>(ch)) {
+            cJSON_Delete(root);
+            return send_error(request, "400 Bad Request", "invalid_ap_channel");
+        }
+        desired.ap_channel = static_cast<uint8_t>(ch);
+    }
+
+    // Ensure queue handler is available
+    if (!api_ptr->network_apply_queue_) {
+        cJSON_Delete(root);
+        return send_error(request, "503 Service Unavailable", "network_apply_unavailable");
+    }
 
     uint32_t cmd_id = api_ptr->command_journal().accept(CommandDomain::Config);
-    esp_err_t err = api_ptr->config()->save_network_settings(net_settings);
-    if (err != ESP_OK) {
-        api_ptr->command_journal().failed(cmd_id, err);
-        return send_error(request, "500 Internal Server Error", "network_save_failed");
+    NetworkApplyRequest apply_req{
+        .previous = previous,
+        .desired = desired,
+        .command_id = cmd_id
+    };
+
+    esp_err_t queue_err = api_ptr->network_apply_queue_(apply_req);
+    if (queue_err == ESP_ERR_INVALID_STATE) {
+        api_ptr->command_journal().failed(cmd_id, queue_err);
+        cJSON_Delete(root);
+        return send_error(request, "409 Conflict", "network_apply_in_progress");
+    } else if (queue_err != ESP_OK) {
+        api_ptr->command_journal().failed(cmd_id, queue_err);
+        cJSON_Delete(root);
+        return send_error(request, "500 Internal Server Error", "network_queue_failed");
     }
 
-    api_ptr->command_journal().applied(cmd_id);
-    api_ptr->notify_status_async();
+    api::AuditLog::instance().log(api::ApiRole::Admin, "network_config", "Network apply queued");
+    cJSON_Delete(root);
 
-    api::AuditLog::instance().log(api::ApiRole::Admin, "network_config", "Network settings updated");
-    char resp[96];
-    snprintf(resp, sizeof(resp), "{\"saved\":true,\"accepted\":true,\"commandId\":%" PRIu32 "}", cmd_id);
-    return send_json(request, resp);
+    char resp[128];
+    snprintf(resp, sizeof(resp), "{\"accepted\":true,\"commandId\":%" PRIu32 ",\"applyPending\":true}", cmd_id);
+    return send_json(request, resp, "202 Accepted");
 }
 
 esp_err_t get_network_status(httpd_req_t* request) {
@@ -2577,23 +2642,37 @@ esp_err_t get_network_status(httpd_req_t* request) {
 
     FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
 
+    NetworkApplyState apply_st = NetworkApplyState::Idle;
+    uint32_t pending_cmd = 0;
+    const char* last_err = nullptr;
+    if (api_ptr->network_apply_status_) {
+        api_ptr->network_apply_status_(apply_st, pending_cmd, last_err);
+    }
+
     cJSON* response = cJSON_CreateObject();
     if (api_ptr->wifi()) {
         WifiRuntimeStatus st = api_ptr->wifi()->status();
-        const char* state_str = "Idle";
-        switch (st.state) {
-            case WifiState::Idle: state_str = "Idle"; break;
-            case WifiState::Connecting: state_str = "Connecting"; break;
-            case WifiState::Connected: state_str = "Connected"; break;
-            case WifiState::ApActive: state_str = "ApActive"; break;
-            case WifiState::Failed: state_str = "Failed"; break;
+
+        const char* state_str = "idle";
+        if (st.is_fallback_ap) {
+            state_str = "fallback_ap";
+        } else if (st.sta_connected) {
+            state_str = "connected";
+        } else if (st.state == WifiState::Connecting) {
+            state_str = "connecting";
+        } else if (st.state == WifiState::ApActive) {
+            state_str = "ap_active";
+        } else if (st.state == WifiState::Failed) {
+            state_str = "failed";
+        } else {
+            state_str = "idle";
         }
+
         cJSON_AddStringToObject(response, "state", state_str);
         cJSON_AddStringToObject(response, "mode",
             st.mode == WifiMode::StaOnly ? "sta_only" :
             st.mode == WifiMode::ApOnly ? "ap_only" : "sta_with_ap_fallback");
         cJSON_AddBoolToObject(response, "staConnected", st.sta_connected);
-        cJSON_AddBoolToObject(response, "apActive", st.ap_active);
         cJSON_AddStringToObject(response, "staSsid", st.sta_ssid);
         cJSON_AddNumberToObject(response, "staRssi", st.sta_rssi);
 
@@ -2601,13 +2680,49 @@ esp_err_t get_network_status(httpd_req_t* request) {
         snprintf(sta_ip_str, sizeof(sta_ip_str), IPSTR, IP2STR(&st.sta_ip));
         cJSON_AddStringToObject(response, "staIp", sta_ip_str);
 
+        cJSON_AddBoolToObject(response, "apActive", st.ap_active);
+
         char ap_ip_str[16] = {};
         snprintf(ap_ip_str, sizeof(ap_ip_str), IPSTR, IP2STR(&st.ap_ip));
         cJSON_AddStringToObject(response, "apIp", ap_ip_str);
 
         cJSON_AddNumberToObject(response, "retryCount", st.retry_count);
+        cJSON_AddStringToObject(response, "applyState", network_apply_state_to_string(apply_st));
+
+        if (pending_cmd != 0) {
+            cJSON_AddNumberToObject(response, "pendingCommandId", pending_cmd);
+        } else {
+            cJSON_AddNullToObject(response, "pendingCommandId");
+        }
+
+        if (last_err != nullptr) {
+            cJSON_AddStringToObject(response, "lastApplyError", last_err);
+        } else {
+            cJSON_AddNullToObject(response, "lastApplyError");
+        }
+
+        cJSON_AddNumberToObject(response, "lastDisconnectReason", st.last_disconnect_reason);
+
+        NetworkSettings persisted{};
+        bool persisted_matches = false;
+        if (api_ptr->config() && api_ptr->config()->load_network_settings(persisted) == ESP_OK) {
+            NetworkMode current_mode = (st.mode == WifiMode::StaOnly) ? NetworkMode::StaOnly :
+                (st.mode == WifiMode::ApOnly) ? NetworkMode::ApOnly : NetworkMode::StaWithApFallback;
+            if (persisted.mode == current_mode &&
+                std::strcmp(persisted.sta_ssid, st.sta_ssid) == 0 &&
+                !st.is_fallback_ap &&
+                apply_st == NetworkApplyState::Idle &&
+                last_err == nullptr) {
+                persisted_matches = true;
+            }
+        }
+        cJSON_AddBoolToObject(response, "persistedMatchesRuntime", persisted_matches);
     } else {
-        cJSON_AddStringToObject(response, "state", "Unavailable");
+        cJSON_AddStringToObject(response, "state", "unavailable");
+        cJSON_AddStringToObject(response, "applyState", network_apply_state_to_string(apply_st));
+        cJSON_AddNullToObject(response, "pendingCommandId");
+        cJSON_AddNullToObject(response, "lastApplyError");
+        cJSON_AddBoolToObject(response, "persistedMatchesRuntime", false);
     }
 
     char* json = cJSON_PrintUnformatted(response);

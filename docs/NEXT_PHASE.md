@@ -1,6 +1,6 @@
 # LumiGrid Next Phase — Operator Platform v2
 
-Baseline: `bdbf4187c420e0fa9f5e263c893d1ee17dbda2a5`.
+Baseline: `1e64f4b349150028f28c45d3464d1b904e09bfe9`.
 
 This phase is deliberately **integration-first**. The runtime/lifecycle architecture is frozen unless a concrete defect requires change. The objective is to make the existing firmware and dashboard behave like one coherent lighting-control product before adding another large feature family.
 
@@ -115,7 +115,27 @@ Firmware
 - Manifest schema 2 separating `playbackHash` from optional `scheduleHash`.
 - Fleet Sync Studio UI with group selector, cluster topology truth evaluation (`VALID_LEADER`, `NO_LEADER`, `SPLIT_BRAIN`, `LEADER_DISAGREEMENT`), polling race protection, leader-cache reset, and unified transport controls.
 
-### 10. Hardware validation
+### 10. Network & Runtime Hardening (LG-027)
+
+- Dual-slot NVS storage (`network` / `network_b`) with CRC-protected schema validation and automatic corruption recovery.
+- Network API endpoints for runtime configuration and diagnostics.
+- Command journaling with command IDs for state verification.
+
+### 11. Network Commissioning & Live Network Lifecycle (LG-028)
+
+- Full operator commissioning path: `Factory/Recovery AP -> configure LAN -> apply -> node changes network -> dashboard reconnects -> configuration survives reboot`.
+- Three explicit network modes: `ApOnly` (standalone AP), `StaOnly` (infrastructure Wi-Fi only), and `StaWithApFallback` (joins Wi-Fi, drops to recovery AP if unreachable while retrying STA with bounded backoff: 5s, 10s, 30s, 60s).
+- Strict validation: SSIDs 1..32 bytes, passwords 8..63 bytes (or 0 for open networks), AP channels 1..13 only (channel 14 strictly rejected with 400 `invalid_ap_channel`), and strict JSON types.
+- Deterministic CRC calculation: field-by-field hashing in defined order (`schema_version`, `mode`, `sta_ssid`, `sta_password`, `ap_name`, `ap_channel`) eliminating padding discrepancies.
+- Asynchronous runtime-owned network apply (`queue_network_apply`): returns immediate `202 Accepted` (`{"accepted":true,"commandId":N,"applyPending":true}`); single in-flight apply enforced (409 Conflict if active).
+- Zero blackout network service rebind: bounds graceful restart across MQTT, NodeSync, sACN, Art-Net, mDNS, and HTTP while `LightingRuntime`, `OutputController`, DMX routing, and active physical output continue running uninterrupted.
+- Intentional vs accidental disconnect separation: `intentional_disconnect_` flag bypasses auto-reconnect loops during administrative reconfigurations.
+- Transactional rollback: holds previous and desired configurations; failures restore previous network (or recovery AP) without altering known-good persisted NVS; new configuration is persisted only after network ready state is confirmed.
+- Write-only credentials: passwords never logged and never returned over GET APIs (`passwordSet: true` only).
+- Safe-mode recovery protection: network reconfiguration that removes recovery connectivity is blocked in safe mode (`400 safe_mode_network_locked`).
+- Fleet Devices operator UI: interactive `NetworkConfigCard` with live status, mode selection, blank-to-preserve password semantics, explicit `clearPassword`, and reconnecting banner handling temporary network disconnects.
+
+### 12. Hardware validation
 
 Execute the documented matrix: boot, networking, API, WebSocket, pixel output, PCA9685, DMX, arbitration, limiter, E-stop, watchdog, recovery, backup/restore, OTA, extended burn-in, and multi-node sync bench tests.
 

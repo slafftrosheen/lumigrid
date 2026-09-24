@@ -282,6 +282,13 @@ esp_err_t LumigridRuntime::init() {
     }
     vTaskDelay(pdMS_TO_TICKS(500));
 
+    if (!net_apply_queue_) {
+        net_apply_queue_ = xQueueCreate(1, sizeof(NetworkApplyRequest));
+    }
+    if (!net_apply_task_ && net_apply_queue_) {
+        xTaskCreatePinnedToCore(&LumigridRuntime::net_apply_worker, "net_apply", 8192, this, 5, &net_apply_task_, 1);
+    }
+
     return (startup_state_ == StartupState::Faulted) ? failing_error_ : ESP_OK;
 }
 
@@ -357,6 +364,19 @@ esp_err_t LumigridRuntime::stop() {
         wifi_.stop();
         started_subsystems_.wifi = false;
     }
+
+    if (net_apply_task_) {
+        TaskHandle_t t = net_apply_task_;
+        net_apply_task_ = nullptr;
+        vTaskDelete(t);
+    }
+    if (net_apply_queue_) {
+        QueueHandle_t q = net_apply_queue_;
+        net_apply_queue_ = nullptr;
+        vQueueDelete(q);
+    }
+    apply_in_progress_.store(false);
+    apply_state_.store(NetworkApplyState::Idle);
 
     services_started_ = false;
     lifecycle_state_ = RuntimeLifecycle::Stopped;
@@ -522,16 +542,23 @@ esp_err_t LumigridRuntime::start() {
     }
     std::memcpy(node.mac, mac, 6);
 
-    ESP_LOGI("lumigrid", "Step 6: api.start(80, 8080)...");
+    ESP_LOGI("lumigrid", "Step 6: Setting up network services & API...");
     api_.set_wifi(&wifi_);
     api_.set_show_clock_provider([this]() { return clock_.now_ms(); });
-    err = api_.start(80, 8080, &config_, &lighting_, &scheduler_, &node_sync_, &dmx_router_, &cue_runner_, &show_transport_);
-    if (err != ESP_OK) {
-        ESP_LOGE("lumigrid", "api.start() FAILED: %s", esp_err_to_name(err));
-        rollback_services(StartupStage::NetworkConfigured, err);
-        return err;
-    }
-    started_subsystems_.api = true;
+
+    api_.set_network_apply_handler(
+        [this](const NetworkApplyRequest& req) -> esp_err_t {
+            return queue_network_apply(req);
+        },
+        [this](NetworkApplyState& state, uint32_t& cmd_id, const char*& err_str) {
+            state = apply_state_.load();
+            cmd_id = pending_apply_command_id_.load();
+            err_str = last_apply_error_;
+        },
+        [this]() -> bool {
+            return is_safe_mode();
+        }
+    );
 
     api_.set_config_apply_callback([this](const DeviceConfig& old_cfg, const DeviceConfig& new_cfg) -> esp_err_t {
         if (safe_mode_) return ESP_OK;
@@ -613,7 +640,6 @@ esp_err_t LumigridRuntime::start() {
             }
             return true;
         } else {
-            // Heartbeat timeout / release
             scheduler_.clear_remote_show_mode();
             cue_runner_.clear_remote_sync();
             return true;
@@ -632,80 +658,13 @@ esp_err_t LumigridRuntime::start() {
         }
     });
 
-    ESP_LOGI("lumigrid", "Step 7: mdns.start()...");
-    err = mdns_.start(current_cfg.device_name, "LumiGrid Signage", 80);
-    if (err != ESP_OK) {
-        ESP_LOGW("lumigrid", "mdns.start() returned %s (non-fatal)", esp_err_to_name(err));
-    } else {
-        started_subsystems_.mdns = true;
-    }
-
-    ESP_LOGI("lumigrid", "Step 8: artnet.start()...");
-    err = artnet_.start(
-        node,
-        [this](const ArtnetDmxPacket& packet) {
-            if (!safe_mode_) {
-                dmx_router_.handle_artnet_dmx(packet);
-            }
-        }
-    );
-    if (err != ESP_OK) {
-        ESP_LOGW("lumigrid", "artnet.start() warning: %s (non-fatal, continuing)", esp_err_to_name(err));
-    } else {
-        started_subsystems_.artnet = true;
-        artnet_.set_output_universes(active_unis, port_count);
-    }
-
-    ESP_LOGI("lumigrid", "Step 8.5: sacn.start()...");
-    err = sacn_.start(
-        [this](const SacnDmxPacket& packet) {
-            if (!safe_mode_) {
-                dmx_router_.handle_sacn_dmx(packet);
-            }
-        }
-    );
-    if (err != ESP_OK) {
-        ESP_LOGW("lumigrid", "sacn.start() warning: %s (non-fatal, continuing)", esp_err_to_name(err));
-    } else {
-        started_subsystems_.sacn = true;
-        sacn_.set_subscribed_universes(active_unis, u_count);
-    }
-    startup_stage_ = StartupStage::ProtocolsStarted;
-
-    if (!safe_mode_) {
-        ESP_LOGI("lumigrid", "Step 9: scheduler.start()...");
+    if (!safe_mode_ && !started_subsystems_.scheduler) {
+        ESP_LOGI("lumigrid", "Starting scheduler...");
         scheduler_.start(current_cfg.timezone);
         started_subsystems_.scheduler = true;
     }
 
-    if (current_cfg.sync_enabled && !safe_mode_) {
-        ESP_LOGI("lumigrid", "Step 10: node_sync.start()...");
-        node_sync_.start(static_cast<NodeRole>(current_cfg.sync_role));
-        started_subsystems_.node_sync = true;
-    }
-
-    if (current_cfg.mqtt_enabled && strlen(current_cfg.mqtt_broker) > 0 && !safe_mode_) {
-        ESP_LOGI("lumigrid", "Step 11: mqtt.start()...");
-        char broker_uri[128];
-        snprintf(broker_uri, sizeof(broker_uri), "mqtt://%s:%d", current_cfg.mqtt_broker, current_cfg.mqtt_port);
-        NodeIdentity id = get_node_identity(current_cfg.device_name);
-        char prefix[64];
-        snprintf(prefix, sizeof(prefix), "lumigrid/%s", id.id);
-
-        if (mqtt_.init(broker_uri, id.id, prefix, &lighting_) == ESP_OK) {
-            mqtt_.start();
-            started_subsystems_.mqtt = true;
-            
-            static MqttService* s_mqtt_ptr = &mqtt_;
-            DiagnosticLog::instance().set_stream_callback([](const char* msg, size_t len) {
-                if (s_mqtt_ptr) s_mqtt_ptr->publish_log(msg, len);
-            });
-            
-            mqtt_.set_command_callback([this](const char* payload, size_t len) {
-                ESP_LOGI("lumigrid", "Received MQTT command: %.*s", (int)len, payload);
-            });
-        }
-    }
+    start_network_services();
 
     startup_stage_ = StartupStage::RuntimeStarted;
     services_started_ = true;
@@ -716,4 +675,359 @@ esp_err_t LumigridRuntime::start() {
     return ESP_OK;
 }
 
+void LumigridRuntime::stop_network_services() {
+    ESP_LOGI("lumigrid", "Stopping network-dependent services for rebind...");
+    if (started_subsystems_.mqtt) {
+        DiagnosticLog::instance().set_stream_callback(nullptr);
+        mqtt_.stop();
+        started_subsystems_.mqtt = false;
+    }
+    if (started_subsystems_.node_sync) {
+        node_sync_.stop(1000);
+        started_subsystems_.node_sync = false;
+    }
+    if (started_subsystems_.sacn) {
+        sacn_.stop();
+        started_subsystems_.sacn = false;
+    }
+    if (started_subsystems_.artnet) {
+        artnet_.stop();
+        started_subsystems_.artnet = false;
+    }
+    if (started_subsystems_.mdns) {
+        mdns_.stop();
+        started_subsystems_.mdns = false;
+    }
+    if (started_subsystems_.api) {
+        api_.stop();
+        started_subsystems_.api = false;
+    }
+}
+
+void LumigridRuntime::start_network_services() {
+    DeviceConfig current_cfg{};
+    config_.load_config(current_cfg);
+
+    uint8_t mac[6] = {};
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+
+    dmx_router_.update_config(current_cfg);
+
+    uint16_t active_unis[16];
+    size_t u_count = dmx_router_.get_active_universes(active_unis, 16);
+    uint8_t port_count = (u_count > 0 && u_count <= 4) ? static_cast<uint8_t>(u_count) : (u_count > 4 ? 4 : 0);
+
+    ArtnetNodeInfo node{};
+    node.short_name = "LumiGrid Factory";
+    node.long_name = "LumiGrid 8xALED 8xPWM Factory Test Node";
+    node.report = "#0001 [0000] LumiGrid ready";
+    node.num_ports = port_count;
+    if (port_count > 0) {
+        uint8_t net = 0, subnet = 0, univ = 0;
+        decode_port_address(active_unis[0], net, subnet, univ);
+        node.net = net;
+        node.subnet = subnet;
+        for (uint8_t i = 0; i < port_count; ++i) {
+            uint8_t p_net = 0, p_sub = 0, p_univ = 0;
+            decode_port_address(active_unis[i], p_net, p_sub, p_univ);
+            node.sw_out[i] = p_univ;
+        }
+    }
+    std::memcpy(node.mac, mac, 6);
+
+    if (!started_subsystems_.api) {
+        ESP_LOGI("lumigrid", "Starting api.start(80, 8080)...");
+        api_.set_wifi(&wifi_);
+        api_.set_show_clock_provider([this]() { return clock_.now_ms(); });
+        esp_err_t err = api_.start(80, 8080, &config_, &lighting_, &scheduler_, &node_sync_, &dmx_router_, &cue_runner_, &show_transport_);
+        if (err == ESP_OK) {
+            started_subsystems_.api = true;
+        } else {
+            ESP_LOGE("lumigrid", "api.start() FAILED: %s", esp_err_to_name(err));
+        }
+    }
+
+    if (!started_subsystems_.mdns) {
+        ESP_LOGI("lumigrid", "Starting mdns.start()...");
+        esp_err_t err = mdns_.start(current_cfg.device_name, "LumiGrid Signage", 80);
+        if (err == ESP_OK) {
+            started_subsystems_.mdns = true;
+        }
+    }
+
+    if (!started_subsystems_.artnet) {
+        ESP_LOGI("lumigrid", "Starting artnet.start()...");
+        esp_err_t err = artnet_.start(
+            node,
+            [this](const ArtnetDmxPacket& packet) {
+                if (!safe_mode_) {
+                    dmx_router_.handle_artnet_dmx(packet);
+                }
+            }
+        );
+        if (err == ESP_OK) {
+            started_subsystems_.artnet = true;
+            artnet_.set_output_universes(active_unis, port_count);
+        }
+    }
+
+    if (!started_subsystems_.sacn) {
+        ESP_LOGI("lumigrid", "Starting sacn.start()...");
+        esp_err_t err = sacn_.start(
+            [this](const SacnDmxPacket& packet) {
+                if (!safe_mode_) {
+                    dmx_router_.handle_sacn_dmx(packet);
+                }
+            }
+        );
+        if (err == ESP_OK) {
+            started_subsystems_.sacn = true;
+            sacn_.set_subscribed_universes(active_unis, u_count);
+        }
+    }
+
+    if (current_cfg.sync_enabled && !safe_mode_ && !started_subsystems_.node_sync) {
+        ESP_LOGI("lumigrid", "Starting node_sync.start()...");
+        node_sync_.start(static_cast<NodeRole>(current_cfg.sync_role));
+        started_subsystems_.node_sync = true;
+    }
+
+    if (current_cfg.mqtt_enabled && strlen(current_cfg.mqtt_broker) > 0 && !safe_mode_ && !started_subsystems_.mqtt) {
+        ESP_LOGI("lumigrid", "Starting mqtt.start()...");
+        char broker_uri[128];
+        snprintf(broker_uri, sizeof(broker_uri), "mqtt://%s:%d", current_cfg.mqtt_broker, current_cfg.mqtt_port);
+        NodeIdentity id = get_node_identity(current_cfg.device_name);
+        char prefix[64];
+        snprintf(prefix, sizeof(prefix), "lumigrid/%s", id.id);
+
+        if (mqtt_.init(broker_uri, id.id, prefix, &lighting_) == ESP_OK) {
+            mqtt_.start();
+            started_subsystems_.mqtt = true;
+            static MqttService* s_mqtt_ptr = &mqtt_;
+            DiagnosticLog::instance().set_stream_callback([](const char* msg, size_t len) {
+                if (s_mqtt_ptr) s_mqtt_ptr->publish_log(msg, len);
+            });
+            mqtt_.set_command_callback([this](const char* payload, size_t len) {
+                ESP_LOGI("lumigrid", "Received MQTT command: %.*s", (int)len, payload);
+            });
+        }
+    }
+}
+
+esp_err_t LumigridRuntime::queue_network_apply(const NetworkApplyRequest& request) {
+    if (apply_in_progress_.exchange(true)) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!net_apply_queue_) {
+        apply_in_progress_.store(false);
+        return ESP_ERR_INVALID_STATE;
+    }
+    apply_state_.store(NetworkApplyState::Applying);
+    pending_apply_command_id_.store(request.command_id);
+    last_apply_error_ = nullptr;
+
+    if (xQueueSend(net_apply_queue_, &request, 0) != pdTRUE) {
+        apply_in_progress_.store(false);
+        apply_state_.store(NetworkApplyState::Idle);
+        pending_apply_command_id_.store(0);
+        return ESP_ERR_NO_MEM;
+    }
+    return ESP_OK;
+}
+
+void LumigridRuntime::net_apply_worker(void* arg) {
+    auto* self = static_cast<LumigridRuntime*>(arg);
+    NetworkApplyRequest req{};
+    while (self) {
+        if (xQueueReceive(self->net_apply_queue_, &req, portMAX_DELAY) == pdTRUE) {
+            self->execute_network_apply(req);
+        }
+    }
+    vTaskDelete(nullptr);
+}
+
+void LumigridRuntime::execute_network_apply(const NetworkApplyRequest& req) {
+    ESP_LOGI("lumigrid", "Executing network apply: target mode %s, SSID '%s' (cmd %" PRIu32 ")",
+             network_mode_to_string(req.desired.mode), req.desired.sta_ssid, req.command_id);
+
+    // 1. Give HTTP 202 response 200ms to escape the socket
+    vTaskDelay(pdMS_TO_TICKS(200));
+
+    // 2. Stop network-dependent services
+    stop_network_services();
+
+    // 3. Stop Wi-Fi intentionally
+    if (started_subsystems_.wifi) {
+        wifi_.stop();
+        started_subsystems_.wifi = false;
+    }
+
+    apply_state_.store(NetworkApplyState::WaitingForNetwork);
+
+    DeviceConfig dev_cfg{};
+    config_.load_config(dev_cfg);
+
+    std::string ap_ssid;
+    if (safe_mode_) {
+        ap_ssid = "LumiGrid-Recovery";
+    } else if (req.desired.ap_name[0] != '\0') {
+        ap_ssid = req.desired.ap_name;
+    } else if (configuration_valid_ && strlen(dev_cfg.device_name) > 0 && std::strcmp(dev_cfg.device_name, "lumigrid") != 0) {
+        ap_ssid = std::string("LumiGrid-") + dev_cfg.device_name;
+    } else {
+        ap_ssid = "LumiGrid-Factory";
+    }
+
+    std::string ap_pass;
+#if defined(CONFIG_LUMIGRID_ENABLE_DEV_CREDENTIALS)
+    ap_pass = "lumigrid123";
+#else
+    if (strlen(dev_cfg.installer_token) >= 8) {
+        ap_pass = dev_cfg.installer_token;
+    } else {
+        uint8_t mac[6] = {};
+        esp_read_mac(mac, ESP_MAC_WIFI_STA);
+        char mac_pass[32];
+        snprintf(mac_pass, sizeof(mac_pass), "lg_%02x%02x%02x%02x", mac[2], mac[3], mac[4], mac[5]);
+        ap_pass = mac_pass;
+    }
+#endif
+
+    WifiMode target_wifi_mode = WifiMode::ApOnly;
+    switch (req.desired.mode) {
+        case NetworkMode::StaOnly: target_wifi_mode = WifiMode::StaOnly; break;
+        case NetworkMode::StaWithApFallback: target_wifi_mode = WifiMode::StaWithApFallback; break;
+        case NetworkMode::ApOnly: default: target_wifi_mode = WifiMode::ApOnly; break;
+    }
+
+    WifiConfig wifi_cfg{
+        .mode = target_wifi_mode,
+        .sta_ssid = req.desired.sta_ssid,
+        .sta_password = req.desired.sta_password,
+        .ap_ssid = ap_ssid,
+        .ap_password = ap_pass,
+        .ap_channel = (req.desired.ap_channel >= 1 && req.desired.ap_channel <= 13) ? req.desired.ap_channel : (uint8_t)1,
+        .max_retry = 3
+    };
+
+    // Recreate readiness semaphore
+    {
+        SemaphoreHandle_t old_sem = net_ready_sem_.exchange(nullptr, std::memory_order_acq_rel);
+        if (old_sem) vSemaphoreDelete(old_sem);
+        net_ready_sem_.store(xSemaphoreCreateBinary(), std::memory_order_release);
+    }
+
+    esp_err_t err = wifi_.start(wifi_cfg, [this](WifiState state) {
+        if (state == WifiState::Connected || state == WifiState::ApActive ||
+            state == WifiState::FallbackAp || state == WifiState::Failed) {
+            SemaphoreHandle_t sem = net_ready_sem_.load(std::memory_order_acquire);
+            if (sem) xSemaphoreGive(sem);
+        }
+    });
+
+    if (err == ESP_OK) {
+        started_subsystems_.wifi = true;
+        // Wait up to 15s for network to achieve ready state
+        xSemaphoreTake(net_ready_sem_.load(std::memory_order_acquire), pdMS_TO_TICKS(15000));
+    }
+
+    // Determine success
+    bool success = false;
+    if (started_subsystems_.wifi) {
+        if (req.desired.mode == NetworkMode::ApOnly && wifi_.state() == WifiState::ApActive) {
+            success = true;
+        } else if (req.desired.mode == NetworkMode::StaOnly && wifi_.state() == WifiState::Connected) {
+            success = true;
+        } else if (req.desired.mode == NetworkMode::StaWithApFallback && wifi_.state() == WifiState::Connected) {
+            success = true;
+        }
+    }
+
+    if (success) {
+        ESP_LOGI("lumigrid", "Network apply SUCCESS: desired network active. Persisting configuration.");
+        config_.save_network_settings(req.desired);
+
+        start_network_services();
+
+        api_.command_journal().applied(req.command_id);
+        last_apply_error_ = nullptr;
+        apply_state_.store(NetworkApplyState::Idle);
+        pending_apply_command_id_.store(0);
+        apply_in_progress_.store(false);
+        return;
+    }
+
+    // Failure path
+    ESP_LOGW("lumigrid", "Network apply FAILED for command %" PRIu32, req.command_id);
+    api_.command_journal().failed(req.command_id, ESP_FAIL);
+    last_apply_error_ = "sta_connect_failed";
+
+    if (req.desired.mode == NetworkMode::StaWithApFallback && wifi_.is_fallback_ap()) {
+        ESP_LOGI("lumigrid", "StaWithApFallback: Recovery AP active at 192.168.4.1. Keeping previous persisted config intact.");
+        start_network_services();
+        apply_state_.store(NetworkApplyState::Failed);
+        pending_apply_command_id_.store(0);
+        apply_in_progress_.store(false);
+        return;
+    }
+
+    // Otherwise, rollback to req.previous
+    ESP_LOGW("lumigrid", "Rolling back to previous network configuration...");
+    apply_state_.store(NetworkApplyState::RollingBack);
+
+    if (started_subsystems_.wifi) {
+        wifi_.stop();
+        started_subsystems_.wifi = false;
+    }
+
+    WifiMode prev_wifi_mode = WifiMode::ApOnly;
+    switch (req.previous.mode) {
+        case NetworkMode::StaOnly: prev_wifi_mode = WifiMode::StaOnly; break;
+        case NetworkMode::StaWithApFallback: prev_wifi_mode = WifiMode::StaWithApFallback; break;
+        case NetworkMode::ApOnly: default: prev_wifi_mode = WifiMode::ApOnly; break;
+    }
+
+    std::string prev_ap_name;
+    if (req.previous.ap_name[0] != '\0') {
+        prev_ap_name = req.previous.ap_name;
+    } else {
+        prev_ap_name = ap_ssid;
+    }
+
+    WifiConfig prev_cfg{
+        .mode = prev_wifi_mode,
+        .sta_ssid = req.previous.sta_ssid,
+        .sta_password = req.previous.sta_password,
+        .ap_ssid = prev_ap_name,
+        .ap_password = ap_pass,
+        .ap_channel = (req.previous.ap_channel >= 1 && req.previous.ap_channel <= 13) ? req.previous.ap_channel : (uint8_t)1,
+        .max_retry = 3
+    };
+
+    {
+        SemaphoreHandle_t old_sem = net_ready_sem_.exchange(nullptr, std::memory_order_acq_rel);
+        if (old_sem) vSemaphoreDelete(old_sem);
+        net_ready_sem_.store(xSemaphoreCreateBinary(), std::memory_order_release);
+    }
+
+    err = wifi_.start(prev_cfg, [this](WifiState state) {
+        if (state == WifiState::Connected || state == WifiState::ApActive ||
+            state == WifiState::FallbackAp || state == WifiState::Failed) {
+            SemaphoreHandle_t sem = net_ready_sem_.load(std::memory_order_acquire);
+            if (sem) xSemaphoreGive(sem);
+        }
+    });
+
+    if (err == ESP_OK) {
+        started_subsystems_.wifi = true;
+        xSemaphoreTake(net_ready_sem_.load(std::memory_order_acquire), pdMS_TO_TICKS(15000));
+    }
+
+    start_network_services();
+    apply_state_.store(NetworkApplyState::Failed);
+    pending_apply_command_id_.store(0);
+    apply_in_progress_.store(false);
+}
+
 } // namespace lg
+

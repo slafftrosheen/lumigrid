@@ -44,16 +44,82 @@ struct NetworkSettings {
     char sta_ssid[33] = {};
     char sta_password[65] = {};
 
-    bool ap_enabled = true;
     char ap_name[33] = {};
     uint8_t ap_channel = 1;
 
     uint32_t checksum = 0;
+
+    bool is_ap_enabled() const {
+        return mode != NetworkMode::StaOnly;
+    }
 };
 
-inline uint32_t calc_network_settings_crc(const NetworkSettings& settings) {
-    return esp_rom_crc32_le(0, reinterpret_cast<const uint8_t*>(&settings),
-                            sizeof(NetworkSettings) - sizeof(uint32_t));
+/**
+ * Deterministic CRC32 computation over explicit fields in a defined order.
+ * Does not include compiler padding or the checksum field itself.
+ */
+inline uint32_t calc_network_settings_crc(const NetworkSettings& s) {
+    uint32_t crc = 0;
+
+    crc = esp_rom_crc32_le(
+        crc,
+        reinterpret_cast<const uint8_t*>(&s.schema_version),
+        sizeof(s.schema_version)
+    );
+
+    const uint8_t mode = static_cast<uint8_t>(s.mode);
+    crc = esp_rom_crc32_le(crc, &mode, sizeof(mode));
+
+    crc = esp_rom_crc32_le(
+        crc,
+        reinterpret_cast<const uint8_t*>(s.sta_ssid),
+        sizeof(s.sta_ssid)
+    );
+
+    crc = esp_rom_crc32_le(
+        crc,
+        reinterpret_cast<const uint8_t*>(s.sta_password),
+        sizeof(s.sta_password)
+    );
+
+    crc = esp_rom_crc32_le(
+        crc,
+        reinterpret_cast<const uint8_t*>(s.ap_name),
+        sizeof(s.ap_name)
+    );
+
+    crc = esp_rom_crc32_le(
+        crc,
+        reinterpret_cast<const uint8_t*>(&s.ap_channel),
+        sizeof(s.ap_channel)
+    );
+
+    return crc;
 }
+
+enum class NetworkApplyState : uint8_t {
+    Idle = 0,
+    Applying,
+    WaitingForNetwork,
+    RollingBack,
+    Failed
+};
+
+inline const char* network_apply_state_to_string(NetworkApplyState s) {
+    switch (s) {
+        case NetworkApplyState::Idle: return "idle";
+        case NetworkApplyState::Applying: return "applying";
+        case NetworkApplyState::WaitingForNetwork: return "waiting_for_network";
+        case NetworkApplyState::RollingBack: return "rolling_back";
+        case NetworkApplyState::Failed: return "failed";
+        default: return "idle";
+    }
+}
+
+struct NetworkApplyRequest {
+    NetworkSettings previous{};
+    NetworkSettings desired{};
+    uint32_t command_id = 0;
+};
 
 } // namespace lg

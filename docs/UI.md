@@ -40,8 +40,13 @@ The operator interface is organized into primary destinations, visually separati
 6. **Timeline:** 16-channel visual step sequencer. Follower nodes disable local playback.
 7. **Cues:** Cue Studio (timed playlist show builder). Follower nodes disable local transport controls.
 8. **Schedules:** Day/time calendar automation.
-9. **Devices:** Sync and network configuration.
+9. **Fleet Devices & Network Commissioning (LG-028):** Multi-node device registry and integrated Network Commissioning Card (`NetworkConfigCard`):
+   - **Connection State Pill:** Real-time visibility into `Connected`, `Connecting`, `Recovery AP`, or `Offline`.
+   - **Mode Selection:** Toggle between `Access Point Only`, `Join Wi-Fi with Recovery AP` (`sta_with_ap_fallback`), and `Wi-Fi Only`.
+   - **Credential Hygiene:** Stored Wi-Fi passwords are never returned to or pre-filled in the browser. Blank submissions preserve existing credentials; an explicit "Clear saved password" option clears credentials for open networks.
+   - **Lifecycle & Reconnect Handling:** Triggering network changes presents a clear asynchronous apply state (`Applying network settings… Connection may move to the new network. Reconnecting…`) rather than a false "Node offline" alarm. Automatic polling verifies reconnection against authoritative runtime telemetry and surfaces recovery access point state if station credentials fail.
 
 ### Service
 - **Diagnostics & System:** Unified maintenance hub featuring live health telemetry, real-time node system logs, security/config audit trails, firmware OTA flashing, and backup/restore. Includes a dedicated section for Factory Output Testing (e.g., Burn-in, Lane Chase, Color Wash) time-bounded by the firmware.
 - **Configuration:** Persistence and system settings.
+

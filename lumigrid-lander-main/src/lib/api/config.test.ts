@@ -299,10 +299,9 @@ describe('config client contract', () => {
   describe('network api client', () => {
     it('getNetworkConfig calls GET /api/v1/network/config and returns network wire config without password', async () => {
       const mockConfig = {
-        mode: 'sta_with_ap_fallback',
+        mode: 'sta_with_ap_fallback' as const,
         ssid: 'Workshop-WiFi',
         passwordSet: true,
-        apEnabled: true,
         apName: 'LumiGrid-Node',
         apChannel: 6,
       };
@@ -315,11 +314,11 @@ describe('config client contract', () => {
       expect((result as any).password).toBeUndefined();
     });
 
-    it('saveNetworkConfig calls PUT /api/v1/network/config with payload', async () => {
+    it('saveNetworkConfig calls PUT /api/v1/network/config with payload and returns accepted state', async () => {
       const apiJsonSpy = vi.spyOn(transport, 'apiJson').mockResolvedValue({
-        saved: true,
         accepted: true,
         commandId: 101,
+        applyPending: true,
       });
 
       const update = {
@@ -335,20 +334,52 @@ describe('config client contract', () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(update),
       });
-      expect(result.saved).toBe(true);
+      expect(result.accepted).toBe(true);
+      expect(result.applyPending).toBe(true);
+      expect(result.commandId).toBe(101);
     });
 
-    it('getNetworkStatus calls GET /api/v1/network/status and returns status', async () => {
+    it('saveNetworkConfig supports clearPassword without sending plaintext password', async () => {
+      const apiJsonSpy = vi.spyOn(transport, 'apiJson').mockResolvedValue({
+        accepted: true,
+        commandId: 102,
+        applyPending: true,
+      });
+
+      const update = {
+        mode: 'sta_only' as const,
+        ssid: 'Open-Venue-LAN',
+        clearPassword: true,
+      };
+
+      const result = await saveNetworkConfig('192.168.4.1', update);
+
+      expect(apiJsonSpy).toHaveBeenCalledWith('192.168.4.1', '/api/v1/network/config', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(update),
+      });
+      expect(result.accepted).toBe(true);
+      expect(update.clearPassword).toBe(true);
+      expect((update as any).password).toBeUndefined();
+    });
+
+    it('getNetworkStatus calls GET /api/v1/network/status and returns extended runtime status', async () => {
       const mockStatus = {
-        state: 'Connected',
+        state: 'connected',
         mode: 'sta_with_ap_fallback' as const,
         staConnected: true,
-        apActive: true,
+        apActive: false,
         staSsid: 'Workshop-WiFi',
         staRssi: -58,
         staIp: '192.168.1.150',
-        apIp: '192.168.4.1',
+        apIp: '0.0.0.0',
         retryCount: 0,
+        applyState: 'idle' as const,
+        pendingCommandId: null,
+        lastApplyError: null,
+        lastDisconnectReason: 0,
+        persistedMatchesRuntime: true,
       };
       const apiJsonSpy = vi.spyOn(transport, 'apiJson').mockResolvedValue(mockStatus);
 
@@ -357,8 +388,11 @@ describe('config client contract', () => {
       expect(apiJsonSpy).toHaveBeenCalledWith('192.168.1.150', '/api/v1/network/status');
       expect(result.staConnected).toBe(true);
       expect(result.staIp).toBe('192.168.1.150');
+      expect(result.applyState).toBe('idle');
+      expect(result.persistedMatchesRuntime).toBe(true);
       expect((result as any).password).toBeUndefined();
     });
   });
 });
+
 

@@ -8,6 +8,7 @@
 #include "esp_err.h"
 #include "esp_event.h"
 #include "esp_netif_types.h"
+#include "esp_timer.h"
 
 namespace lg {
 
@@ -24,7 +25,7 @@ struct WifiConfig {
     std::string ap_ssid = "LumiGrid-Factory";
     std::string ap_password; // Configured at runtime, non-universal
     uint8_t ap_channel = 1;
-    uint8_t max_retry = 10;
+    uint8_t max_retry = 3;
 };
 
 enum class WifiState : uint8_t {
@@ -32,6 +33,7 @@ enum class WifiState : uint8_t {
     Connecting,
     Connected,
     ApActive,
+    FallbackAp,
     Failed
 };
 
@@ -41,6 +43,7 @@ struct WifiRuntimeStatus {
 
     bool sta_connected = false;
     bool ap_active = false;
+    bool is_fallback_ap = false;
 
     char sta_ssid[33] = {};
     int8_t sta_rssi = 0;
@@ -49,6 +52,7 @@ struct WifiRuntimeStatus {
     esp_ip4_addr_t ap_ip{};
 
     uint8_t retry_count = 0;
+    uint8_t last_disconnect_reason = 0;
 };
 
 using WifiStateCallback = std::function<void(WifiState)>;
@@ -61,6 +65,19 @@ public:
     bool has_ip() const;
     WifiRuntimeStatus status() const;
 
+    void set_intentional_disconnect(bool val) {
+        intentional_disconnect_.store(val, std::memory_order_relaxed);
+    }
+    bool is_intentional_disconnect() const {
+        return intentional_disconnect_.load(std::memory_order_relaxed);
+    }
+    uint8_t last_disconnect_reason() const {
+        return last_disconnect_reason_.load(std::memory_order_relaxed);
+    }
+    bool is_fallback_ap() const {
+        return is_fallback_ap_.load(std::memory_order_relaxed);
+    }
+
 private:
     static void event_handler(
         void* arg,
@@ -69,14 +86,26 @@ private:
         void* event_data
     );
 
+    static void on_fallback_timer(void* arg);
+
     esp_err_t start_sta();
     esp_err_t start_ap();
+    esp_err_t start_fallback_ap();
+    void schedule_fallback_retry();
+    void cancel_fallback_timer();
 
     WifiConfig config_{};
     WifiStateCallback callback_{};
     std::atomic<WifiState> state_{WifiState::Idle};
     uint8_t retries_ = 0;
     std::atomic<bool> has_ip_{false};
+    std::atomic<bool> intentional_disconnect_{false};
+    std::atomic<uint8_t> last_disconnect_reason_{0};
+    std::atomic<bool> is_fallback_ap_{false};
+
+    esp_timer_handle_t fallback_timer_ = nullptr;
+    uint8_t fallback_backoff_index_ = 0;
+
     esp_netif_t* sta_netif_ = nullptr;
     esp_netif_t* ap_netif_ = nullptr;
     bool wifi_init_done_ = false;
@@ -85,4 +114,3 @@ private:
 };
 
 } // namespace lg
-

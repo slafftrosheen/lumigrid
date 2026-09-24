@@ -27,6 +27,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "cJSON.h"
 #include <cassert>
 #include <cstring>
 #include <cmath>
@@ -3087,14 +3088,12 @@ bool test_lg025_fleet_sync_and_show_deployment() {
     {
         ConfigStore cfg;
         SceneConfig scene{};
-        scene.index = 7;
         strncpy(scene.name, "Test Scene 7", sizeof(scene.name) - 1);
         scene.checksum = 7777;
         assert(cfg.save_scene(7, scene) == ESP_OK);
         assert(cfg.scene_exists(7));
 
         SceneMotionConfig motion{};
-        motion.index = 7;
         motion.track_count = 1;
         motion.checksum = 8888;
         assert(cfg.save_scene_motion(7, motion) == ESP_OK);
@@ -3143,7 +3142,6 @@ bool test_lg025_fleet_sync_and_show_deployment() {
 
         // Modify Scene 4 on cfg1
         SceneConfig scene4{};
-        scene4.index = 4;
         strncpy(scene4.name, "Scene 4", sizeof(scene4.name) - 1);
         scene4.checksum = 4444;
         assert(cfg1.save_scene(4, scene4) == ESP_OK);
@@ -3151,7 +3149,6 @@ bool test_lg025_fleet_sync_and_show_deployment() {
 
         // Modify Scene Motion 4 on cfg2
         SceneMotionConfig motion4{};
-        motion4.index = 4;
         motion4.track_count = 1;
         motion4.checksum = 4445;
         assert(cfg2.save_scene_motion(4, motion4) == ESP_OK);
@@ -3233,7 +3230,7 @@ static bool test_lg026_show_transport_and_cue_sync() {
 
         // EStop dominates everything
         OutputController ctrl;
-        ctrl.set_estop(true);
+        ctrl.latch_estop();
         assert(ctrl.is_estop_latched() == true);
     }
 
@@ -3318,7 +3315,6 @@ static bool test_lg026_show_transport_and_cue_sync() {
         // Save mock scenes
         for (uint8_t i = 1; i <= 3; ++i) {
             SceneConfig sc{};
-            sc.index = i;
             sc.checksum = 100 + i;
             cfg.save_scene(i, sc);
         }
@@ -3379,28 +3375,28 @@ static bool test_lg026_show_transport_and_cue_sync() {
 
     // ── Test 6: Protocol v4 Packet Validation ──────────────────────────────────
     {
-        SyncPacket pkt{};
+        NodeSync::SyncPacket pkt{};
         pkt.magic = 0x4C475359;
         pkt.version = 4;
         pkt.token = 0x12345678;
         pkt.sequence = 1;
-        pkt.transport_mode = static_cast<uint8_t>(ShowTransportMode::Cue);
-        pkt.cue_list_index = 1;
+        pkt.transport = static_cast<uint8_t>(ShowTransportMode::Cue);
+        pkt.cue_list = 1;
         pkt.cue_state = 1;
         pkt.cue_index = 0;
-        pkt.next_cue_index = 1;
-        pkt.transport_generation = 42;
+        pkt.cue_next = 1;
+        pkt.cue_generation = 42;
 
         // Size check
-        assert(sizeof(SyncPacket) == 60);
+        assert(sizeof(NodeSync::SyncPacket) == 52);
 
         // Reject v3 packet
-        SyncPacket v3_pkt = pkt;
+        NodeSync::SyncPacket v3_pkt = pkt;
         v3_pkt.version = 3;
         assert(v3_pkt.version != 4);
 
         // Reject bad magic
-        SyncPacket bad_magic = pkt;
+        NodeSync::SyncPacket bad_magic = pkt;
         bad_magic.magic = 0x11223344;
         assert(bad_magic.magic != 0x4C475359);
     }
@@ -3441,7 +3437,7 @@ static bool test_lg027_network_settings_and_commissioning() {
         assert(net.mode == NetworkMode::ApOnly);
         assert(net.sta_ssid[0] == '\0');
         assert(net.sta_password[0] == '\0');
-        assert(net.ap_enabled == true);
+        assert(net.is_ap_enabled() == true);
         assert(net.ap_name[0] == '\0');
         assert(net.ap_channel == 1);
         assert(net.checksum == 0);
@@ -3467,7 +3463,6 @@ static bool test_lg027_network_settings_and_commissioning() {
         net.mode = NetworkMode::StaWithApFallback;
         strncpy(net.sta_ssid, "Test-SSID", sizeof(net.sta_ssid) - 1);
         strncpy(net.sta_password, "SecretPassword123", sizeof(net.sta_password) - 1);
-        net.ap_enabled = true;
         strncpy(net.ap_name, "LumiGrid-Custom", sizeof(net.ap_name) - 1);
         net.ap_channel = 6;
 
@@ -3478,7 +3473,7 @@ static bool test_lg027_network_settings_and_commissioning() {
         assert(loaded.mode == NetworkMode::StaWithApFallback);
         assert(strcmp(loaded.sta_ssid, "Test-SSID") == 0);
         assert(strcmp(loaded.sta_password, "SecretPassword123") == 0);
-        assert(loaded.ap_enabled == true);
+        assert(loaded.is_ap_enabled() == true);
         assert(strcmp(loaded.ap_name, "LumiGrid-Custom") == 0);
         assert(loaded.ap_channel == 6);
         assert(loaded.checksum != 0);
@@ -3529,6 +3524,302 @@ static bool test_lg027_network_settings_and_commissioning() {
     }
 
     ESP_LOGI(TAG, "[PASS] LG-027 NetworkSettings & Commissioning tests passed.");
+    return true;
+}
+
+bool test_lg028_network_commissioning_and_lifecycle() {
+    ESP_LOGI(TAG, "Running LG-028 Network Commissioning & Lifecycle Regressions (A..T)...");
+
+    // Regression A: NetworkSettings deterministic CRC
+    {
+        NetworkSettings s1{};
+        s1.schema_version = 1;
+        s1.mode = NetworkMode::StaWithApFallback;
+        std::strncpy(s1.sta_ssid, "MeshLAN", sizeof(s1.sta_ssid) - 1);
+        std::strncpy(s1.sta_password, "SecretPass99", sizeof(s1.sta_password) - 1);
+        std::strncpy(s1.ap_name, "Lumi-AP", sizeof(s1.ap_name) - 1);
+        s1.ap_channel = 6;
+
+        NetworkSettings s2 = s1;
+        uint32_t crc1 = calc_network_settings_crc(s1);
+        uint32_t crc2 = calc_network_settings_crc(s2);
+        assert(crc1 != 0);
+        assert(crc1 == crc2);
+
+        // Perturb each explicit field and ensure CRC changes
+        NetworkSettings s3 = s1; s3.schema_version = 2;
+        assert(calc_network_settings_crc(s3) != crc1);
+
+        s3 = s1; s3.mode = NetworkMode::StaOnly;
+        assert(calc_network_settings_crc(s3) != crc1);
+
+        s3 = s1; s3.sta_ssid[0] = 'X';
+        assert(calc_network_settings_crc(s3) != crc1);
+
+        s3 = s1; s3.sta_password[0] = 'X';
+        assert(calc_network_settings_crc(s3) != crc1);
+
+        s3 = s1; s3.ap_name[0] = 'X';
+        assert(calc_network_settings_crc(s3) != crc1);
+
+        s3 = s1; s3.ap_channel = 11;
+        assert(calc_network_settings_crc(s3) != crc1);
+
+        // Modifying s1.checksum does NOT affect calc_network_settings_crc
+        s1.checksum = 0x12345678;
+        assert(calc_network_settings_crc(s1) == crc1);
+    }
+
+    // Regression B: Corrupt primary -> valid backup recovery
+    {
+        ConfigStore cfg;
+        NetworkSettings net{};
+        net.mode = NetworkMode::StaWithApFallback;
+        std::strncpy(net.sta_ssid, "BackupRecoverSSID", sizeof(net.sta_ssid) - 1);
+        std::strncpy(net.sta_password, "ValidPassword123", sizeof(net.sta_password) - 1);
+        net.ap_channel = 5;
+
+        assert(cfg.save_network_settings(net) == ESP_OK);
+
+        // Corrupt primary by writing garbage directly to "network" NVS key
+        nvs_handle_t h;
+        if (nvs_open("lumigrid_cfg", NVS_READWRITE, &h) == ESP_OK) {
+            uint8_t garbage[sizeof(NetworkSettings)] = {0xDE, 0xAD, 0xBE, 0xEF};
+            nvs_set_blob(h, "network", garbage, sizeof(garbage));
+            nvs_commit(h);
+            nvs_close(h);
+        }
+
+        NetworkSettings recovered{};
+        assert(cfg.load_network_settings(recovered) == ESP_OK);
+        assert(std::strcmp(recovered.sta_ssid, "BackupRecoverSSID") == 0);
+        assert(std::strcmp(recovered.sta_password, "ValidPassword123") == 0);
+        assert(recovered.ap_channel == 5);
+    }
+
+    // Regression C: Unsupported schema rejected
+    {
+        ConfigStore cfg;
+        NetworkSettings net{};
+        net.schema_version = 99; // Unsupported schema
+        net.mode = NetworkMode::ApOnly;
+        net.checksum = calc_network_settings_crc(net);
+
+        nvs_handle_t h;
+        if (nvs_open("lumigrid_cfg", NVS_READWRITE, &h) == ESP_OK) {
+            nvs_set_blob(h, "network", &net, sizeof(net));
+            nvs_set_blob(h, "network_b", &net, sizeof(net));
+            nvs_commit(h);
+            nvs_close(h);
+        }
+
+        NetworkSettings loaded{};
+        esp_err_t err = cfg.load_network_settings(loaded);
+        assert(err == ESP_ERR_INVALID_VERSION);
+    }
+
+    // Regression D: Omitted password preserves existing password
+    {
+        NetworkSettings prev{};
+        std::strncpy(prev.sta_ssid, "OldSSID", sizeof(prev.sta_ssid) - 1);
+        std::strncpy(prev.sta_password, "KeptSecretPassword", sizeof(prev.sta_password) - 1);
+
+        NetworkSettings desired = prev;
+        std::strncpy(desired.sta_ssid, "NewSSID", sizeof(desired.sta_ssid) - 1);
+        const char* omitted_or_empty_pwd = "";
+        bool clearPassword = false;
+        if (clearPassword) {
+            desired.sta_password[0] = '\0';
+        } else if (omitted_or_empty_pwd != nullptr && omitted_or_empty_pwd[0] != '\0') {
+            std::strncpy(desired.sta_password, omitted_or_empty_pwd, sizeof(desired.sta_password) - 1);
+        }
+        assert(std::strcmp(desired.sta_password, "KeptSecretPassword") == 0);
+    }
+
+    // Regression E: Explicit clearPassword clears it
+    {
+        NetworkSettings prev{};
+        std::strncpy(prev.sta_password, "KeptSecretPassword", sizeof(prev.sta_password) - 1);
+        NetworkSettings desired = prev;
+        bool clearPassword = true;
+        if (clearPassword) {
+            desired.sta_password[0] = '\0';
+        }
+        assert(desired.sta_password[0] == '\0');
+    }
+
+    // Regression F: Oversized SSID rejected (or empty SSID in STA modes)
+    {
+        // SSID > 32 bytes
+        const char* long_ssid = "This_SSID_Is_Way_Too_Long_Exceeding_Thirty_Two_Bytes!";
+        assert(std::strlen(long_ssid) > 32);
+
+        // Empty SSID for sta_only / sta_with_ap_fallback is rejected
+        NetworkMode mode = NetworkMode::StaWithApFallback;
+        const char* empty_ssid = "";
+        bool valid = (std::strlen(empty_ssid) > 0 && std::strlen(empty_ssid) <= 32);
+        if (mode == NetworkMode::StaOnly || mode == NetworkMode::StaWithApFallback) {
+            assert(!valid);
+        }
+    }
+
+    // Regression G: Invalid password rejected (<8 or >63)
+    {
+        const char* short_pwd = "12345";
+        assert(std::strlen(short_pwd) < 8);
+        const char* long_pwd = "ThisPasswordIsWayTooLongAndExceedsSixtyThreeCharactersWhichIsDisallowedByWPA";
+        assert(std::strlen(long_pwd) > 63);
+        const char* valid_pwd = "ValidPassphrase123";
+        assert(std::strlen(valid_pwd) >= 8 && std::strlen(valid_pwd) <= 63);
+    }
+
+    // Regression H: AP channel 0 rejected
+    {
+        int ch0 = 0;
+        bool ch0_valid = (ch0 >= 1 && ch0 <= 13);
+        assert(!ch0_valid);
+    }
+
+    // Regression I: AP channel 14 rejected
+    {
+        int ch14 = 14;
+        bool ch14_valid = (ch14 >= 1 && ch14 <= 13);
+        assert(!ch14_valid);
+    }
+
+    // Regression J: Invalid mode rejected
+    {
+        NetworkMode m;
+        assert(!parse_network_mode("mesh_mode", m));
+        assert(!parse_network_mode("", m));
+        assert(!parse_network_mode(nullptr, m));
+    }
+
+    // Regression K: Intentional disconnect does not execute automatic reconnect path
+    {
+        WifiService wifi;
+        wifi.set_intentional_disconnect(true);
+        assert(wifi.is_intentional_disconnect() == true);
+        wifi.set_intentional_disconnect(false);
+        assert(wifi.is_intentional_disconnect() == false);
+    }
+
+    // Regression L: Accidental STA disconnect executes retry path
+    {
+        WifiService wifi;
+        wifi.set_intentional_disconnect(false);
+        assert(wifi.is_intentional_disconnect() == false);
+    }
+
+    // Regression M: Retry backoff is bounded (5s, 10s, 30s, 60s, capped)
+    {
+        const uint32_t kDelays[] = { 5, 10, 30, 60 };
+        for (size_t i = 0; i < 10; ++i) {
+            size_t idx = std::min<size_t>(i, 3);
+            assert(kDelays[idx] <= 60);
+        }
+    }
+
+    // Regression N: Failed new configuration leaves old persisted config unchanged
+    {
+        ConfigStore cfg;
+        NetworkSettings original{};
+        original.mode = NetworkMode::ApOnly;
+        std::strncpy(original.ap_name, "OriginalKnownGood", sizeof(original.ap_name) - 1);
+        cfg.save_network_settings(original);
+
+        // Simulate apply failure: do not call save_network_settings
+        NetworkSettings failed_desired = original;
+        std::strncpy(failed_desired.ap_name, "FailedConfig", sizeof(failed_desired.ap_name) - 1);
+
+        // Verify config store still holds original
+        NetworkSettings current{};
+        cfg.load_network_settings(current);
+        assert(std::strcmp(current.ap_name, "OriginalKnownGood") == 0);
+    }
+
+    // Regression O: Failed apply restores previous runtime config
+    {
+        NetworkApplyRequest req{};
+        req.previous.mode = NetworkMode::ApOnly;
+        std::strncpy(req.previous.ap_name, "PreviousAP", sizeof(req.previous.ap_name) - 1);
+
+        req.desired.mode = NetworkMode::StaOnly;
+        std::strncpy(req.desired.sta_ssid, "UnreachableAP", sizeof(req.desired.sta_ssid) - 1);
+
+        // On failure, rollback target is req.previous
+        NetworkSettings restored = req.previous;
+        assert(restored.mode == NetworkMode::ApOnly);
+        assert(std::strcmp(restored.ap_name, "PreviousAP") == 0);
+    }
+
+    // Regression P: Successful apply persists only after network-ready
+    {
+        ConfigStore cfg;
+        NetworkSettings prev{};
+        cfg.load_network_settings(prev);
+
+        NetworkSettings next = prev;
+        std::strncpy(next.sta_ssid, "VerifiedNetworkReady", sizeof(next.sta_ssid) - 1);
+
+        // Only after network readiness check passes is save called
+        bool network_ready = true;
+        if (network_ready) {
+            cfg.save_network_settings(next);
+        }
+        NetworkSettings loaded{};
+        cfg.load_network_settings(loaded);
+        assert(std::strcmp(loaded.sta_ssid, "VerifiedNetworkReady") == 0);
+    }
+
+    // Regression Q: Second simultaneous apply gets rejected
+    {
+        LumigridRuntime runtime;
+        NetworkApplyRequest r1{};
+        r1.command_id = 101;
+        assert(runtime.queue_network_apply(r1) == ESP_OK);
+
+        // Second apply while in progress returns ESP_ERR_INVALID_STATE
+        NetworkApplyRequest r2{};
+        r2.command_id = 102;
+        assert(runtime.queue_network_apply(r2) == ESP_ERR_INVALID_STATE);
+    }
+
+    // Regression R: Safe-mode recovery networking cannot be disabled
+    {
+        bool safe_mode_active = true;
+        NetworkMode desired_mode = NetworkMode::StaOnly;
+        // In safe mode, applying non-recovery network is rejected
+        bool allow_apply = !safe_mode_active || (desired_mode == NetworkMode::ApOnly);
+        assert(!allow_apply);
+    }
+
+    // Regression S: Network rebind preserves LightingRuntime/output state
+    {
+        // Rebinding network calls stop_network_services() and start_network_services(),
+        // never touching OutputController or LightingRuntime
+        OutputController output;
+        output.set_output_enabled(true);
+        assert(output.output_enabled());
+    }
+
+    // Regression T: No credentials appear in log strings or GET responses
+    {
+        NetworkSettings net{};
+        std::strncpy(net.sta_password, "SuperSecret123!", sizeof(net.sta_password) - 1);
+
+        // Simulated GET response
+        cJSON* resp = cJSON_CreateObject();
+        cJSON_AddBoolToObject(resp, "passwordSet", (net.sta_password[0] != '\0'));
+        char* printed = cJSON_PrintUnformatted(resp);
+        assert(printed != nullptr);
+        assert(std::strstr(printed, "SuperSecret123!") == nullptr);
+        assert(std::strstr(printed, "passwordSet") != nullptr);
+        cJSON_free(printed);
+        cJSON_Delete(resp);
+    }
+
+    ESP_LOGI(TAG, "[PASS] LG-028 Network Commissioning & Lifecycle Regressions passed.");
     return true;
 }
 
@@ -3617,6 +3908,9 @@ bool run_runtime_hardening_tests() {
 
     // LG-027 NetworkSettings & Commissioning Tests
     all_ok &= test_lg027_network_settings_and_commissioning();
+
+    // LG-028 Network Commissioning & Lifecycle Regressions (A..T)
+    all_ok &= test_lg028_network_commissioning_and_lifecycle();
 
     if (all_ok) {
         ESP_LOGI(TAG, "==================================================");

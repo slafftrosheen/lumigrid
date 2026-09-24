@@ -1,6 +1,6 @@
 # LumiGrid Runtime Certification Status
 
-> **Target Base Commit**: `90e7644bd943dfe285d9e8ff69effc9f843f51a1`
+> **Target Base Commit**: `1e64f4b349150028f28c45d3464d1b904e09bfe9`
 > **Date**: September 2026
 > **Scope**: Certification Hardening, Lifecycle Integrity, Concurrency Safety, and Verification Status.
 > **Certification Stage**: Pre-Hardware Verification (Architecture & Simulation Complete). Full certification is **NOT** claimed until physical hardware milestones are completed.
@@ -35,6 +35,16 @@
 | **Transport** | NodeSync protocol v4 (60-byte packed frame): leader-authoritative cues, remote BPM, clock sync | `[PASS]` | Compile Verified, Unit Test |
 | **Transport** | Follower local playback suppression and 409 `sync_follower_read_only` guard | `[PASS]` | Compile Verified, Unit Test |
 | **Parity** | Manifest schema 2: separation of playback parity (`playbackHash`) from optional schedule parity | `[PASS]` | Compile Verified, Unit Test |
+| **Network** | Deterministic CRC calculation: field-by-field hashing in defined order eliminating padding artifacts | `[PASS]` | Compile Verified, Unit Test |
+| **Network** | Dual-slot NVS storage (`network`/`network_b`) with CRC verification and self-healing backup recovery | `[PASS]` | Compile Verified, Unit Test |
+| **Network** | Strict input validation: SSID (1..32), WPA (8..63/open), channel (1..13, reject 14), mode, and types | `[PASS]` | Compile Verified, Unit Test |
+| **Network** | Asynchronous network apply lifecycle via `queue_network_apply` with 409 concurrency lock | `[PASS]` | Compile Verified, Unit Test |
+| **Network** | Transactional rollback: failed apply restores previous configuration without overwriting NVS | `[PASS]` | Compile Verified, Unit Test |
+| **Network** | Bounded service rebind (MQTT, NodeSync, sACN, Art-Net, mDNS, API) with zero lighting blackout | `[PASS]` | Compile Verified, Unit Test |
+| **Network** | Intentional vs accidental disconnect separation: `intentional_disconnect_` prevents reconnect loops | `[PASS]` | Compile Verified, Unit Test |
+| **Network** | `StaWithApFallback` bounded backoff retry (`5s -> 10s -> 30s -> 60s`) while keeping recovery AP active | `[PASS]` | Compile Verified, Unit Test |
+| **Network** | Safe-mode recovery invariant: non-recovery network apply rejected with `safe_mode_network_locked` | `[PASS]` | Compile Verified, Unit Test |
+| **Security** | Write-only credentials: passwords never logged and never exposed over GET APIs (`passwordSet: true` only) | `[PASS]` | Compile Verified, Unit Test |
 
 ---
 
@@ -62,6 +72,18 @@
 - **Single Explicit Transport Coordinator**: `ShowTransportCoordinator` models explicit Scene, Timeline, and Cue List playback, eliminating hidden competing playback sources.
 - **NodeSync Protocol v4**: Transmits packed 60-byte UDP packets with leader-authoritative cue lists, random progression, hold/fade duration, and manual crossfade progress.
 - **Follower Guard**: Active followers reject direct playback activations with HTTP 409 `sync_follower_read_only` while permitting show asset editing.
+
+### 2.5 Network Commissioning & Live Network Lifecycle (LG-028)
+- **Deterministic Checksum**: `calc_network_settings_crc()` computes CRC32 by feeding explicit fields in fixed order (`schema_version`, `mode`, `sta_ssid`, `sta_password`, `ap_name`, `ap_channel`) into `esp_rom_crc32_le()`, preventing compiler padding and checksum fields from causing false corruption detections.
+- **Dual-Slot Persistence with Self-Healing**: `ConfigStore` reads primary slot `"network"` with strict `schema_version == 1` enforcement. Upon CRC failure or version mismatch, it falls back to `"network_b"` and heals the primary slot automatically.
+- **Strict Input Validation**: Endpoints enforce RFC/Wi-Fi constraints: SSIDs must be 1..32 bytes (required for STA modes), passwords 8..63 bytes (or 0 for open networks), AP channels strictly 1..13 (channel 14 rejected with 400 `invalid_ap_channel`), and strict JSON types.
+- **Asynchronous Apply Lifecycle**: `PUT /api/v1/network/config` validates input, journals command ID, enqueues request via `queue_network_apply()`, and responds with `202 Accepted` (`{"accepted":true,"commandId":N,"applyPending":true}`). Concurrent apply requests return `409 Conflict`.
+- **Transactional Rollback**: The runtime-owned `net_apply_worker` holds both previous and desired settings. If the desired network cannot become ready within the timeout, it restores previous runtime settings without modifying persisted NVS. Configuration is persisted only upon verified network readiness.
+- **Zero Blackout Network Service Rebind**: When switching networks, network-dependent services (MQTT, NodeSync, sACN, Art-Net, mDNS, API) are stopped and rebound sequentially. `LightingRuntime`, `OutputController`, DMX routing, and active hardware outputs remain uninterrupted throughout.
+- **Intentional Disconnect Handling**: `WifiService` maintains `intentional_disconnect_` (`std::atomic<bool>`) so administrative reconfigurations do not trigger the automatic reconnect retry loop.
+- **StaWithApFallback Lifecycle**: If STA fails to connect under `StaWithApFallback`, the recovery AP is activated for operator access, and a FreeRTOS timer performs bounded exponential backoff retries (`5s -> 10s -> 30s -> 60s -> capped at 60s`) until STA connects.
+- **Safe-Mode Recovery Guard**: When `safe_mode_` is active, non-recovery network reconfigurations are rejected with `400 safe_mode_network_locked`.
+- **Write-Only Credential Security**: Passwords are never logged and never exposed in GET responses; the API exposes only `passwordSet: true`.
 
 ---
 

@@ -430,3 +430,39 @@ not greater than the firmware factory-test maximum.
 Connect to `GET /ws` with the WebSocket protocol. The node broadcasts factory
 status JSON whenever its state changes. Clients should treat it as read-only and
 use the HTTP command endpoints for all writes.
+
+## Network Commissioning & Lifecycle (LG-028)
+
+The node provides an operator-grade commissioning path that allows moving from Factory/Recovery SoftAP to the local LAN without rebooting the lighting runtime, losing active output, exposing passwords, or risking unreachability from a mistyped credential.
+
+### Network Modes
+
+1. **`ap_only`**: Standalone Access Point mode. Node hosts a SoftAP (default `192.168.4.1`) and does not connect to a station LAN.
+2. **`sta_only`**: Station-only mode. Node connects to the configured Wi-Fi network. SoftAP is disabled. If connection fails, rollback occurs to the previous configuration.
+3. **`sta_with_ap_fallback`**: Station with Recovery AP fallback. Node attempts to join the configured Wi-Fi LAN. If STA connection fails after configured retries, the node automatically spins up a Recovery SoftAP (`192.168.4.1`) in AP+STA mode so operators can reconnect and remediate credentials, while continuing background reconnect attempts with bounded backoff (5s, 10s, 30s, 60s max).
+
+### Credentials & Security Invariants
+
+- **Write-Only Passwords**: Stored Wi-Fi passwords are never returned in `GET /api/v1/network/config`. Responses contain only `"passwordSet": true`.
+- **Zero Plaintext Logging**: Credentials are never printed in diagnostic logs, serial console messages, or audit trails.
+- **Preservation by Default**: Submitting a blank password field preserves existing credentials. To explicitly clear credentials for an open network, clients must set `"clearPassword": true`.
+- **Safe-Mode Locked**: When the node is in Safe/Recovery mode, network configuration is locked (`400 {"error":"safe_mode_network_locked"}`) to guarantee physical recovery access remains available.
+
+### Asynchronous Lifecycle & Sockets Rebind
+
+Reconfiguring Wi-Fi is an asynchronous runtime-owned operation:
+1. `PUT /api/v1/network/config` strictly validates parameters (`ssid`, `password`, `apChannel` 1..13, `mode`).
+2. If another apply operation is already in flight, returns `409 Conflict` (`{"error":"network_apply_in_progress"}`).
+3. Returns `202 Accepted` (`{"accepted":true,"commandId":<id>,"applyPending":true}`) and allows the HTTP response to cleanly escape the socket before reconfiguration begins.
+4. Runtime network transition shuts down network-dependent listeners (MQTT, NodeSync, sACN, Art-Net, mDNS, HTTP/API) while keeping `LightingRuntime`, `OutputController`, and active LED output running without interruption (zero blackout).
+5. Wi-Fi reconfigures. Once network readiness is confirmed, network services are rebound.
+6. The new configuration is persisted to NVS **only after** successful application.
+7. **Transactional Rollback**: If the new network fails to achieve readiness, the runtime restores the previous configuration (or stays in recovery AP for `sta_with_ap_fallback`), leaves the previously known-good NVS configuration intact, and marks the command failed.
+
+### Endpoints
+
+| Method | Path | Auth Role | Description |
+| --- | --- | --- | --- |
+| `GET` | `/api/v1/network/config` | Operator | Returns current network configuration (`mode`, `ssid`, `passwordSet`, `apName`, `apChannel`). Never returns password. |
+| `PUT` | `/api/v1/network/config` | Admin | Asynchronously queues a network configuration apply request. Returns `202 Accepted`. |
+| `GET` | `/api/v1/network/status` | Operator | Returns runtime network telemetry (`state`, `mode`, `staConnected`, `staIp`, `apActive`, `applyState`, `lastApplyError`, `persistedMatchesRuntime`). |

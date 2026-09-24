@@ -397,11 +397,12 @@ export function restoreBackup(ip: string, payload: Record<string, unknown>): Pro
 
 export type NetworkMode = 'ap_only' | 'sta_only' | 'sta_with_ap_fallback';
 
+export type NetworkApplyState = 'idle' | 'applying' | 'waiting_for_network' | 'rolling_back' | 'failed';
+
 export interface NetworkConfigWire {
   mode: NetworkMode;
   ssid: string;
   passwordSet: boolean;
-  apEnabled: boolean;
   apName?: string;
   apChannel?: number;
 }
@@ -411,21 +412,25 @@ export interface NetworkConfigUpdate {
   ssid?: string;
   password?: string;
   clearPassword?: boolean;
-  apEnabled?: boolean;
   apName?: string;
   apChannel?: number;
 }
 
 export interface NetworkRuntimeStatus {
-  state: string;
+  state: string; // 'connected' | 'connecting' | 'fallback_ap' | 'ap_active' | 'idle' | 'failed'
   mode: NetworkMode;
   staConnected: boolean;
-  apActive: boolean;
   staSsid: string;
   staRssi: number;
   staIp: string;
+  apActive: boolean;
   apIp: string;
   retryCount: number;
+  applyState: NetworkApplyState;
+  pendingCommandId: number | null;
+  lastApplyError: string | null;
+  lastDisconnectReason: number;
+  persistedMatchesRuntime: boolean;
 }
 
 export function getNetworkConfig(ip: string): Promise<NetworkConfigWire> {
@@ -435,8 +440,8 @@ export function getNetworkConfig(ip: string): Promise<NetworkConfigWire> {
 export function saveNetworkConfig(
   ip: string,
   update: NetworkConfigUpdate
-): Promise<{ saved: boolean; accepted: boolean; commandId?: number }> {
-  return apiJson<{ saved: boolean; accepted: boolean; commandId?: number }>(ip, '/api/v1/network/config', {
+): Promise<{ accepted: boolean; commandId?: number; applyPending: boolean }> {
+  return apiJson<{ accepted: boolean; commandId?: number; applyPending: boolean }>(ip, '/api/v1/network/config', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(update),
@@ -446,4 +451,5 @@ export function saveNetworkConfig(
 export function getNetworkStatus(ip: string): Promise<NetworkRuntimeStatus> {
   return apiJson<NetworkRuntimeStatus>(ip, '/api/v1/network/status');
 }
+
 

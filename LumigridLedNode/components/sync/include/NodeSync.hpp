@@ -102,9 +102,45 @@ public:
     void set_remote_transport_callback(RemoteTransportCallback callback) {
         remote_transport_callback_ = std::move(callback);
     }
+    enum class PacketType : uint8_t {
+        Heartbeat = 1,
+        Acknowledgement = 2,
+    };
+
+    // Phase 6: Canonical 52-byte packed SyncPacket v4
+    struct __attribute__((packed)) SyncPacket {
+        uint32_t magic;
+        uint8_t  version;
+        PacketType type;
+
+        uint32_t sequence;
+
+        uint8_t  transport;       // ShowTransportMode
+        uint8_t  active_scene;
+        uint16_t bpm;
+
+        uint8_t  cue_list;
+        uint8_t  cue_index;
+        uint8_t  cue_next;
+        uint8_t  cue_state;
+
+        uint32_t cue_generation;
+        uint32_t cue_elapsed_ms;
+        uint16_t manual_fade_q15;
+
+        uint8_t  flags;
+        uint8_t  reserved;
+
+        uint64_t global_clock_ms;
+        uint32_t sent_monotonic_ms;
+
+        uint8_t  sender_mac[6];
+        uint32_t token;
+    };
+
+    static_assert(sizeof(SyncPacket) == 52, "SyncPacket must be 52 bytes");
 
 private:
-    struct SyncPacket;
 
     static void master_task_entry(void* arg);
     static void worker_task_entry(void* arg);
@@ -173,44 +209,6 @@ private:
     static constexpr uint8_t kPacketVersion = 4;
     static constexpr uint32_t kPeerTimeoutMs = 3000;
     static constexpr uint32_t kAutoElectionBaseMs = 800;
-
-    enum class PacketType : uint8_t {
-        Heartbeat = 1,
-        Acknowledgement = 2,
-    };
-
-    // Phase 6: Canonical 52-byte packed SyncPacket v4
-    struct __attribute__((packed)) SyncPacket {
-        uint32_t magic;
-        uint8_t  version;
-        PacketType type;
-
-        uint32_t sequence;
-
-        uint8_t  transport;       // ShowTransportMode
-        uint8_t  active_scene;
-        uint16_t bpm;
-
-        uint8_t  cue_list;
-        uint8_t  cue_index;
-        uint8_t  cue_next;
-        uint8_t  cue_state;
-
-        uint32_t cue_generation;
-        uint32_t cue_elapsed_ms;
-        uint16_t manual_fade_q15;
-
-        uint8_t  flags;
-        uint8_t  reserved;
-
-        uint64_t global_clock_ms;
-        uint32_t sent_monotonic_ms;
-
-        uint8_t  sender_mac[6];
-        uint32_t token;
-    };
-
-    static_assert(sizeof(SyncPacket) == 52, "SyncPacket must be 52 bytes");
 };
 
 } // namespace lg

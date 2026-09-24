@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import OperatorDialog from '$lib/components/dashboard/OperatorDialog.svelte';
+  import NetworkConfigCard from '$lib/components/dashboard/NetworkConfigCard.svelte';
   import {
     getSelectedNodeIp,
     setSelectedNodeIp,
@@ -748,6 +749,15 @@
         </div>
       {/if}
     </section>
+
+    <!-- ── NETWORK CONFIGURATION & RECOVERY AP ───────────────────────────────── -->
+    <NetworkConfigCard
+      {nodeIp}
+      {isAdmin}
+      onNetworkChanged={() => {
+        reconnectNode();
+      }}
+    />
   {/if}
 </div>
 

@@ -6,7 +6,9 @@
 #include "CommandReceipt.hpp"
 #include "JobManager.hpp"
 #include "NodeIdentity.hpp"
+#include "NetworkSettings.hpp"
 #include <atomic>
+#include <functional>
 
 struct cJSON;
 
@@ -153,6 +155,18 @@ public:
         return config_apply_callback_;
     }
 
+    using NetworkApplyQueueFunc = std::function<esp_err_t(const NetworkApplyRequest&)>;
+    using NetworkApplyStatusFunc = std::function<void(NetworkApplyState& state, uint32_t& cmd_id, const char*& err_str)>;
+    using SafeModeCheckFunc = std::function<bool()>;
+
+    void set_network_apply_handler(NetworkApplyQueueFunc queue_func,
+                                   NetworkApplyStatusFunc status_func,
+                                   SafeModeCheckFunc safe_mode_func) {
+        network_apply_queue_ = std::move(queue_func);
+        network_apply_status_ = std::move(status_func);
+        safe_mode_check_ = std::move(safe_mode_func);
+    }
+
     void notify_status_async();
 
     static void ws_broadcast_work(void* arg);
@@ -185,6 +199,9 @@ public:
     JobManager job_manager_{};
     std::atomic<uint32_t> ws_seq_{1};
     NodeIdentity identity_{};
+    NetworkApplyQueueFunc network_apply_queue_{};
+    NetworkApplyStatusFunc network_apply_status_{};
+    SafeModeCheckFunc safe_mode_check_{};
 };
 
 } // namespace lg

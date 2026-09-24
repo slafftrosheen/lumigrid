@@ -131,8 +131,18 @@ public:
     DmxRouter& dmx_router() { return dmx_router_; }
     ConfigStore& config() { return config_; }
 
+    esp_err_t queue_network_apply(const NetworkApplyRequest& request);
+    NetworkApplyState network_apply_state() const { return apply_state_.load(); }
+    uint32_t pending_apply_command_id() const { return pending_apply_command_id_.load(); }
+    const char* last_apply_error() const { return last_apply_error_; }
+    bool is_network_apply_in_progress() const { return apply_in_progress_.load(); }
+
 private:
     static void recovery_task(void* arg);
+    static void net_apply_worker(void* arg);
+    void execute_network_apply(const NetworkApplyRequest& req);
+    void stop_network_services();
+    void start_network_services();
     void rollback_services(StartupStage failed_stage, esp_err_t error);
 
     OutputController output_;
@@ -181,6 +191,13 @@ private:
     bool configuration_valid_ = true;
     uint32_t configuration_error_count_ = 0;
     char configuration_first_error_[128] = {0};
+
+    QueueHandle_t net_apply_queue_ = nullptr;
+    TaskHandle_t net_apply_task_ = nullptr;
+    std::atomic<bool> apply_in_progress_{false};
+    std::atomic<NetworkApplyState> apply_state_{NetworkApplyState::Idle};
+    std::atomic<uint32_t> pending_apply_command_id_{0};
+    const char* last_apply_error_ = nullptr;
 };
 
 } // namespace lg

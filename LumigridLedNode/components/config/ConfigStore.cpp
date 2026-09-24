@@ -1450,6 +1450,10 @@ esp_err_t ConfigStore::load_network_settings(NetworkSettings& settings) {
         if (err == ESP_OK && len == sizeof(NetworkSettings)) {
             err = nvs_get_blob(handle_, k, &out, &len);
             if (err == ESP_OK) {
+                if (out.schema_version != 1) {
+                    ESP_LOGW(TAG, "NetworkSettings %s unsupported schema %u", k, out.schema_version);
+                    return ESP_ERR_INVALID_VERSION;
+                }
                 if (out.checksum != calc_network_settings_crc(out)) {
                     ESP_LOGW(TAG, "NetworkSettings %s CRC mismatch", k);
                     return ESP_ERR_NVS_INVALID_STATE;
@@ -1482,7 +1486,6 @@ esp_err_t ConfigStore::load_network_settings(NetworkSettings& settings) {
     settings.mode = NetworkMode::ApOnly;
     settings.sta_ssid[0] = '\0';
     settings.sta_password[0] = '\0';
-    settings.ap_enabled = true;
     settings.ap_name[0] = '\0';
     settings.ap_channel = 1;
     settings.checksum = calc_network_settings_crc(settings);
