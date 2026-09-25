@@ -1,5 +1,5 @@
 idf_component_register(
     SRCS "ConfigStore.cpp" "NodeIdentity.cpp"
     INCLUDE_DIRS "include"
-    REQUIRES nvs_flash esp_rom board driver
+    REQUIRES nvs_flash esp_rom board driver esp_app_format
 )

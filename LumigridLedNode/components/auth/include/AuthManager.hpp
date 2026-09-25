@@ -33,7 +33,14 @@ public:
     // Check if initial admin has been provisioned
     bool is_provisioned() const;
 
-    // Bootstrap initial admin credential (allowed only once when !provisioned)
+    // Commissioning state ownership (Section 0)
+    void set_commissioning_state(CommissioningState state) { commissioning_state_ = state; }
+    CommissioningState commissioning_state() const { return commissioning_state_; }
+    bool is_bootstrap_allowed() const {
+        return !is_provisioned() && (commissioning_state_ == CommissioningState::FactoryFirstBoot || commissioning_state_ == CommissioningState::PhysicalRecovery);
+    }
+
+    // Bootstrap initial admin credential (allowed only once when !provisioned && is_bootstrap_allowed())
     esp_err_t bootstrap(const char* admin_token);
 
     // Authenticate a long-lived credential and open a new session
@@ -86,6 +93,7 @@ private:
 
     AuthSession sessions_[kMaxSessions] = {};
     WsTicket ws_tickets_[kMaxWsTickets] = {};
+    CommissioningState commissioning_state_{CommissioningState::None};
 
     // Rate limiter state
     uint32_t failed_attempts_ = 0;

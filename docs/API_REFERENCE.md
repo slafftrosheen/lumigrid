@@ -105,6 +105,7 @@ Errors use this shape:
 | `GET` | `/api/v1/show/status` | Read unified Show Transport runtime status and mode. |
 | `DELETE` | `/api/v1/scene-motion` | Delete motion tracks for a scene preset (via `?index=N`). |
 | `GET` | `/api/v1/sync` | Read sync role, clock health, transport, master address, and discovered followers. |
+| `GET` | `/api/v1/fleet/nodes` | Read discovered fleet nodes table and self identity via mDNS. |
 | `GET` | `/api/v1/show-manifest` | Read compact CRC32 show manifest, playbackHash, and scheduleHash. |
 | `GET` | `/api/v1/health` | Read system memory, uptime, and telemetry. |
 | `GET` | `/api/v1/logs` | Read recent diagnostic logs. |
@@ -510,3 +511,82 @@ Reconfiguring Wi-Fi is an asynchronous runtime-owned operation:
 | `GET` | `/api/v1/network/config` | Operator | Returns current network configuration (`mode`, `ssid`, `passwordSet`, `apName`, `apChannel`). Never returns password. |
 | `PUT` | `/api/v1/network/config` | Admin | Asynchronously queues a network configuration apply request. Returns `202 Accepted`. |
 | `GET` | `/api/v1/network/status` | Operator | Returns runtime network telemetry (`state`, `mode`, `staConnected`, `staIp`, `apActive`, `applyState`, `lastApplyError`, `persistedMatchesRuntime`). |
+
+## Fleet Discovery, Presence & Immutable Identity (LG-030)
+
+LumiGrid nodes automatically discover peer nodes on the local network via mDNS Zeroconf. The web dashboard connects to a single node, which queries the local subnet and reports the discovered fleet.
+
+### Stable Immutable Hostname & Zeroconf Service
+
+- **Immutable Hostname**: The node mDNS hostname is permanently derived from its factory-assigned MAC address (`lg-<mac>.local`, e.g. `lg-84f703c29110.local`), ensuring stability across operator renames and avoiding collision.
+- **Display Name**: Friendly device names are advertised as the Zeroconf service instance name.
+- **Dedicated Service**: Nodes advertise the product-specific Zeroconf service:
+  ```text
+  _lumigrid._tcp.local.
+  ```
+- **TXT Record Metadata**:
+  - `id`: Immutable node identifier (`lg-84f703c29110`)
+  - `family`: Hardware family (`led-node`)
+  - `model`: Device model (`lg-led-v1`)
+  - `fw`: Firmware version derived authoritatively from `esp_app_get_description()->version`
+  - `hw`: Hardware revision (`A`)
+  - `api`: HTTP API schema version (`1`)
+  - `ws`: WebSocket protocol version (`2`)
+  - `auth`: Node-backed authentication schema version (`1`)
+
+### Presence & Reconciliation Contract
+
+- **Reconciliation Key**: Nodes are uniquely keyed by immutable `NodeIdentity.id`. If a node's IP address changes via DHCP renewal, the existing entry is updated in place without duplicate records.
+- **Self Exclusion**: Querying nodes exclude their own immutable ID from discovered peer lists.
+- **Bounded Table**: Bounded table of 32 nodes max, managed in background worker tasks without blocking HTTP handlers.
+- **Presence Timing**:
+  - **Online**: `age <= 20s`
+  - **Stale**: `20s < age <= 60s`
+  - **Offline / Expired**: `age > 60s` (automatically pruned)
+
+### Bootstrap Trust Boundary Guard
+
+Bootstrap (`POST /api/v1/auth/bootstrap`) requires **both**:
+1. `auth.provisioned == false`
+2. Node is in genuine commissioning/recovery context (`CommissioningState::FactoryFirstBoot` or `CommissioningState::PhysicalRecovery`).
+
+Nodes connected to customer infrastructure STA networks or ordinary LANs return `403 Forbidden` (`{"error": "bootstrap_not_allowed"}`) to ensure remote unauthorized claiming cannot occur.
+
+### Discovery Endpoint
+
+```http
+GET /api/v1/fleet/nodes
+Authorization: Bearer <session-token>
+```
+
+#### Response (200 OK)
+
+```json
+{
+  "self": {
+    "id": "lg-84f703c29110",
+    "name": "Stage Front",
+    "hostname": "lg-84f703c29110",
+    "family": "led-node",
+    "model": "lg-led-v1",
+    "firmware": "1.0.0",
+    "hardwareRevision": "A"
+  },
+  "nodes": [
+    {
+      "id": "lg-001122334455",
+      "name": "Stage Left",
+      "hostname": "lg-001122334455.local",
+      "ip": "192.168.1.101",
+      "port": 80,
+      "family": "led-node",
+      "model": "lg-led-v1",
+      "firmware": "1.0.0",
+      "lastSeenMs": 12345000,
+      "ageMs": 4000,
+      "status": "online"
+    }
+  ]
+}
+```
+

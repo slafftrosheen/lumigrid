@@ -1,0 +1,12 @@
+idf_component_register(
+    SRCS
+        "FleetDiscoveryService.cpp"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        config
+        mdns
+        esp_netif
+        esp_timer
+        freertos
+)

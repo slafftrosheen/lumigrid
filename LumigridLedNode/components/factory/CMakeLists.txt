@@ -25,4 +25,5 @@ idf_component_register(
         show
         network
         auth
+        discovery
 )

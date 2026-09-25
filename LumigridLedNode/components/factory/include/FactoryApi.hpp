@@ -25,6 +25,9 @@ class WifiService;
 namespace auth {
 class AuthManager;
 }
+namespace discovery {
+class FleetDiscoveryService;
+}
 }
 
 namespace lg {
@@ -148,6 +151,9 @@ public:
     auth::AuthManager* auth_manager() { return auth_manager_; }
     const auth::AuthManager* auth_manager() const { return auth_manager_; }
     void set_auth_manager(auth::AuthManager* auth) { auth_manager_ = auth; }
+    discovery::FleetDiscoveryService* fleet_discovery() { return fleet_discovery_; }
+    const discovery::FleetDiscoveryService* fleet_discovery() const { return fleet_discovery_; }
+    void set_fleet_discovery(discovery::FleetDiscoveryService* disc) { fleet_discovery_ = disc; }
 
     using ShowClockProvider = std::function<uint64_t()>;
     void set_show_clock_provider(ShowClockProvider provider) { show_clock_provider_ = std::move(provider); }
@@ -195,6 +201,7 @@ public:
     class ShowTransportCoordinator* show_transport_ = nullptr;
     WifiService* wifi_ = nullptr;
     auth::AuthManager* auth_manager_ = nullptr;
+    discovery::FleetDiscoveryService* fleet_discovery_ = nullptr;
     ShowClockProvider show_clock_provider_{};
     std::function<StartupDiagnostics()> diagnostics_provider_{};
     RuntimeConfigApplyCallback config_apply_callback_{};

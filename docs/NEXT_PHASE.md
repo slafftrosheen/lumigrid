@@ -149,6 +149,17 @@ Firmware
 
 Execute the documented matrix: boot, networking, API, WebSocket, pixel output, PCA9685, DMX, arbitration, limiter, E-stop, watchdog, recovery, backup/restore, OTA, extended burn-in, and multi-node sync bench tests.
 
+### 13. Fleet Discovery, Presence & Immutable Identity (LG-030 Complete)
+
+- Automated mDNS fleet discovery transforming Fleet Devices from a manually maintained IP list into a self-discovering fleet.
+- Mandatory LG-029 security correction: Runtime-owned `CommissioningState` (`None`, `FactoryFirstBoot`, `PhysicalRecovery`). Bootstrap requires `provisioned == false` AND genuine commissioning context; blocked with `403 Forbidden` (`{"error": "bootstrap_not_allowed"}`) on ordinary infrastructure STA.
+- Fixed `esp_err_t-as-boolean` truthiness bugs across endpoints (`load_config(cfg) == ESP_OK`).
+- Dynamic firmware version derived from authoritative ESP-IDF metadata (`esp_app_get_description()->version`).
+- Stable mDNS hostname derived permanently from hardware MAC (`lg-<mac>.local`, e.g. `lg-84f703c29110.local`), uncoupled from mutable display names.
+- Dedicated Zeroconf service `_lumigrid._tcp.local.` advertising bounded TXT metadata (`id`, `family`, `model`, `fw`, `hw`, `api=1`, `ws=2`, `auth=1`).
+- Low-priority background `FleetDiscoveryService` maintaining bounded table of 32 nodes max, 10s query intervals, <=1s timeouts, presence timing (online <=20s, stale 20s..60s, offline >60s), self-exclusion by immutable ID, and automatic DHCP/IP address reconciliation under immutable `id`.
+- Dashboard queries `GET /api/v1/fleet/nodes` on focused node, reconciles discovered peers into `storage.ts`, renders live presence badges, and connects WebSocket strictly to the single focused node.
+
 ## Explicit non-goals for this phase
 
 - No new node families.

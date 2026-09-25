@@ -15,6 +15,12 @@ enum class AuthRole : uint8_t {
     Admin = 2,
 };
 
+enum class CommissioningState : uint8_t {
+    None = 0,
+    FactoryFirstBoot = 1,
+    PhysicalRecovery = 2,
+};
+
 enum class AuthMethod : uint8_t {
     None = 0,
     Session = 1,

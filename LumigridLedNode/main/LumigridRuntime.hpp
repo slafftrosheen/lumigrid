@@ -18,6 +18,7 @@
 #include "FactoryApi.hpp"
 #include "AuthStore.hpp"
 #include "AuthManager.hpp"
+#include "FleetDiscoveryService.hpp"
 #include "esp_err.h"
 #include <atomic>
 
@@ -133,6 +134,7 @@ public:
     DmxRouter& dmx_router() { return dmx_router_; }
     ConfigStore& config() { return config_; }
     auth::AuthManager& auth_manager() { return auth_manager_; }
+    discovery::FleetDiscoveryService& fleet_discovery() { return fleet_discovery_; }
 
     esp_err_t queue_network_apply(const NetworkApplyRequest& request);
     NetworkApplyState network_apply_state() const { return apply_state_.load(); }
@@ -167,11 +169,13 @@ private:
     Scheduler scheduler_;
     NodeSync node_sync_;
     MqttService mqtt_;
+    discovery::FleetDiscoveryService fleet_discovery_;
 
     struct StartedSubsystems {
         bool wifi = false;
         bool api = false;
         bool mdns = false;
+        bool fleet_discovery = false;
         bool artnet = false;
         bool sacn = false;
         bool scheduler = false;

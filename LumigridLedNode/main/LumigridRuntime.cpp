@@ -200,6 +200,22 @@ esp_err_t LumigridRuntime::init() {
         // Migrate legacy credentials into AuthStore if needed (Case A: universal defaults -> unprovisioned; Case B: custom -> migrated)
         auth_manager_.migrate_legacy_tokens(dev_cfg.admin_token, dev_cfg.installer_token, dev_cfg.operator_token);
 
+        if (auth_manager_.is_provisioned()) {
+            auth_manager_.set_commissioning_state(auth::CommissioningState::None);
+        } else {
+            NetworkSettings net_settings{};
+            esp_err_t net_err = config_.load_network_settings(net_settings);
+            bool has_configured_sta = (net_err == ESP_OK && net_settings.mode != NetworkMode::ApOnly && net_settings.sta_ssid[0] != '\0');
+            if (has_configured_sta) {
+                auth_manager_.set_commissioning_state(auth::CommissioningState::None);
+                ESP_LOGW("lumigrid", "Node unprovisioned with configured STA network: bootstrap disabled until physical recovery");
+            } else if (safe_mode_) {
+                auth_manager_.set_commissioning_state(auth::CommissioningState::PhysicalRecovery);
+            } else {
+                auth_manager_.set_commissioning_state(auth::CommissioningState::FactoryFirstBoot);
+            }
+        }
+
         ConfigStore::ConfigValidationResult val_res;
         esp_err_t val_err = config_.validate_config(dev_cfg, &val_res);
         if (val_err != ESP_OK) {
@@ -332,6 +348,10 @@ void LumigridRuntime::rollback_services(StartupStage failed_stage, esp_err_t err
     if (started_subsystems_.mdns) {
         mdns_.stop();
         started_subsystems_.mdns = false;
+    }
+    if (started_subsystems_.fleet_discovery) {
+        fleet_discovery_.stop();
+        started_subsystems_.fleet_discovery = false;
     }
     // NOTE: Wi-Fi and Web API are intentionally NOT stopped during rollback
     // to preserve recovery access and telemetry at 192.168.4.1 even during failures.
@@ -487,6 +507,9 @@ esp_err_t LumigridRuntime::start() {
     esp_err_t err = wifi_.start(
         wifi_cfg,
         [this](WifiState state) {
+            if (state == WifiState::Connected) {
+                auth_manager_.set_commissioning_state(auth::CommissioningState::None);
+            }
             if (state == WifiState::Connected || state == WifiState::ApActive) {
                 // Load with acquire so we see the semaphore written by the creator task
                 SemaphoreHandle_t sem = net_ready_sem_.load(std::memory_order_acquire);
@@ -710,6 +733,10 @@ void LumigridRuntime::stop_network_services() {
         mdns_.stop();
         started_subsystems_.mdns = false;
     }
+    if (started_subsystems_.fleet_discovery) {
+        fleet_discovery_.stop();
+        started_subsystems_.fleet_discovery = false;
+    }
     if (started_subsystems_.api) {
         api_.stop();
         started_subsystems_.api = false;
@@ -751,6 +778,7 @@ void LumigridRuntime::start_network_services() {
         ESP_LOGI("lumigrid", "Starting api.start(80, 8080)...");
         api_.set_wifi(&wifi_);
         api_.set_auth_manager(&auth_manager_);
+        api_.set_fleet_discovery(&fleet_discovery_);
         api_.set_show_clock_provider([this]() { return clock_.now_ms(); });
         esp_err_t err = api_.start(80, 8080, &config_, &lighting_, &scheduler_, &node_sync_, &dmx_router_, &cue_runner_, &show_transport_);
         if (err == ESP_OK) {
@@ -762,9 +790,19 @@ void LumigridRuntime::start_network_services() {
 
     if (!started_subsystems_.mdns) {
         ESP_LOGI("lumigrid", "Starting mdns.start()...");
-        esp_err_t err = mdns_.start(current_cfg.device_name, "LumiGrid Signage", 80);
+        NodeIdentity identity = get_node_identity(current_cfg.device_name);
+        esp_err_t err = mdns_.start(identity.id, identity.name, 80, identity);
         if (err == ESP_OK) {
             started_subsystems_.mdns = true;
+        }
+    }
+
+    if (!started_subsystems_.fleet_discovery) {
+        ESP_LOGI("lumigrid", "Starting fleet_discovery.start()...");
+        NodeIdentity identity = get_node_identity(current_cfg.device_name);
+        esp_err_t err = fleet_discovery_.start(identity);
+        if (err == ESP_OK) {
+            started_subsystems_.fleet_discovery = true;
         }
     }
 
@@ -931,6 +969,9 @@ void LumigridRuntime::execute_network_apply(const NetworkApplyRequest& req) {
     }
 
     esp_err_t err = wifi_.start(wifi_cfg, [this](WifiState state) {
+        if (state == WifiState::Connected) {
+            auth_manager_.set_commissioning_state(auth::CommissioningState::None);
+        }
         if (state == WifiState::Connected || state == WifiState::ApActive ||
             state == WifiState::FallbackAp || state == WifiState::Failed) {
             SemaphoreHandle_t sem = net_ready_sem_.load(std::memory_order_acquire);

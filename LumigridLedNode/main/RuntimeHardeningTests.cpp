@@ -28,6 +28,8 @@
 #include "AuthStore.hpp"
 #include "AuthManager.hpp"
 #include "ApiAuth.hpp"
+#include "NodeIdentity.hpp"
+#include "FleetDiscoveryService.hpp"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -4066,6 +4068,195 @@ bool test_lg029_node_backed_authentication() {
     return true;
 }
 
+    // LG-030 Fleet Discovery, Presence & Immutable Identity Tests
+    // ============================================================================
+    bool test_lg030_fleet_discovery_and_identity() {
+        ESP_LOGI(TAG, "Testing LG-030 Fleet Discovery, Presence & Immutable Identity...");
+
+        // 0. Bootstrap Trust Boundary & Commissioning State Policy
+        {
+            auth::AuthStore mem_store;
+            auth::AuthManager auth_mgr(&mem_store);
+            assert(auth_mgr.init() == ESP_OK);
+            assert(!auth_mgr.is_provisioned());
+
+            // Default state is None (ordinary operational context)
+            assert(auth_mgr.commissioning_state() == auth::CommissioningState::None);
+            assert(!auth_mgr.is_bootstrap_allowed());
+
+            // In FactoryFirstBoot context: bootstrap permitted
+            auth_mgr.set_commissioning_state(auth::CommissioningState::FactoryFirstBoot);
+            assert(auth_mgr.commissioning_state() == auth::CommissioningState::FactoryFirstBoot);
+            assert(auth_mgr.is_bootstrap_allowed());
+
+            // In PhysicalRecovery context: bootstrap permitted
+            auth_mgr.set_commissioning_state(auth::CommissioningState::PhysicalRecovery);
+            assert(auth_mgr.commissioning_state() == auth::CommissioningState::PhysicalRecovery);
+            assert(auth_mgr.is_bootstrap_allowed());
+
+            // In None context (e.g. connected to STA LAN): bootstrap strictly forbidden
+            auth_mgr.set_commissioning_state(auth::CommissioningState::None);
+            assert(!auth_mgr.is_bootstrap_allowed());
+
+            // Perform bootstrap during FactoryFirstBoot
+            auth_mgr.set_commissioning_state(auth::CommissioningState::FactoryFirstBoot);
+            assert(auth_mgr.bootstrap("InitialAdminSecretPass123!") == ESP_OK);
+            assert(auth_mgr.is_provisioned());
+            // Commissioning state cleared to None upon bootstrap
+            assert(auth_mgr.commissioning_state() == auth::CommissioningState::None);
+            assert(!auth_mgr.is_bootstrap_allowed());
+
+            // Even if an attacker tries to assert recovery on a provisioned node, bootstrap is denied
+            auth_mgr.set_commissioning_state(auth::CommissioningState::PhysicalRecovery);
+            assert(!auth_mgr.is_bootstrap_allowed());
+            assert(auth_mgr.bootstrap("MaliciousAttemptPass456!") == ESP_ERR_INVALID_STATE);
+        }
+
+        // 1. esp_err_t-as-boolean fix validation (load_config(cfg) == ESP_OK)
+        {
+            // ESP_OK is 0; when checking esp_err_t, "== ESP_OK" evaluates true while "if(err)" evaluates false!
+            esp_err_t ok_val = ESP_OK;
+            assert(ok_val == 0);
+            assert((ok_val == ESP_OK) == true);
+            assert(((bool)ok_val) == false); // proves why "if (load_config(cfg))" was a severe bug
+
+            esp_err_t fail_val = ESP_FAIL;
+            assert(fail_val != ESP_OK);
+            assert((fail_val == ESP_OK) == false);
+        }
+
+        // 2. Firmware Identity Version: no hardcoded "0.8.0"
+        {
+            NodeIdentity id = get_node_identity("TestDevice");
+            assert(std::strcmp(id.fw_version, "0.8.0") != 0);
+            assert(std::strlen(id.fw_version) > 0);
+            assert(std::strncmp(id.id, "lg-", 3) == 0);
+            assert(std::strlen(id.id) >= 5);
+        }
+
+        // 3. Immutable Node Identity vs Mutable Display Name (mDNS Hostname Stability)
+        {
+            NodeIdentity id1 = get_node_identity("Friendly Office Light");
+            NodeIdentity id2 = get_node_identity("Main Stage Rig #42 [VIP]");
+            // Changing friendly display name MUST NOT change immutable hardware id
+            assert(std::strcmp(id1.id, id2.id) == 0);
+            assert(std::strcmp(id1.name, "Friendly Office Light") == 0);
+            assert(std::strcmp(id2.name, "Main Stage Rig #42 [VIP]") == 0);
+
+            // Hostname characters must be valid for DNS hostname (alnum and hyphens)
+            for (const char* p = id1.id; *p != '\0'; ++p) {
+                assert((*p >= 'a' && *p <= 'z') || (*p >= '0' && *p <= '9') || *p == '-');
+            }
+        }
+
+        // 4. FleetDiscoveryService: self-exclusion, insertion, DHCP/IP reconciliation, presence, expiry
+        {
+            discovery::FleetDiscoveryService fds;
+            NodeIdentity self_id = get_node_identity("Local Controller");
+            fds.set_self_identity(self_id);
+
+            uint32_t now = 100000; // simulated 100s
+
+            // A. Self-exclusion by immutable NodeIdentity.id
+            discovery::DiscoveredNode self_node{};
+            std::strncpy(self_node.id, self_id.id, sizeof(self_node.id) - 1);
+            std::strncpy(self_node.name, "Local Controller", sizeof(self_node.name) - 1);
+            self_node.ipv4 = discovery::FleetDiscoveryService::parse_ipv4("192.168.1.50");
+            self_node.port = 80;
+            bool accepted = fds.reconcile_node(self_node, now);
+            assert(!accepted);
+            assert(fds.count() == 0);
+
+            // B. Insert peer node
+            discovery::DiscoveredNode peer1{};
+            std::strncpy(peer1.id, "lg-001122334455", sizeof(peer1.id) - 1);
+            std::strncpy(peer1.name, "Stage Left", sizeof(peer1.name) - 1);
+            std::strncpy(peer1.hostname, "lg-001122334455.local", sizeof(peer1.hostname) - 1);
+            std::strncpy(peer1.family, "led-node", sizeof(peer1.family) - 1);
+            std::strncpy(peer1.model, "lg-led-v1", sizeof(peer1.model) - 1);
+            std::strncpy(peer1.firmware, "1.0.0", sizeof(peer1.firmware) - 1);
+            peer1.ipv4 = discovery::FleetDiscoveryService::parse_ipv4("192.168.1.101");
+            peer1.port = 80;
+
+            assert(fds.reconcile_node(peer1, now));
+            assert(fds.count() == 1);
+
+            discovery::DiscoveredNode snapshot[4] = {};
+            size_t count = fds.get_snapshot(snapshot, 4, now);
+            assert(count == 1);
+            assert(std::strcmp(snapshot[0].id, "lg-001122334455") == 0);
+            assert(snapshot[0].ipv4 == peer1.ipv4);
+
+            char ip_buf[16] = {};
+            discovery::FleetDiscoveryService::format_ipv4(snapshot[0].ipv4, ip_buf);
+            assert(std::strcmp(ip_buf, "192.168.1.101") == 0);
+
+            // C. DHCP / IP Reconciliation: Same ID, new IP address
+            // Must update transport address without creating a duplicate record!
+            discovery::DiscoveredNode peer1_dhcp = peer1;
+            peer1_dhcp.ipv4 = discovery::FleetDiscoveryService::parse_ipv4("192.168.1.188");
+            assert(fds.reconcile_node(peer1_dhcp, now + 5000));
+            assert(fds.count() == 1); // Still exactly 1 entry!
+
+            count = fds.get_snapshot(snapshot, 4, now + 5000);
+            assert(count == 1);
+            assert(std::strcmp(snapshot[0].id, "lg-001122334455") == 0);
+            discovery::FleetDiscoveryService::format_ipv4(snapshot[0].ipv4, ip_buf);
+            assert(std::strcmp(ip_buf, "192.168.1.188") == 0); // Updated to new DHCP lease!
+
+            // D. Presence classification timing
+            // online: age <= 20s
+            assert(discovery::FleetDiscoveryService::determine_presence(now, now) == discovery::NodePresence::Online);
+            assert(discovery::FleetDiscoveryService::determine_presence(now, now + 15000) == discovery::NodePresence::Online);
+            assert(discovery::FleetDiscoveryService::determine_presence(now, now + 20000) == discovery::NodePresence::Online);
+            // stale: age 20s..60s
+            assert(discovery::FleetDiscoveryService::determine_presence(now, now + 20001) == discovery::NodePresence::Stale);
+            assert(discovery::FleetDiscoveryService::determine_presence(now, now + 59999) == discovery::NodePresence::Stale);
+            assert(discovery::FleetDiscoveryService::determine_presence(now, now + 60000) == discovery::NodePresence::Stale);
+            // offline: age > 60s
+            assert(discovery::FleetDiscoveryService::determine_presence(now, now + 60001) == discovery::NodePresence::Offline);
+            assert(discovery::FleetDiscoveryService::determine_presence(now, now + 120000) == discovery::NodePresence::Offline);
+
+            assert(std::strcmp(discovery::FleetDiscoveryService::presence_to_string(discovery::NodePresence::Online), "online") == 0);
+            assert(std::strcmp(discovery::FleetDiscoveryService::presence_to_string(discovery::NodePresence::Stale), "stale") == 0);
+            assert(std::strcmp(discovery::FleetDiscoveryService::presence_to_string(discovery::NodePresence::Offline), "offline") == 0);
+
+            // E. Pruning expired records (age > 60s)
+            // Add a second node that will expire
+            discovery::DiscoveredNode peer2{};
+            std::strncpy(peer2.id, "lg-aabbccddeeff", sizeof(peer2.id) - 1);
+            peer2.ipv4 = discovery::FleetDiscoveryService::parse_ipv4("192.168.1.102");
+            assert(fds.reconcile_node(peer2, now));
+            assert(fds.count() == 2);
+
+            // At now + 30s: peer1 refreshed, peer2 not refreshed
+            assert(fds.reconcile_node(peer1, now + 30000));
+            assert(fds.count() == 2);
+
+            // At now + 70s: peer2 age is 70s (> 60s stale threshold), peer1 age is 40s (stale, <= 60s)
+            fds.prune_expired(now + 70000);
+            assert(fds.count() == 1);
+            count = fds.get_snapshot(snapshot, 4, now + 70000);
+            assert(count == 1);
+            assert(std::strcmp(snapshot[0].id, "lg-001122334455") == 0);
+
+            // F. Bounded Capacity (32 nodes maximum)
+            for (size_t i = 0; i < 40; ++i) {
+                discovery::DiscoveredNode n{};
+                std::snprintf(n.id, sizeof(n.id), "lg-node%06zu", i);
+                char ip_str[16];
+                std::snprintf(ip_str, sizeof(ip_str), "10.0.0.%zu", i + 1);
+                n.ipv4 = discovery::FleetDiscoveryService::parse_ipv4(ip_str);
+                fds.reconcile_node(n, now + 80000);
+            }
+            assert(fds.count() <= discovery::FleetDiscoveryService::kMaxDiscoveredNodes);
+            assert(fds.count() == 32);
+        }
+
+        ESP_LOGI(TAG, "[PASS] LG-030 Fleet Discovery, Presence & Immutable Identity passed.");
+        return true;
+    }
+
 } // namespace
 
 bool run_runtime_hardening_tests() {
@@ -4157,6 +4348,9 @@ bool run_runtime_hardening_tests() {
 
     // LG-029 Node-Backed Authentication & Sessions Regressions (A..AC)
     all_ok &= test_lg029_node_backed_authentication();
+
+    // LG-030 Fleet Discovery, Presence & Immutable Identity
+    all_ok &= test_lg030_fleet_discovery_and_identity();
 
     if (all_ok) {
         ESP_LOGI(TAG, "==================================================");

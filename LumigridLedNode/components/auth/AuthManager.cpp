@@ -79,6 +79,7 @@ esp_err_t AuthManager::bootstrap(const char* admin_token) {
 
     esp_err_t err = store_->save(cfg);
     if (err == ESP_OK) {
+        commissioning_state_ = CommissioningState::None;
         ESP_LOGI(TAG, "auth_bootstrap_completed: Admin credential provisioned successfully");
     } else {
         ESP_LOGE(TAG, "auth_bootstrap_failed: unable to save auth config: %s", esp_err_to_name(err));

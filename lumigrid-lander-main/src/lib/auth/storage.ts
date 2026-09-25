@@ -109,6 +109,8 @@ export interface NodeRecord {
   address?: string; // Transport route IP / hostname
   family: string;
   model: string;
+  firmware?: string;
+  presence?: 'online' | 'stale' | 'offline';
   lastSeen: number;
   discoverySource: DiscoverySource;
   connection: NodeConnectionStatus;
@@ -120,6 +122,10 @@ export interface SavedNodeInfo {
   name: string;
   lastSeen?: number;
   id?: string;
+  family?: string;
+  model?: string;
+  firmware?: string;
+  presence?: 'online' | 'stale' | 'offline';
 }
 
 const DISCOVERY_PRIORITY: Record<DiscoverySource, number> = {
@@ -211,6 +217,8 @@ export function upsertNodeRecord(record: Partial<NodeRecord> & { id: string }): 
     address: record.address ?? existing?.address,
     family: record.family ?? existing?.family ?? 'led-node',
     model: record.model ?? existing?.model ?? 'lg-led-v1',
+    firmware: record.firmware ?? existing?.firmware,
+    presence: record.presence ?? existing?.presence,
     lastSeen: record.lastSeen ?? Date.now(),
     discoverySource: effectiveSource,
     connection: record.connection ?? existing?.connection ?? 'offline',
@@ -299,6 +307,10 @@ export function getSavedNodes(): SavedNodeInfo[] {
         name: r.name,
         lastSeen: r.lastSeen,
         id: r.id,
+        family: r.family,
+        model: r.model,
+        firmware: r.firmware,
+        presence: r.presence,
       }));
   }
 

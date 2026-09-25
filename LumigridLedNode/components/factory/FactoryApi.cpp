@@ -21,6 +21,7 @@
 #include "DmxRouter.hpp"
 #include "esp_check.h"
 #include "NodeIdentity.hpp"
+#include "FleetDiscoveryService.hpp"
 #include "Capabilities.hpp"
 #include "CueRunner.hpp"
 #include "ChannelConfiguration.hpp"
@@ -536,7 +537,7 @@ esp_err_t get_info(httpd_req_t* request) {
     FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
     DeviceConfig cfg;
     const char* dev_name = nullptr;
-    if (api_ptr->config() && api_ptr->config()->load_config(cfg)) {
+    if (api_ptr->config() && api_ptr->config()->load_config(cfg) == ESP_OK) {
         dev_name = cfg.device_name;
     }
     NodeIdentity id = get_node_identity(dev_name);
@@ -739,9 +740,10 @@ esp_err_t get_logs(httpd_req_t* request) {
 esp_err_t get_auth_status(httpd_req_t* request) {
     auto* auth_mgr = api::get_auth_manager();
     bool prov = auth_mgr ? auth_mgr->is_provisioned() : false;
+    bool allowed = auth_mgr ? auth_mgr->is_bootstrap_allowed() : false;
     cJSON* root = cJSON_CreateObject();
     cJSON_AddBoolToObject(root, "provisioned", prov);
-    cJSON_AddBoolToObject(root, "bootstrapAllowed", !prov);
+    cJSON_AddBoolToObject(root, "bootstrapAllowed", allowed);
     return send_json(request, root, "200 OK");
 }
 
@@ -749,6 +751,9 @@ esp_err_t post_auth_bootstrap(httpd_req_t* request) {
     auto* auth_mgr = api::get_auth_manager();
     if (!auth_mgr || auth_mgr->is_provisioned()) {
         return send_error(request, "400 Bad Request", "already_provisioned");
+    }
+    if (!auth_mgr->is_bootstrap_allowed()) {
+        return send_error(request, "403 Forbidden", "bootstrap_not_allowed");
     }
 
     cJSON* root = nullptr;
@@ -3335,7 +3340,7 @@ esp_err_t get_identity(httpd_req_t* request) {
     FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
     DeviceConfig cfg;
     const char* dev_name = nullptr;
-    if (api_ptr->config() && api_ptr->config()->load_config(cfg)) {
+    if (api_ptr->config() && api_ptr->config()->load_config(cfg) == ESP_OK) {
         dev_name = cfg.device_name;
     }
     NodeIdentity id = get_node_identity(dev_name);
@@ -3346,13 +3351,67 @@ esp_err_t get_identity(httpd_req_t* request) {
     return send_json(request, body);
 }
 
+esp_err_t get_fleet_nodes(httpd_req_t* request) {
+    if (!api::authorize(request, api::ApiRole::Operator)) return ESP_OK;
+
+    FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+    uint32_t now_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
+
+    cJSON* root = cJSON_CreateObject();
+
+    // Self info
+    NodeIdentity self_id = api_ptr->identity();
+    cJSON* self_obj = cJSON_CreateObject();
+    cJSON_AddStringToObject(self_obj, "id", self_id.id);
+    cJSON_AddStringToObject(self_obj, "name", self_id.name);
+    cJSON_AddStringToObject(self_obj, "hostname", self_id.id);
+    cJSON_AddStringToObject(self_obj, "family", self_id.family);
+    cJSON_AddStringToObject(self_obj, "model", self_id.model);
+    cJSON_AddStringToObject(self_obj, "firmware", self_id.fw_version);
+    cJSON_AddStringToObject(self_obj, "hardwareRevision", self_id.hw_revision);
+    cJSON_AddItemToObject(root, "self", self_obj);
+
+    // Discovered nodes
+    cJSON* nodes_arr = cJSON_CreateArray();
+    if (api_ptr->fleet_discovery()) {
+        discovery::DiscoveredNode snap[discovery::FleetDiscoveryService::kMaxDiscoveredNodes];
+        size_t n = api_ptr->fleet_discovery()->get_snapshot(snap, discovery::FleetDiscoveryService::kMaxDiscoveredNodes, now_ms);
+
+        for (size_t i = 0; i < n; ++i) {
+            cJSON* node_obj = cJSON_CreateObject();
+            cJSON_AddStringToObject(node_obj, "id", snap[i].id);
+            cJSON_AddStringToObject(node_obj, "name", snap[i].name);
+            cJSON_AddStringToObject(node_obj, "hostname", snap[i].hostname);
+
+            char ip_str[16];
+            discovery::FleetDiscoveryService::format_ipv4(snap[i].ipv4, ip_str);
+            cJSON_AddStringToObject(node_obj, "ip", ip_str);
+            cJSON_AddNumberToObject(node_obj, "port", snap[i].port);
+            cJSON_AddStringToObject(node_obj, "family", snap[i].family);
+            cJSON_AddStringToObject(node_obj, "model", snap[i].model);
+            cJSON_AddStringToObject(node_obj, "firmware", snap[i].firmware);
+
+            uint32_t age_ms = (now_ms >= snap[i].last_seen_ms) ? (now_ms - snap[i].last_seen_ms) : 0;
+            cJSON_AddNumberToObject(node_obj, "lastSeenMs", snap[i].last_seen_ms);
+            cJSON_AddNumberToObject(node_obj, "ageMs", age_ms);
+
+            discovery::NodePresence presence = discovery::FleetDiscoveryService::determine_presence(snap[i].last_seen_ms, now_ms);
+            cJSON_AddStringToObject(node_obj, "status", discovery::FleetDiscoveryService::presence_to_string(presence));
+
+            cJSON_AddItemToArray(nodes_arr, node_obj);
+        }
+    }
+    cJSON_AddItemToObject(root, "nodes", nodes_arr);
+    return send_json(request, root, "200 OK");
+}
+
 esp_err_t get_capabilities(httpd_req_t* request) {
     if (!api::authorize(request, api::ApiRole::Operator)) return ESP_OK;
 
     FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
     DeviceConfig cfg;
     const char* dev_name = nullptr;
-    if (api_ptr->config() && api_ptr->config()->load_config(cfg)) {
+    if (api_ptr->config() && api_ptr->config()->load_config(cfg) == ESP_OK) {
         dev_name = cfg.device_name;
     }
     NodeIdentity id = get_node_identity(dev_name);
@@ -4920,7 +4979,7 @@ esp_err_t FactoryApi::start(
 
     const char* dev_name = nullptr;
     DeviceConfig cfg;
-    if (config_ && config_->load_config(cfg)) {
+    if (config_ && config_->load_config(cfg) == ESP_OK) {
         dev_name = cfg.device_name;
     }
     identity_ = get_node_identity(dev_name);
@@ -4961,6 +5020,7 @@ esp_err_t FactoryApi::start(
         // ── Identity & Info ──
         { .uri = "/api/v1/info",              .method = HTTP_GET,  .handler = get_info,           .user_ctx = this },
         { .uri = "/api/v1/identity",          .method = HTTP_GET,  .handler = get_identity,       .user_ctx = this },
+        { .uri = "/api/v1/fleet/nodes",       .method = HTTP_GET,  .handler = get_fleet_nodes,    .user_ctx = this },
 
         // ── Auth endpoints (LG-029) ──
         { .uri = "/api/v1/auth/status",       .method = HTTP_GET,  .handler = get_auth_status,   .user_ctx = this },

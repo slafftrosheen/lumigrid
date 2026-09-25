@@ -10,8 +10,10 @@
     renameSavedNode,
     removeSavedNode,
     normalizeNodeAddress,
+    upsertNodeRecord,
     type SavedNodeInfo,
   } from '$lib/auth/storage';
+  import { getFleetNodes } from '$lib/api/fleet';
   import { nodeAuthStore } from '$lib/auth/nodeAuth';
   import {
     getNodeLiveState,
@@ -50,6 +52,8 @@
   let activeTab = $state<'node' | 'fleet'>('node');
   let savedFleet = $state<SavedNodeInfo[]>([]);
   let activeFleetNode = $derived(savedFleet.find(node => node.ip === nodeIp));
+  let isScanningFleet = $state(false);
+  let discoveryTimer: ReturnType<typeof setInterval> | null = null;
   let newIpInput = $state('');
   let newNameInput = $state('');
   let fleetInputError = $state('');
@@ -143,11 +147,54 @@
     savedFleet = getSavedNodes();
   }
 
+  async function pollFleetDiscovery() {
+    if (!nodeIp || isScanningFleet) return;
+    isScanningFleet = true;
+    try {
+      const resp = await getFleetNodes(nodeIp);
+      if (resp?.self) {
+        upsertNodeRecord({
+          id: resp.self.id,
+          name: resp.self.name,
+          address: nodeIp,
+          family: resp.self.family,
+          model: resp.self.model,
+          firmware: resp.self.firmware,
+          presence: 'online',
+          discoverySource: 'mdns',
+          lastSeen: Date.now(),
+        });
+      }
+      if (resp?.nodes && Array.isArray(resp.nodes)) {
+        for (const dn of resp.nodes) {
+          upsertNodeRecord({
+            id: dn.id,
+            name: dn.name,
+            address: dn.ip,
+            family: dn.family,
+            model: dn.model,
+            firmware: dn.firmware,
+            presence: dn.status,
+            discoverySource: 'mdns',
+            lastSeen: Date.now() - dn.ageMs,
+          });
+        }
+      }
+      refreshFleetList();
+    } catch {
+      // transient discovery failure or unauthenticated
+    } finally {
+      isScanningFleet = false;
+    }
+  }
+
   function handleSelectFleetNode(ip: string) {
     setSelectedNodeIp(ip);
     nodeIp = ip;
     connect(ip);
     getInfo(ip).then(info => { nodeInfo = info; }).catch(() => {});
+    getDeviceConfig(ip).then(cfg => { deviceConfig = cfg; }).catch(() => {});
+    pollFleetDiscovery();
     activeTab = 'node';
     toast(`Connected to node ${ip}`);
   }
@@ -274,7 +321,14 @@
       connect(nodeIp);
       getInfo(nodeIp).then(info => { nodeInfo = info; }).catch(() => {});
       getDeviceConfig(nodeIp).then(cfg => { deviceConfig = cfg; }).catch(() => {});
+      pollFleetDiscovery();
     }
+
+    discoveryTimer = setInterval(() => {
+      if (nodeIp) {
+        pollFleetDiscovery();
+      }
+    }, 10000);
 
     unsubscribeState = getNodeLiveState().subscribe(val => {
       liveState = val;
@@ -283,6 +337,7 @@
         if (nodeIp) {
           getInfo(nodeIp).then(info => { nodeInfo = info; }).catch(() => {});
           getDeviceConfig(nodeIp).then(cfg => { deviceConfig = cfg; }).catch(() => {});
+          pollFleetDiscovery();
         } else {
           nodeInfo = null;
           deviceConfig = null;
@@ -303,6 +358,7 @@
   });
 
   onDestroy(() => {
+    if (discoveryTimer) clearInterval(discoveryTimer);
     if (rafId) cancelAnimationFrame(rafId);
     if (unsubscribeState) unsubscribeState();
     if (unsubscribePixels) unsubscribePixels();
@@ -400,24 +456,36 @@
       <!-- Fleet Nodes Table / Cards -->
       <section class="section-card fleet-table-card">
         <div class="card-header">
-          <h3>Registered Fleet Nodes</h3>
-          <span class="fleet-count-tag">{savedFleet.length} configured</span>
+          <div class="fleet-header-title">
+            <h3>Discovered Fleet Nodes</h3>
+            <span class="fleet-count-tag">{savedFleet.length} configured</span>
+          </div>
+          {#if nodeIp}
+            <button
+              class="btn-scan-fleet"
+              onclick={pollFleetDiscovery}
+              disabled={isScanningFleet}
+              type="button"
+            >
+              {isScanningFleet ? 'Scanning...' : '↻ Discover Fleet (mDNS)'}
+            </button>
+          {/if}
         </div>
 
         {#if savedFleet.length === 0}
           <div class="empty-fleet">
-            <p>No nodes registered in fleet yet. Add a node IP above to begin controlling physical outputs.</p>
+            <p>No nodes registered in fleet yet. Add a node IP above or connect to a node to discover the fleet via mDNS.</p>
           </div>
         {:else}
           <div class="fleet-table-wrap">
             <table class="fleet-table">
               <thead>
                 <tr>
-                  <th>Node Name</th>
+                  <th>Node Identity</th>
                   <th>IP Address</th>
-                  <th>Status</th>
+                  <th>Presence</th>
+                  <th>Hardware / FW</th>
                   <th>Last Seen</th>
-                  <th>Active Effect</th>
                   <th>Health</th>
                   <th>Actions</th>
                 </tr>
@@ -427,25 +495,34 @@
                   {@const isSelected = fn.ip === nodeIp}
                   {@const isConnected = isSelected && liveState.connection === 'connected'}
                   <tr class:selected-row={isSelected}>
-                    <td data-label="Node">
+                    <td data-label="Node Identity">
                       <span class="fn-name">{fn.name}</span>
+                      {#if fn.id}
+                        <span class="fn-id mono">{fn.id}</span>
+                      {/if}
                     </td>
                     <td class="mono" data-label="Address">{fn.ip}</td>
-                    <td data-label="Status">
+                    <td data-label="Presence">
                       {#if isConnected}
-                        <span class="badge badge-live">● CONNECTED</span>
+                        <span class="badge badge-live">● FOCUSED (LIVE)</span>
+                      {:else if fn.presence === 'online'}
+                        <span class="badge badge-live">● ONLINE</span>
+                      {:else if fn.presence === 'stale'}
+                        <span class="badge badge-stale">◐ STALE</span>
+                      {:else if fn.presence === 'offline'}
+                        <span class="badge badge-offline">○ OFFLINE</span>
                       {:else if isSelected && liveState.connection === 'connecting'}
                         <span class="badge badge-connecting">CONNECTING</span>
-                      {:else if isSelected}
-                        <span class="badge badge-offline">OFFLINE</span>
                       {:else}
                         <span class="badge badge-registered">REGISTERED</span>
                       {/if}
                     </td>
-                    <td class="fn-time" data-label="Last Seen">{formatTimeAgo(fn.lastSeen)}</td>
-                    <td class="fn-effect mono" data-label="Effect">
-                      {isSelected ? (liveState.status?.effect || '—') : '—'}
+                    <td data-label="Hardware / FW">
+                      <span class="mono fn-hw">
+                        {fn.model || 'lg-led-v1'}{#if fn.firmware} (v{fn.firmware}){/if}
+                      </span>
                     </td>
+                    <td class="fn-time" data-label="Last Seen">{formatTimeAgo(fn.lastSeen)}</td>
                     <td data-label="Health">
                       {#if isSelected && liveState.health}
                         <span class="badge" class:badge-live={!liveState.health.output.fault} class:badge-fault={liveState.health.output.fault}>
@@ -978,10 +1055,54 @@
     color: #ff9f0a;
     border: 1px solid rgba(255, 159, 10, 0.35);
   }
+  .badge-stale {
+    background: rgba(255, 159, 10, 0.15);
+    color: #ff9f0a;
+    border: 1px solid rgba(255, 159, 10, 0.35);
+  }
   .badge-offline {
     background: rgba(255, 255, 255, 0.05);
     color: #86868b;
     border: 1px solid rgba(255, 255, 255, 0.1);
+  }
+  .badge-registered {
+    background: rgba(255, 255, 255, 0.05);
+    color: #86868b;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+  }
+  .fn-id {
+    display: block;
+    font-size: 0.7rem;
+    color: #737378;
+    margin-top: 0.15rem;
+  }
+  .fn-hw {
+    font-size: 0.76rem;
+    color: #a1a1a6;
+  }
+  .fleet-header-title {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+  }
+  .btn-scan-fleet {
+    background: rgba(var(--dash-accent-rgb), 0.12);
+    border: 1px solid rgba(var(--dash-accent-rgb), 0.3);
+    border-radius: 6px;
+    color: var(--dash-accent);
+    padding: 0.3rem 0.75rem;
+    font-size: 0.78rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+  .btn-scan-fleet:hover:not(:disabled) {
+    background: rgba(var(--dash-accent-rgb), 0.22);
+    border-color: rgba(var(--dash-accent-rgb), 0.45);
+  }
+  .btn-scan-fleet:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
   .badge-fault {
     background: rgba(255, 69, 58, 0.15);
