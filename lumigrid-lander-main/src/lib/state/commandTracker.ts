@@ -25,6 +25,8 @@ export type CommandState =
 
 export interface PendingCommand {
   id: number;
+  commandId?: number;
+  jobId?: number;
   domain: CommandDomain;
   nodeId?: string;
   nodeIp?: string;
@@ -40,9 +42,24 @@ export interface PendingCommand {
 export interface NodeStatusSnapshot {
   schema?: number;
   seq?: number;
+  streamSeq?: number;
   nodeId?: string;
   appliedGeneration?: number;
   activePreset?: number;
+  scene?: {
+    appliedGeneration?: number;
+    activePreset?: number;
+    requestedGeneration?: number;
+    applyPending?: boolean;
+  };
+  job?: {
+    jobId?: number;
+    type?: string;
+    state?: string;
+    progress?: number;
+    startedMs?: number;
+    error?: string | null;
+  } | null;
   state?: {
     scene?: {
       appliedGeneration?: number;
@@ -82,6 +99,10 @@ export class CommandTracker {
     return this.pending.get(id);
   }
 
+  has(id: number): boolean {
+    return this.pending.has(id);
+  }
+
   getAll(): PendingCommand[] {
     return Array.from(this.pending.values());
   }
@@ -92,12 +113,15 @@ export class CommandTracker {
   observe(snapshot: NodeStatusSnapshot): void {
     if (!snapshot) return;
 
-    // Resolve applied generation from Schema 2 (snapshot.state.scene.appliedGeneration)
-    // or legacy / top-level (snapshot.appliedGeneration or snapshot.status.appliedGeneration)
+    // Resolve applied generation from Schema 3 (snapshot.scene.appliedGeneration)
+    // or Schema 2 (snapshot.state.scene.appliedGeneration) or legacy top-level
     const appliedGen =
+      snapshot.scene?.appliedGeneration ??
       snapshot.state?.scene?.appliedGeneration ??
       snapshot.appliedGeneration ??
       snapshot.status?.appliedGeneration;
+
+    const job = snapshot.job !== undefined ? snapshot.job : snapshot.state?.job;
 
     for (const cmd of this.pending.values()) {
       if (cmd.state === 'applied' || cmd.state === 'failed' || cmd.state === 'rejected' || cmd.state === 'superseded') {
@@ -112,9 +136,13 @@ export class CommandTracker {
       }
 
       // 2. Job-based commands (OTA / Restore / Factory burn-in)
-      if ((cmd.domain === 'ota' || cmd.domain === 'restore') && snapshot.state?.job) {
-        const job = snapshot.state.job;
-        if (job.jobId === cmd.id || cmd.id !== undefined) {
+      // Requirement 29: Command matching must use actual authoritative IDs.
+      if ((cmd.domain === 'ota' || cmd.domain === 'restore' || cmd.domain === 'factory') && job) {
+        const matchesJob =
+          (cmd.jobId !== undefined && cmd.jobId === job.jobId) ||
+          (cmd.jobId === undefined && (cmd.commandId === job.jobId || cmd.id === job.jobId));
+
+        if (matchesJob) {
           if (job.state === 'completed') {
             this.markApplied(cmd);
           } else if (job.state === 'failed') {

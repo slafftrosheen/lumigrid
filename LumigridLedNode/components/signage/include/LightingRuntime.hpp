@@ -245,6 +245,9 @@ public:
     using MaintenanceCallback = std::function<void(uint32_t now_ms)>;
     void set_maintenance_callback(MaintenanceCallback cb) { maintenance_cb_ = std::move(cb); }
 
+    using GenerationAppliedCallback = std::function<void(uint32_t applied_generation)>;
+    void set_generation_applied_callback(GenerationAppliedCallback cb) { generation_applied_cb_ = std::move(cb); }
+
 private:
     /// State machine for deterministic E-stop reset:
     /// Tripped -> PendingReset -> ReArmedBlackout -> Inactive
@@ -257,6 +260,7 @@ private:
     };
 
     ConfigReloadCallback config_reload_cb_;
+    GenerationAppliedCallback generation_applied_cb_;
     static void task_entry(void* arg);
     void task();
     void render_frame(uint32_t current_ms);

@@ -15,21 +15,21 @@
     CHANNEL_PORTS,
   } from '$lib/api/timeline';
   import { getSelectedNodeIp } from '$lib/auth/storage';
-  import { getSyncStatus, type SyncStatus } from '$lib/api/sync';
   import { nodeStore } from '$lib/state/nodeStore';
 
   let nodeIp = $state('');
   let loading = $state(true);
   let saving = $state(false);
   let activating = $state(false);
-  let nodeSyncStatus = $state<SyncStatus | null>(null);
 
+  const snapSync = $derived($nodeStore.snapshot?.sync);
+  const snapTransport = $derived($nodeStore.snapshot?.transport);
   const isFollower = $derived(
-    nodeSyncStatus?.activeRole === 'worker' &&
-    Boolean(nodeSyncStatus.masterAddress) &&
-    (nodeSyncStatus.lastPacketAgeMs === null || nodeSyncStatus.lastPacketAgeMs < 10000)
+    snapSync?.activeRole === 'worker' &&
+    Boolean(snapSync.masterAddress) &&
+    (snapSync.lastPacketAgeMs === null || snapSync.lastPacketAgeMs === undefined || snapSync.lastPacketAgeMs < 10000)
   );
-  const syncMasterAddress = $derived(nodeSyncStatus?.masterAddress || 'Leader');
+  const syncMasterAddress = $derived(snapSync?.masterAddress || 'Leader');
   let error = $state('');
   let toast = $state('');
 
@@ -43,7 +43,11 @@
   const editTrack = $derived(seq?.tracks[selectedTrack] ?? null);
   const editStep = $derived(editTrack?.steps[selectedStep] ?? null);
   const isDirty = $derived(isSequenceDirty(seq, savedSnapshot));
-  const isPlaying = $derived(Boolean(seq?.enabled));
+  const isPlaying = $derived(
+    snapTransport?.timeline?.running !== undefined
+      ? snapTransport.timeline.running
+      : Boolean(seq?.enabled)
+  );
 
   function presetName(idx: number): string {
     const p = presets.find(pr => pr.index === idx);
@@ -64,13 +68,11 @@
     savedSnapshot = null;
     presets = [];
     try {
-      const [s, p, syncSt] = await Promise.all([
+      const [s, p] = await Promise.all([
         getSequence(targetIp).catch(() => null),
         getPresets(targetIp).catch(() => [] as ScenePreset[]),
-        getSyncStatus(targetIp).catch(() => null),
       ]);
       if (gen !== loadGen) return;
-      nodeSyncStatus = syncSt;
 
       if (s && s.tracks) {
         for (let i = 0; i < TRACK_COUNT; i++) {

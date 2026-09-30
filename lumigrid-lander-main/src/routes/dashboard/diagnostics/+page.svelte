@@ -142,6 +142,20 @@
     return '#ff453a';
   }
 
+  // Authoritative live indicators from nodeStore snapshot
+  const liveOutput = $derived($nodeStore.snapshot?.output);
+  const liveNetwork = $derived($nodeStore.snapshot?.network);
+  const liveSync = $derived($nodeStore.snapshot?.sync);
+  const liveProtocols = $derived($nodeStore.snapshot?.protocols);
+  const liveRuntime = $derived($nodeStore.snapshot?.runtime);
+  const liveJob = $derived($nodeStore.snapshot?.job);
+
+  const displayOutputState = $derived(liveOutput?.state ?? health?.output.state ?? 'Normal');
+  const displayFault = $derived(liveOutput?.fault ?? health?.output.fault ?? false);
+  const displayPowerMw = $derived(liveOutput?.powerMw ?? health?.output.current_power_mw ?? 0);
+  const displayRssi = $derived(liveNetwork?.rssi ?? health?.network.wifi_rssi ?? 0);
+  const displayEstop = $derived(liveOutput?.estopActive ?? health?.output.estop_latched ?? false);
+
   function statusColor(ok: boolean): string {
     return ok ? '#30d158' : '#ff453a';
   }
@@ -301,14 +315,14 @@
           </div>
           <div class="conf-item">
             <span class="conf-label">Output Stage</span>
-            <span class="conf-val" style:color={statusColor(!health.output.fault)}>
-              {health.output.fault ? 'FAULT' : health.output.state}
+            <span class="conf-val" style:color={statusColor(!displayFault)}>
+              {displayFault ? 'FAULT' : displayOutputState}
             </span>
           </div>
           <div class="conf-item">
             <span class="conf-label">Emergency Stop</span>
-            <span class="conf-val" style:color={statusColor(!health.output.estop_latched)}>
-              {health.output.estop_latched ? 'LATCHED' : 'Disarmed / Normal'}
+            <span class="conf-val" style:color={statusColor(!displayEstop)}>
+              {displayEstop ? 'LATCHED' : 'Disarmed / Normal'}
             </span>
           </div>
         </div>
@@ -426,26 +440,26 @@
         <div class="stat-card wide">
           <div class="card-head">
             <h3>Output Stage & Power</h3>
-            <span class="pwr-tag">{formatPower(health.output.current_power_mw)}</span>
+            <span class="pwr-tag">{formatPower(displayPowerMw)}</span>
           </div>
           <div class="stat-grid-2col">
             <div class="stat-row">
               <span>Output State</span>
-              <span class="stat-val">{health.output.state}</span>
+              <span class="stat-val">{displayOutputState}</span>
             </div>
             <div class="stat-row">
               <span>Fault Detected</span>
-              <span class="stat-val" style:color={statusColor(!health.output.fault)}>
-                {health.output.fault ? 'YES' : 'No'}
+              <span class="stat-val" style:color={statusColor(!displayFault)}>
+                {displayFault ? 'YES' : 'No'}
               </span>
             </div>
             <div class="stat-row">
               <span>Control Source</span>
-              <span class="stat-val">{controlSourceName(health.output.control_source)}</span>
+              <span class="stat-val">{liveRuntime?.controlOwner ?? controlSourceName(health.output.control_source)}</span>
             </div>
             <div class="stat-row">
               <span>Active Scene</span>
-              <span class="stat-val mono">Scene {health.output.active_preset + 1}</span>
+              <span class="stat-val mono">Scene {($nodeStore.snapshot?.scene?.activePreset ?? health.output.active_preset) + 1}</span>
             </div>
             <div class="stat-row">
               <span>Live Render Objects</span>
@@ -453,7 +467,7 @@
             </div>
             <div class="stat-row">
               <span>Estimated Power</span>
-              <span class="stat-val">{formatPower(health.output.current_power_mw)}</span>
+              <span class="stat-val">{formatPower(displayPowerMw)}</span>
             </div>
             <div class="stat-row">
               <span>Throttling Events</span>

@@ -21,9 +21,18 @@
 
   let brightness = $state(32);
   let durationMs = $state(10000);
-  let autoRefresh = $state(false);
-  let refreshTimer: ReturnType<typeof setInterval> | null = null;
   let aborting = $state(false);
+
+  // Live runtime state derived directly from authoritative nodeStore snapshot
+  const liveRuntime = $derived($nodeStore.snapshot?.runtime);
+  const liveOutput = $derived($nodeStore.snapshot?.output);
+  const liveJob = $derived($nodeStore.snapshot?.job);
+
+  const isTestActive = $derived(liveRuntime?.testActive ?? status?.testActive ?? false);
+  const activeEffect = $derived(liveRuntime?.effect ?? status?.effect ?? 'None (Idle)');
+  const isOutputsEnabled = $derived(liveOutput?.enabled ?? status?.outputsEnabled ?? false);
+  const isAutoLoop = $derived(liveRuntime?.autoLoop ?? status?.autoLoop ?? false);
+  const activeBrightness = $derived(liveRuntime?.brightness ?? status?.brightness ?? 0);
 
   const ALL_EFFECTS: { name: FactoryEffectName; label: string; desc: string; icon: string; category: 'quick' | 'burnin' | 'pwm' }[] = [
     { name: 'identity',       label: 'Identity',       desc: 'Flashing node identification pulse', icon: '◻', category: 'quick' },
@@ -63,17 +72,6 @@
       if (gen === refreshGen) {
         loading = false;
       }
-    }
-  }
-
-  function toggleAutoRefresh() {
-    autoRefresh = !autoRefresh;
-    if (refreshTimer) {
-      clearInterval(refreshTimer);
-      refreshTimer = null;
-    }
-    if (autoRefresh) {
-      refreshTimer = setInterval(refresh, 2000);
     }
   }
 
@@ -174,10 +172,6 @@
     });
     return unsub;
   });
-
-  onDestroy(() => {
-    if (refreshTimer) clearInterval(refreshTimer);
-  });
 </script>
 
 <svelte:head>
@@ -193,9 +187,6 @@
     </div>
 
     <div class="header-right">
-      <button class="ghost-btn" onclick={toggleAutoRefresh} type="button">
-        {autoRefresh ? '⏸ Stop Polling' : '▶ Auto-poll (2s)'}
-      </button>
       <button class="ghost-btn" onclick={() => refresh()} type="button">↻ Refresh</button>
     </div>
   </header>
@@ -241,7 +232,7 @@
     <section class="panel status-panel">
       <div class="panel-head">
         <h2>Factory Status</h2>
-        {#if status?.testActive}
+        {#if isTestActive}
           <span class="status-live-pill">
             <span class="pulse-dot"></span> TEST RUNNING
           </span>
@@ -253,27 +244,27 @@
       <div class="status-grid">
         <div class="stat-card">
           <span class="stat-label">Active Effect</span>
-          <span class="stat-val {status?.testActive ? 'active' : ''}">
-            {status?.effect ? status.effect : 'None (Idle)'}
+          <span class="stat-val {isTestActive ? 'active' : ''}">
+            {activeEffect}
           </span>
         </div>
 
         <div class="stat-card">
           <span class="stat-label">Hardware Outputs</span>
-          <span class="stat-val {status?.outputsEnabled ? 'ok' : 'muted'}">
-            {status?.outputsEnabled ? 'Enabled' : 'Disabled'}
+          <span class="stat-val {isOutputsEnabled ? 'ok' : 'muted'}">
+            {isOutputsEnabled ? 'Enabled' : 'Disabled'}
           </span>
         </div>
 
         <div class="stat-card">
           <span class="stat-label">Active Test Brightness</span>
-          <span class="stat-val mono">{status?.brightness ?? 0} / 96</span>
+          <span class="stat-val mono">{activeBrightness} / 96</span>
         </div>
 
         <div class="stat-card">
           <span class="stat-label">Automated Loop</span>
-          <span class="stat-val {status?.autoLoop ? 'ok' : 'muted'}">
-            {status?.autoLoop ? 'Active (Looping)' : 'Disabled'}
+          <span class="stat-val {isAutoLoop ? 'ok' : 'muted'}">
+            {isAutoLoop ? 'Active (Looping)' : 'Disabled'}
           </span>
         </div>
 

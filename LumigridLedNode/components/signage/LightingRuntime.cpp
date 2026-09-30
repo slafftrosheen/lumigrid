@@ -444,6 +444,9 @@ void LightingRuntime::render_frame(uint32_t current_ms) {
                     render_scene_generation,
                     std::memory_order_release
                 );
+                if (generation_applied_cb_) {
+                    generation_applied_cb_(render_scene_generation);
+                }
             }
         }
     }

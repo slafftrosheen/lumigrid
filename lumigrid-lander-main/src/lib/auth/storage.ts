@@ -86,308 +86,33 @@ export function lockDashboardSession(): void {
 }
 
 // ── Fleet Node & Topology Model (Control Plane v3) ───────────────────────────
+// Moved to src/lib/fleet per LG-031 Requirement 0.4.
+// Re-exported here for temporary backward compatibility.
 
-export type DiscoverySource = 'mdns' | 'sync' | 'mqtt' | 'manual';
+export type {
+  DiscoverySource,
+  NodeConnectionStatus,
+  NodePresence,
+  NodeChild,
+  NodeRecord,
+  SavedNodeInfo,
+} from '../fleet/types';
+export { getNodeDisplayName } from '../fleet/types';
 
-export type NodeConnectionStatus =
-  | 'offline'
-  | 'discovering'
-  | 'connecting'
-  | 'online'
-  | 'degraded';
+export {
+  NODE_REGISTRY_CHANGED_EVENT,
+  readNodeMetadataMap,
+  writeNodeMetadataMap,
+  normalizeNodeAddress,
+  readNodeRegistry,
+  writeNodeRegistry,
+  upsertNodeRecord,
+  setNodeLocalAlias,
+  recordDiscoveredNode,
+  getSavedNodes,
+  addSavedNode,
+  renameSavedNode,
+  removeSavedNode,
+  updateNodeLastSeen,
+} from '../fleet/registry';
 
-export interface NodeChild {
-  id: string;
-  parentId: string;
-  kind: 'zone' | 'output' | 'sensor';
-  name: string;
-}
-
-export interface NodeRecord {
-  id: string; // Immutable node ID: "lg-84f703c29110"
-  name: string;
-  address?: string; // Transport route IP / hostname
-  family: string;
-  model: string;
-  firmware?: string;
-  presence?: 'online' | 'stale' | 'offline';
-  lastSeen: number;
-  discoverySource: DiscoverySource;
-  connection: NodeConnectionStatus;
-  children?: NodeChild[];
-}
-
-export interface SavedNodeInfo {
-  ip: string;
-  name: string;
-  lastSeen?: number;
-  id?: string;
-  family?: string;
-  model?: string;
-  firmware?: string;
-  presence?: 'online' | 'stale' | 'offline';
-}
-
-const DISCOVERY_PRIORITY: Record<DiscoverySource, number> = {
-  mdns: 4,
-  sync: 3,
-  mqtt: 2,
-  manual: 1,
-};
-
-export function readNodeRegistry(): Record<string, NodeRecord> {
-  const raw = readString(NODE_REGISTRY_KEY, '');
-  if (raw) {
-    try {
-      const parsed = JSON.parse(raw);
-      if (typeof parsed === 'object' && parsed !== null) {
-        return parsed as Record<string, NodeRecord>;
-      }
-    } catch {}
-  }
-
-  // Automatic one-time migration from legacy storage
-  const legacyIps = readStringList(NODE_LIST_KEY);
-  const legacyMeta = readNodeMetadataMap();
-  const migrated: Record<string, NodeRecord> = {};
-
-  for (const ip of legacyIps) {
-    const id = `node-${ip.replace(/\./g, '-')}`;
-    migrated[id] = {
-      id,
-      name: legacyMeta[ip]?.name || ip,
-      address: ip,
-      family: 'led-node',
-      model: 'lg-led-v1',
-      lastSeen: legacyMeta[ip]?.lastSeen || Date.now(),
-      discoverySource: 'manual',
-      connection: 'offline',
-    };
-  }
-
-  if (Object.keys(migrated).length > 0) {
-    writeString(NODE_REGISTRY_KEY, JSON.stringify(migrated));
-  }
-
-  return migrated;
-}
-
-export const NODE_REGISTRY_CHANGED_EVENT = 'lumigrid:nodes-changed';
-
-function notifyNodeRegistryChanged(): void {
-  if (typeof window !== 'undefined') {
-    window.dispatchEvent(new Event(NODE_REGISTRY_CHANGED_EVENT));
-  }
-}
-
-export function writeNodeRegistry(
-  registry: Record<string, NodeRecord>,
-  notify = true,
-): void {
-  writeString(NODE_REGISTRY_KEY, JSON.stringify(registry));
-  if (notify) notifyNodeRegistryChanged();
-}
-
-export function upsertNodeRecord(record: Partial<NodeRecord> & { id: string }): NodeRecord {
-  const registry = readNodeRegistry();
-  const existing = registry[record.id];
-
-  // Precedence rule: do not let a lower-priority discovery source override higher-priority data
-  let effectiveSource = record.discoverySource ?? existing?.discoverySource ?? 'manual';
-  if (existing && record.discoverySource) {
-    const oldPri = DISCOVERY_PRIORITY[existing.discoverySource] ?? 0;
-    const newPri = DISCOVERY_PRIORITY[record.discoverySource] ?? 0;
-    if (oldPri > newPri) {
-      effectiveSource = existing.discoverySource;
-    }
-  }
-
-  // If a manual entry with the same address exists, merge into canonical ID
-  if (record.address) {
-    for (const [key, val] of Object.entries(registry)) {
-      if (key !== record.id && val.address === record.address) {
-        delete registry[key];
-      }
-    }
-  }
-
-  const updated: NodeRecord = {
-    id: record.id,
-    name: record.name ?? existing?.name ?? record.address ?? record.id,
-    address: record.address ?? existing?.address,
-    family: record.family ?? existing?.family ?? 'led-node',
-    model: record.model ?? existing?.model ?? 'lg-led-v1',
-    firmware: record.firmware ?? existing?.firmware,
-    presence: record.presence ?? existing?.presence,
-    lastSeen: record.lastSeen ?? Date.now(),
-    discoverySource: effectiveSource,
-    connection: record.connection ?? existing?.connection ?? 'offline',
-    children: record.children ?? existing?.children ?? [],
-  };
-
-  registry[record.id] = updated;
-  writeNodeRegistry(registry);
-
-  // Synchronize legacy keys for backwards compatibility
-  syncLegacyFromRegistry(registry);
-
-  return updated;
-}
-
-export function recordDiscoveredNode(
-  node: { id: string; address?: string; name?: string; family?: string; model?: string },
-  source: DiscoverySource = 'sync'
-): NodeRecord {
-  return upsertNodeRecord({
-    id: node.id,
-    address: node.address,
-    name: node.name,
-    family: node.family,
-    model: node.model,
-    discoverySource: source,
-    lastSeen: Date.now(),
-  });
-}
-
-function syncLegacyFromRegistry(registry: Record<string, NodeRecord>): void {
-  const ips: string[] = [];
-  const meta: Record<string, { name?: string; lastSeen?: number }> = {};
-
-  for (const rec of Object.values(registry)) {
-    if (rec.address) {
-      ips.push(rec.address);
-      meta[rec.address] = { name: rec.name, lastSeen: rec.lastSeen };
-    }
-  }
-
-  writeStringList(NODE_LIST_KEY, ips);
-  writeString(NODE_META_KEY, JSON.stringify(meta));
-}
-
-// ── Backwards-Compatible Saved Node API ───────────────────────────────────────
-
-export function readNodeMetadataMap(): Record<string, { name?: string; lastSeen?: number }> {
-  const raw = readString(NODE_META_KEY, '{}');
-  try {
-    const parsed = JSON.parse(raw);
-    return typeof parsed === 'object' && parsed !== null ? parsed : {};
-  } catch {
-    return {};
-  }
-}
-
-export function writeNodeMetadataMap(map: Record<string, { name?: string; lastSeen?: number }>): void {
-  writeString(NODE_META_KEY, JSON.stringify(map));
-}
-
-export function normalizeNodeAddress(raw: string): string | null {
-  const stripped = raw.trim()
-    .replace(/^https?:\/\//i, '')
-    .replace(/\/+$/, '');
-
-  if (!stripped || /[/?#\s]/.test(stripped)) return null;
-
-  try {
-    const parsed = new URL(`http://${stripped}`);
-    if (!parsed.hostname || parsed.username || parsed.password) return null;
-    return parsed.host;
-  } catch {
-    return null;
-  }
-}
-
-export function getSavedNodes(): SavedNodeInfo[] {
-  const registry = readNodeRegistry();
-  const records = Object.values(registry);
-  if (records.length > 0) {
-    return records
-      .filter(r => Boolean(r.address))
-      .map(r => ({
-        ip: r.address!,
-        name: r.name,
-        lastSeen: r.lastSeen,
-        id: r.id,
-        family: r.family,
-        model: r.model,
-        firmware: r.firmware,
-        presence: r.presence,
-      }));
-  }
-
-  const ips = readStringList(NODE_LIST_KEY);
-  const metaMap = readNodeMetadataMap();
-  return ips.map(ip => ({
-    ip,
-    name: metaMap[ip]?.name || ip,
-    lastSeen: metaMap[ip]?.lastSeen,
-  }));
-}
-
-export function addSavedNode(ip: string, name?: string): void {
-  const cleanIp = normalizeNodeAddress(ip);
-  if (!cleanIp) return;
-
-  const id = `node-${cleanIp.replace(/\./g, '-')}`;
-  upsertNodeRecord({
-    id,
-    name: name?.trim() || cleanIp,
-    address: cleanIp,
-    discoverySource: 'manual',
-    lastSeen: Date.now(),
-  });
-}
-
-export function renameSavedNode(ip: string, newName: string): void {
-  const cleanIp = ip.trim();
-  const cleanName = newName.trim();
-  if (!cleanIp || !cleanName) return;
-
-  const registry = readNodeRegistry();
-  for (const rec of Object.values(registry)) {
-    if (rec.address === cleanIp) {
-      rec.name = cleanName;
-      writeNodeRegistry(registry);
-      syncLegacyFromRegistry(registry);
-      return;
-    }
-  }
-
-  addSavedNode(cleanIp, cleanName);
-}
-
-export function removeSavedNode(ip: string): void {
-  const cleanIp = ip.trim();
-  const registry = readNodeRegistry();
-
-  for (const [key, rec] of Object.entries(registry)) {
-    if (rec.address === cleanIp) {
-      delete registry[key];
-    }
-  }
-  writeNodeRegistry(registry);
-  syncLegacyFromRegistry(registry);
-
-  if (getSelectedNodeIp() === cleanIp) {
-    const remaining = Object.values(registry).find(r => Boolean(r.address));
-    setSelectedNodeIp(remaining?.address || '');
-  }
-}
-
-export function updateNodeLastSeen(ip: string): void {
-  const cleanIp = ip.trim();
-  if (!cleanIp) return;
-
-  const registry = readNodeRegistry();
-  let found = false;
-  for (const rec of Object.values(registry)) {
-    if (rec.address === cleanIp) {
-      rec.lastSeen = Date.now();
-      found = true;
-    }
-  }
-  if (found) {
-    // Presence telemetry is high-frequency metadata, not a structural fleet
-    // change. Persist it without causing shell selectors to rerender.
-    writeNodeRegistry(registry, false);
-  }
-}

@@ -2,13 +2,13 @@
   import { onMount } from 'svelte';
   import OperatorDialog from '$lib/components/dashboard/OperatorDialog.svelte';
   import {
-    getInfo,
+    getNodeInfo,
     uploadFirmware,
     getDeviceConfig,
     saveDeviceConfig,
     getBackup,
     restoreBackup,
-    type NodeInfo,
+    type PublicNodeInfo,
     type DeviceConfig,
   } from '$lib/api/node';
   import {
@@ -205,15 +205,15 @@
   // OTA Functions
   async function refreshVersions() {
     const infos = await Promise.allSettled(
-      nodeList.map(async ip => ({ ip, info: await getInfo(ip) }))
+      nodeList.map(async ip => ({ ip, info: await getNodeInfo(ip) }))
     );
     nodes = nodeList.map((ip, i) => {
       const r = infos[i];
-      const info: NodeInfo | null = r.status === 'fulfilled' ? r.value.info : null;
+      const info: PublicNodeInfo | null = r.status === 'fulfilled' ? r.value.info : null;
       return {
         ip,
         name: info?.name ?? ip,
-        version: info?.ver ?? '?',
+        version: info?.firmwareVersion ?? '?',
         status: 'idle',
         progress: 0,
         error: r.status === 'rejected' ? String((r as PromiseRejectedResult).reason) : '',
@@ -347,10 +347,10 @@
     while (Date.now() - t0 < 60000) {
       await sleep(3000);
       try {
-        const res = await getInfo(node.ip);
-        if (res.ver && res.ver !== oldVer) {
+        const res = await getNodeInfo(node.ip);
+        if (res.firmwareVersion && res.firmwareVersion !== oldVer) {
           nodes = nodes.map((n, i) =>
-            i === idx ? { ...n, version: res.ver, status: 'done', progress: 100, error: '' } : n
+            i === idx ? { ...n, version: res.firmwareVersion, status: 'done', progress: 100, error: '' } : n
           );
           return;
         }

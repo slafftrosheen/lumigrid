@@ -212,10 +212,15 @@ public:
     CommandJournal command_journal_{};
     JobManager job_manager_{};
     std::atomic<uint32_t> ws_seq_{1};
+    std::atomic<bool> status_pending_{false};
+    std::atomic<uint32_t> last_preview_ms_{0};
+    std::atomic<uint32_t> last_status_broadcast_ms_{0};
     NodeIdentity identity_{};
     NetworkApplyQueueFunc network_apply_queue_{};
     NetworkApplyStatusFunc network_apply_status_{};
     SafeModeCheckFunc safe_mode_check_{};
+
+    NetworkApplyStatusFunc network_apply_status_func() const { return network_apply_status_; }
 };
 
 } // namespace lg

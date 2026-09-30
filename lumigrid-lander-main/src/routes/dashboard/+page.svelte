@@ -5,6 +5,8 @@
   import {
     getSelectedNodeIp,
     setSelectedNodeIp,
+  } from '$lib/auth/storage';
+  import {
     getSavedNodes,
     addSavedNode,
     renameSavedNode,
@@ -12,7 +14,8 @@
     normalizeNodeAddress,
     upsertNodeRecord,
     type SavedNodeInfo,
-  } from '$lib/auth/storage';
+    getNodeDisplayName,
+  } from '$lib/fleet';
   import { getFleetNodes } from '$lib/api/fleet';
   import { nodeAuthStore } from '$lib/auth/nodeAuth';
   import {
@@ -31,13 +34,13 @@
     postFactoryAbort,
     postFactoryEffect,
     postFactoryAutoLoop,
-    getInfo,
-    type NodeInfo,
+    getNodeInfo,
+    type PublicNodeInfo,
   } from '$lib/api/node';
   import { getDeviceConfig, type DeviceConfig } from '$lib/api/config';
 
   let nodeIp = $state('');
-  let nodeInfo = $state<NodeInfo | null>(null);
+  let nodeInfo = $state<PublicNodeInfo | null>(null);
   let liveState = $state<NodeLiveState>(getNodeLiveSnapshot());
   let canvasEl = $state<HTMLCanvasElement | null>(null);
   let rafId = 0;
@@ -192,7 +195,7 @@
     setSelectedNodeIp(ip);
     nodeIp = ip;
     connect(ip);
-    getInfo(ip).then(info => { nodeInfo = info; }).catch(() => {});
+    getNodeInfo(ip).then(info => { nodeInfo = info; }).catch(() => {});
     getDeviceConfig(ip).then(cfg => { deviceConfig = cfg; }).catch(() => {});
     pollFleetDiscovery();
     activeTab = 'node';
@@ -319,7 +322,7 @@
 
     if (nodeIp) {
       connect(nodeIp);
-      getInfo(nodeIp).then(info => { nodeInfo = info; }).catch(() => {});
+      getNodeInfo(nodeIp).then(info => { nodeInfo = info; }).catch(() => {});
       getDeviceConfig(nodeIp).then(cfg => { deviceConfig = cfg; }).catch(() => {});
       pollFleetDiscovery();
     }
@@ -335,7 +338,7 @@
       if (val.nodeIp !== nodeIp) {
         nodeIp = val.nodeIp;
         if (nodeIp) {
-          getInfo(nodeIp).then(info => { nodeInfo = info; }).catch(() => {});
+          getNodeInfo(nodeIp).then(info => { nodeInfo = info; }).catch(() => {});
           getDeviceConfig(nodeIp).then(cfg => { deviceConfig = cfg; }).catch(() => {});
           pollFleetDiscovery();
         } else {
@@ -545,9 +548,9 @@
                         class="btn-action-rename"
                         onclick={() => handleRenameNode(fn.ip, fn.name)}
                         type="button"
-                        title="Rename node"
+                        title="Set local alias"
                       >
-                        Rename
+                        Set local alias
                       </button>
                       <button
                         class="btn-action-remove"
@@ -597,11 +600,11 @@
           </span>
         </div>
         <div class="node-sub-meta">
-          <span>Uptime: <strong>{formatUptime(liveState.health?.system.uptime_s)}</strong></span>
+          <span>Uptime: <strong>{formatUptime(liveState.health?.system.uptime_s || (liveState.snapshot ? Math.floor(liveState.snapshot.generatedAtMs / 1000) : undefined))}</strong></span>
           <span>·</span>
-          <span>Firmware: <strong>{nodeInfo?.ver || '—'}</strong></span>
+          <span>Firmware: <strong>{nodeInfo?.firmwareVersion || '—'}</strong></span>
           <span>·</span>
-          <span>Outputs: <strong>{liveState.status?.outputsEnabled ? 'ENABLED' : 'DISABLED'}</strong></span>
+          <span>Outputs: <strong>{(liveState.snapshot?.output.enabled ?? liveState.status?.outputsEnabled) ? 'ENABLED' : 'DISABLED'}</strong></span>
           {#if liveState.health}
             <span>·</span>
             <span>FPS: <strong>{liveState.health.system.fps.toFixed(1)}</strong></span>

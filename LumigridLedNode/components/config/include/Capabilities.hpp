@@ -38,11 +38,13 @@ struct CapabilitiesManifest {
     static constexpr bool kFeatureSyncTimelineTransport = true;
     static constexpr bool kFeatureShowManifest = true;
     static constexpr bool kFeaturePlaybackManifest = true;
+    static constexpr bool kFeatureFleetDiscovery = true;
 
     // Protocol versions
     static constexpr uint8_t kProtocolHttpApi = 1;
     static constexpr uint8_t kProtocolWebsocket = 2;
     static constexpr uint8_t kProtocolSync = 4;
+    static constexpr uint8_t kProtocolDiscovery = 1;
 };
 
 } // namespace lg

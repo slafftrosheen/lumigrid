@@ -1,6 +1,6 @@
 # LumiGrid Next Phase — Operator Platform v2
 
-Baseline: `e5e18f31034371ba8939d758ca91bc137cc79565`.
+Baseline: `d21e5e56eea18854524e90c5c8cf243de8c4369d`.
 
 This phase is deliberately **integration-first**. The runtime/lifecycle architecture is frozen unless a concrete defect requires change. The objective is to make the existing firmware and dashboard behave like one coherent lighting-control product before adding another large feature family.
 
@@ -159,6 +159,18 @@ Execute the documented matrix: boot, networking, API, WebSocket, pixel output, P
 - Dedicated Zeroconf service `_lumigrid._tcp.local.` advertising bounded TXT metadata (`id`, `family`, `model`, `fw`, `hw`, `api=1`, `ws=2`, `auth=1`).
 - Low-priority background `FleetDiscoveryService` maintaining bounded table of 32 nodes max, 10s query intervals, <=1s timeouts, presence timing (online <=20s, stale 20s..60s, offline >60s), self-exclusion by immutable ID, and automatic DHCP/IP address reconciliation under immutable `id`.
 - Dashboard queries `GET /api/v1/fleet/nodes` on focused node, reconciles discovered peers into `storage.ts`, renders live presence badges, and connects WebSocket strictly to the single focused node.
+
+### 14. Canonical Runtime State & API v1 Cutover (LG-031 Complete)
+
+- **One Authoritative State Model (Schema 3 `RuntimeSnapshot`):** Replaced divergent state payloads (`GET /api/v1/status` vs WebSocket `build_schema2_status_json`) with a single, unified Schema 3 snapshot model shared identically across HTTP and authenticated WebSocket channels.
+- **Side-Effect Free Collection:** Snapshot collection and serialization are purely observational with zero runtime mutations; command journal transitions (`APPLIED`) are strictly owned by the runtime renderer upon hardware commit.
+- **Bounded Failure-Aware Serialization:** Implemented `FixedJsonWriter` within an explicit 8192-byte max payload budget, preventing silent string truncation on ESP32 while logging diagnostics on overflow.
+- **Independent Stream Sequencing:** Decoupled WebSocket gap tracking (`streamSeq > 0`) from HTTP polling (`streamSeq == 0`), preventing false packet-gap alarms when operators query status over HTTP.
+- **Coalesced Broadcast Scheduling:** State broadcast notifications utilize an atomic CAS `status_pending_` guard collapsing rapid multi-event notifications into the latest state snapshot at max 5 Hz.
+- **Static Capabilities & DMX Decoupling:** Static feature and limit metadata are kept strictly in `GET /api/v1/capabilities`. 1024-char raw DMX frame data is removed from generic status and isolated to on-demand `GET /api/v1/dmx/frame` (`Installer+`).
+- **Unified Frontend Authority (`nodeStore`):** Centralized live state store on the focused node; stream sequence gaps trigger `degraded` state and automatic HTTP status recovery back to `online`.
+- **Page Cutover:** Scenes, Timeline, Cues, Factory, and Diagnostics consume `nodeStore.snapshot` directly without redundant polling loops. Overview and Firmware use typed `GET /api/v1/info` instead of legacy `/json/info`. Thermal page reports hardware reality ("Temperature sensor unavailable on this hardware/configuration").
+- **Closed LG-030 Client Contracts:** Sessions bind strictly to immutable node IDs; DHCP route changes preserve browser sessions; IP address reuse decouples old sessions; browser-local aliases are separate from firmware `deviceName`; transport schemes strictly use `http://` and `ws://` with `transport-blocked` detection for mixed-content browser contexts.
 
 ## Explicit non-goals for this phase
 

@@ -28,21 +28,58 @@ export function authHeaders(
   return result;
 }
 
+export class TransportBlockedError extends Error {
+  constructor(public nodeIp: string) {
+    super('Direct local-node access is blocked by this browser context. Open the dashboard directly from a LumiGrid node.');
+    this.name = 'TransportBlockedError';
+  }
+}
+
+export function isTransportBlockedError(error: unknown): boolean {
+  return error instanceof TransportBlockedError ||
+    (error instanceof Error && error.name === 'TransportBlockedError');
+}
+
+export function isBrowserHttpsContext(): boolean {
+  return typeof location !== 'undefined' && location.protocol === 'https:';
+}
+
+/**
+ * Return canonical HTTP base URL for a LumiGrid node.
+ * Current firmware serves plain HTTP. Does not guess HTTPS from dashboard origin.
+ */
+export function getNodeHttpBase(address: string): string {
+  const clean = address.trim().replace(/^https?:\/\//i, '').replace(/\/+$/, '');
+  return `http://${clean}`;
+}
+
+/**
+ * Return canonical WebSocket URL for a LumiGrid node.
+ * Current firmware serves plain WS. Does not guess WSS from dashboard origin.
+ */
+export function getNodeWsUrl(address: string, path = '/ws'): string {
+  const clean = address.trim()
+    .replace(/^wss?:\/\//i, '')
+    .replace(/^https?:\/\//i, '')
+    .replace(/\/+$/, '');
+  const cleanPath = path.startsWith('/') ? path : `/${path}`;
+  return `ws://${clean}${cleanPath}`;
+}
+
 export async function apiFetch(
   ip: string,
   path: string,
   options: ApiFetchOptions = {},
   timeoutMs = 8000,
 ): Promise<Response> {
-  const scheme =
-    typeof location !== 'undefined' && location.protocol === 'https:' ? 'https' : 'http';
+  const base = getNodeHttpBase(ip);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   const reqHeaders = authHeaders(ip, options.headers, options.apiKey);
 
   try {
-    const response = await fetch(`${scheme}://${ip}${path}`, {
+    const response = await fetch(`${base}${path}`, {
       ...options,
       headers: reqHeaders,
       signal: controller.signal,
@@ -54,6 +91,14 @@ export async function apiFetch(
     }
 
     return response;
+  } catch (err: unknown) {
+    // If running in HTTPS and fetch failed, detect mixed-content browser restriction
+    if (isBrowserHttpsContext()) {
+      if (err instanceof TypeError && !controller.signal.aborted) {
+        throw new TransportBlockedError(ip);
+      }
+    }
+    throw err;
   } finally {
     clearTimeout(timer);
   }

@@ -146,14 +146,34 @@ backup_files = [
     NODE_DIR / "components" / "factory" / "FactoryApi.cpp",
 ]
 for f in backup_files:
-    check_file_contains(
-        f,
-        [
-            ('cJSON_AddStringToObject(auth_obj, "adminToken"', "Forbidden backup export of adminToken"),
-            ('cJSON_AddStringToObject(auth_obj, "installerToken"', "Forbidden backup export of installerToken"),
-            ('cJSON_AddStringToObject(auth_obj, "operatorToken"', "Forbidden backup export of operatorToken"),
-        ]
-    )
+    check_file_contains(f, backup_token_patterns)
+
+# 10. LG-031: Normal dashboard routes must not introduce /json/* or import legacy.ts
+DASHBOARD_ROUTES_DIR = FRONTEND_SRC / "routes" / "dashboard"
+if DASHBOARD_ROUTES_DIR.exists():
+    legacy_json_patterns = [
+        ("/json/info", "Forbidden /json/info call in normal dashboard routes"),
+        ("/json/state", "Forbidden /json/state call in normal dashboard routes"),
+        ("/json/nodes", "Forbidden /json/nodes call in normal dashboard routes"),
+        ("/json/cfg", "Forbidden /json/cfg call in normal dashboard routes"),
+        ("api/legacy", "Forbidden import of legacy API in normal dashboard routes"),
+    ]
+    for f in DASHBOARD_ROUTES_DIR.rglob("*.*"):
+        if f.suffix in [".svelte", ".ts", ".js"]:
+            if ".test." in f.name:
+                continue
+            check_file_contains(f, legacy_json_patterns)
+
+# 11. LG-031: Prevent multiple new WebSocket(...) owners in frontend application source
+if FRONTEND_SRC.exists():
+    for f in FRONTEND_SRC.rglob("*.*"):
+        if f.suffix in [".ts", ".svelte", ".js"]:
+            if ".test." in f.name:
+                continue
+            # Focused-node socket must remain centralized in nodeStore.ts
+            if f.name == "nodeStore.ts":
+                continue
+            check_file_contains(f, [("new WebSocket(", "Forbidden multiple new WebSocket owner outside nodeStore.ts")])
 
 if errors:
     print("\nFAILED: Discovered architectural invariant violations:")

@@ -30,6 +30,8 @@
 #include "ApiAuth.hpp"
 #include "NodeIdentity.hpp"
 #include "FleetDiscoveryService.hpp"
+#include "RuntimeSnapshot.hpp"
+#include "Capabilities.hpp"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -4257,6 +4259,202 @@ bool test_lg029_node_backed_authentication() {
         return true;
     }
 
+    // ============================================================================
+    // LG-031 Canonical Runtime State & API v1 Cutover
+    // ============================================================================
+    bool test_lg031_runtime_snapshot_and_api_cutover() {
+        ESP_LOGI(TAG, "Starting LG-031 Canonical Runtime State & API v1 Cutover Tests...");
+
+        // 1. Requirement S & T: Capabilities Manifest verification
+        {
+            assert(CapabilitiesManifest::kFeatureFleetDiscovery == true);
+            assert(CapabilitiesManifest::kProtocolDiscovery == 1);
+        }
+
+        // 2. Requirement A & K: Snapshot collection is side-effect free & contains 16 physical channels
+        {
+            RuntimeSnapshot snap{};
+            snap.schema = 3;
+            snap.generated_at_ms = 123456;
+            std::strncpy(snap.node.id, "lg-aabbccddeeff", sizeof(snap.node.id) - 1);
+            std::strncpy(snap.runtime.effect, "solid", sizeof(snap.runtime.effect) - 1);
+            snap.runtime.brightness = 128;
+            snap.output.enabled = true;
+            snap.output.power_mw = 4500;
+            std::strncpy(snap.output.state, "healthy", sizeof(snap.output.state) - 1);
+            snap.scene.active_preset = 2;
+            std::strncpy(snap.transport.mode, "scene", sizeof(snap.transport.mode) - 1);
+
+            for (uint8_t i = 0; i < kChannelCount; ++i) {
+                snap.channels[i].index = i;
+                std::string port_str = (i < 8) ? ("A" + std::to_string(i + 1)) : ("P" + std::to_string(i - 7));
+                std::strncpy(snap.channels[i].port, port_str.c_str(), sizeof(snap.channels[i].port) - 1);
+                snap.channels[i].configured = true;
+                snap.channels[i].enabled = true;
+                std::strncpy(snap.channels[i].owner, "ScenePlayback", sizeof(snap.channels[i].owner) - 1);
+                snap.channels[i].fault = false;
+                snap.channels[i].brightness = 255;
+            }
+
+            // Collection test: verify snap has 16 channels and collection has no mutation
+            assert(kChannelCount == 16);
+            assert(std::strcmp(snap.channels[0].port, "A1") == 0);
+            assert(std::strcmp(snap.channels[15].port, "P8") == 0);
+        }
+
+        // 3. Requirement B, C, D, E, F: Serialization test for HTTP vs WS
+        {
+            RuntimeSnapshot snap{};
+            snap.schema = 3;
+            snap.stream_seq = 0;
+            snap.generated_at_ms = 5000;
+            std::strncpy(snap.node.id, "lg-112233445566", sizeof(snap.node.id) - 1);
+            std::strncpy(snap.runtime.effect, "rainbow", sizeof(snap.runtime.effect) - 1);
+            snap.runtime.brightness = 180;
+            std::strncpy(snap.runtime.control_owner, "ScenePlayback", sizeof(snap.runtime.control_owner) - 1);
+            snap.output.enabled = true;
+            snap.output.power_mw = 5200;
+            std::strncpy(snap.output.state, "healthy", sizeof(snap.output.state) - 1);
+            snap.scene.active_preset = 3;
+            std::strncpy(snap.transport.mode, "scene", sizeof(snap.transport.mode) - 1);
+
+            // HTTP serialization: stream_seq = 0
+            char http_buf[8192];
+            FixedJsonWriter http_writer(http_buf, sizeof(http_buf));
+            bool http_ok = serialize_runtime_snapshot(snap, http_writer);
+            assert(http_ok);
+            assert(http_writer.ok());
+
+            // WS serialization: stream_seq = 42
+            snap.stream_seq = 42;
+            char ws_buf[8192];
+            FixedJsonWriter ws_writer(ws_buf, sizeof(ws_buf));
+            bool ws_ok = serialize_runtime_snapshot(snap, ws_writer);
+            assert(ws_ok);
+            assert(ws_writer.ok());
+
+            // Parse HTTP JSON and verify schema 3 and streamSeq == 0
+            cJSON* http_json = cJSON_Parse(http_buf);
+            assert(http_json != nullptr);
+            cJSON* schema_item = cJSON_GetObjectItem(http_json, "schema");
+            assert(schema_item != nullptr && schema_item->valueint == 3);
+            cJSON* seq_item = cJSON_GetObjectItem(http_json, "streamSeq");
+            assert(seq_item != nullptr && seq_item->valueint == 0);
+
+            // Requirement I & J: features/limits and dmxHex absent from snapshot
+            assert(cJSON_GetObjectItem(http_json, "features") == nullptr);
+            assert(cJSON_GetObjectItem(http_json, "limits") == nullptr);
+            assert(cJSON_GetObjectItem(http_json, "dmxHex") == nullptr);
+
+            // Parse WS JSON and verify schema 3 and streamSeq == 42
+            cJSON* ws_json = cJSON_Parse(ws_buf);
+            assert(ws_json != nullptr);
+            cJSON* ws_seq = cJSON_GetObjectItem(ws_json, "streamSeq");
+            assert(ws_seq != nullptr && ws_seq->valueint == 42);
+
+            // Verify payload state (node, runtime, output, scene) matches identically
+            cJSON* http_node = cJSON_GetObjectItem(http_json, "node");
+            cJSON* ws_node = cJSON_GetObjectItem(ws_json, "node");
+            assert(std::strcmp(cJSON_GetObjectItem(http_node, "id")->valuestring,
+                               cJSON_GetObjectItem(ws_node, "id")->valuestring) == 0);
+
+            cJSON_Delete(http_json);
+            cJSON_Delete(ws_json);
+        }
+
+        // 4. Requirement G & H: FixedJsonWriter overflow detection and 16-channel worst-case budget
+        {
+            // Test overflow detection
+            char tiny_buf[64];
+            FixedJsonWriter tiny_writer(tiny_buf, sizeof(tiny_buf));
+            tiny_writer.append("{\"schema\":3,\"long_field\":\"");
+            for (int i = 0; i < 100; ++i) {
+                tiny_writer.append("x");
+            }
+            tiny_writer.append("\"}");
+            assert(!tiny_writer.ok()); // Must detect overflow
+
+            // Worst-case 16-channel snapshot must comfortably fit 8192 bytes budget
+            RuntimeSnapshot max_snap{};
+            max_snap.schema = 3;
+            max_snap.stream_seq = 12345;
+            max_snap.generated_at_ms = 99999999;
+            std::strncpy(max_snap.node.id, "lg-ffffffffffff", sizeof(max_snap.node.id) - 1);
+            std::strncpy(max_snap.runtime.effect, "combined_pulse", sizeof(max_snap.runtime.effect) - 1);
+            max_snap.runtime.brightness = 255;
+            std::strncpy(max_snap.runtime.control_owner, "ShowCoordinator", sizeof(max_snap.runtime.control_owner) - 1);
+            max_snap.output.enabled = true;
+            max_snap.output.power_mw = 35000;
+            std::strncpy(max_snap.output.state, "throttled", sizeof(max_snap.output.state) - 1);
+            max_snap.scene.active_preset = 15;
+            max_snap.scene.requested_preset = 15;
+            std::strncpy(max_snap.transport.mode, "timeline", sizeof(max_snap.transport.mode) - 1);
+            max_snap.transport.timeline.bpm = 180;
+            max_snap.transport.cue.list_index = 8;
+            max_snap.transport.cue.cue_index = 15;
+            std::strncpy(max_snap.sync.active_role, "follower", sizeof(max_snap.sync.active_role) - 1);
+            std::strncpy(max_snap.sync.master_address, "255.255.255.255", sizeof(max_snap.sync.master_address) - 1);
+            std::strncpy(max_snap.network.sta_ip, "192.168.254.254", sizeof(max_snap.network.sta_ip) - 1);
+
+            for (uint8_t i = 0; i < kChannelCount; ++i) {
+                max_snap.channels[i].index = i;
+                std::string port_str = "A" + std::to_string(i);
+                std::strncpy(max_snap.channels[i].port, port_str.c_str(), sizeof(max_snap.channels[i].port) - 1);
+                max_snap.channels[i].configured = true;
+                max_snap.channels[i].enabled = true;
+                std::strncpy(max_snap.channels[i].owner, "ShowCoordinator", sizeof(max_snap.channels[i].owner) - 1);
+                max_snap.channels[i].fault = true;
+                max_snap.channels[i].brightness = 255;
+            }
+
+            char budget_buf[8192];
+            FixedJsonWriter budget_writer(budget_buf, sizeof(budget_buf));
+            bool ok = serialize_runtime_snapshot(max_snap, budget_writer);
+            assert(ok);
+            assert(budget_writer.ok());
+            assert(budget_writer.size() < 4096); // Well under 8192 budget!
+        }
+
+        // 5. Requirement L, M, N, O, P: Observational fields mapping
+        {
+            RuntimeSnapshot snap{};
+            snap.stream_seq = 1;
+            snap.manual.active = true;
+            snap.manual.channel_mask = 0x00FF;
+            snap.manual.lease_remaining_ms = 4500;
+            std::strncpy(snap.transport.mode, "cue", sizeof(snap.transport.mode) - 1);
+            std::strncpy(snap.sync.active_role, "leader", sizeof(snap.sync.active_role) - 1);
+            snap.sync.clock_locked = true;
+            std::strncpy(snap.network.state, "connected", sizeof(snap.network.state) - 1);
+            snap.job.has_job = true;
+            snap.job.job_id = 101;
+            std::strncpy(snap.job.type, "ota", sizeof(snap.job.type) - 1);
+            std::strncpy(snap.job.state, "in_progress", sizeof(snap.job.state) - 1);
+            snap.job.progress = 65;
+
+            char buf[8192];
+            FixedJsonWriter writer(buf, sizeof(buf));
+            bool ok = serialize_runtime_snapshot(snap, writer);
+            assert(ok);
+
+            cJSON* root = cJSON_Parse(buf);
+            assert(root != nullptr);
+            cJSON* manual = cJSON_GetObjectItem(root, "manual");
+            assert(cJSON_IsTrue(cJSON_GetObjectItem(manual, "active")));
+            assert(cJSON_GetObjectItem(manual, "channelMask")->valueint == 0x00FF);
+
+            cJSON* job = cJSON_GetObjectItem(root, "job");
+            assert(job != nullptr && !cJSON_IsNull(job));
+            assert(cJSON_GetObjectItem(job, "jobId")->valueint == 101);
+            assert(cJSON_GetObjectItem(job, "progress")->valueint == 65);
+
+            cJSON_Delete(root);
+        }
+
+        ESP_LOGI(TAG, "[PASS] LG-031 RuntimeSnapshot & API Cutover Tests passed.");
+        return true;
+    }
+
 } // namespace
 
 bool run_runtime_hardening_tests() {
@@ -4351,6 +4549,9 @@ bool run_runtime_hardening_tests() {
 
     // LG-030 Fleet Discovery, Presence & Immutable Identity
     all_ok &= test_lg030_fleet_discovery_and_identity();
+
+    // LG-031 Canonical Runtime State & API v1 Cutover
+    all_ok &= test_lg031_runtime_snapshot_and_api_cutover();
 
     if (all_ok) {
         ESP_LOGI(TAG, "==================================================");

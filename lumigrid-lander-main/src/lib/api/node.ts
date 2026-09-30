@@ -97,6 +97,9 @@ export interface CapabilitiesFeatures {
   ota: boolean;
   signedOta: boolean;
   backup: boolean;
+  showManifest?: boolean;
+  playbackManifest?: boolean;
+  fleetDiscovery?: boolean;
   sceneMotion?: boolean;
   cueLists?: boolean;
   transitionEngineV2?: boolean;
@@ -106,6 +109,7 @@ export interface CapabilitiesProtocols {
   httpApi: number;
   websocket: number;
   sync: number;
+  discovery?: number;
 }
 
 export interface CapabilitiesManifest {
@@ -121,8 +125,43 @@ export interface CapabilitiesManifest {
   protocols: CapabilitiesProtocols;
 }
 
-export function getIdentity(ip: string): Promise<NodeIdentity> {
-  return apiJson<NodeIdentity>(ip, '/api/v1/identity');
+export interface PublicNodeInfo {
+  id: string;
+  name: string;
+  family: string;
+  model: string;
+  hardwareRevision: string;
+  firmwareVersion: string;
+  mac?: string;
+}
+
+import type { RuntimeSnapshotV3 } from '../state/runtimeSnapshot';
+import { normalizeRuntimeSnapshot } from '../state/compat/runtimeSnapshotV2';
+import { nodeAuthStore } from '../auth/nodeAuth';
+
+export async function getNodeInfo(ip: string): Promise<PublicNodeInfo> {
+  const info = await apiJson<PublicNodeInfo>(ip, '/api/v1/info');
+  if (info && info.id) {
+    nodeAuthStore.bindNodeId(ip, info.id);
+  }
+  return info;
+}
+
+export async function getStatus(ip: string): Promise<RuntimeSnapshotV3> {
+  const raw = await apiJson<unknown>(ip, '/api/v1/status');
+  const snap = normalizeRuntimeSnapshot(raw);
+  if (snap && snap.node && snap.node.id) {
+    nodeAuthStore.bindNodeId(ip, snap.node.id);
+  }
+  return snap;
+}
+
+export async function getIdentity(ip: string): Promise<NodeIdentity> {
+  const ident = await apiJson<NodeIdentity>(ip, '/api/v1/identity');
+  if (ident && ident.id) {
+    nodeAuthStore.bindNodeId(ip, ident.id);
+  }
+  return ident;
 }
 
 export function getCapabilities(ip: string): Promise<CapabilitiesManifest> {
@@ -145,26 +184,6 @@ export {
   authHeaders,
 };
 
-
-// ── Legacy compatibility re-exports ──────────────────────────────────────────
-
-export {
-  getInfo,
-  getState,
-  getNodes,
-  getChannelConfig,
-  getSchedule,
-  setState,
-  applyPreset,
-  setBrightness,
-  setPower,
-  emergencyOff,
-  setPixelColor,
-  setPixels,
-  uploadFile,
-  saveSchedule,
-  getNodeStatus,
-} from './legacy';
 
 // ── Domain module re-exports: Scenes & Timeline ──────────────────────────────
 export * from './scenes';

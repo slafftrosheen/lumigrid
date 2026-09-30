@@ -1,5 +1,6 @@
 // components/factory/FactoryApi.cpp
 #include "FactoryApi.hpp"
+#include "RuntimeSnapshot.hpp"
 #include "esp_ota_ops.h"
 #include "esp_app_format.h"
 #include "ApiAuth.hpp"
@@ -3157,7 +3158,7 @@ esp_err_t post_channel_test(httpd_req_t* request) {
     return send_json(request, test_resp, "202 Accepted");
 }
 
-static const char* control_source_name(ControlSource src) {
+[[maybe_unused]] static const char* control_source_name(ControlSource src) {
     switch (src) {
         case ControlSource::EStop: return "EStop";
         case ControlSource::Factory: return "Factory";
@@ -3176,162 +3177,36 @@ esp_err_t get_signage_status(httpd_req_t* request) {
 
     FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
 
-    cJSON* response = cJSON_CreateObject();
+    // Schema 3 Canonical RuntimeSnapshot: HTTP uses streamSeq = 0
+    RuntimeSnapshot snapshot = collect_runtime_snapshot(api_ptr, 0);
+
+    char payload[kRuntimeSnapshotMaxBytes];
+    FixedJsonWriter writer(payload, sizeof(payload));
+    if (!serialize_runtime_snapshot(snapshot, writer)) {
+        return send_error(request, "500 Internal Server Error", "snapshot_serialization_failed");
+    }
+
+    return send_json(request, payload);
+}
+
+esp_err_t get_dmx_frame(httpd_req_t* request) {
+    if (!api::authorize(request, api::ApiRole::Installer)) return ESP_OK;
+
+    FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+    char dmx_hex[1025];
     if (api_ptr->signage()) {
-        cJSON_AddNumberToObject(
-            response,
-            "activePreset",
-            api_ptr->signage()->active_scene_index()
-        );
-        cJSON_AddNumberToObject(
-            response,
-            "requestedPreset",
-            api_ptr->signage()->requested_scene_index()
-        );
-        cJSON_AddNumberToObject(
-            response,
-            "requestedGeneration",
-            api_ptr->signage()->requested_scene_generation()
-        );
-        cJSON_AddNumberToObject(
-            response,
-            "appliedGeneration",
-            api_ptr->signage()->applied_scene_generation()
-        );
-        cJSON_AddBoolToObject(
-            response,
-            "sceneApplyPending",
-            api_ptr->signage()->scene_apply_pending()
-        );
-        cJSON_AddBoolToObject(
-            response,
-            "fallbackActive",
-            api_ptr->signage()->is_fallback_active()
-        );
-        cJSON_AddBoolToObject(
-            response,
-            "transitioning",
-            api_ptr->signage()->is_transitioning()
-        );
-        cJSON_AddNumberToObject(
-            response,
-            "estimatedMilliwatts",
-            api_ptr->signage()->power_budget().current_power_mw()
-        );
-        cJSON_AddBoolToObject(
-            response,
-            "outputsEnabled",
-            api_ptr->signage()->controller().output_enabled()
-        );
-        
-        const char* owner = control_source_name(api_ptr->signage()->current_control_source());
-        cJSON_AddStringToObject(response, "controlOwner", owner);
-        cJSON_AddNumberToObject(response, "frameCount", api_ptr->signage()->frame_count());
-        cJSON_AddNumberToObject(response, "brightness", api_ptr->signage()->current_brightness());
-        cJSON_AddBoolToObject(response, "testActive", api_ptr->runner().status().test_active);
-
-        ManualControlStatus man_st = api_ptr->signage()->manual_control_status();
-        cJSON* man_obj = cJSON_CreateObject();
-        cJSON_AddBoolToObject(man_obj, "active", man_st.active);
-        cJSON_AddNumberToObject(man_obj, "channelMask", man_st.channel_mask);
-        cJSON_AddNumberToObject(man_obj, "leaseRemainingMs", man_st.lease_remaining_ms);
-        cJSON_AddItemToObject(response, "manual", man_obj);
-
-        // Encode DMX telemetry as a compact hex string instead of 512 individual
-        // cJSON number objects (~41 KB heap) to prevent OOM on status polls.
         const auto& dmx = api_ptr->signage()->last_dmx_data();
-        char dmx_hex[1025];
         for (int i = 0; i < 512; ++i) {
             snprintf(dmx_hex + i * 2, 3, "%02x", dmx[i]);
         }
-        dmx_hex[1024] = '\0';
-        cJSON_AddStringToObject(response, "dmxHex", dmx_hex);
-
     } else {
-        cJSON_AddStringToObject(response, "signage", "not_started");
+        memset(dmx_hex, '0', 1024);
     }
+    dmx_hex[1024] = '\0';
 
-    if (api_ptr->config()) {
-        DeviceConfig cfg;
-        api_ptr->config()->load_config(cfg);
-    }
-
-    cJSON_AddNumberToObject(
-        response,
-        "controlSource",
-        static_cast<int>(api_ptr->signage() ? api_ptr->signage()->current_control_source() : api_ptr->runner().control_sources().current_owner())
-    );
-
-    cJSON_AddBoolToObject(
-        response,
-        "estopActive",
-        api_ptr->signage() && api_ptr->signage()->is_estop_active()
-    );
-
-    cJSON_AddBoolToObject(
-        response,
-        "outputFault",
-        api_ptr->signage() && api_ptr->signage()->output_fault()
-    );
-
-    cJSON_AddNumberToObject(
-        response,
-        "outputFaultCount",
-        api_ptr->signage() ? api_ptr->signage()->output_fault_count() : 0
-    );
-
-    cJSON_AddBoolToObject(
-        response,
-        "timeSynced",
-        api_ptr->scheduler() && api_ptr->scheduler()->has_time()
-    );
-
-    cJSON* limits = cJSON_CreateObject();
-    cJSON_AddNumberToObject(limits, "channels", 16);
-    cJSON_AddNumberToObject(limits, "groups", 8);
-    cJSON_AddNumberToObject(limits, "pixelLanes", CapabilitiesManifest::kPixelLanes);
-    cJSON_AddNumberToObject(limits, "pwmChannels", CapabilitiesManifest::kPwmChannels);
-    cJSON_AddNumberToObject(limits, "zones", CapabilitiesManifest::kZones);
-    cJSON_AddNumberToObject(limits, "layersPerZone", CapabilitiesManifest::kLayersPerZone);
-    cJSON_AddNumberToObject(limits, "presets", CapabilitiesManifest::kPresets);
-    cJSON_AddNumberToObject(limits, "timelineSteps", CapabilitiesManifest::kTimelineSteps);
-    cJSON_AddNumberToObject(limits, "cueLists", CapabilitiesManifest::kCueLists);
-    cJSON_AddNumberToObject(limits, "cuesPerList", CapabilitiesManifest::kCuesPerList);
-    cJSON_AddNumberToObject(limits, "automationTracks", CapabilitiesManifest::kAutomationTracks);
-    cJSON_AddNumberToObject(limits, "automationPoints", CapabilitiesManifest::kAutomationPoints);
-    cJSON_AddNumberToObject(limits, "syncPeers", CapabilitiesManifest::kSyncPeers);
-    cJSON_AddItemToObject(response, "limits", limits);
-
-    cJSON* features = cJSON_CreateObject();
-    cJSON_AddBoolToObject(features, "manualControl", true);
-    cJSON_AddBoolToObject(features, "addressable", CapabilitiesManifest::kFeatureAddressable);
-    cJSON_AddBoolToObject(features, "pwm", CapabilitiesManifest::kFeaturePwm);
-    cJSON_AddBoolToObject(features, "artnet", CapabilitiesManifest::kFeatureArtnet);
-    cJSON_AddBoolToObject(features, "sacn", CapabilitiesManifest::kFeatureSacn);
-    cJSON_AddBoolToObject(features, "sync", CapabilitiesManifest::kFeatureSync);
-    cJSON_AddBoolToObject(features, "mqtt", CapabilitiesManifest::kFeatureMqtt);
-    cJSON_AddBoolToObject(features, "factory", CapabilitiesManifest::kFeatureFactory);
-    cJSON_AddBoolToObject(features, "ota", CapabilitiesManifest::kFeatureOta);
-    cJSON_AddBoolToObject(features, "signedOta", CapabilitiesManifest::kFeatureSignedOta);
-    cJSON_AddBoolToObject(features, "backup", CapabilitiesManifest::kFeatureBackup);
-    cJSON_AddBoolToObject(features, "sceneMotion", CapabilitiesManifest::kFeatureSceneMotion);
-    cJSON_AddBoolToObject(features, "cueLists", CapabilitiesManifest::kFeatureCueLists);
-    cJSON_AddBoolToObject(features, "transitionEngineV2", CapabilitiesManifest::kFeatureTransitionEngineV2);
-    cJSON_AddBoolToObject(features, "showTransportV2", CapabilitiesManifest::kFeatureShowTransportV2);
-    cJSON_AddBoolToObject(features, "syncCueTransport", CapabilitiesManifest::kFeatureSyncCueTransport);
-    cJSON_AddBoolToObject(features, "syncTimelineTransport", CapabilitiesManifest::kFeatureSyncTimelineTransport);
-    cJSON_AddBoolToObject(features, "showManifest", CapabilitiesManifest::kFeatureShowManifest);
-    cJSON_AddBoolToObject(features, "playbackManifest", CapabilitiesManifest::kFeaturePlaybackManifest);
-    cJSON_AddItemToObject(response, "features", features);
-
-    char* json = cJSON_PrintUnformatted(response);
-    cJSON_Delete(response);
-    if (json == nullptr) {
-        return send_error(request, "500 Internal Server Error", "json_encode_failed");
-    }
-    const esp_err_t result = send_json(request, json);
-    cJSON_free(json);
-    return result;
+    char body[1152];
+    snprintf(body, sizeof(body), "{\"universe\":1,\"dataHex\":\"%s\"}", dmx_hex);
+    return send_json(request, body);
 }
 
 esp_err_t get_identity(httpd_req_t* request) {
@@ -3415,13 +3290,13 @@ esp_err_t get_capabilities(httpd_req_t* request) {
         dev_name = cfg.device_name;
     }
     NodeIdentity id = get_node_identity(dev_name);
-    char body[1280];
+    char body[1536];
     snprintf(body, sizeof(body),
         "{\"schema\":%u,"
         "\"node\":{\"family\":\"%s\",\"model\":\"%s\",\"firmware\":\"%s\",\"hardwareRevision\":\"%s\"},"
         "\"limits\":{\"channels\":16,\"groups\":8,\"pixelLanes\":%u,\"pwmChannels\":%u,\"zones\":%u,\"layersPerZone\":%u,\"presets\":%u,\"timelineSteps\":%u,\"cueLists\":%u,\"cuesPerList\":%u,\"automationTracks\":%u,\"automationPoints\":%u,\"syncPeers\":%u,\"syncProtocol\":%u},"
-        "\"features\":{\"manualControl\":true,\"addressable\":%s,\"pwm\":%s,\"artnet\":%s,\"sacn\":%s,\"sync\":%s,\"mqtt\":%s,\"factory\":%s,\"ota\":%s,\"signedOta\":%s,\"backup\":%s,\"sceneMotion\":%s,\"cueLists\":%s,\"transitionEngineV2\":%s,\"showTransportV2\":%s,\"syncCueTransport\":%s,\"syncTimelineTransport\":%s,\"showManifest\":%s,\"playbackManifest\":%s},"
-        "\"protocols\":{\"httpApi\":%u,\"websocket\":%u,\"sync\":%u}}",
+        "\"features\":{\"manualControl\":true,\"addressable\":%s,\"pwm\":%s,\"artnet\":%s,\"sacn\":%s,\"sync\":%s,\"mqtt\":%s,\"factory\":%s,\"ota\":%s,\"signedOta\":%s,\"backup\":%s,\"sceneMotion\":%s,\"cueLists\":%s,\"transitionEngineV2\":%s,\"showTransportV2\":%s,\"syncCueTransport\":%s,\"syncTimelineTransport\":%s,\"showManifest\":%s,\"playbackManifest\":%s,\"fleetDiscovery\":%s},"
+        "\"protocols\":{\"httpApi\":%u,\"websocket\":%u,\"sync\":%u,\"discovery\":%u}}",
         CapabilitiesManifest::kSchema,
         id.family, id.model, id.fw_version, id.hw_revision,
         CapabilitiesManifest::kPixelLanes, CapabilitiesManifest::kPwmChannels,
@@ -3449,9 +3324,11 @@ esp_err_t get_capabilities(httpd_req_t* request) {
         CapabilitiesManifest::kFeatureSyncTimelineTransport ? "true" : "false",
         CapabilitiesManifest::kFeatureShowManifest ? "true" : "false",
         CapabilitiesManifest::kFeaturePlaybackManifest ? "true" : "false",
+        CapabilitiesManifest::kFeatureFleetDiscovery ? "true" : "false",
         CapabilitiesManifest::kProtocolHttpApi,
         CapabilitiesManifest::kProtocolWebsocket,
-        CapabilitiesManifest::kProtocolSync
+        CapabilitiesManifest::kProtocolSync,
+        CapabilitiesManifest::kProtocolDiscovery
     );
     return send_json(request, body);
 }
@@ -3471,262 +3348,7 @@ esp_err_t get_current_job(httpd_req_t* request) {
     return send_json(request, "{\"job\":null}");
 }
 
-void build_schema2_status_json(FactoryApi* api, char* response, size_t max_len) {
-    const NodeIdentity& identity = api->identity();
 
-    uint32_t seq = api->next_ws_seq();
-    uint32_t now = esp_log_timestamp();
-
-    CommandReceipt sc_receipt;
-    if (api->command_journal().get_latest(CommandDomain::Scene, sc_receipt)) {
-        if (sc_receipt.state == CommandState::Accepted && api->signage()) {
-            if (api->signage()->applied_scene_generation() >= sc_receipt.generation) {
-                api->command_journal().applied(sc_receipt.id);
-            }
-        }
-    }
-
-    const char* owner = "Unknown";
-    uint32_t frame_count = 0;
-    uint8_t brightness = 0;
-    uint16_t active_preset = 0;
-    uint16_t requested_preset = 0;
-    uint32_t req_gen = 0;
-    uint32_t app_gen = 0;
-    bool scene_pending = false;
-    bool transitioning = false;
-    bool outputs_enabled = false;
-    uint32_t power_mw = 0;
-    bool fault = false;
-    uint32_t fault_count = 0;
-
-    if (api->signage()) {
-        switch (api->signage()->current_control_source()) {
-            case ControlSource::ScenePlayback: owner = "ScenePlayback"; break;
-            case ControlSource::Factory: owner = "Factory"; break;
-            case ControlSource::LiveDmx: owner = "LiveDmx"; break;
-            case ControlSource::ManualOverride: owner = "ManualOverride"; break;
-            case ControlSource::EStop: owner = "EStop"; break;
-            default: break;
-        }
-        frame_count = api->signage()->frame_count();
-        brightness = api->signage()->current_brightness();
-        active_preset = api->signage()->active_scene_index();
-        requested_preset = api->signage()->requested_scene_index();
-        req_gen = api->signage()->requested_scene_generation();
-        app_gen = api->signage()->applied_scene_generation();
-        scene_pending = api->signage()->scene_apply_pending();
-        transitioning = api->signage()->is_transitioning();
-        outputs_enabled = api->signage()->controller().output_enabled();
-        power_mw = api->signage()->power_budget().current_power_mw();
-        fault = api->signage()->output_fault();
-        fault_count = api->signage()->output_fault_count();
-    } else {
-        brightness = api->runner().status().brightness;
-        outputs_enabled = api->runner().status().outputs_enabled;
-    }
-
-    uint32_t artnet_sources = 0;
-    uint32_t artnet_pps = 0;
-    uint32_t artnet_age_ms = 0;
-    uint32_t sacn_sources = 0;
-    uint32_t sacn_pps = 0;
-    if (api->dmx_router()) {
-        const auto stats = api->dmx_router()->get_stats();
-        artnet_sources = stats.active_sources;
-        artnet_pps = stats.packets_accepted;
-    }
-
-    OperationJob current_job;
-    char job_str[160] = "null";
-    if (api->job_manager().get_current(current_job)) {
-        snprintf(job_str, sizeof(job_str),
-            "{\"jobId\":%" PRIu32 ",\"type\":\"%s\",\"state\":\"%s\",\"progress\":%u,\"startedMs\":%" PRIu32 ",\"error\":%s}",
-            current_job.job_id, job_type_name(current_job.type), job_state_name(current_job.state),
-            current_job.progress, current_job.started_ms,
-            current_job.error_code != 0 ? "\"failed\"" : "null");
-    }
-
-    int rssi = 0;
-    wifi_ap_record_t ap_info;
-    if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) {
-        rssi = ap_info.rssi;
-    }
-    const char* sync_role = api->node_sync() ? node_role_name(api->node_sync()->role()) : "auto";
-    bool in_sync = api->node_sync() ? api->node_sync()->status().clock_locked : false;
-
-    uint64_t clock_ms = 0;
-    int32_t drift_ppm = 0;
-    bool time_synced = false;
-    if (api->scheduler()) {
-        clock_ms = api->scheduler()->current_clock_ms();
-        drift_ppm = api->scheduler()->estimated_drift_ppm();
-        time_synced = api->scheduler()->is_time_synced();
-    }
-
-    const char* trans_curve = "easeInOut";
-    uint8_t motion_tracks = 0;
-    if (api->signage()) {
-        trans_curve = transition_curve_name(api->signage()->transition_curve());
-        motion_tracks = api->signage()->scene_manager().current_motion().track_count;
-    }
-
-    char cue_str[256] = "{\"running\":false}";
-    if (api->cue_runner()) {
-        const auto* cr = api->cue_runner();
-        snprintf(cue_str, sizeof(cue_str),
-            "{\"running\":%s,\"state\":\"%s\",\"listIndex\":%u,\"cueIndex\":%u,\"nextCueIndex\":%u,\"mode\":\"%s\",\"elapsedMs\":%" PRIu32 ",\"remainingMs\":%" PRIu32 ",\"manualFade\":%u}",
-            cr->is_running() ? "true" : "false",
-            cr->state_name(),
-            cr->active_list_index(),
-            cr->current_cue_index(),
-            cr->next_cue_index(),
-            cue_run_mode_name(cr->current_list().mode),
-            cr->cue_elapsed_ms(now),
-            cr->cue_remaining_ms(now),
-            cr->manual_fade_q15());
-    }
-
-    DeviceConfig status_cfg{};
-    if (api->config()) {
-        api->config()->load_config(status_cfg);
-    }
-
-    ControlSnapshot ctrl_snapshot = api->runner().control_sources().get_snapshot(now);
-
-    char channels_buf[2048] = "[";
-    size_t ch_pos = 1;
-    for (uint8_t i = 0; i < kChannelCount; ++i) {
-        char port[8];
-        channel_port_name(i, port, sizeof(port));
-        auto hw = channel_hardware(i);
-        const auto& ch_cfg = status_cfg.channels[i];
-        bool ch_configured = channel_is_configured(hw, ch_cfg);
-        bool ch_enabled = ch_cfg.enabled;
-        ControlSource ch_source = ctrl_snapshot.resolve_channel(i, now);
-        const char* ch_owner = control_source_name(ch_source);
-        bool ch_fault = fault;
-
-        char item[140];
-        if (hw.kind == ChannelKind::Addressable) {
-            uint8_t ch_brightness = (brightness * ch_cfg.max_brightness) / 255;
-            snprintf(item, sizeof(item),
-                "%s{\"index\":%u,\"port\":\"%s\",\"configured\":%s,\"enabled\":%s,\"owner\":\"%s\",\"fault\":%s,\"brightness\":%u,\"pixels\":%u}",
-                i > 0 ? "," : "",
-                i, port,
-                ch_configured ? "true" : "false",
-                ch_enabled ? "true" : "false",
-                ch_owner,
-                ch_fault ? "true" : "false",
-                ch_brightness,
-                ch_cfg.pixel_count);
-        } else {
-            uint16_t ch_level = api->signage() ? api->signage()->last_pwm_level(i) : 0;
-            snprintf(item, sizeof(item),
-                "%s{\"index\":%u,\"port\":\"%s\",\"configured\":%s,\"enabled\":%s,\"owner\":\"%s\",\"fault\":%s,\"level\":%u}",
-                i > 0 ? "," : "",
-                i, port,
-                ch_configured ? "true" : "false",
-                ch_enabled ? "true" : "false",
-                ch_owner,
-                ch_fault ? "true" : "false",
-                ch_level);
-        }
-        size_t ilen = strlen(item);
-        if (ch_pos + ilen < sizeof(channels_buf) - 2) {
-            memcpy(channels_buf + ch_pos, item, ilen);
-            ch_pos += ilen;
-        }
-    }
-    channels_buf[ch_pos++] = ']';
-    channels_buf[ch_pos] = '\0';
-
-    char manual_str[128] = "{\"active\":false,\"channelMask\":0,\"leaseRemainingMs\":0}";
-    if (api->signage()) {
-        ManualControlStatus man_st = api->signage()->manual_control_status();
-        snprintf(manual_str, sizeof(manual_str),
-            "{\"active\":%s,\"channelMask\":%u,\"leaseRemainingMs\":%" PRIu32 "}",
-            man_st.active ? "true" : "false",
-            man_st.channel_mask,
-            man_st.lease_remaining_ms);
-    }
-
-    char show_transport_str[384] = "{\"mode\":\"scene\",\"generation\":0,\"sceneIndex\":0,\"timelineRunning\":false,\"timelineBpm\":120,\"cue\":{\"running\":false}}";
-    if (api->show_transport()) {
-        auto st = api->show_transport()->snapshot();
-        const char* mode_str = "scene";
-        if (st.mode == ShowTransportMode::Timeline) mode_str = "timeline";
-        else if (st.mode == ShowTransportMode::Cue) mode_str = "cue";
-
-        char cue_part[192];
-        if (st.cue.active) {
-            const char* c_state = "stopped";
-            if (st.cue.state == 1) c_state = "holding";
-            else if (st.cue.state == 2) c_state = "fading";
-            else if (st.cue.state == 3) c_state = "paused";
-            snprintf(cue_part, sizeof(cue_part),
-                "{\"running\":true,\"state\":\"%s\",\"listIndex\":%u,\"cueIndex\":%u,\"nextCueIndex\":%u,\"manualFade\":%u}",
-                c_state, st.cue.list_index, st.cue.current_cue, st.cue.next_cue, st.cue.manual_fade_q15);
-        } else {
-            snprintf(cue_part, sizeof(cue_part), "{\"running\":false}");
-        }
-
-        snprintf(show_transport_str, sizeof(show_transport_str),
-            "{\"mode\":\"%s\",\"generation\":%" PRIu32 ",\"sceneIndex\":%u,\"timelineRunning\":%s,\"timelineBpm\":%u,\"cue\":%s}",
-            mode_str, st.generation, st.active_scene, st.timeline_running() ? "true" : "false", st.bpm, cue_part);
-    }
-
-    snprintf(response, max_len,
-        "{\"schema\":2,\"seq\":%" PRIu32 ",\"nodeId\":\"%s\",\"uptimeMs\":%" PRIu32 ","
-        "\"channels\":%s,"
-        "\"manual\":%s,"
-        "\"showTransport\":%s,"
-        "\"state\":{"
-          "\"runtime\":{\"effect\":\"%s\",\"brightness\":%u,\"testActive\":%s,\"autoLoop\":%s,\"controlOwner\":\"%s\",\"frameCount\":%" PRIu32 "},"
-          "\"output\":{\"outputsEnabled\":%s,\"powerMw\":%" PRIu32 ",\"fault\":%s,\"faultCount\":%" PRIu32 "},"
-          "\"scene\":{\"activePreset\":%u,\"requestedPreset\":%u,\"requestedGeneration\":%" PRIu32 ",\"appliedGeneration\":%" PRIu32 ",\"sceneApplyPending\":%s,\"transitioning\":%s},"
-          "\"manual\":%s,"
-          "\"sync\":{\"role\":\"%s\",\"inSync\":%s},"
-          "\"network\":{\"rssi\":%d},"
-          "\"protocol\":{\"artnet\":{\"enabled\":true,\"sources\":%" PRIu32 ",\"packetsPerSecond\":%" PRIu32 ",\"lastPacketAgeMs\":%" PRIu32 "},"
-                        "\"sacn\":{\"enabled\":true,\"sources\":%" PRIu32 ",\"packetsPerSecond\":%" PRIu32 "},"
-                        "\"owner\":\"%s\"},"
-          "\"timeline\":{\"clockMs\":%" PRIu64 ",\"driftPpm\":%" PRId32 ",\"synced\":%s},"
-          "\"automation\":{\"activeTracks\":%u,\"transitionCurve\":\"%s\"},"
-          "\"showTransport\":%s,"
-          "\"cue\":%s,"
-          "\"job\":%s"
-        "},"
-        "\"effect\":\"%s\",\"brightness\":%u,\"outputsEnabled\":%s,\"testActive\":%s,\"autoLoop\":%s,\"activePreset\":%u,\"appliedGeneration\":%" PRIu32 "}",
-        seq, identity.id, now,
-        channels_buf,
-        manual_str,
-        show_transport_str,
-        effect_name(api->runner().status().active_effect), brightness,
-        api->runner().status().test_active ? "true" : "false",
-        api->runner().status().auto_loop ? "true" : "false",
-        owner, frame_count,
-        outputs_enabled ? "true" : "false", power_mw, fault ? "true" : "false", fault_count,
-        active_preset, requested_preset, req_gen, app_gen,
-        scene_pending ? "true" : "false", transitioning ? "true" : "false",
-        manual_str,
-        sync_role, in_sync ? "true" : "false",
-        rssi,
-        artnet_sources, artnet_pps, artnet_age_ms,
-        sacn_sources, sacn_pps,
-        owner,
-        clock_ms, drift_ppm, time_synced ? "true" : "false",
-        motion_tracks, trans_curve,
-        show_transport_str,
-        cue_str,
-        job_str,
-        effect_name(api->runner().status().active_effect), brightness,
-        outputs_enabled ? "true" : "false",
-        api->runner().status().test_active ? "true" : "false",
-        api->runner().status().auto_loop ? "true" : "false",
-        active_preset, app_gen
-    );
-}
 
 esp_err_t get_sequence(httpd_req_t* request) {
     if (!api::authorize(request, api::ApiRole::Operator)) return ESP_OK;
@@ -4936,7 +4558,7 @@ esp_err_t post_restore(httpd_req_t* request) {
 
 struct WsBroadcastArg {
     FactoryApi* api;
-    char payload[4096];
+    char payload[kRuntimeSnapshotMaxBytes];
 };
 
 struct WsPreviewArg {
@@ -5048,6 +4670,7 @@ esp_err_t FactoryApi::start(
         { .uri = "/api/v1/network/config",    .method = HTTP_PUT,  .handler = put_network_config, .user_ctx = this },
         { .uri = "/api/v1/network/status",    .method = HTTP_GET,  .handler = get_network_status, .user_ctx = this },
         { .uri = "/api/v1/status",            .method = HTTP_GET,  .handler = get_signage_status, .user_ctx = this },
+        { .uri = "/api/v1/dmx/frame",         .method = HTTP_GET,  .handler = get_dmx_frame,      .user_ctx = this },
         { .uri = "/api/v1/manual",            .method = HTTP_PUT,   .handler = put_manual,        .user_ctx = this },
         { .uri = "/api/v1/manual",            .method = HTTP_DELETE,.handler = delete_manual,     .user_ctx = this },
         { .uri = "/api/v1/effects",           .method = HTTP_GET,  .handler = get_effects,        .user_ctx = this },
@@ -5095,24 +4718,31 @@ esp_err_t FactoryApi::start(
     runner_.set_status_callback([this]() { this->notify_status_async(); });
     
     if (signage_) {
+        signage_->set_generation_applied_callback([this](uint32_t applied_gen) {
+            CommandReceipt sc_receipt;
+            if (this->command_journal().get_latest(CommandDomain::Scene, sc_receipt)) {
+                if (sc_receipt.state == CommandState::Accepted && applied_gen >= sc_receipt.generation) {
+                    this->command_journal().applied(sc_receipt.id);
+                }
+            }
+        });
+
         signage_->set_preview_callback([this](const RenderFrame& frame, const DeviceConfig& cfg) {
             if (this->factory_server_ == nullptr) return;
 
             // Rate limit to ~10 fps (100ms)
-            static uint32_t last_preview_ms = 0;
             uint32_t now = esp_log_timestamp();
-            if (now - last_preview_ms < 100) return;
+            if (now - this->last_preview_ms_.load(std::memory_order_relaxed) < 100) return;
             
             bool expected = false;
             if (!this->preview_pending_.compare_exchange_strong(expected, true)) {
                 return; // Already pending
             }
-            last_preview_ms = now;
+            this->last_preview_ms_.store(now, std::memory_order_relaxed);
 
             // Periodically broadcast live status snapshot (~5 fps = 200ms) over WebSocket
-            static uint32_t last_status_broadcast_ms = 0;
-            if (now - last_status_broadcast_ms >= 200) {
-                last_status_broadcast_ms = now;
+            if (now - this->last_status_broadcast_ms_.load(std::memory_order_relaxed) >= 200) {
+                this->last_status_broadcast_ms_.store(now, std::memory_order_relaxed);
                 this->notify_status_async();
             }
 
@@ -5173,6 +4803,7 @@ void FactoryApi::ws_broadcast_work(void* arg) {
     size_t clients = client_fds.size();
 
     if (httpd_get_client_list(msg->api->factory_server_, &clients, client_fds.data()) != ESP_OK || clients == 0) {
+        msg->api->status_pending_.store(false);
         return;
     }
 
@@ -5182,20 +4813,32 @@ void FactoryApi::ws_broadcast_work(void* arg) {
             ws_clients++;
         }
     }
-    if (ws_clients == 0) return;
+    if (ws_clients == 0) {
+        msg->api->status_pending_.store(false);
+        return;
+    }
 
-    build_schema2_status_json(msg->api, msg->payload, sizeof(msg->payload));
+    uint32_t stream_seq = msg->api->next_ws_seq();
+    RuntimeSnapshot snapshot = collect_runtime_snapshot(msg->api, stream_seq);
+
+    FixedJsonWriter writer(msg->payload, sizeof(msg->payload));
+    if (!serialize_runtime_snapshot(snapshot, writer)) {
+        msg->api->status_pending_.store(false);
+        return;
+    }
 
     httpd_ws_frame_t frame = {};
     frame.type = HTTPD_WS_TYPE_TEXT;
     frame.payload = reinterpret_cast<uint8_t*>(msg->payload);
-    frame.len = strlen(msg->payload);
+    frame.len = writer.size();
 
     for (size_t i = 0; i < clients; ++i) {
         if (httpd_ws_get_fd_info(msg->api->factory_server_, client_fds[i]) == HTTPD_WS_CLIENT_WEBSOCKET) {
             httpd_ws_send_frame_async(msg->api->factory_server_, client_fds[i], &frame);
         }
     }
+
+    msg->api->status_pending_.store(false);
 }
 
 void FactoryApi::ws_broadcast_preview_work(void* arg) {
@@ -5224,12 +4867,21 @@ void FactoryApi::ws_broadcast_preview_work(void* arg) {
 void FactoryApi::notify_status_async() {
     if (factory_server_ == nullptr) return;
 
+    bool expected = false;
+    if (!status_pending_.compare_exchange_strong(expected, true)) {
+        return; // Another status job is already queued/running
+    }
+
     auto* arg = new (std::nothrow) WsBroadcastArg{};
-    if (!arg) return;
+    if (!arg) {
+        status_pending_.store(false);
+        return;
+    }
     arg->api = this;
     arg->payload[0] = '\0';
 
     if (httpd_queue_work(factory_server_, ws_broadcast_work, arg) != ESP_OK) {
+        status_pending_.store(false);
         delete arg;
     }
 }

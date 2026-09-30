@@ -1,12 +1,12 @@
 /**
- * Shared live node connection/state for dashboard views.
+ * Shared live node connection/state for dashboard views (LG-031).
  *
- * The node remains the source of truth. This module owns client-side
- * connection state, high-frequency pixel buffers, live status, and health
- * metadata without pages opening competing WebSockets or duplicating state.
+ * The node remains the source of truth. nodeStore is the authoritative
+ * live-state manager for the focused node, owning connection lifecycle,
+ * RuntimeSnapshot v3 propagation, WebSocket connection, and pixel streams.
  */
 
-import { writable } from 'svelte/store';
+import { writable, derived } from 'svelte/store';
 import {
   getSelectedNodeIp,
   setSelectedNodeIp,
@@ -15,16 +15,32 @@ import {
 } from '../auth/storage';
 import { nodeAuthStore } from '../auth/nodeAuth';
 import { createWsTicket } from '../api/auth';
-import { getHealth, type HealthSnapshot } from '../api/node';
-import { commandTracker, type NodeStatusSnapshot } from './commandTracker';
+import { getHealth, getStatus, type HealthSnapshot } from '../api/node';
+import { getNodeWsUrl, isTransportBlockedError } from '../api/transport';
+import { commandTracker } from './commandTracker';
+import type { RuntimeSnapshotV3 } from './runtimeSnapshot';
+import { normalizeRuntimeSnapshot } from './compat/runtimeSnapshotV2';
 
 export { commandTracker };
+export type { RuntimeSnapshotV3 };
 
 export const LANES = 8;
 export const PIXELS_PER_LANE = 144;
 export const BUF_SIZE = LANES * PIXELS_PER_LANE * 3;
 
-export type NodeConnection = 'idle' | 'connecting' | 'connected' | 'disconnected' | 'error' | 'degraded';
+export type NodeConnection =
+  | 'idle'
+  | 'connecting'
+  | 'online'
+  | 'degraded'
+  | 'offline'
+  | 'auth-required'
+  | 'transport-blocked'
+  // Backward compatibility aliases:
+  | 'connected'
+  | 'disconnected'
+  | 'error';
+
 export type NodeRole = 'admin' | 'installer' | 'operator' | 'unknown';
 
 export interface NodeLiveStatus {
@@ -99,69 +115,161 @@ export interface NodeLiveStatus {
   };
 }
 
-export interface DashboardNodeState {
+export interface NodeLiveState {
+  nodeId: string | null;
+  route: string | null;
+
+  connection: NodeConnection;
+
+  snapshot: RuntimeSnapshotV3 | null;
+
+  health: HealthSnapshot | null;
+  healthError: string;
+  healthUpdatedAt: number;
+
+  lastSnapshotAt: number;
+  lastStreamSeq: number;
+
+  error: string | null;
+
+  // Backward compatibility fields
   nodeIp: string;
   ip: string;
-  nodeId?: string;
-  connection: NodeConnection;
-  /** True if local dashboard PIN wall is unlocked. Firmware remains authoritative. */
   dashboardUnlocked: boolean;
-  dashboardRole: 'admin' | 'operator' | 'installer' | 'unknown';
-  /** @deprecated Use dashboardUnlocked. Indicates local PIN wall state, NOT firmware auth. */
+  dashboardRole: NodeRole;
   authenticated: boolean;
-  /** @deprecated Use dashboardRole. Indicates local UI role, NOT firmware auth. */
   role: NodeRole;
   lastSeen: number;
   lastMessageAt: number;
   status: NodeLiveStatus | null;
-  health: HealthSnapshot | null;
-  healthError: string;
-  healthUpdatedAt: number;
-  error: string;
-}
-
-export interface NodeLiveState extends DashboardNodeState {
   pixels: Uint8Array;
   frameCount: number;
 }
 
-const EMPTY_STATUS: NodeLiveStatus = {
-  effect: '',
-  brightness: 0,
-  outputsEnabled: false,
-  testActive: false,
-  autoLoop: false,
-  effectStartedMs: 0,
-  durationMs: 0,
-  commandRejections: 0,
-  activePreset: -1,
-};
+function projectLegacyStatus(snap: RuntimeSnapshotV3 | null): NodeLiveStatus | null {
+  if (!snap) return null;
+  return {
+    effect: snap.runtime.effect,
+    brightness: snap.runtime.brightness,
+    outputsEnabled: snap.output.enabled,
+    testActive: snap.runtime.testActive,
+    autoLoop: snap.runtime.autoLoop,
+    activePreset: snap.scene.activePreset,
+    appliedGeneration: snap.scene.appliedGeneration,
+    requestedGeneration: snap.scene.requestedGeneration,
+    sceneApplyPending: snap.scene.applyPending,
+    transitioning: snap.scene.transitioning,
+    controlOwner: snap.runtime.controlOwner,
+    powerMw: snap.output.powerMw,
+    fault: snap.output.fault,
+    faultCount: snap.output.faultCount,
+    seq: snap.streamSeq,
+    nodeId: snap.node.id,
+    uptimeMs: snap.generatedAtMs,
+    protocol: {
+      artnet: snap.protocols.artnet ? {
+        enabled: snap.protocols.artnet.enabled,
+        sources: snap.protocols.artnet.sources,
+        packetsPerSecond: snap.protocols.artnet.packetsPerSecond,
+        lastPacketAgeMs: snap.protocols.artnet.lastPacketAgeMs || 0,
+      } : undefined,
+      sacn: snap.protocols.sacn ? {
+        enabled: snap.protocols.sacn.enabled,
+        sources: snap.protocols.sacn.sources,
+        packetsPerSecond: snap.protocols.sacn.packetsPerSecond,
+      } : undefined,
+      owner: snap.runtime.controlOwner,
+    },
+    job: snap.job ? { ...snap.job } : null,
+    timeline: {
+      clockMs: snap.timeline.clockMs,
+      driftPpm: snap.timeline.driftPpm,
+      synced: snap.timeline.synced,
+    },
+    automation: {
+      activeTracks: snap.automation.activeTracks,
+      transitionCurve: snap.automation.transitionCurve,
+    },
+    cue: snap.transport.cue ? {
+      running: snap.transport.cue.running,
+      state: snap.transport.cue.state,
+      listIndex: snap.transport.cue.listIndex,
+      cueIndex: snap.transport.cue.cueIndex,
+      nextCueIndex: snap.transport.cue.nextCueIndex,
+      manualFade: snap.transport.cue.manualFade,
+    } : null,
+    channels: snap.channels ? snap.channels.map(c => ({ ...c })) : [],
+    manual: {
+      active: snap.manual.active,
+      channelMask: snap.manual.channelMask,
+      leaseRemainingMs: snap.manual.leaseRemainingMs,
+    },
+  };
+}
 
 const initial: NodeLiveState = {
+  nodeId: null,
+  route: null,
+  connection: 'idle',
+  snapshot: null,
+  health: null,
+  healthError: '',
+  healthUpdatedAt: 0,
+  lastSnapshotAt: 0,
+  lastStreamSeq: 0,
+  error: null,
+
   nodeIp: '',
   ip: '',
-  connection: 'idle',
   dashboardUnlocked: false,
   dashboardRole: 'unknown',
   authenticated: false,
   role: 'unknown',
   lastSeen: 0,
   lastMessageAt: 0,
-  status: { ...EMPTY_STATUS },
-  health: null,
-  healthError: '',
-  healthUpdatedAt: 0,
+  status: {
+    effect: '',
+    brightness: 0,
+    outputsEnabled: true,
+    testActive: false,
+    autoLoop: false,
+    activePreset: 0,
+    appliedGeneration: 0,
+    requestedGeneration: 0,
+    sceneApplyPending: false,
+    transitioning: false,
+    controlOwner: 'ScenePlayback',
+    powerMw: 0,
+    fault: false,
+    faultCount: 0,
+    seq: 0,
+    nodeId: '',
+    uptimeMs: 0,
+    protocol: {},
+    channels: [],
+    manual: { active: false, channelMask: 0, leaseRemainingMs: 0 },
+  },
   pixels: new Uint8Array(BUF_SIZE),
   frameCount: 0,
-  error: '',
 };
 
-// Main node state store (low-frequency metadata)
+// Main authoritative node live state store
 const state = writable<NodeLiveState>(initial);
 let latestState = initial;
-state.subscribe(value => { latestState = value; });
+state.subscribe((value) => {
+  latestState = value;
+});
 
-// Separate pixel buffer store for high-frequency renders without waking up unrelated UI components
+// Derived store selectors for high-rate efficiency
+export const sceneRuntimeStore = derived(state, ($s) => $s.snapshot?.scene ?? null);
+export const outputRuntimeStore = derived(state, ($s) => $s.snapshot?.output ?? null);
+export const networkRuntimeStore = derived(state, ($s) => $s.snapshot?.network ?? null);
+export const syncRuntimeStore = derived(state, ($s) => $s.snapshot?.sync ?? null);
+export const transportRuntimeStore = derived(state, ($s) => $s.snapshot?.transport ?? null);
+export const channelRuntimeStore = derived(state, ($s) => $s.snapshot?.channels ?? []);
+export const jobRuntimeStore = derived(state, ($s) => $s.snapshot?.job ?? null);
+
+// Dedicated isolated pixel stores
 export const nodePixelStore = writable<Uint8Array>(new Uint8Array(BUF_SIZE));
 export const nodeFrameCount = writable<number>(0);
 
@@ -172,41 +280,42 @@ let reconnectAttempt = 0;
 let manualClose = false;
 let lastSeq = 0;
 
-function getStoredRole(ip = latestState.nodeIp || getSelectedNodeIp()): NodeRole {
+function getStoredRole(ip = latestState.route || latestState.nodeIp || getSelectedNodeIp()): NodeRole {
   if (!ip) return 'unknown';
   const session = nodeAuthStore.getSession(ip);
   if (session) return session.role;
   return 'unknown';
 }
 
-function isStoredAuthed(ip = latestState.nodeIp || getSelectedNodeIp()): boolean {
+function isStoredAuthed(ip = latestState.route || latestState.nodeIp || getSelectedNodeIp()): boolean {
   if (!ip) return false;
   return nodeAuthStore.hasValidSession(ip);
 }
 
 function publish(patch: Partial<NodeLiveState>) {
-  state.update(current => {
+  state.update((current) => {
     const next = { ...current, ...patch };
-    const ipVal = patch.nodeIp ?? patch.ip;
+    const ipVal = patch.route ?? patch.nodeIp ?? patch.ip;
     if (ipVal !== undefined) {
+      next.route = ipVal;
       next.nodeIp = ipVal;
       next.ip = ipVal;
     }
-    const msgVal = patch.lastMessageAt ?? patch.lastSeen;
+    const msgVal = patch.lastMessageAt ?? patch.lastSeen ?? patch.lastSnapshotAt;
     if (msgVal !== undefined) {
       next.lastMessageAt = msgVal;
       next.lastSeen = msgVal;
+      next.lastSnapshotAt = msgVal;
+    }
+    if (patch.snapshot !== undefined) {
+      next.status = projectLegacyStatus(patch.snapshot);
     }
     return next;
   });
 }
 
 export function getWsUrl(ip: string): string {
-  const scheme =
-    typeof location !== 'undefined' && location.protocol === 'https:'
-      ? 'wss'
-      : 'ws';
-  return `${scheme}://${ip}/ws`;
+  return getNodeWsUrl(ip);
 }
 
 let lastFleetUpdate = 0;
@@ -215,13 +324,15 @@ function recordFleetPresence(ip: string) {
   const now = Date.now();
   if (now - lastFleetUpdate > 5000) {
     lastFleetUpdate = now;
-    try { updateNodeLastSeen(ip); } catch {}
+    try {
+      updateNodeLastSeen(ip);
+    } catch {}
   }
 }
 
 function scheduleReconnect() {
   if (manualClose || reconnectTimer) return;
-  const targetIp = latestState.nodeIp || getSelectedNodeIp();
+  const targetIp = latestState.route || latestState.nodeIp || getSelectedNodeIp();
   if (!targetIp || !nodeAuthStore.hasValidSession(targetIp)) return;
 
   const delay = Math.min(10000, 500 * Math.pow(2, reconnectAttempt));
@@ -232,7 +343,7 @@ function scheduleReconnect() {
   }, delay);
 }
 
-export async function refreshHealth(nodeIp = latestState.nodeIp || getSelectedNodeIp()): Promise<HealthSnapshot | null> {
+export async function refreshHealth(nodeIp = latestState.route || latestState.nodeIp || getSelectedNodeIp()): Promise<HealthSnapshot | null> {
   const ip = nodeIp.trim();
   if (!ip) return null;
   try {
@@ -241,8 +352,54 @@ export async function refreshHealth(nodeIp = latestState.nodeIp || getSelectedNo
     recordFleetPresence(ip);
     return health;
   } catch (err) {
+    if (isTransportBlockedError(err)) {
+      publish({
+        connection: 'transport-blocked',
+        error: 'Direct local-node access is blocked by this browser context. Open the dashboard directly from a LumiGrid node.',
+      });
+      return null;
+    }
     const healthError = err instanceof Error ? err.message : String(err);
     publish({ healthError, healthUpdatedAt: Date.now() });
+    return null;
+  }
+}
+
+/**
+ * Perform initial state recovery or HTTP gap recovery via GET /api/v1/status.
+ * Requirement 15: populates nodeStore deterministically before WS opens.
+ */
+export async function recoverStateViaHttp(ip: string): Promise<RuntimeSnapshotV3 | null> {
+  try {
+    const snapshot = await getStatus(ip);
+    if (!snapshot) return null;
+
+    if (snapshot.node && snapshot.node.id) {
+      nodeAuthStore.bindNodeId(ip, snapshot.node.id);
+      try {
+        recordDiscoveredNode({ id: snapshot.node.id, address: ip, name: snapshot.node.id }, 'sync');
+      } catch {}
+    }
+
+    commandTracker.observe(snapshot as any);
+
+    publish({
+      nodeId: snapshot.node.id,
+      snapshot,
+      lastSnapshotAt: Date.now(),
+      error: null,
+      connection: latestState.connection === 'degraded' || latestState.connection === 'connecting'
+        ? (socket && (socket.readyState === 1 || socket.readyState === (WebSocket as any).OPEN) ? 'online' : latestState.connection)
+        : latestState.connection,
+    });
+    return snapshot;
+  } catch (err) {
+    if (isTransportBlockedError(err)) {
+      publish({
+        connection: 'transport-blocked',
+        error: 'Direct local-node access is blocked by this browser context. Open the dashboard directly from a LumiGrid node.',
+      });
+    }
     return null;
   }
 }
@@ -258,18 +415,22 @@ export async function connect(nodeIp = getSelectedNodeIp()): Promise<void> {
       socket = null;
       ws.close();
     }
-    publish({ nodeIp: '', connection: 'idle', error: '' });
+    publish({ route: '', nodeIp: '', ip: '', connection: 'idle', error: null, snapshot: null });
     return;
   }
   setSelectedNodeIp(ip);
 
   // If already connected/connecting to the exact same IP, return early
-  if (socket && latestState.nodeIp === ip && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
+  if (
+    socket &&
+    latestState.route === ip &&
+    (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)
+  ) {
     return;
   }
 
   // If switching to a different node, close existing socket and clear reconnect timer
-  if (socket && latestState.nodeIp !== ip) {
+  if (socket && latestState.route !== ip) {
     const ws = socket;
     socket = null;
     ws.close();
@@ -290,8 +451,10 @@ export async function connect(nodeIp = getSelectedNodeIp()): Promise<void> {
 
   if (!currentUnlocked) {
     publish({
+      route: ip,
       nodeIp: ip,
-      connection: 'disconnected',
+      ip,
+      connection: 'auth-required',
       dashboardRole: currentRole,
       dashboardUnlocked: false,
       role: currentRole,
@@ -302,221 +465,188 @@ export async function connect(nodeIp = getSelectedNodeIp()): Promise<void> {
   }
 
   publish({
+    route: ip,
     nodeIp: ip,
+    ip,
     connection: 'connecting',
     dashboardRole: currentRole,
     dashboardUnlocked: currentUnlocked,
     role: currentRole,
     authenticated: currentUnlocked,
-    error: '',
+    error: null,
   });
+
+  // Requirement 15: Initial HTTP status fetch before connecting WebSocket
+  recoverStateViaHttp(ip).catch(() => {});
 
   try {
     const { ticket } = await createWsTicket(ip);
-    if (manualClose || latestState.nodeIp !== ip) return;
-    const ws = new WebSocket(getWsUrl(ip), [`lumigrid-ticket.${ticket}`]);
+    if (manualClose || latestState.route !== ip) return;
+
+    const wsUrl = getNodeWsUrl(ip);
+    const ws = new WebSocket(wsUrl, [`lumigrid-ticket.${ticket}`]);
     socket = ws;
     ws.binaryType = 'arraybuffer';
 
-      ws.onopen = () => {
-        if (socket !== ws) return;
-        reconnectAttempt = 0;
-        const openRole = getStoredRole(ip);
-        const openUnlocked = isStoredAuthed(ip);
-        publish({
-          connection: 'connected',
-          dashboardRole: openRole,
-          dashboardUnlocked: openUnlocked,
-          role: openRole,
-          authenticated: openUnlocked,
-          error: '',
-        });
+    ws.onopen = () => {
+      if (socket !== ws) return;
+      reconnectAttempt = 0;
+      const openRole = getStoredRole(ip);
+      const openUnlocked = isStoredAuthed(ip);
+      publish({
+        connection: 'online',
+        dashboardRole: openRole,
+        dashboardUnlocked: openUnlocked,
+        role: openRole,
+        authenticated: openUnlocked,
+        error: null,
+      });
 
-        // Proactively pull health snapshot on connect
-        refreshHealth(ip).catch(() => {});
+      // Proactively pull health snapshot on connect
+      refreshHealth(ip).catch(() => {});
 
-        // Periodic health poll while connected (every 10 seconds, single interval guaranteed)
-        if (healthPollTimer) clearInterval(healthPollTimer);
-        healthPollTimer = setInterval(() => {
-          if (socket && socket.readyState === WebSocket.OPEN) {
-            refreshHealth(ip).catch(() => {});
-          }
-        }, 10000);
-      };
-
-      ws.onclose = () => {
-        if (socket !== ws) return;
-        socket = null;
-        if (healthPollTimer) {
-          clearInterval(healthPollTimer);
-          healthPollTimer = null;
+      if (healthPollTimer) clearInterval(healthPollTimer);
+      healthPollTimer = setInterval(() => {
+        if (socket && socket.readyState === WebSocket.OPEN) {
+          refreshHealth(ip).catch(() => {});
         }
-        publish({ connection: 'disconnected' });
-        scheduleReconnect();
-      };
+      }, 10000);
+    };
 
-      ws.onerror = () => {
-        if (socket !== ws) return;
-        publish({ connection: 'error', error: 'WebSocket connection error' });
-      };
-
-      ws.onmessage = event => {
-    if (socket !== ws) return;
-    const now = Date.now();
-
-    if (event.data instanceof ArrayBuffer) {
-      const arr = new Uint8Array(event.data);
-      if (arr.length > 1 && (arr[0] === 1 || arr[0] === 76)) {
-        const raw = arr.subarray(1);
-        const len = Math.min(raw.length, BUF_SIZE);
-        const pixels = new Uint8Array(BUF_SIZE);
-        pixels.set(raw.subarray(0, len));
-
-        // Update dedicated pixel stores
-        nodePixelStore.set(pixels);
-        nodeFrameCount.update(n => n + 1);
-
-        // Update main state snapshot
-        state.update(current => ({
-          ...current,
-          pixels,
-          frameCount: current.frameCount + 1,
-          lastSeen: now,
-          lastMessageAt: now,
-        }));
+    ws.onclose = () => {
+      if (socket !== ws) return;
+      socket = null;
+      if (healthPollTimer) {
+        clearInterval(healthPollTimer);
+        healthPollTimer = null;
       }
+      publish({ connection: 'offline' });
+      scheduleReconnect();
+    };
+
+    ws.onerror = () => {
+      if (socket !== ws) return;
+      publish({ connection: 'offline', error: 'WebSocket connection error' });
+    };
+
+    ws.onmessage = (event) => {
+      if (socket !== ws) return;
+      const now = Date.now();
+
+      // Binary Pixel Frame: isolated high-frequency rendering path (Requirement 32)
+      if (event.data instanceof ArrayBuffer) {
+        const arr = new Uint8Array(event.data);
+        if (arr.length > 1 && (arr[0] === 1 || arr[0] === 76)) {
+          const raw = arr.subarray(1);
+          const len = Math.min(raw.length, BUF_SIZE);
+          const pixels = new Uint8Array(BUF_SIZE);
+          pixels.set(raw.subarray(0, len));
+
+          nodePixelStore.set(pixels);
+          nodeFrameCount.update((n) => n + 1);
+
+          publish({
+            pixels,
+            frameCount: latestState.frameCount + 1,
+            lastSeen: now,
+            lastMessageAt: now,
+          });
+        }
+        return;
+      }
+
+      // JSON RuntimeSnapshot path
+      if (typeof event.data === 'string') {
+        try {
+          const raw = JSON.parse(event.data);
+          let snapshot = normalizeRuntimeSnapshot(raw);
+          if (!snapshot) return;
+
+          if (raw.schema === undefined && latestState.snapshot) {
+            snapshot = {
+              ...latestState.snapshot,
+              streamSeq: snapshot.streamSeq || latestState.snapshot.streamSeq,
+              runtime: {
+                ...latestState.snapshot.runtime,
+                ...snapshot.runtime,
+                effect: raw.effect !== undefined ? String(raw.effect) : latestState.snapshot.runtime.effect,
+                brightness: raw.brightness !== undefined ? Number(raw.brightness) : latestState.snapshot.runtime.brightness,
+                testActive: raw.testActive !== undefined ? Boolean(raw.testActive) : latestState.snapshot.runtime.testActive,
+                autoLoop: raw.autoLoop !== undefined ? Boolean(raw.autoLoop) : latestState.snapshot.runtime.autoLoop,
+              },
+              output: {
+                ...latestState.snapshot.output,
+                enabled: raw.outputsEnabled !== undefined ? Boolean(raw.outputsEnabled) : latestState.snapshot.output.enabled,
+              },
+            };
+          }
+
+          // Requirement 7 & 16: Stream sequence gap tracking
+          const streamSeq = snapshot.streamSeq;
+          let connStatus: NodeConnection = latestState.connection;
+          if (streamSeq > 0) {
+            if (lastSeq > 0 && streamSeq > lastSeq + 1) {
+              connStatus = 'degraded';
+              // Gap detected: recover state via HTTP
+              recoverStateViaHttp(latestState.route || ip).catch(() => {});
+            } else if (connStatus === 'degraded') {
+              connStatus = 'online';
+            }
+            lastSeq = streamSeq;
+          }
+
+          // Requirement 0.2: Bind authenticated node ID
+          if (snapshot.node && snapshot.node.id) {
+            nodeAuthStore.bindNodeId(ip, snapshot.node.id);
+            try {
+              recordDiscoveredNode({ id: snapshot.node.id, address: ip, name: snapshot.node.id }, 'sync');
+            } catch {}
+          }
+
+          // Inform CommandTracker
+          commandTracker.observe(snapshot as any);
+
+          publish({
+            nodeId: snapshot.node.id,
+            connection: connStatus,
+            snapshot,
+            lastSnapshotAt: now,
+            lastStreamSeq: streamSeq,
+            lastSeen: now,
+            lastMessageAt: now,
+            error: null,
+          });
+
+          recordFleetPresence(latestState.route || ip);
+        } catch {
+          // Defensive: ignore malformed frames
+        }
+      }
+    };
+  } catch (err: unknown) {
+    if (manualClose || latestState.route !== ip) return;
+
+    if (isTransportBlockedError(err)) {
+      publish({
+        connection: 'transport-blocked',
+        error: 'Direct local-node access is blocked by this browser context. Open the dashboard directly from a LumiGrid node.',
+      });
       return;
     }
 
-    if (typeof event.data === 'string') {
-      try {
-        const json = JSON.parse(event.data) as Record<string, unknown>;
-        const isSchema2 = json.schema === 2 && typeof json.seq === 'number';
-        const hasStatusFields =
-          isSchema2 ||
-          json.type === 'status' ||
-          'effect' in json ||
-          'brightness' in json ||
-          'outputsEnabled' in json ||
-          'testActive' in json ||
-          'autoLoop' in json ||
-          'activePreset' in json ||
-          'appliedGeneration' in json;
-        if (!hasStatusFields) return;
-
-        const connectionPatch: Partial<NodeLiveState> = {};
-        if (isSchema2) {
-          const currentSeq = json.seq as number;
-          if (lastSeq > 0 && currentSeq !== lastSeq + 1) {
-            connectionPatch.connection = 'degraded';
-            // Sequence gap detected: refresh health asynchronously for deterministic recovery
-            refreshHealth(latestState.nodeIp).catch(() => {});
-          } else if (latestState.connection === 'degraded') {
-            connectionPatch.connection = 'connected';
-          }
-          lastSeq = currentSeq;
-        }
-
-        // Inform CommandTracker for event-driven acknowledgement
-        commandTracker.observe(json as unknown as NodeStatusSnapshot);
-
-        const s2State = isSchema2 && json.state && typeof json.state === 'object'
-          ? (json.state as Record<string, any>)
-          : null;
-        const s2Runtime = s2State?.runtime;
-        const s2Output = s2State?.output;
-        const s2Scene = s2State?.scene;
-        const s2Protocol = s2State?.protocol;
-        const s2Job = s2State?.job;
-        const s2Timeline = s2State?.timeline;
-        const s2Automation = s2State?.automation;
-        const s2Cue = s2State?.cue;
-        const s2Manual = s2State?.manual ?? (json.manual && typeof json.manual === 'object' ? (json.manual as Record<string, any>) : undefined);
-
-        const nodeIdStr = typeof json.nodeId === 'string' ? json.nodeId : undefined;
-        if (nodeIdStr && latestState.nodeIp) {
-          try {
-            recordDiscoveredNode(
-              { id: nodeIdStr, address: latestState.nodeIp, name: nodeIdStr },
-              'sync'
-            );
-          } catch {}
-        }
-
-        state.update(current => ({
-          ...current,
-          ...connectionPatch,
-          ...(nodeIdStr ? { nodeId: nodeIdStr } : {}),
-          status: {
-            effect: typeof s2Runtime?.effect === 'string'
-              ? s2Runtime.effect
-              : (typeof json.effect === 'string' ? json.effect : (current.status?.effect ?? '')),
-            brightness: typeof s2Runtime?.brightness === 'number'
-              ? s2Runtime.brightness
-              : (typeof json.brightness === 'number' ? json.brightness : (current.status?.brightness ?? 0)),
-            outputsEnabled: typeof s2Output?.outputsEnabled === 'boolean'
-              ? s2Output.outputsEnabled
-              : (typeof json.outputsEnabled === 'boolean' ? json.outputsEnabled : (current.status?.outputsEnabled ?? false)),
-            testActive: typeof s2Runtime?.testActive === 'boolean'
-              ? s2Runtime.testActive
-              : (typeof json.testActive === 'boolean' ? json.testActive : (current.status?.testActive ?? false)),
-            autoLoop: typeof s2Runtime?.autoLoop === 'boolean'
-              ? s2Runtime.autoLoop
-              : (typeof json.autoLoop === 'boolean' ? json.autoLoop : (current.status?.autoLoop ?? false)),
-            effectStartedMs: typeof json.effectStartedMs === 'number' ? json.effectStartedMs : current.status?.effectStartedMs,
-            durationMs: typeof json.durationMs === 'number' ? json.durationMs : current.status?.durationMs,
-            commandRejections: typeof json.commandRejections === 'number' ? json.commandRejections : current.status?.commandRejections,
-            activePreset: typeof s2Scene?.activePreset === 'number'
-              ? s2Scene.activePreset
-              : (typeof json.activePreset === 'number' ? json.activePreset : current.status?.activePreset),
-            appliedGeneration: typeof s2Scene?.appliedGeneration === 'number'
-              ? s2Scene.appliedGeneration
-              : (typeof json.appliedGeneration === 'number' ? json.appliedGeneration : current.status?.appliedGeneration),
-            requestedGeneration: typeof s2Scene?.requestedGeneration === 'number'
-              ? s2Scene.requestedGeneration
-              : (typeof json.requestedGeneration === 'number' ? json.requestedGeneration : current.status?.requestedGeneration),
-            sceneApplyPending: typeof s2Scene?.sceneApplyPending === 'boolean' ? s2Scene.sceneApplyPending : current.status?.sceneApplyPending,
-            transitioning: typeof s2Scene?.transitioning === 'boolean' ? s2Scene.transitioning : current.status?.transitioning,
-            controlOwner: typeof s2Runtime?.controlOwner === 'string' ? s2Runtime.controlOwner : current.status?.controlOwner,
-            powerMw: typeof s2Output?.powerMw === 'number' ? s2Output.powerMw : current.status?.powerMw,
-            fault: typeof s2Output?.fault === 'boolean' ? s2Output.fault : current.status?.fault,
-            faultCount: typeof s2Output?.faultCount === 'number' ? s2Output.faultCount : current.status?.faultCount,
-            seq: typeof json.seq === 'number' ? json.seq : current.status?.seq,
-            nodeId: nodeIdStr ?? current.status?.nodeId,
-            uptimeMs: typeof json.uptimeMs === 'number' ? json.uptimeMs : current.status?.uptimeMs,
-            protocol: s2Protocol ?? current.status?.protocol,
-            job: s2Job !== undefined ? s2Job : current.status?.job,
-            timeline: s2Timeline !== undefined ? s2Timeline : current.status?.timeline,
-            automation: s2Automation !== undefined ? s2Automation : current.status?.automation,
-            cue: s2Cue !== undefined ? s2Cue : current.status?.cue,
-            manual: s2Manual
-              ? {
-                  active: Boolean(s2Manual.active),
-                  channelMask: Number(s2Manual.channelMask ?? 0),
-                  leaseRemainingMs: Number(s2Manual.leaseRemainingMs ?? 0),
-                }
-              : current.status?.manual,
-            channels: Array.isArray(json.channels) ? json.channels : current.status?.channels,
-          },
-          lastSeen: now,
-          lastMessageAt: now,
-        }));
-        recordFleetPresence(latestState.nodeIp);
-      } catch {
-        // Defensive: ignore malformed status frames; maintain last known good state.
-      }
-      }
-    };
-  } catch (err) {
-    if (manualClose || latestState.nodeIp !== ip) return;
     const msg = err instanceof Error ? err.message : String(err);
-    const isAuthErr = msg.includes('401') || msg.toLowerCase().includes('auth') || msg.toLowerCase().includes('session');
+    const isAuthErr =
+      msg.includes('401') ||
+      msg.toLowerCase().includes('auth') ||
+      msg.toLowerCase().includes('session');
+
     publish({
-      connection: 'error',
+      connection: isAuthErr ? 'auth-required' : 'offline',
       dashboardUnlocked: isAuthErr ? false : latestState.dashboardUnlocked,
       authenticated: isAuthErr ? false : latestState.authenticated,
       error: isAuthErr ? 'Authentication required' : msg,
     });
+
     if (!isAuthErr) {
       scheduleReconnect();
     }
@@ -538,13 +668,13 @@ export function disconnect(): void {
   const ws = socket;
   socket = null;
   if (ws) ws.close();
-  publish({ connection: 'disconnected' });
+  publish({ connection: latestState.route || latestState.nodeIp ? 'offline' : 'idle' });
 }
 
 export async function reconnect(ip?: string): Promise<void> {
   disconnect();
   manualClose = false;
-  const target = ip ?? latestState.nodeIp ?? getSelectedNodeIp();
+  const target = ip ?? latestState.route ?? latestState.nodeIp ?? getSelectedNodeIp();
   await connect(target);
 }
 
@@ -555,7 +685,7 @@ export function selectNode(ip: string): void {
   setSelectedNodeIp(target);
   if (!target) {
     disconnect();
-    publish({ nodeIp: '', ip: '', connection: 'idle' });
+    publish({ route: '', nodeIp: '', ip: '', connection: 'idle', snapshot: null });
   } else {
     connect(target);
   }
@@ -580,20 +710,29 @@ export function _resetForTesting(): void {
   reconnectAttempt = 0;
   lastSeq = 0;
   commandTracker.clear();
-  state.set({ ...initial, status: { ...EMPTY_STATUS }, pixels: new Uint8Array(BUF_SIZE) });
+  state.set({ ...initial, pixels: new Uint8Array(BUF_SIZE) });
   nodePixelStore.set(new Uint8Array(BUF_SIZE));
   nodeFrameCount.set(0);
 }
 
 if (typeof window !== 'undefined') {
   nodeAuthStore.subscribe(() => {
-    const currentIp = latestState.nodeIp;
+    const currentIp = latestState.route || latestState.nodeIp;
     if (!currentIp) return;
     const hasSession = nodeAuthStore.hasValidSession(currentIp);
     const role = getStoredRole(currentIp);
-    if (hasSession && (latestState.connection === 'disconnected' || latestState.connection === 'idle' || latestState.error === 'Authentication required')) {
+    if (
+      hasSession &&
+      (latestState.connection === 'offline' ||
+        latestState.connection === 'idle' ||
+        latestState.connection === 'auth-required' ||
+        latestState.error === 'Authentication required')
+    ) {
       connect(currentIp);
-    } else if (!hasSession && (latestState.connection === 'connected' || latestState.connection === 'connecting')) {
+    } else if (
+      !hasSession &&
+      (latestState.connection === 'online' || latestState.connection === 'connecting')
+    ) {
       disconnect();
       publish({
         dashboardRole: 'unknown',
@@ -601,6 +740,7 @@ if (typeof window !== 'undefined') {
         role: 'unknown',
         authenticated: false,
         error: 'Authentication required',
+        connection: 'auth-required',
       });
     } else if (hasSession) {
       publish({
@@ -612,4 +752,3 @@ if (typeof window !== 'undefined') {
     }
   });
 }
-

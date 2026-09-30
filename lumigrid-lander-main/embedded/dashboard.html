@@ -1368,7 +1368,9 @@ window.lg = (() => {
         const powerBar = byId('dash-power-bar');
 
         let owner = 'ScenePlayback';
-        if (st?.controlSource !== undefined) {
+        if (st?.runtime?.controlOwner !== undefined) {
+            owner = st.runtime.controlOwner;
+        } else if (st?.controlSource !== undefined) {
             owner = st.controlSource === 2 ? 'LiveDmx' :
                     st.controlSource === 1 ? 'Factory' :
                     st.controlSource === 6 ? 'Fallback' : 'ScenePlayback';
@@ -1376,7 +1378,7 @@ window.lg = (() => {
         if (ownerEl) ownerEl.textContent = owner;
         if (ownerTextEl) ownerTextEl.textContent = owner;
 
-        const estMw = st?.estimatedMilliwatts ?? 0;
+        const estMw = st?.output?.powerMw ?? st?.estimatedMilliwatts ?? 0;
         const maxMw = state.config?.maxPowerMw || 30000;
         const pct = Math.min(100, Math.round((estMw / maxMw) * 100));
 
@@ -1387,8 +1389,9 @@ window.lg = (() => {
             powerBar.className = 'power-fill' + (pct > 90 ? ' danger' : pct > 75 ? ' warning' : '');
         }
 
+        const isTransitioning = st?.scene?.transitioning ?? st?.transitioning;
         const transEl = byId('dash-trans-text');
-        if (transEl) transEl.textContent = st?.transitioning ? 'Blending' : 'Steady';
+        if (transEl) transEl.textContent = isTransitioning ? 'Blending' : 'Steady';
     }
 
     // ── Navigation ──
@@ -1412,11 +1415,11 @@ window.lg = (() => {
 
     // ── Dashboard View ──
     function renderDashboard() {
-        const activeIdx = state.status?.activePreset;
+        const activeIdx = state.status?.scene?.activePreset ?? state.status?.activePreset;
         const activeScene = state.presets.find(p => Number(p.index) === Number(activeIdx));
         const playingEl = byId('dash-playing');
         if (playingEl) {
-            playingEl.textContent = activeScene?.name || (activeIdx !== undefined ? `Scene ${activeIdx + 1}` : 'No Scene Active');
+            playingEl.textContent = activeScene?.name || (activeIdx !== undefined && activeIdx >= 0 ? `Scene ${activeIdx + 1}` : 'No Scene Active');
         }
 
         const quickGrid = byId('dash-quick-scenes');

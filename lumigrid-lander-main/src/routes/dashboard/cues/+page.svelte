@@ -19,7 +19,6 @@
   import { getPresets, type ScenePreset } from '$lib/api/node';
   import { TRANSITION_CURVES, type TransitionCurve } from '$lib/runtime/curves';
   import { getSelectedNodeIp } from '$lib/auth/storage';
-  import { getSyncStatus, type SyncStatus } from '$lib/api/sync';
   import { nodeStore, commandTracker } from '$lib/state/nodeStore';
 
   let nodeIp = $state('');
@@ -33,18 +32,18 @@
   let toast = $state('');
   let deleteListDialogOpen = $state(false);
   let deletingList = $state(false);
-  let nodeSyncStatus = $state<SyncStatus | null>(null);
 
+  const snapSync = $derived($nodeStore.snapshot?.sync);
   const isFollower = $derived(
-    nodeSyncStatus?.activeRole === 'worker' &&
-    Boolean(nodeSyncStatus.masterAddress) &&
-    (nodeSyncStatus.lastPacketAgeMs === null || nodeSyncStatus.lastPacketAgeMs < 10000)
+    snapSync?.activeRole === 'worker' &&
+    Boolean(snapSync.masterAddress) &&
+    (snapSync.lastPacketAgeMs === null || snapSync.lastPacketAgeMs === undefined || snapSync.lastPacketAgeMs < 10000)
   );
-  const syncMasterAddress = $derived(nodeSyncStatus?.masterAddress || 'Leader');
+  const syncMasterAddress = $derived(snapSync?.masterAddress || 'Leader');
 
-  // Live telemetry from nodeStore
-  let liveStatus = $derived($nodeStore.status);
-  let liveCue = $derived(liveStatus?.cue);
+  // Live telemetry from nodeStore snapshot
+  let snapTransport = $derived($nodeStore.snapshot?.transport);
+  let liveCue = $derived(snapTransport?.cue ?? $nodeStore.status?.cue);
 
   let isRunning = $derived(liveCue?.running ?? false);
   let cueState = $derived(liveCue?.state ?? 'idle');
@@ -79,14 +78,12 @@
     loading = true;
     error = '';
     try {
-      const [lists, pres, syncSt] = await Promise.all([
+      const [lists, pres] = await Promise.all([
         getCueLists(nodeIp).catch(() => []),
         getPresets(nodeIp).catch(() => []),
-        getSyncStatus(nodeIp).catch(() => null),
       ]);
       cueLists = lists;
       presets = pres;
-      nodeSyncStatus = syncSt;
 
       if (cueLists.length > 0) {
         await selectList(cueLists[0].index);

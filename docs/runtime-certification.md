@@ -1,8 +1,8 @@
 # LumiGrid Runtime Certification Status
 
-> **Target Base Commit**: `e5e18f31034371ba8939d758ca91bc137cc79565`
+> **Target Base Commit**: `d21e5e56eea18854524e90c5c8cf243de8c4369d`
 > **Date**: September 2026
-> **Scope**: Certification Hardening, Lifecycle Integrity, Concurrency Safety, and Verification Status.
+> **Scope**: Certification Hardening, Lifecycle Integrity, Concurrency Safety, Runtime Snapshot Authority, and Verification Status.
 > **Certification Stage**: Pre-Hardware Verification (Architecture & Simulation Complete). Full certification is **NOT** claimed until physical hardware milestones are completed.
 
 ---
@@ -53,6 +53,12 @@
 | **Auth (LG-029)** | Explicit separation: `Authorization: Bearer <session>` for browser, `X-API-Key` for automation; query tokens rejected | `[PASS]` | Compile Verified, Static CI, Unit Test |
 | **Auth (LG-029)** | Backup schema v3: zero authentication tokens, salts, or hashes in backup; restore v2 ignores legacy secrets | `[PASS]` | Compile Verified, Static CI, Unit Test |
 | **Auth (LG-029)** | Per-node browser session state in memory and `sessionStorage` (zero tokens in `localStorage`) | `[PASS]` | Compile Verified, Unit Test |
+| **State (LG-031)** | Side-effect free `RuntimeSnapshot` collection (zero command journal mutations or lifecycle side effects) | `[PASS]` | Compile Verified, Unit Test |
+| **State (LG-031)** | Authoritative single runtime-state contract: Schema 3 shared identically by `GET /api/v1/status` and `/ws` | `[PASS]` | Compile Verified, Unit Test |
+| **State (LG-031)** | Bounded 8192-byte serialization budget with `FixedJsonWriter` failure-awareness and overflow truncation protection | `[PASS]` | Compile Verified, Unit Test |
+| **State (LG-031)** | Coalesced status broadcasts via atomic `status_pending_` CAS loop at max 5 Hz rate limit | `[PASS]` | Compile Verified, Unit Test |
+| **State (LG-031)** | Instance-scoped timing atomics `last_preview_ms_` and `last_status_broadcast_ms_` (zero process-global timing statics) | `[PASS]` | Compile Verified, Unit Test |
+| **State (LG-031)** | Decoupled heavy payload: DMX raw frame isolated behind dedicated `GET /api/v1/dmx/frame` (Installer+ role) | `[PASS]` | Compile Verified, Unit Test |
 
 ---
 
@@ -91,7 +97,13 @@
 - **Intentional Disconnect Handling**: `WifiService` maintains `intentional_disconnect_` (`std::atomic<bool>`) so administrative reconfigurations do not trigger the automatic reconnect retry loop.
 - **StaWithApFallback Lifecycle**: If STA fails to connect under `StaWithApFallback`, the recovery AP is activated for operator access, and a FreeRTOS timer performs bounded exponential backoff retries (`5s -> 10s -> 30s -> 60s -> capped at 60s`) until STA connects.
 - **Safe-Mode Recovery Guard**: When `safe_mode_` is active, non-recovery network reconfigurations are rejected with `400 safe_mode_network_locked`.
-- **Write-Only Credential Security**: Passwords are never logged and never exposed in GET responses; the API exposes only `passwordSet: true`.
+### 2.6 Canonical Runtime State & API v1 Cutover (LG-031)
+- **Side-Effect Free Collection**: `collect_runtime_snapshot` reads atomic state and acquires minimal locks purely for observation. Zero state transitions, zero command journal mutations, and zero hardware operations occur during telemetry collection or serialization.
+- **Authoritative Single State Contract**: Schema 3 `RuntimeSnapshot` is shared identically between HTTP `GET /api/v1/status` and authenticated WebSocket (`/ws`) broadcasts. Both channels deliver bit-compatible JSON payloads with identical field hierarchy (`system`, `output`, `dmx`, `network`, `transport`, `hardware`).
+- **Bounded Buffer Safety**: Serialization uses `FixedJsonWriter` within a strict 8192-byte stack/heap budget. Overflow detection truncates safely with failure-awareness rather than causing buffer overflows or unbounded dynamic allocations.
+- **Coalesced Status Broadcasting**: Status changes trigger WebSocket broadcasts through an atomic `status_pending_` CAS loop, rate-limited to a maximum of 5 Hz (200 ms). Preview frames are transmitted at up to 30 Hz.
+- **Zero Process-Global Statics**: Rate limiting and timing tracking use instance-scoped `std::atomic<uint32_t>` members (`last_preview_ms_`, `last_status_broadcast_ms_`) in `FactoryApi`, guaranteeing multi-instance thread safety.
+- **DMX Payload Decoupling**: Static capabilities (`CapabilitiesManifest`) are removed from live status to eliminate bandwidth waste, and raw DMX channel frames are decoupled into a dedicated `GET /api/v1/dmx/frame` endpoint restricted to `Installer+` role.
 
 ---
 
@@ -165,7 +177,7 @@ With the completion of LG-029 (Node-Backed Authentication, Sessions & Credential
 
 ## 6. Stop Condition Notice
 
-With the completion of LG-024 (Live Desk Hardening), LG-025 (Fleet Sync Studio & Show Deployment v1), LG-026 (Show Transport v2 & Synchronized Cue Playback), and LG-029 (Node-Backed Authentication & Provisioning):
-- **Architecture is frozen** across firmware services, state machines, and API contracts.
-- **No new feature families** will be introduced before physical hardware validation.
+With the completion of LG-024 (Live Desk Hardening), LG-025 (Fleet Sync Studio & Show Deployment v1), LG-026 (Show Transport v2 & Synchronized Cue Playback), LG-029 (Node-Backed Authentication & Provisioning), LG-030 (Frontend Architecture Alignment), and LG-031 (Canonical Runtime State & API v1 Cutover):
+- **Architecture is frozen** across firmware services, state machines, API contracts, and frontend stores.
+- **No new feature families** (Scene Studio redesign, Timeline drag/drop, TLS, cloud services) will be introduced before physical hardware validation.
 - Timing certification requires completion of the bench test matrices above on physical LumiGrid LED Node hardware.

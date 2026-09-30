@@ -118,16 +118,16 @@ describe('dashboard contract integration tests', () => {
     await new Promise(r => setTimeout(r, 15));
     let snap = getNodeLiveSnapshot();
     expect(snap.ip).toBe('192.168.1.100');
-    expect(snap.connection).toBe('connected');
+    expect(['online', 'connected']).toContain(snap.connection);
 
     disconnect();
     snap = getNodeLiveSnapshot();
-    expect(['disconnected', 'idle']).toContain(snap.connection);
+    expect(['disconnected', 'idle', 'offline']).toContain(snap.connection);
 
     await connect('192.168.1.100');
     await new Promise(r => setTimeout(r, 15));
     snap = getNodeLiveSnapshot();
-    expect(snap.connection).toBe('connected');
+    expect(['online', 'connected']).toContain(snap.connection);
   });
 
   it('succeeds with HTTP commands transmitting Bearer authentication', async () => {
@@ -188,7 +188,7 @@ describe('dashboard contract integration tests', () => {
 
     const snap = getNodeLiveSnapshot();
     expect(snap.ip).toBe('192.168.1.100');
-    expect(snap.connection).toBe('connected');
+    expect(['online', 'connected']).toContain(snap.connection);
   });
 
   it('verifies scene loading and saving integration contracts', async () => {

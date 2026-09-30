@@ -51,6 +51,12 @@ The operator interface is organized into primary destinations, visually separati
    - **Node Login & Session Lifecycle:** Provisioned nodes prompt for the configured node access key. On successful authentication, the node returns an ephemeral session token with server-dictated role and expiration.
    - **Session Storage:** Active sessions are tracked per-node address and ID in memory and `sessionStorage`. No access credentials or tokens are ever placed in `localStorage`.
    - **Admin Access Control Surface:** Dedicated credential management panel for Admin sessions displaying configured/disabled status for Administrator, Installer, and Operator roles, with one-time copy credential generation, confirmation, and session invalidation on rotation.
+11. **Canonical Live State & Focused Node Store (LG-031):**
+   - **Single Authoritative Live Store (`nodeStore`):** The focused node is backed by one authoritative `RuntimeSnapshotV3` store feeding all views. Overview, Scenes, Timeline, Cues, Factory, Diagnostics, and Network eliminate redundant polling and observe `nodeStore.snapshot`.
+   - **Deterministic Initial Recovery & Stream Gap Healing:** Upon connecting or focusing a node, `GET /api/v1/status` immediately seeds initial snapshot truth before the authenticated WebSocket opens. Stream sequence gaps (`streamSeq N -> N+k`) transition connection status to `degraded`, fetch an HTTP snapshot recovery, and heal the state back to `online`.
+   - **High-Rate Pixel Preview Isolation:** High-frequency binary pixel rendering (`nodePixelStore`, `nodeFrameCount`) is decoupled from snapshot updates to prevent full-dashboard rerendering at 10 Hz.
+   - **Hardware-Truth Diagnostics:** Live indicators consume `nodeStore.snapshot` directly; heavy engineering diagnostics (NVS inspection, logs, security audit) are fetched on-demand.
+   - **Identity vs. Local Alias Separation:** Fleet Devices separates device hardware name from user-defined browser-local aliases. Setting a local alias persists locally across mDNS refreshes.
 
 ### Service
 - **Diagnostics & System:** Unified maintenance hub featuring live health telemetry, real-time node system logs, security/config audit trails, firmware OTA flashing, and backup/restore. Includes a dedicated section for Factory Output Testing (e.g., Burn-in, Lane Chase, Color Wash) time-bounded by the firmware.

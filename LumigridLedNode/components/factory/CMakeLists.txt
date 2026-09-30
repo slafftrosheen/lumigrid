@@ -4,6 +4,7 @@ idf_component_register(
         "FactoryRunner.cpp"
         "FactoryApi.cpp"
         "DiagnosticLog.cpp"
+        "RuntimeSnapshot.cpp"
     INCLUDE_DIRS
         "include"
         "../../generated"

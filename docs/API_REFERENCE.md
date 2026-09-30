@@ -85,7 +85,8 @@ Errors use this shape:
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `GET` | `/api/v1/status` | Read signage playback state. |
+| `GET` | `/api/v1/status` | Read canonical Schema 3 runtime snapshot (identical to WebSocket state). |
+| `GET` | `/api/v1/dmx/frame` | Read on-demand raw 512-channel DMX universe frame (Installer+). |
 | `GET` | `/api/v1/channels` | Read all 16 physical output channels (A1–A8 and P1–P8). |
 | `POST` | `/api/v1/channel/test` | Test or identify a specific physical channel connector. |
 | `PUT` | `/api/v1/manual` | Apply live manual control override frame across 16 physical channels. |
@@ -589,4 +590,157 @@ Authorization: Bearer <session-token>
   ]
 }
 ```
+
+## Canonical Runtime State & API v1 Cutover (LG-031)
+
+LumiGrid control plane maintains **one authoritative runtime-state model**: Schema 3 `RuntimeSnapshot`.
+
+HTTP `GET /api/v1/status` and authenticated WebSocket state streaming (`/ws`) use the **exact same serialized contract**.
+
+```text
+Firmware runtime
+      ↓
+Canonical RuntimeSnapshot v3
+      ↓
+ ┌───────────────┬─────────────────┐
+ │ GET /status   │ authenticated WS │
+ └───────────────┴─────────────────┘
+          ↓ identical state contract
+      nodeStore
+          ↓
+ Overview / Scenes / Timeline / Cues /
+ Live / Factory / Diagnostics / Network
+```
+
+### Architectural Invariants
+
+1. **Observational & Side-Effect Free:** Collection and serialization perform zero mutations or bookkeeping transitions. Generation apply acknowledgment occurs strictly in the runtime renderer when frames commit to hardware.
+2. **Stream Sequencing Independence:** WebSocket broadcasts include `streamSeq = ++ws_stream_seq` for packet-gap detection. HTTP `/api/v1/status` emits `streamSeq: 0` and does not affect the WebSocket sequence counter.
+3. **Bounded Budget:** Serialization uses `FixedJsonWriter` within an 8192-byte max budget. Overflows abort cleanly without transmitting malformed JSON.
+4. **Coalesced Broadcasts:** Status notifications utilize atomic CAS (`status_pending_`) collapsing rapid notifications to max 5 Hz.
+5. **Decoupled Heavy Data:**
+   - Static capabilities are excluded from the live snapshot (`GET /api/v1/capabilities`).
+   - 1024-char raw DMX frame data is excluded from generic status (`GET /api/v1/dmx/frame`, role `Installer+`).
+   - Binary pixel preview remains on an isolated binary WebSocket channel (header byte `1` or `76`).
+
+### Schema 3 JSON Contract
+
+```json
+{
+  "schema": 3,
+  "streamSeq": 42,
+  "generatedAtMs": 1234567,
+
+  "node": {
+    "id": "lg-84f703c29110"
+  },
+
+  "runtime": {
+    "effect": "solid",
+    "brightness": 180,
+    "testActive": false,
+    "autoLoop": false,
+    "controlOwner": "ScenePlayback",
+    "frameCount": 48291
+  },
+
+  "output": {
+    "enabled": true,
+    "powerMw": 7230,
+    "state": "healthy",
+    "fault": false,
+    "faultCount": 0,
+    "estopActive": false
+  },
+
+  "scene": {
+    "activePreset": 4,
+    "requestedPreset": 4,
+    "requestedGeneration": 88,
+    "appliedGeneration": 88,
+    "applyPending": false,
+    "transitioning": false,
+    "fallbackActive": false
+  },
+
+  "manual": {
+    "active": false,
+    "channelMask": 0,
+    "leaseRemainingMs": 0
+  },
+
+  "transport": {
+    "mode": "scene",
+    "generation": 31,
+    "sceneIndex": 4,
+    "timeline": {
+      "running": false,
+      "bpm": 120
+    },
+    "cue": {
+      "running": false
+    }
+  },
+
+  "sync": {
+    "configuredRole": "auto",
+    "activeRole": "worker",
+    "clockLocked": true,
+    "masterAddress": "192.168.1.50",
+    "lastPacketAgeMs": 140,
+    "clockOffsetMs": 1.4,
+    "clockJitterUs": 240
+  },
+
+  "network": {
+    "state": "connected",
+    "rssi": -54,
+    "staConnected": true,
+    "staIp": "192.168.1.71",
+    "apActive": false,
+    "applyState": "idle"
+  },
+
+  "protocols": {
+    "artnet": {
+      "enabled": true,
+      "sources": 0,
+      "packetsPerSecond": 0,
+      "lastPacketAgeMs": 0
+    },
+    "sacn": {
+      "enabled": true,
+      "sources": 0,
+      "packetsPerSecond": 0
+    }
+  },
+
+  "timeline": {
+    "clockMs": 90014,
+    "driftPpm": 0,
+    "synced": true
+  },
+
+  "automation": {
+    "activeTracks": 0,
+    "transitionCurve": "easeInOut"
+  },
+
+  "job": null,
+
+  "channels": [
+    {
+      "index": 0,
+      "port": "A1",
+      "configured": true,
+      "enabled": true,
+      "owner": "ScenePlayback",
+      "fault": false,
+      "brightness": 180,
+      "pixels": 60
+    }
+  ]
+}
+```
+
 

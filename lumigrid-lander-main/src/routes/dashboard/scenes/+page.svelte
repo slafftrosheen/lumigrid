@@ -1,8 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import OperatorDialog from '$lib/components/dashboard/OperatorDialog.svelte';
-  import { getPresets, savePreset, activatePreset, getSignageStatus, getEffects } from '$lib/api/node';
-  import type { ScenePreset, EffectMeta, SignageStatus } from '$lib/api/node';
+  import { getPresets, savePreset, activatePreset, getEffects } from '$lib/api/node';
+  import type { ScenePreset, EffectMeta } from '$lib/api/node';
   import {
     createDefaultPreset,
     clonePreset,
@@ -18,7 +18,6 @@
   } from '$lib/api/scenes';
   import { getChannels, type HardwareChannel } from '$lib/api/channels';
   import { getSelectedNodeIp } from '$lib/auth/storage';
-  import { getSyncStatus, type SyncStatus } from '$lib/api/sync';
   import { nodeStore, commandTracker } from '$lib/state/nodeStore';
   import {
     getSceneMotion,
@@ -39,14 +38,14 @@
   let loading = $state(true);
   let saving = $state(false);
   let activating = $state(false);
-  let nodeSyncStatus = $state<SyncStatus | null>(null);
 
+  const snapSync = $derived($nodeStore.snapshot?.sync);
   const isFollower = $derived(
-    nodeSyncStatus?.activeRole === 'worker' &&
-    Boolean(nodeSyncStatus.masterAddress) &&
-    (nodeSyncStatus.lastPacketAgeMs === null || nodeSyncStatus.lastPacketAgeMs < 10000)
+    snapSync?.activeRole === 'worker' &&
+    Boolean(snapSync.masterAddress) &&
+    (snapSync.lastPacketAgeMs === null || snapSync.lastPacketAgeMs === undefined || snapSync.lastPacketAgeMs < 10000)
   );
-  const syncMasterAddress = $derived(nodeSyncStatus?.masterAddress || 'Leader');
+  const syncMasterAddress = $derived(snapSync?.masterAddress || 'Leader');
   let error = $state('');
   let toast = $state('');
   let clearSceneIdx = $state<number | null>(null);
@@ -200,15 +199,6 @@
     }
   }
 
-  function observeSignageStatus(status: SignageStatus) {
-    if (typeof status.activePreset === 'number') {
-      activePreset = status.activePreset;
-    }
-    if (typeof status.sceneApplyPending === 'boolean') {
-      sceneApplyPending = status.sceneApplyPending;
-    }
-  }
-
   async function doActivate(idx: number) {
     if (activating) return;
     activating = true;
@@ -283,19 +273,15 @@
     editScene = null;
     savedSnapshot = null;
     try {
-      const [p, e, status, chList, syncSt] = await Promise.all([
+      const [p, e, chList] = await Promise.all([
         getPresets(targetIp),
         getEffects(targetIp),
-        getSignageStatus(targetIp),
         getChannels(targetIp).catch(() => [] as HardwareChannel[]),
-        getSyncStatus(targetIp).catch(() => null),
       ]);
       if (gen !== loadGen) return;
       presets = p;
       effects = e;
       hwChannels = chList;
-      nodeSyncStatus = syncSt;
-      observeSignageStatus(status);
       if (presets.length > 0 && selectedIdx === null) {
         selectPreset(presets[0].index);
       }
@@ -311,13 +297,17 @@
 
   onMount(() => {
     const unsub = nodeStore.subscribe(state => {
-      if (state.status?.activePreset !== undefined) {
-        activePreset = state.status.activePreset;
+      const sceneSnap = state.snapshot?.scene ?? state.status;
+      if (sceneSnap && typeof sceneSnap.activePreset === 'number') {
+        activePreset = sceneSnap.activePreset;
       }
-      if (typeof state.status?.sceneApplyPending === 'boolean') {
-        sceneApplyPending = state.status.sceneApplyPending;
+      if (state.snapshot?.scene && typeof state.snapshot.scene.applyPending === 'boolean') {
+        sceneApplyPending = state.snapshot.scene.applyPending;
+      } else if (state.status && typeof (state.status as any).sceneApplyPending === 'boolean') {
+        sceneApplyPending = (state.status as any).sceneApplyPending;
       }
-      if (activating && state.status?.fault) {
+      const outputSnap = state.snapshot?.output ?? state.status;
+      if (activating && outputSnap?.fault) {
         activating = false;
         activationGeneration = 0;
         activationPreset = -1;

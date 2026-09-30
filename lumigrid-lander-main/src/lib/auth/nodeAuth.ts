@@ -7,7 +7,7 @@
  */
 
 export interface NodeAuthSession {
-  nodeId: string;
+  nodeId?: string;
   address: string;
   role: 'operator' | 'installer' | 'admin';
   sessionToken: string;
@@ -167,17 +167,74 @@ class NodeAuthSessionStore {
     this.notify();
   }
 
+  /**
+   * Rebind address for an immutable node ID when physical node moves via DHCP.
+   * Requirement 0.3: Preserves the node session across route changes.
+   */
+  public rebindAddress(nodeId: string, newAddress: string): void {
+    if (!nodeId || !newAddress) return;
+    const newNorm = normalizeNodeAddress(newAddress);
+    const session = this.sessionsByNodeId.get(nodeId);
+    if (!session) return;
+
+    // Disassociate old address if it pointed to this node
+    const oldNorm = normalizeNodeAddress(session.address);
+    if (oldNorm && oldNorm !== newNorm) {
+      if (this.sessionsByAddress.get(oldNorm)?.nodeId === nodeId) {
+        this.sessionsByAddress.delete(oldNorm);
+      }
+      if (this.addressToNodeId.get(oldNorm) === nodeId) {
+        this.addressToNodeId.delete(oldNorm);
+      }
+    }
+
+    // Rebind session to new route
+    session.address = newNorm;
+    this.sessionsByAddress.set(newNorm, session);
+    this.addressToNodeId.set(newNorm, nodeId);
+    this.saveToSessionStorage();
+    this.notify();
+  }
+
+  /**
+   * Bind address to immutable node ID.
+   * Handles:
+   * 1. Same physical node moved address -> preserves session via rebindAddress.
+   * 2. Reused address by a different node ID -> decouples and does NOT transfer session.
+   */
   public bindNodeId(address: string, nodeId: string): void {
     if (!address || !nodeId) return;
     const norm = normalizeNodeAddress(address);
+
+    const previousNodeId = this.addressToNodeId.get(norm);
+    if (previousNodeId && previousNodeId !== nodeId) {
+      // Inverse case: Address was lg-OLD, now lg-NEW. Decouple address from old session.
+      this.sessionsByAddress.delete(norm);
+      this.addressToNodeId.delete(norm);
+    }
+
     this.addressToNodeId.set(norm, nodeId);
+
+    // If an existing session for this immutable nodeId exists, rebind to this address
+    const nodeSession = this.sessionsByNodeId.get(nodeId);
+    if (nodeSession) {
+      this.rebindAddress(nodeId, norm);
+      return;
+    }
 
     const existing = this.sessionsByAddress.get(norm);
     if (existing) {
-      existing.nodeId = nodeId;
-      this.sessionsByNodeId.set(nodeId, existing);
-      this.saveToSessionStorage();
-      this.notify();
+      if (!existing.nodeId || existing.nodeId === nodeId) {
+        existing.nodeId = nodeId;
+        this.sessionsByNodeId.set(nodeId, existing);
+        this.saveToSessionStorage();
+        this.notify();
+      } else {
+        // Mismatched session from previous node on this address
+        this.sessionsByAddress.delete(norm);
+        this.saveToSessionStorage();
+        this.notify();
+      }
     }
   }
 
