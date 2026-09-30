@@ -646,8 +646,23 @@ esp_err_t LumigridRuntime::start() {
             }
             return true;
         } else if (remote_snap.mode == ShowTransportMode::Timeline) {
+            Sequence local_seq{};
+            if (config_.load_sequence(local_seq) != ESP_OK) {
+                out_error = static_cast<uint8_t>(SyncTransportError::TimelineMissing);
+                return false;
+            }
+            if (remote_snap.timeline_active_checksum != 0 && local_seq.checksum != remote_snap.timeline_active_checksum) {
+                out_error = static_cast<uint8_t>(SyncTransportError::TimelineMismatch);
+                return false;
+            }
             if (cue_runner_.is_running()) cue_runner_.stop(clock_.now_ms());
-            scheduler_.apply_remote_show_mode(Scheduler::RemoteShowMode::Timeline, remote_snap.bpm, clock_.now_ms());
+            scheduler_.apply_remote_timeline(
+                remote_snap.transport_generation,
+                remote_snap.timeline_anchor_ms,
+                remote_snap.timeline_active_checksum,
+                remote_snap.bpm,
+                clock_.now_ms()
+            );
             return true;
         } else if (remote_snap.mode == ShowTransportMode::Cue) {
             scheduler_.apply_remote_show_mode(Scheduler::RemoteShowMode::Cue, remote_snap.bpm, clock_.now_ms());
@@ -683,7 +698,13 @@ esp_err_t LumigridRuntime::start() {
 
     node_sync_.set_transport_callback([this](const ShowTransportSnapshot& snap) {
         if (snap.mode == ShowTransportMode::Timeline) {
-            scheduler_.apply_remote_show_mode(Scheduler::RemoteShowMode::Timeline, snap.bpm, clock_.now_ms());
+            scheduler_.apply_remote_timeline(
+                snap.transport_generation,
+                snap.timeline_anchor_ms,
+                snap.timeline_active_checksum,
+                snap.bpm,
+                clock_.now_ms()
+            );
         } else if (snap.mode == ShowTransportMode::Scene) {
             scheduler_.apply_remote_show_mode(Scheduler::RemoteShowMode::Scene, snap.bpm, clock_.now_ms());
         } else if (snap.mode == ShowTransportMode::Cue) {

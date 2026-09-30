@@ -675,7 +675,14 @@ Canonical RuntimeSnapshot v3
     "sceneIndex": 4,
     "timeline": {
       "running": false,
-      "bpm": 120
+      "bpm": 120,
+      "generation": 41,
+      "anchorMs": 123456000,
+      "elapsedMs": 7420,
+      "currentBeat": 14,
+      "activeChecksum": 1234,
+      "savedChecksum": 1234,
+      "contentStale": false
     },
     "cue": {
       "running": false
@@ -740,6 +747,132 @@ Canonical RuntimeSnapshot v3
       "pixels": 60
     }
   ]
+}
+```
+
+## Timeline Studio v2 & Document API (LG-033)
+
+### Fetch Timeline Document
+
+```http
+GET /api/v1/sequence
+```
+
+Returns the canonical Schema 2 Timeline document:
+
+```json
+{
+  "schema": 2,
+  "checksum": 123456,
+  "bpm": 120,
+  "tracks": [
+    {
+      "channelId": 0,
+      "enabled": true,
+      "numSteps": 3,
+      "steps": [
+        { "presetIndex": 4, "lengthBeats": 8 },
+        { "presetIndex": 2, "lengthBeats": 4 },
+        { "presetIndex": 7, "lengthBeats": 2 }
+      ]
+    }
+  ]
+}
+```
+
+The 16 tracks correspond permanently to physical channels 0..15 (`A1..A8` and `P1..P8`). Each track contains 0..16 steps with lengths from 1 to 64 beats.
+
+### Save Timeline Document
+
+```http
+PUT /api/v1/sequence
+Content-Type: application/json
+```
+
+```json
+{
+  "expectedChecksum": 123456,
+  "bpm": 120,
+  "tracks": [ ... ]
+}
+```
+
+#### Invariants:
+1. **Separation of Persistence and Playback:** Saving a timeline persists content to NVS and recalculates `checksum`. It **never** starts or stops playback, mutates `active_sequence_`, or changes active playback BPM or anchor.
+2. **Optimistic Concurrency:** If `expectedChecksum` does not match the stored checksum:
+   ```http
+   409 Conflict
+   ```
+   ```json
+   {
+     "error": "timeline_conflict",
+     "currentChecksum": 789012
+   }
+   ```
+3. **Missing Scene Reference Protection:** Every active block must reference an existing scene preset slot (`scene_exists(presetIndex)`). If any active step references a non-existent preset:
+   ```http
+   400 Bad Request
+   ```
+   ```json
+   {
+     "error": "timeline_scene_missing",
+     "channel": 4,
+     "step": 2,
+     "presetIndex": 14
+   }
+   ```
+4. **Successful Response:**
+   ```json
+   {
+     "saved": true,
+     "checksum": 789012,
+     "commandId": 41
+   }
+   ```
+
+### Show Control Timeline Transport
+
+```http
+POST /api/v1/show/control
+Content-Type: application/json
+```
+
+Start or restart playback:
+```json
+{
+  "mode": "timeline",
+  "action": "start",
+  "bpm": 120
+}
+```
+
+Response:
+```json
+{
+  "accepted": true,
+  "mode": "timeline",
+  "generation": 42,
+  "anchorMs": 123456000,
+  "checksum": 789012,
+  "commandId": 88
+}
+```
+
+Stop playback:
+```json
+{
+  "mode": "timeline",
+  "action": "stop"
+}
+```
+
+Response:
+```json
+{
+  "accepted": true,
+  "mode": "timeline",
+  "generation": 43,
+  "commandId": 89
 }
 ```
 

@@ -57,6 +57,19 @@ The operator interface is organized into primary destinations, visually separati
    - **High-Rate Pixel Preview Isolation:** High-frequency binary pixel rendering (`nodePixelStore`, `nodeFrameCount`) is decoupled from snapshot updates to prevent full-dashboard rerendering at 10 Hz.
    - **Hardware-Truth Diagnostics:** Live indicators consume `nodeStore.snapshot` directly; heavy engineering diagnostics (NVS inspection, logs, security audit) are fetched on-demand.
    - **Identity vs. Local Alias Separation:** Fleet Devices separates device hardware name from user-defined browser-local aliases. Setting a local alias persists locally across mDNS refreshes.
+12. **Scene Studio v2 (LG-032):**
+   - **16-Channel Canvas:** Direct mapping of addressable strips A1–A8 and PWM dimmers P1–P8 with per-channel layer inspector and global brightness/transition controls.
+   - **Visual Library & Thumbnails:** Dedicated `SceneThumbnail` component rendering color ribbons for pixel channels and intensity indicators for PWM outputs.
+   - **Motion Curve Automation:** Multi-track curve editor (`AutomationTrackEditor`) supporting up to 4 tracks and 6 curve points per scene with human-readable value scaling.
+   - **Optimistic Concurrency & Safe Persistence:** Strict CRC32 checksum verification guarding against concurrent edit overwrites (`409 Conflict`). Saving persists to NVS without mutating live output until explicitly activated.
+   - **Dependency-Protected Deletion:** Preflight dependency checking surfacing exact timeline step and cue list references before deletion.
+13. **Timeline Studio v2 (LG-033):**
+   - **Visual Beat-Block Sequencer:** Variable-width blocks proportional to beat duration (1..64 beats) replacing rigid equal-width step tables.
+   - **Permanent 16-Track Matrix:** Canonical physical track rows mapped permanently to A1–A8 and P1–P8 without ambiguous routing dropdowns.
+   - **Separated Persistence & Transport:** "Save" persists the draft to hardware; "Run" snapshots the persisted sequence and begins anchored playback at Beat 0.
+   - **Live Stale-Content Notification:** Clearly displays when saved changes differ from currently running playback snapshot, offering a single-click "Restart with Saved Version".
+   - **Authoritative Live Playhead:** Live playhead derived directly from `RuntimeSnapshot.transport.timeline` with smooth client-side interpolation.
+   - **Follower Mode Protection:** Active followers display "Playback Controlled by Sync Leader" with transport controls disabled, while permitting document editing and saving.
 
 ### Service
 - **Diagnostics & System:** Unified maintenance hub featuring live health telemetry, real-time node system logs, security/config audit trails, firmware OTA flashing, and backup/restore. Includes a dedicated section for Factory Output Testing (e.g., Burn-in, Lane Chase, Color Wash) time-bounded by the firmware.

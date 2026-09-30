@@ -1,6 +1,6 @@
 # LumiGrid Next Phase — Operator Platform v2
 
-Baseline: `d21e5e56eea18854524e90c5c8cf243de8c4369d`.
+Baseline: `c5dbc6fe7d47740bbe796ec6be2cedd587abadb6`.
 
 This phase is deliberately **integration-first**. The runtime/lifecycle architecture is frozen unless a concrete defect requires change. The objective is to make the existing firmware and dashboard behave like one coherent lighting-control product before adding another large feature family.
 
@@ -77,21 +77,23 @@ Firmware
 - One frontend node-state store feeds Fleet, Scenes, Factory, Diagnostics, and Visualizer.
 - Explicit connection states: offline / connecting / online / degraded.
 
-### 4. Scene Studio
+### 4. Scene Studio (LG-032 Complete)
 
-- Visual scene preview.
-- Zone/layer editing.
-- Effect metadata drives controls dynamically.
-- Save / Save As / duplicate / activate.
-- Clear dirty/saved/error states.
+- Visual scene authoring across 16 physical channels (A1–A8 and P1–P8).
+- Zone/layer inspector with effect parameter automation and multi-track motion curves (`AutomationTrackEditor`).
+- Visual library sidebar with 16-channel thumbnails (`SceneThumbnail`).
+- Strict validation: 23-byte UTF-8 name cap, optimistic concurrency via CRC32 conflict detection.
+- Reference-aware safe scene deletion guarding against active timeline and cue list dependencies.
+- Atomic scene + motion persistence ensuring live output is unchanged after save until intentional activation.
 
-### 5. Timeline Studio
+### 5. Timeline Studio (LG-033 Active)
 
-- Replace form-like editing with a visual beat grid.
-- Drag/resize/duplicate steps.
-- BPM-aware editing.
-- Multi-track view (16 physical channels: A1–A8 and P1–P8).
-- Preview against the same scene model used by the device.
+- Decouple timeline document persistence from playback transport: saving timeline content never mutates running playback.
+- Immutable active sequence snapshot on RUN with monotonic transport generation and start anchor clock.
+- Visual block sequencer with variable-width beat blocks (1..64 beats) and independent track looping.
+- 16 canonical physical tracks permanently mapped to A1–A8 and P1–P8.
+- NodeSync protocol v5 transmitting transport generation, timeline anchor, and checksum for synchronized cluster playback.
+- Strict document validation, optimistic concurrency conflict detection, and fail-closed follower checksum verification.
 
 ### 6. Diagnostics + Factory
 
@@ -172,6 +174,26 @@ Execute the documented matrix: boot, networking, API, WebSocket, pixel output, P
 - **Page Cutover:** Scenes, Timeline, Cues, Factory, and Diagnostics consume `nodeStore.snapshot` directly without redundant polling loops. Overview and Firmware use typed `GET /api/v1/info` instead of legacy `/json/info`. Thermal page reports hardware reality ("Temperature sensor unavailable on this hardware/configuration").
 - **Closed LG-030 Client Contracts:** Sessions bind strictly to immutable node IDs; DHCP route changes preserve browser sessions; IP address reuse decouples old sessions; browser-local aliases are separate from firmware `deviceName`; transport schemes strictly use `http://` and `ws://` with `transport-blocked` detection for mixed-content browser contexts.
 
+### 15. Scene Studio v2 & Safe Persistence (LG-032 Complete)
+
+- **Full Visual Scene Authoring:** Complete 16-channel canvas mapping channels A1–A8 (pixel strips) and P1–P8 (PWM dimmers) with tabbed channel and motion workspaces.
+- **16-Channel Visual Previews:** `SceneThumbnail` component rendering color ribbons for addressable outputs and brightness bars for PWM outputs with dynamic effect indicators.
+- **Automation Track Editor:** Multi-track parameter automation editor (`AutomationTrackEditor`) supporting up to 4 tracks and 6 curve points per scene with human-readable value scaling.
+- **Optimistic Concurrency & Safe Persistence:** Strict CRC32 checksum verification preventing silent overwrite of remote modifications (`409 Conflict`). Atomic scene configuration and motion curve persistence.
+- **Safe-Save Invariant:** Saving scene modifications writes exclusively to persisted NVS without altering active hardware output; explicit activation required to apply changes to physical fixtures.
+- **Reference-Aware Deletion:** Preflight checks for scene dependencies in Timeline sequences and Cue Lists, blocking destructive deletions when references exist.
+- **Validation:** Strict UTF-8 23-byte scene name enforcement, bounds clamping, and clipboard copy/paste with cross-channel normalization.
+
+### 16. Timeline Studio v2 — Anchored Transport, Safe Playback & Visual Sequencing (LG-033 Active)
+
+- **Decoupled Persistence & Playback:** `PUT /api/v1/sequence` persists validated timeline documents to NVS without starting, stopping, or altering running playback. Playback is controlled exclusively via `POST /api/v1/show/control` with `mode: "timeline"` (`start`, `restart`, `stop`).
+- **Immutable Active Snapshot:** Starting a timeline snapshots the latest saved sequence into `active_sequence_`. Subsequent saves while running do not alter active playback, cleanly reporting stale content status.
+- **Anchored Deterministic Timing:** Playback starts deterministically at Beat 0 from an explicit anchor timestamp (`timeline_anchor_ms`) rather than deriving phase from uptime.
+- **Monotonic Transport Generations:** Every start/restart increments a transport generation counter, allowing followers and UI to detect new runs without restarting on repeated sync packets.
+- **NodeSync Protocol v5:** Transmits 68-byte packed UDP frames carrying `transport_generation`, `timeline_anchor_ms`, and `timeline_checksum`. Followers validate local timeline checksum against the leader and fail closed on mismatch. Late followers calculate exact phase from the leader's anchor.
+- **Visual Block Sequencer:** Replaces rigid equal-width step tables with variable-width blocks proportional to beat duration (1..64 beats). Supports block addition, dragging, resizing, duplication, deletion, copy/paste across channels, and independent track loop visualization.
+- **Fail-Closed API Validation:** Strict schema 2 validation, 16 physical tracks permanently mapped to A1–A8 and P1–P8, 0..16 steps per track, missing scene reference validation (400), and checksum conflict protection (409).
+
 ## Explicit non-goals for this phase
 
 - No new node families.
@@ -183,3 +205,4 @@ Execute the documented matrix: boot, networking, API, WebSocket, pixel output, P
 ## Definition of done
 
 A new operator can discover/add a node, see its real live state, compose a scene, preview it, activate it, sequence it, schedule it, run synchronized cue shows across a cluster, diagnose a fault, run a factory test, and recover/update the node without needing to understand firmware internals.
+

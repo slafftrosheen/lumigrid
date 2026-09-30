@@ -72,6 +72,15 @@ struct ShowTransportSnapshot {
     uint32_t generation = 0;
     CueTransportSnapshot cue{};
 
+    // Timeline Studio v2 extensions (LG-033)
+    uint32_t transport_generation = 0;
+    uint64_t timeline_anchor_ms = 0;
+    uint32_t timeline_active_checksum = 0;
+    uint32_t timeline_saved_checksum = 0;
+    uint64_t timeline_elapsed_ms = 0;
+    uint32_t timeline_current_beat = 0;
+    bool timeline_content_stale = false;
+
     uint8_t scene_index() const { return active_scene; }
     uint16_t timeline_bpm() const { return bpm; }
     bool timeline_running() const { return mode == ShowTransportMode::Timeline; }
@@ -86,14 +95,30 @@ public:
     ShowTransportSnapshot snapshot() const;
 
     void set_scene_mode(uint8_t scene_index);
-    void set_timeline_mode(bool running, uint16_t bpm);
+    void set_timeline_mode(
+        bool running,
+        uint16_t bpm,
+        uint64_t anchor_ms = 0,
+        uint32_t active_checksum = 0,
+        uint32_t saved_checksum = 0,
+        bool force_restart = false
+    );
     void set_cue_mode(const CueTransportSnapshot& cue_snap);
     void update_cue_snapshot(const CueTransportSnapshot& cue_snap);
     void update_snapshot(const ShowTransportSnapshot& snap);
 
     // Convenience aliases
     void set_scene(uint8_t scene_index) { set_scene_mode(scene_index); }
-    void set_timeline(bool running, uint16_t bpm) { set_timeline_mode(running, bpm); }
+    void set_timeline(
+        bool running,
+        uint16_t bpm,
+        uint64_t anchor_ms = 0,
+        uint32_t active_checksum = 0,
+        uint32_t saved_checksum = 0,
+        bool force_restart = false
+    ) {
+        set_timeline_mode(running, bpm, anchor_ms, active_checksum, saved_checksum, force_restart);
+    }
     void set_cue(const CueTransportSnapshot& cue_snap) { set_cue_mode(cue_snap); }
     void set_mode(ShowTransportMode mode);
 

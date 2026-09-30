@@ -90,6 +90,13 @@ struct TransportCueSnapshot {
 struct TransportTimelineSnapshot {
     bool running = false;
     uint16_t bpm = 120;
+    uint32_t generation = 0;
+    uint64_t anchor_ms = 0;
+    uint32_t elapsed_ms = 0;
+    uint32_t current_beat = 0;
+    uint32_t active_checksum = 0;
+    uint32_t saved_checksum = 0;
+    bool content_stale = false;
 };
 
 struct TransportSnapshot {

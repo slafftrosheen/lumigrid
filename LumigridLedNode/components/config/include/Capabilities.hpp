@@ -43,7 +43,7 @@ struct CapabilitiesManifest {
     // Protocol versions
     static constexpr uint8_t kProtocolHttpApi = 1;
     static constexpr uint8_t kProtocolWebsocket = 2;
-    static constexpr uint8_t kProtocolSync = 4;
+    static constexpr uint8_t kProtocolSync = 5;
     static constexpr uint8_t kProtocolDiscovery = 1;
 };
 

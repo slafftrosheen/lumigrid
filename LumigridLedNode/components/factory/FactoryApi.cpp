@@ -1175,16 +1175,22 @@ esp_err_t get_presets(httpd_req_t* request) {
     return ESP_OK;
 }
 
+struct TimelineReference {
+    uint8_t channel = 0;
+    uint8_t step = 0;
+};
+
 struct SceneReferences {
     uint8_t scene_index = 0;
     bool active = false;
     bool fallback = false;
     std::vector<uint8_t> cues;
     std::vector<uint8_t> timeline_tracks;
+    std::vector<TimelineReference> timeline_steps;
     std::vector<uint8_t> schedules;
 
     bool in_use() const {
-        return active || fallback || !cues.empty() || !timeline_tracks.empty() || !schedules.empty();
+        return active || fallback || !cues.empty() || !timeline_tracks.empty() || !timeline_steps.empty() || !schedules.empty();
     }
 };
 
@@ -1227,7 +1233,7 @@ static SceneReferences evaluate_scene_references(FactoryApi* api_ptr, uint8_t sc
                 for (uint8_t s = 0; s < seq.tracks[t].num_steps && s < 16; ++s) {
                     if (seq.tracks[t].steps[s].preset_index == scene_index) {
                         refs.timeline_tracks.push_back(t);
-                        break;
+                        refs.timeline_steps.push_back({t, s});
                     }
                 }
             }
@@ -1355,10 +1361,11 @@ esp_err_t delete_preset(httpd_req_t* request) {
             cJSON_AddNumberToObject(item, "index", c);
             cJSON_AddItemToArray(ref_arr, item);
         }
-        for (uint8_t t : refs.timeline_tracks) {
+        for (const auto& ts : refs.timeline_steps) {
             cJSON* item = cJSON_CreateObject();
-            cJSON_AddStringToObject(item, "type", "timelineTrack");
-            cJSON_AddNumberToObject(item, "index", t);
+            cJSON_AddStringToObject(item, "type", "timeline");
+            cJSON_AddNumberToObject(item, "channel", ts.channel);
+            cJSON_AddNumberToObject(item, "step", ts.step);
             cJSON_AddItemToArray(ref_arr, item);
         }
         for (uint8_t s : refs.schedules) {
@@ -1434,7 +1441,7 @@ esp_err_t get_show_manifest(httpd_req_t* request) {
     cJSON_AddNumberToObject(root, "schemaVersion", 2);
     cJSON_AddStringToObject(root, "firmware", id.fw_version);
     cJSON_AddNumberToObject(root, "protocol", 1);
-    cJSON_AddNumberToObject(root, "syncProtocol", 4);
+    cJSON_AddNumberToObject(root, "syncProtocol", CapabilitiesManifest::kProtocolSync);
     cJSON_AddNumberToObject(root, "playbackHash", api_ptr->config()->compute_playback_hash());
     cJSON_AddNumberToObject(root, "fullHash", api_ptr->config()->compute_full_show_hash());
     cJSON_AddNumberToObject(root, "scheduleHash", api_ptr->config()->compute_schedule_hash());
@@ -2424,7 +2431,10 @@ esp_err_t post_show_control(httpd_req_t* request) {
         const char* action = (act_j && cJSON_IsString(act_j)) ? act_j->valuestring : "start";
 
         uint32_t transport_gen = 0;
-        if (strcmp(action, "start") == 0) {
+        uint64_t anchor_ms = 0;
+        uint32_t active_cs = 0;
+
+        if (strcmp(action, "start") == 0 || strcmp(action, "restart") == 0) {
             if (api_ptr->cue_runner()) {
                 api_ptr->cue_runner()->stop(now_ms);
             }
@@ -2439,9 +2449,15 @@ esp_err_t post_show_control(httpd_req_t* request) {
             }
             if (api_ptr->scheduler()) {
                 api_ptr->scheduler()->start_local_timeline(bpm);
+                auto snap = api_ptr->scheduler()->transport_snapshot(api_ptr->show_clock_now_ms());
+                anchor_ms = snap.timeline_anchor_ms;
+                transport_gen = snap.transport_generation;
+                active_cs = snap.timeline_active_checksum;
             }
             if (api_ptr->show_transport()) {
-                api_ptr->show_transport()->set_timeline(true, bpm);
+                api_ptr->show_transport()->set_timeline(
+                    true, bpm, anchor_ms, active_cs, seq.checksum, (strcmp(action, "restart") == 0)
+                );
                 transport_gen = api_ptr->show_transport()->generation();
             }
         } else if (strcmp(action, "stop") == 0) {
@@ -2462,8 +2478,10 @@ esp_err_t post_show_control(httpd_req_t* request) {
         api_ptr->command_journal().applied(cmd_id);
         api_ptr->notify_status_async();
 
-        char resp[128];
-        snprintf(resp, sizeof(resp), "{\"accepted\":true,\"mode\":\"timeline\",\"generation\":%" PRIu32 ",\"commandId\":%" PRIu32 "}", transport_gen, cmd_id);
+        char resp[256];
+        snprintf(resp, sizeof(resp),
+            "{\"accepted\":true,\"mode\":\"timeline\",\"generation\":%" PRIu32 ",\"anchorMs\":%" PRIu64 ",\"checksum\":%" PRIu32 ",\"commandId\":%" PRIu32 "}",
+            transport_gen, anchor_ms, active_cs, cmd_id);
         return send_json(request, resp, "200 OK");
     } else if (strcmp(mode_str, "cue") == 0) {
         if (!api_ptr->cue_runner()) {
@@ -3831,22 +3849,23 @@ esp_err_t get_sequence(httpd_req_t* request) {
     FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
     if (!api_ptr->config()) return send_error(request, "503 Service Unavailable", "config_not_ready");
 
-    Sequence seq;
+    Sequence seq{};
     api_ptr->config()->load_sequence(seq);
 
     cJSON* obj = cJSON_CreateObject();
-    cJSON_AddNumberToObject(obj, "bpm", seq.bpm);
-    cJSON_AddBoolToObject(obj, "enabled", seq.enabled);
+    cJSON_AddNumberToObject(obj, "schema", 2);
+    cJSON_AddNumberToObject(obj, "checksum", seq.checksum);
+    cJSON_AddNumberToObject(obj, "bpm", seq.bpm > 0 ? seq.bpm : 120);
 
     cJSON* tracks = cJSON_CreateArray();
     for (uint8_t i = 0; i < 16; ++i) {
         cJSON* trk = cJSON_CreateObject();
-        cJSON_AddNumberToObject(trk, "channelId", seq.tracks[i].channel_id);
+        cJSON_AddNumberToObject(trk, "channelId", i);
         cJSON_AddNumberToObject(trk, "numSteps", seq.tracks[i].num_steps);
         cJSON_AddBoolToObject(trk, "enabled", seq.tracks[i].enabled);
 
         cJSON* steps = cJSON_CreateArray();
-        for (uint8_t s = 0; s < 16; ++s) {
+        for (uint8_t s = 0; s < seq.tracks[i].num_steps && s < 16; ++s) {
             cJSON* stp = cJSON_CreateObject();
             cJSON_AddNumberToObject(stp, "presetIndex", seq.tracks[i].steps[s].preset_index);
             cJSON_AddNumberToObject(stp, "lengthBeats", seq.tracks[i].steps[s].length_beats);
@@ -3874,40 +3893,116 @@ esp_err_t put_sequence(httpd_req_t* request) {
     if (!api_ptr->config()) return send_error(request, "503 Service Unavailable", "config_not_ready");
 
     cJSON* root = nullptr;
-    if (read_json(request, &root) != ESP_OK) {
+    if (read_json(request, &root) != ESP_OK || !root) {
         return send_error(request, "400 Bad Request", "invalid_json");
     }
 
-    Sequence seq{};
-    json_u16(root, "bpm", 10, 500, seq.bpm);
+    // LG-033 Requirement 15: Optimistic concurrency / conflict protection
+    Sequence current_seq{};
+    api_ptr->config()->load_sequence(current_seq);
+    const cJSON* exp_cs = cJSON_GetObjectItemCaseSensitive(root, "expectedChecksum");
+    if (exp_cs) {
+        if (!cJSON_IsNumber(exp_cs)) {
+            cJSON_Delete(root);
+            return send_error(request, "400 Bad Request", "invalid_expected_checksum");
+        }
+        uint32_t expected = static_cast<uint32_t>(exp_cs->valuedouble);
+        if (expected != current_seq.checksum) {
+            cJSON_Delete(root);
+            char conflict_body[128];
+            snprintf(conflict_body, sizeof(conflict_body),
+                     "{\"error\":\"timeline_conflict\",\"currentChecksum\":%" PRIu32 "}",
+                     current_seq.checksum);
+            return send_json(request, conflict_body, "409 Conflict");
+        }
+    }
 
-    const cJSON* en = cJSON_GetObjectItemCaseSensitive(root, "enabled");
-    if (cJSON_IsBool(en)) seq.enabled = cJSON_IsTrue(en);
+    // Strict validation: BPM 10..500
+    const cJSON* bpm_j = cJSON_GetObjectItemCaseSensitive(root, "bpm");
+    if (!bpm_j || !cJSON_IsNumber(bpm_j) || bpm_j->valueint < 10 || bpm_j->valueint > 500) {
+        cJSON_Delete(root);
+        return send_error(request, "400 Bad Request", "invalid_bpm_10_500");
+    }
+    uint16_t bpm = static_cast<uint16_t>(bpm_j->valueint);
 
+    // Strict validation: Exactly 16 canonical physical tracks
     const cJSON* tracks = cJSON_GetObjectItemCaseSensitive(root, "tracks");
-    if (cJSON_IsArray(tracks)) {
-        int trk_idx = 0;
-        cJSON* trk_item = nullptr;
-        cJSON_ArrayForEach(trk_item, tracks) {
-            if (trk_idx >= 16) break;
-            json_u8(trk_item, "channelId", 0, 15, seq.tracks[trk_idx].channel_id);
-            json_u8(trk_item, "numSteps", 1, 16, seq.tracks[trk_idx].num_steps);
+    if (!tracks || !cJSON_IsArray(tracks) || cJSON_GetArraySize(tracks) != 16) {
+        cJSON_Delete(root);
+        return send_error(request, "400 Bad Request", "requires_16_tracks");
+    }
 
-            const cJSON* trk_en = cJSON_GetObjectItemCaseSensitive(trk_item, "enabled");
-            if (cJSON_IsBool(trk_en)) seq.tracks[trk_idx].enabled = cJSON_IsTrue(trk_en);
+    Sequence seq{};
+    seq.bpm = bpm;
+    seq.enabled = false; // LG-033: always false in new saves
 
-            const cJSON* steps = cJSON_GetObjectItemCaseSensitive(trk_item, "steps");
-            if (cJSON_IsArray(steps)) {
-                int stp_idx = 0;
-                cJSON* stp_item = nullptr;
-                cJSON_ArrayForEach(stp_item, steps) {
-                    if (stp_idx >= 16) break;
-                    json_u8(stp_item, "presetIndex", 0, kMaxPresets - 1, seq.tracks[trk_idx].steps[stp_idx].preset_index);
-                    json_u8(stp_item, "lengthBeats", 1, 64, seq.tracks[trk_idx].steps[stp_idx].length_beats);
-                    ++stp_idx;
-                }
+    for (int i = 0; i < 16; ++i) {
+        const cJSON* trk_item = cJSON_GetArrayItem(tracks, i);
+        if (!trk_item || !cJSON_IsObject(trk_item)) {
+            cJSON_Delete(root);
+            return send_error(request, "400 Bad Request", "invalid_track_object");
+        }
+
+        // Canonical mapping: channelId must match track row i
+        const cJSON* ch_id_j = cJSON_GetObjectItemCaseSensitive(trk_item, "channelId");
+        if (!ch_id_j || !cJSON_IsNumber(ch_id_j) || ch_id_j->valueint != i) {
+            cJSON_Delete(root);
+            return send_error(request, "400 Bad Request", "invalid_channel_mapping");
+        }
+        seq.tracks[i].channel_id = static_cast<uint8_t>(i);
+
+        const cJSON* trk_en = cJSON_GetObjectItemCaseSensitive(trk_item, "enabled");
+        seq.tracks[i].enabled = (trk_en && cJSON_IsBool(trk_en)) ? cJSON_IsTrue(trk_en) : false;
+
+        const cJSON* num_steps_j = cJSON_GetObjectItemCaseSensitive(trk_item, "numSteps");
+        if (!num_steps_j || !cJSON_IsNumber(num_steps_j) || num_steps_j->valueint < 0 || num_steps_j->valueint > 16) {
+            cJSON_Delete(root);
+            return send_error(request, "400 Bad Request", "invalid_num_steps_0_16");
+        }
+        uint8_t num_steps = static_cast<uint8_t>(num_steps_j->valueint);
+        seq.tracks[i].num_steps = num_steps;
+
+        const cJSON* steps = cJSON_GetObjectItemCaseSensitive(trk_item, "steps");
+        if (num_steps > 0) {
+            if (!steps || !cJSON_IsArray(steps) || cJSON_GetArraySize(steps) < num_steps) {
+                cJSON_Delete(root);
+                return send_error(request, "400 Bad Request", "invalid_steps_length");
             }
-            ++trk_idx;
+
+            for (uint8_t s = 0; s < num_steps; ++s) {
+                const cJSON* stp_item = cJSON_GetArrayItem(steps, s);
+                if (!stp_item || !cJSON_IsObject(stp_item)) {
+                    cJSON_Delete(root);
+                    return send_error(request, "400 Bad Request", "invalid_step_object");
+                }
+
+                const cJSON* p_idx_j = cJSON_GetObjectItemCaseSensitive(stp_item, "presetIndex");
+                if (!p_idx_j || !cJSON_IsNumber(p_idx_j) || p_idx_j->valueint < 0 || p_idx_j->valueint >= kMaxPresets) {
+                    cJSON_Delete(root);
+                    return send_error(request, "400 Bad Request", "invalid_preset_index_0_31");
+                }
+                uint8_t preset_index = static_cast<uint8_t>(p_idx_j->valueint);
+
+                const cJSON* len_j = cJSON_GetObjectItemCaseSensitive(stp_item, "lengthBeats");
+                if (!len_j || !cJSON_IsNumber(len_j) || len_j->valueint < 1 || len_j->valueint > 64) {
+                    cJSON_Delete(root);
+                    return send_error(request, "400 Bad Request", "invalid_length_beats_1_64");
+                }
+                uint8_t length_beats = static_cast<uint8_t>(len_j->valueint);
+
+                // LG-033 Requirement 19: Active Scene references must exist on node
+                if (!api_ptr->config()->scene_exists(preset_index)) {
+                    cJSON_Delete(root);
+                    char err_resp[160];
+                    snprintf(err_resp, sizeof(err_resp),
+                        "{\"error\":\"timeline_scene_missing\",\"channel\":%d,\"step\":%d,\"presetIndex\":%d}",
+                        i, s, preset_index);
+                    return send_json(request, err_resp, "400 Bad Request");
+                }
+
+                seq.tracks[i].steps[s].preset_index = preset_index;
+                seq.tracks[i].steps[s].length_beats = length_beats;
+            }
         }
     }
 
@@ -3919,14 +4014,19 @@ esp_err_t put_sequence(httpd_req_t* request) {
         return send_error(request, "500 Internal Server Error", "nvs_write_failed");
     }
 
+    // Refresh persisted sequence in config store to retrieve newly computed checksum
+    api_ptr->config()->load_sequence(seq);
+
     api_ptr->command_journal().applied(cmd_id);
     api_ptr->notify_status_async();
 
     api::AuditLog::instance().log(api::ApiRole::Operator, "sequence_update", "Sequence updated");
 
-    char resp[96];
-    snprintf(resp, sizeof(resp), "{\"saved\":true,\"accepted\":true,\"commandId\":%" PRIu32 "}", cmd_id);
-    return send_json(request, resp);
+    char resp[128];
+    snprintf(resp, sizeof(resp),
+        "{\"saved\":true,\"checksum\":%" PRIu32 ",\"commandId\":%" PRIu32 "}",
+        seq.checksum, cmd_id);
+    return send_json(request, resp, "200 OK");
 }
 
 esp_err_t put_manual(httpd_req_t* request) {
@@ -4230,8 +4330,8 @@ esp_err_t get_sync_status(httpd_req_t* request) {
 
     const NodeSyncStatus status = api_ptr->node_sync()->status();
     cJSON* response = cJSON_CreateObject();
-    cJSON_AddNumberToObject(response, "protocolVersion", 4);
-    cJSON_AddNumberToObject(response, "syncProtocol", 4);
+    cJSON_AddNumberToObject(response, "protocolVersion", CapabilitiesManifest::kProtocolSync);
+    cJSON_AddNumberToObject(response, "syncProtocol", CapabilitiesManifest::kProtocolSync);
 
     DeviceConfig dev_cfg{};
     if (api_ptr->config() && api_ptr->config()->load_config(dev_cfg) == ESP_OK) {

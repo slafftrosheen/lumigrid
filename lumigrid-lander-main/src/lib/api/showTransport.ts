@@ -14,6 +14,13 @@ export interface ShowTransportStatus {
   timeline: {
     running: boolean;
     bpm: number;
+    generation?: number;
+    anchorMs?: number;
+    elapsedMs?: number;
+    currentBeat?: number;
+    activeChecksum?: number;
+    savedChecksum?: number;
+    contentStale?: boolean;
   };
 
   cue: CueStatus;
@@ -23,6 +30,8 @@ export interface ShowControlResponse {
   accepted: boolean;
   mode: ShowTransportMode;
   generation?: number;
+  anchorMs?: number;
+  checksum?: number;
   commandId?: number;
   error?: string;
   leader?: string;
@@ -46,6 +55,14 @@ export async function startTimeline(ip: string, bpm?: number): Promise<ShowContr
   return apiJson<ShowControlResponse>(ip, '/api/v1/show/control', {
     method: 'POST',
     body: JSON.stringify({ mode: 'timeline', action: 'start', ...(bpm ? { bpm } : {}) }),
+  });
+}
+
+/** Restarts Timeline transport, capturing a new generation, anchor, and active sequence. */
+export async function restartTimeline(ip: string, bpm?: number): Promise<ShowControlResponse> {
+  return apiJson<ShowControlResponse>(ip, '/api/v1/show/control', {
+    method: 'POST',
+    body: JSON.stringify({ mode: 'timeline', action: 'restart', ...(bpm ? { bpm } : {}) }),
   });
 }
 

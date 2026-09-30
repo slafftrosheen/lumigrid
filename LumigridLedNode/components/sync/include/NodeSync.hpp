@@ -25,6 +25,9 @@ enum class SyncTransportError : uint8_t {
     CueIndexInvalid = 3,
     RuntimeUnavailable = 4,
     UnsupportedTransport = 5,
+    TimelineMissing = 6,
+    TimelineMismatch = 7,
+    TimelineInvalid = 8,
 };
 
 inline const char* sync_transport_error_str(uint8_t err) {
@@ -35,6 +38,9 @@ inline const char* sync_transport_error_str(uint8_t err) {
         case SyncTransportError::CueIndexInvalid: return "cue_index_invalid";
         case SyncTransportError::RuntimeUnavailable: return "runtime_unavailable";
         case SyncTransportError::UnsupportedTransport: return "unsupported_transport";
+        case SyncTransportError::TimelineMissing: return "timeline_missing";
+        case SyncTransportError::TimelineMismatch: return "timeline_mismatch";
+        case SyncTransportError::TimelineInvalid: return "timeline_invalid";
         default: return "none";
     }
 }
@@ -107,7 +113,7 @@ public:
         Acknowledgement = 2,
     };
 
-    // Phase 6: Canonical 52-byte packed SyncPacket v4
+    // Phase 6: Canonical 68-byte packed SyncPacket v5
     struct __attribute__((packed)) SyncPacket {
         uint32_t magic;
         uint8_t  version;
@@ -136,9 +142,14 @@ public:
 
         uint8_t  sender_mac[6];
         uint32_t token;
+
+        // Protocol v5 extensions (16 bytes)
+        uint32_t transport_generation;
+        uint64_t timeline_anchor_ms;
+        uint32_t timeline_checksum;
     };
 
-    static_assert(sizeof(SyncPacket) == 52, "SyncPacket must be 52 bytes");
+    static_assert(sizeof(SyncPacket) == 68, "SyncPacket must be 68 bytes");
 
 private:
 
@@ -206,7 +217,7 @@ private:
     static constexpr uint32_t kSyncIntervalMs = 100; // 10 Hz
     static constexpr uint32_t kSyncManualIntervalMs = 50; // 20 Hz during manual crossfade
     static constexpr uint32_t kMagic = 0x4C475359; // "LGSY"
-    static constexpr uint8_t kPacketVersion = 4;
+    static constexpr uint8_t kPacketVersion = 5;
     static constexpr uint32_t kPeerTimeoutMs = 3000;
     static constexpr uint32_t kAutoElectionBaseMs = 800;
 };

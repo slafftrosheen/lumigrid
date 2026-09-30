@@ -1212,6 +1212,7 @@ void ConfigStore::populate_default_topology(DeviceConfig& config) {
 
 esp_err_t ConfigStore::save_sequence(const Sequence& seq) {
     auto to_save = std::make_unique<Sequence>(seq);
+    to_save->enabled = false; // LG-033: Deprecated compatibility state, new saves always false
     to_save->checksum = calc_seq_crc(*to_save);
 
     ESP_RETURN_ON_ERROR(
@@ -1249,6 +1250,42 @@ esp_err_t ConfigStore::load_sequence(Sequence& seq) {
                 ESP_LOGW(TAG, "Sequence %s CRC mismatch", k);
                 return ESP_ERR_NVS_INVALID_STATE;
             }
+
+            // LG-033: Verify canonical 16 physical tracks (track 0 -> A1 .. track 15 -> P8)
+            bool needs_canonical = false;
+            for (uint8_t i = 0; i < 16; ++i) {
+                if (out.tracks[i].channel_id != i) {
+                    needs_canonical = true;
+                    break;
+                }
+            }
+            if (needs_canonical) {
+                Sequence canonical{};
+                canonical.bpm = out.bpm > 0 ? out.bpm : 120;
+                canonical.enabled = false;
+                for (uint8_t i = 0; i < 16; ++i) {
+                    canonical.tracks[i].channel_id = i;
+                    canonical.tracks[i].num_steps = 0;
+                    canonical.tracks[i].enabled = false;
+                }
+                bool mapped[16] = {};
+                for (uint8_t i = 0; i < 16; ++i) {
+                    uint8_t ch = out.tracks[i].channel_id;
+                    if (ch < 16) {
+                        if (!mapped[ch]) {
+                            canonical.tracks[ch] = out.tracks[i];
+                            canonical.tracks[ch].channel_id = ch;
+                            mapped[ch] = true;
+                        } else {
+                            ESP_LOGW(TAG, "Sequence has duplicate channel %u; first valid wins", ch);
+                        }
+                    }
+                }
+                out = canonical;
+                out.checksum = calc_seq_crc(out);
+                migrated = true;
+            }
+            out.enabled = false; // LG-033: Deprecate Sequence.enabled as runtime authority
             return ESP_OK;
         }
 
@@ -1262,20 +1299,32 @@ esp_err_t ConfigStore::load_sequence(Sequence& seq) {
                 return ESP_ERR_NVS_INVALID_STATE;
             }
 
+            // LG-033: Map old tracks to canonical physical tracks by channel_id
             out = Sequence{};
-            for (uint8_t i = 0; i < 8; ++i) {
-                out.tracks[i] = old.tracks[i];
-            }
-            for (uint8_t i = 8; i < 16; ++i) {
+            for (uint8_t i = 0; i < 16; ++i) {
                 out.tracks[i] = SequencerTrack{};
                 out.tracks[i].channel_id = i;
+                out.tracks[i].num_steps = 0;
                 out.tracks[i].enabled = false;
             }
-            out.bpm = old.bpm;
-            out.enabled = old.enabled;
+            bool mapped[16] = {};
+            for (uint8_t i = 0; i < 8; ++i) {
+                uint8_t ch = old.tracks[i].channel_id;
+                if (ch < 16) {
+                    if (!mapped[ch]) {
+                        out.tracks[ch] = old.tracks[i];
+                        out.tracks[ch].channel_id = ch;
+                        mapped[ch] = true;
+                    } else {
+                        ESP_LOGW(TAG, "Legacy sequence has duplicate channel %u; first valid wins", ch);
+                    }
+                }
+            }
+            out.bpm = old.bpm > 0 ? old.bpm : 120;
+            out.enabled = false;
             out.checksum = calc_seq_crc(out);
             migrated = true;
-            ESP_LOGI(TAG, "Migrated sequence %s from 8 tracks to 16 physical-channel tracks", k);
+            ESP_LOGI(TAG, "Migrated sequence %s from 8 tracks to 16 canonical physical tracks", k);
             return ESP_OK;
         }
 
@@ -1300,7 +1349,10 @@ esp_err_t ConfigStore::load_sequence(Sequence& seq) {
         seq = Sequence{};
         for (uint8_t i = 0; i < 16; ++i) {
             seq.tracks[i].channel_id = i;
+            seq.tracks[i].num_steps = 0;
+            seq.tracks[i].enabled = false;
         }
+        seq.enabled = false;
         seq.checksum = calc_seq_crc(seq);
         return ESP_OK;
     }

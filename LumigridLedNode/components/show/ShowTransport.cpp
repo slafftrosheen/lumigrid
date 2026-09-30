@@ -44,16 +44,41 @@ void ShowTransportCoordinator::set_scene_mode(uint8_t scene_index) {
     }
 }
 
-void ShowTransportCoordinator::set_timeline_mode(bool running, uint16_t bpm) {
+void ShowTransportCoordinator::set_timeline_mode(
+    bool running,
+    uint16_t bpm,
+    uint64_t anchor_ms,
+    uint32_t active_checksum,
+    uint32_t saved_checksum,
+    bool force_restart
+) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (snapshot_.mode != ShowTransportMode::Timeline ||
-        snapshot_.bpm != bpm ||
-        (snapshot_.mode == ShowTransportMode::Timeline && !running)) {
+    const bool was_timeline = (snapshot_.mode == ShowTransportMode::Timeline);
+    const bool state_changed = (was_timeline != running) || (snapshot_.bpm != bpm) || force_restart;
+
+    if (state_changed) {
         snapshot_.mode = running ? ShowTransportMode::Timeline : ShowTransportMode::Scene;
         snapshot_.bpm = bpm;
         snapshot_.cue.active = false;
         snapshot_.cue_state = CueRunnerState::Stopped;
         snapshot_.generation++;
+    }
+
+    if (running) {
+        if (anchor_ms != 0 || state_changed) {
+            snapshot_.timeline_anchor_ms = anchor_ms;
+        }
+        snapshot_.timeline_active_checksum = active_checksum;
+        snapshot_.timeline_saved_checksum = saved_checksum;
+        snapshot_.timeline_content_stale = (active_checksum != saved_checksum && active_checksum != 0);
+        snapshot_.transport_generation = snapshot_.generation;
+    } else {
+        snapshot_.timeline_anchor_ms = 0;
+        snapshot_.timeline_active_checksum = 0;
+        snapshot_.timeline_saved_checksum = saved_checksum;
+        snapshot_.timeline_content_stale = false;
+        snapshot_.timeline_elapsed_ms = 0;
+        snapshot_.timeline_current_beat = 0;
     }
 }
 

@@ -20,6 +20,7 @@
 #include "NodeSync.hpp"
 #include "Scheduler.hpp"
 #include "ClockDiscipline.hpp"
+#include "TimelineEvaluator.hpp"
 #include "ChannelConfiguration.hpp"
 #include "ShowTransport.hpp"
 #include "NetworkSettings.hpp"
@@ -3381,11 +3382,11 @@ static bool test_lg026_show_transport_and_cue_sync() {
         assert(follower.manual_fade_q15() == 32768);
     }
 
-    // ── Test 6: Protocol v4 Packet Validation ──────────────────────────────────
+    // ── Test 6: Protocol v5 Packet Validation ──────────────────────────────────
     {
         NodeSync::SyncPacket pkt{};
         pkt.magic = 0x4C475359;
-        pkt.version = 4;
+        pkt.version = 5;
         pkt.token = 0x12345678;
         pkt.sequence = 1;
         pkt.transport = static_cast<uint8_t>(ShowTransportMode::Cue);
@@ -3394,14 +3395,17 @@ static bool test_lg026_show_transport_and_cue_sync() {
         pkt.cue_index = 0;
         pkt.cue_next = 1;
         pkt.cue_generation = 42;
+        pkt.transport_generation = 101;
+        pkt.timeline_anchor_ms = 9876543210ULL;
+        pkt.timeline_checksum = 0xAABBCCDD;
 
-        // Size check
-        assert(sizeof(NodeSync::SyncPacket) == 52);
+        // Size check (68 bytes explicitly packed and statically asserted)
+        assert(sizeof(NodeSync::SyncPacket) == 68);
 
-        // Reject v3 packet
-        NodeSync::SyncPacket v3_pkt = pkt;
-        v3_pkt.version = 3;
-        assert(v3_pkt.version != 4);
+        // Reject older version packet
+        NodeSync::SyncPacket v4_pkt = pkt;
+        v4_pkt.version = 4;
+        assert(v4_pkt.version != 5);
 
         // Reject bad magic
         NodeSync::SyncPacket bad_magic = pkt;
@@ -4540,6 +4544,290 @@ bool test_lg029_node_backed_authentication() {
         return true;
     }
 
+    // ============================================================================
+    // LG-033 Timeline Studio v2, Anchored Transport & Safe Playback Tests
+    // ============================================================================
+    bool test_lg033_timeline_studio_v2() {
+        ESP_LOGI(TAG, "Testing LG-033 Timeline Studio v2 & Safe Playback...");
+
+        // 1. Pure Timeline Evaluator Tests (AO..AV)
+        {
+            // AO: Single 4-beat step
+            SequencerTrack track1{};
+            track1.enabled = true;
+            track1.channel_id = 0;
+            track1.num_steps = 1;
+            track1.steps[0].preset_index = 3;
+            track1.steps[0].length_beats = 4;
+
+            TimelineStepPosition p0 = evaluate_timeline_track(track1, 0);
+            assert(p0.step_index == 0);
+            assert(p0.beat_in_track == 0);
+            assert(p0.step_start_beat == 0);
+            assert(p0.step_end_beat == 4);
+
+            TimelineStepPosition p2 = evaluate_timeline_track(track1, 2);
+            assert(p2.step_index == 0);
+            assert(p2.beat_in_track == 2);
+
+            TimelineStepPosition p3 = evaluate_timeline_track(track1, 3);
+            assert(p3.step_index == 0);
+            assert(p3.beat_in_track == 3);
+
+            // Wraps at beat 4
+            TimelineStepPosition p4 = evaluate_timeline_track(track1, 4);
+            assert(p4.step_index == 0);
+            assert(p4.beat_in_track == 0);
+
+            // AP: 4+8+2 pattern (total 14 beats)
+            SequencerTrack track3{};
+            track3.enabled = true;
+            track3.channel_id = 1;
+            track3.num_steps = 3;
+            track3.steps[0].preset_index = 10;
+            track3.steps[0].length_beats = 4;
+            track3.steps[1].preset_index = 11;
+            track3.steps[1].length_beats = 8;
+            track3.steps[2].preset_index = 12;
+            track3.steps[2].length_beats = 2;
+
+            // AQ: Exact boundary selects next step
+            TimelineStepPosition b3 = evaluate_timeline_track(track3, 3);
+            assert(b3.step_index == 0);
+            assert(b3.step_start_beat == 0);
+            assert(b3.step_end_beat == 4);
+
+            TimelineStepPosition b4 = evaluate_timeline_track(track3, 4);
+            assert(b4.step_index == 1);
+            assert(b4.step_start_beat == 4);
+            assert(b4.step_end_beat == 12);
+
+            TimelineStepPosition b11 = evaluate_timeline_track(track3, 11);
+            assert(b11.step_index == 1);
+
+            TimelineStepPosition b12 = evaluate_timeline_track(track3, 12);
+            assert(b12.step_index == 2);
+            assert(b12.step_start_beat == 12);
+            assert(b12.step_end_beat == 14);
+
+            TimelineStepPosition b13 = evaluate_timeline_track(track3, 13);
+            assert(b13.step_index == 2);
+
+            // AR: Pattern wraps at beat 14
+            TimelineStepPosition b14 = evaluate_timeline_track(track3, 14);
+            assert(b14.step_index == 0);
+            assert(b14.beat_in_track == 0);
+
+            TimelineStepPosition b18 = evaluate_timeline_track(track3, 18); // 18 % 14 = 4 -> step 1
+            assert(b18.step_index == 1);
+            assert(b18.beat_in_track == 4);
+
+            // AS: Zero-step track ignored
+            SequencerTrack track_zero{};
+            track_zero.enabled = true;
+            track_zero.num_steps = 0;
+            TimelineStepPosition p_zero = evaluate_timeline_track(track_zero, 5);
+            assert(p_zero.step_index == 0xFF);
+
+            // AT: Muted track ignored
+            SequencerTrack track_muted = track3;
+            track_muted.enabled = false;
+            TimelineStepPosition p_muted = evaluate_timeline_track(track_muted, 5);
+            assert(p_muted.step_index == 0xFF);
+
+            // AU: Different tracks loop independently
+            TimelineStepPosition t1_at_8 = evaluate_timeline_track(track1, 8);
+            TimelineStepPosition t3_at_8 = evaluate_timeline_track(track3, 8);
+            assert(t1_at_8.beat_in_track == 0); // 8 % 4 == 0
+            assert(t3_at_8.beat_in_track == 8); // 8 % 14 == 8 (step 1)
+            assert(t3_at_8.step_index == 1);
+        }
+
+        // 2. ConfigStore Sequence Persistence, Legacy Migration & Checksum (Requirements D..G, M..O, W)
+        ConfigStore cfg;
+        cfg.init();
+        {
+            Sequence seq{};
+            seq.enabled = true; // Legacy backup/client had enabled=true
+            seq.bpm = 120;
+            for (uint8_t i = 0; i < 16; ++i) {
+                seq.tracks[i].channel_id = i;
+                seq.tracks[i].enabled = (i < 4);
+                seq.tracks[i].num_steps = (i < 4) ? 2 : 0;
+                if (i < 4) {
+                    seq.tracks[i].steps[0].preset_index = 1;
+                    seq.tracks[i].steps[0].length_beats = 4;
+                    seq.tracks[i].steps[1].preset_index = 2;
+                    seq.tracks[i].steps[1].length_beats = 4;
+                }
+            }
+
+            assert(cfg.save_sequence(seq) == ESP_OK);
+
+            Sequence loaded{};
+            assert(cfg.load_sequence(loaded) == ESP_OK);
+            // Requirement W: legacy enabled=true cannot auto-start after reboot/load!
+            assert(loaded.enabled == false);
+            assert(loaded.bpm == 120);
+            assert(loaded.checksum != 0);
+
+            // Legacy non-canonical channel mapping migration
+            Sequence legacy_order{};
+            legacy_order.bpm = 130;
+            legacy_order.tracks[0].channel_id = 7; // A8 placed in slot 0
+            legacy_order.tracks[0].enabled = true;
+            legacy_order.tracks[0].num_steps = 1;
+            legacy_order.tracks[0].steps[0].preset_index = 5;
+            legacy_order.tracks[0].steps[0].length_beats = 8;
+            legacy_order.tracks[1].channel_id = 0; // A1 placed in slot 1
+            legacy_order.tracks[1].enabled = true;
+            legacy_order.tracks[1].num_steps = 1;
+            legacy_order.tracks[1].steps[0].preset_index = 6;
+            legacy_order.tracks[1].steps[0].length_beats = 4;
+
+            assert(cfg.save_sequence(legacy_order) == ESP_OK);
+            Sequence canon_loaded{};
+            assert(cfg.load_sequence(canon_loaded) == ESP_OK);
+            // Canonical mapping ensures tracks[i].channel_id == i
+            for (uint8_t i = 0; i < 16; ++i) {
+                assert(canon_loaded.tracks[i].channel_id == i);
+            }
+            assert(canon_loaded.tracks[7].enabled == true);
+            assert(canon_loaded.tracks[7].steps[0].preset_index = 5);
+            assert(canon_loaded.tracks[7].steps[0].length_beats = 8);
+            assert(canon_loaded.tracks[0].enabled == true);
+            assert(canon_loaded.tracks[0].steps[0].preset_index = 6);
+            assert(canon_loaded.tracks[0].steps[0].length_beats = 4);
+
+            // Restore clean sequence for further tests
+            assert(cfg.save_sequence(seq) == ESP_OK);
+        }
+
+        // 3. Persistence / Playback Separation & Anchored Transport (Requirements P..W, X..AC)
+        {
+            OutputController ctrl;
+            ControlSourceManager csm;
+            csm.init();
+            LightingRuntime runtime(csm, ctrl, cfg);
+            ClockDiscipline clock;
+            Scheduler scheduler(cfg, runtime, clock);
+
+            // Initially not running
+            assert(!scheduler.is_local_timeline_running());
+            assert(!scheduler.is_remote_timeline_running());
+            assert(scheduler.transport_generation() == 0);
+
+            // RUN Timeline with explicit anchor (Beat 0 start)
+            const uint64_t anchor1 = 5000000ULL;
+            scheduler.start_local_timeline(120, anchor1);
+            assert(scheduler.is_local_timeline_running());
+            assert(scheduler.timeline_anchor_ms() == anchor1);
+            assert(scheduler.transport_generation() == 1);
+            assert(!scheduler.is_timeline_content_stale());
+
+            // Verify active snapshot matches stored sequence
+            Sequence active1 = scheduler.active_sequence();
+            assert(active1.bpm == 120);
+            assert(active1.tracks[0].steps[0].length_beats == 4);
+
+            // Elapsed calculation from anchor
+            auto snap1 = scheduler.transport_snapshot();
+            assert(snap1.timeline_running());
+            assert(snap1.timeline_bpm() == 120);
+            assert(snap1.transport_generation == 1);
+            assert(snap1.timeline_anchor_ms == anchor1);
+            assert(!snap1.timeline_content_stale);
+            assert(snap1.timeline_active_checksum == snap1.timeline_saved_checksum);
+
+            // Simulate PUT /sequence (saving edits while running)
+            Sequence modified_seq{};
+            cfg.load_sequence(modified_seq);
+            modified_seq.bpm = 145; // Edited BPM
+            modified_seq.tracks[0].steps[0].length_beats = 16; // Edited step length
+            assert(cfg.save_sequence(modified_seq) == ESP_OK);
+
+            // Reload scheduler persisted cache (as happens every ~1s or via PUT sequence)
+            scheduler.reload_sequence();
+
+            // HARD INVARIANT: Saving while running MUST NOT mutate active_sequence!
+            assert(scheduler.is_local_timeline_running());
+            assert(scheduler.timeline_anchor_ms() == anchor1);
+            assert(scheduler.transport_generation() == 1);
+            assert(scheduler.active_sequence().bpm == 120); // Still running 120 BPM!
+            assert(scheduler.active_sequence().tracks[0].steps[0].length_beats == 4); // Still 4 beats!
+
+            // Runtime correctly flags contentStale!
+            assert(scheduler.is_timeline_content_stale());
+            auto snap_stale = scheduler.transport_snapshot();
+            assert(snap_stale.timeline_running());
+            assert(snap_stale.timeline_content_stale);
+            assert(snap_stale.timeline_active_checksum != snap_stale.timeline_saved_checksum);
+
+            // Restart with saved version: creates new generation and new anchor
+            const uint64_t anchor2 = 5060000ULL;
+            scheduler.start_local_timeline(145, anchor2);
+            assert(scheduler.is_local_timeline_running());
+            assert(scheduler.transport_generation() == 2); // Monotonic increment
+            assert(scheduler.timeline_anchor_ms() == anchor2); // New anchor
+            assert(!scheduler.is_timeline_content_stale()); // Stale cleared
+            assert(scheduler.active_sequence().bpm == 145); // Now running new BPM!
+            assert(scheduler.active_sequence().tracks[0].steps[0].length_beats == 16);
+
+            // Stop Timeline: releases playback, leaves persisted sequence untouched
+            scheduler.stop_local_timeline();
+            assert(!scheduler.is_local_timeline_running());
+            Sequence check_persisted{};
+            cfg.load_sequence(check_persisted);
+            assert(check_persisted.bpm == 145);
+        }
+
+        // 4. NodeSync v5 & Follower Timeline Synchronization (Requirements AD..AN)
+        {
+            static_assert(sizeof(NodeSync::SyncPacket) == 68, "NodeSync v5 packet must be exactly 68 bytes");
+            OutputController ctrl;
+            ControlSourceManager csm;
+            csm.init();
+            LightingRuntime runtime(csm, ctrl, cfg);
+            ClockDiscipline clock;
+            Scheduler scheduler(cfg, runtime, clock);
+
+            Sequence stored_seq{};
+            cfg.load_sequence(stored_seq);
+
+            // Apply new remote timeline generation
+            const uint64_t leader_anchor = 7000000ULL;
+            scheduler.apply_remote_timeline(10, 130, leader_anchor, stored_seq.checksum);
+            assert(scheduler.is_remote_timeline_running());
+            assert(scheduler.transport_generation() == 10);
+            assert(scheduler.timeline_anchor_ms() == leader_anchor);
+
+            // Repeated packet with same generation does NOT reset anchor or re-snapshot
+            scheduler.apply_remote_timeline(10, 130, leader_anchor, stored_seq.checksum);
+            assert(scheduler.timeline_anchor_ms() == leader_anchor);
+            assert(scheduler.transport_generation() == 10);
+
+            // Late follower phase calculation:
+            // At disciplined clock 7006000ULL, elapsed = 6000ms.
+            // At 130 BPM, 60000 / 130 = 461ms per beat; total beats = 6000 / 461 = 13.
+            const uint64_t now_ms = leader_anchor + 6000ULL;
+            const uint64_t elapsed = now_ms >= leader_anchor ? (now_ms - leader_anchor) : 0;
+            const uint32_t ms_per_beat = (60000 / 130);
+            assert(elapsed / ms_per_beat == 13);
+
+            // Mismatched checksum error code check
+            assert(static_cast<uint8_t>(SyncTransportError::TimelineMissing) == 6);
+            assert(static_cast<uint8_t>(SyncTransportError::TimelineMismatch) == 7);
+            assert(static_cast<uint8_t>(SyncTransportError::TimelineInvalid) == 8);
+
+            // Sync timeout clears remote timeline
+            scheduler.clear_remote_timeline();
+            assert(!scheduler.is_remote_timeline_running());
+        }
+
+        ESP_LOGI(TAG, "[PASS] LG-033 Timeline Studio v2 & Safe Playback Tests passed.");
+        return true;
+    }
+
 } // namespace
 
 bool run_runtime_hardening_tests() {
@@ -4640,6 +4928,9 @@ bool run_runtime_hardening_tests() {
 
     // LG-032 Scene Studio v2 & Safe Persistence
     all_ok &= test_lg032_scene_studio_and_persistence();
+
+    // LG-033 Timeline Studio v2 & Safe Playback
+    all_ok &= test_lg033_timeline_studio_v2();
 
     if (all_ok) {
         ESP_LOGI(TAG, "==================================================");

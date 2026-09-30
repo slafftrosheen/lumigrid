@@ -353,6 +353,11 @@ NodeRole NodeSync::master_loop(int socket, bool auto_mode) {
             std::memcpy(packet.sender_mac, local_mac, sizeof(local_mac));
             packet.token = cached_sync_token_;
 
+            // Protocol v5 extensions
+            packet.transport_generation = transport.transport_generation;
+            packet.timeline_anchor_ms = transport.timeline_anchor_ms;
+            packet.timeline_checksum = transport.timeline_active_checksum;
+
             sendto(socket, &packet, sizeof(packet), 0,
                    reinterpret_cast<const sockaddr*>(&destination), sizeof(destination));
 
@@ -549,6 +554,11 @@ bool NodeSync::handle_heartbeat(
     remote_snap.cue_elapsed_ms = packet.cue_elapsed_ms;
     remote_snap.manual_fade_q15 = packet.manual_fade_q15;
 
+    // Protocol v5 extensions
+    remote_snap.transport_generation = packet.transport_generation;
+    remote_snap.timeline_anchor_ms = packet.timeline_anchor_ms;
+    remote_snap.timeline_active_checksum = packet.timeline_checksum;
+
     // Backward-compat cue struct
     remote_snap.cue.active = (packet.cue_state != 0);
     remote_snap.cue.list_index = packet.cue_list;
@@ -608,6 +618,9 @@ void NodeSync::send_ack(
     acknowledgement.token = token;
     acknowledgement.transport = heartbeat.transport;
     acknowledgement.cue_generation = heartbeat.cue_generation;
+    acknowledgement.transport_generation = heartbeat.transport_generation;
+    acknowledgement.timeline_anchor_ms = heartbeat.timeline_anchor_ms;
+    acknowledgement.timeline_checksum = heartbeat.timeline_checksum;
     std::memcpy(acknowledgement.sender_mac, local_mac, sizeof(local_mac));
 
     sendto(socket, &acknowledgement, sizeof(acknowledgement), 0,

@@ -84,8 +84,10 @@ describe('showDeployment service', () => {
     vi.spyOn(cuesApi, 'deleteCueList').mockResolvedValue({ deleted: true });
 
     vi.spyOn(timelineApi, 'getSequence').mockResolvedValue({
+      schema: 2,
+      checksum: 1234,
       bpm: 120,
-      enabled: true,
+      enabled: false,
       tracks: [],
     });
     vi.spyOn(timelineApi, 'saveSequence').mockResolvedValue({ saved: true });

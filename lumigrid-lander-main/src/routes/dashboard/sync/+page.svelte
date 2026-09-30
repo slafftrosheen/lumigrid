@@ -302,7 +302,7 @@
         }
 
         if (syncStatus) {
-          if (syncStatus.syncProtocol !== undefined && syncStatus.syncProtocol !== 4 && syncStatus.protocolVersion !== 4) {
+          if (syncStatus.syncProtocol !== undefined && syncStatus.syncProtocol !== 5 && syncStatus.protocolVersion !== 5) {
             reachabilityState = 'ONLINE / SYNC INCOMPATIBLE';
           } else if (!syncStatus.syncEnabled) {
             reachabilityState = 'ONLINE / SYNC DISABLED';

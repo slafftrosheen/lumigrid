@@ -1970,7 +1970,10 @@ window.lg = (() => {
         const bpmOut = byId('timeline-bpm-output');
         if (bpmOut) bpmOut.textContent = `${state.sequence.bpm ?? 120} BPM`;
         const enEl = byId('timeline-enabled');
-        if (enEl) enEl.checked = !!state.sequence.enabled;
+        const isRunning = (state.status && state.status.transport && state.status.transport.timeline)
+            ? state.status.transport.timeline.running
+            : (state.status && state.status.transport && state.status.transport.mode === 'timeline');
+        if (enEl) enEl.checked = !!isRunning;
 
         const activeTrk = Math.min(state.activeTimelineStep.track || 0, Math.max(0, state.sequence.tracks.length - 1));
         const currentTrack = state.sequence.tracks[activeTrk] || { steps: [] };
@@ -2089,14 +2092,38 @@ window.lg = (() => {
         if (bpmOut) bpmOut.textContent = `${state.sequence.bpm} BPM`;
     }
 
-    function setTimelineEnabled(en) {
-        if (!state.sequence) state.sequence = { bpm: 120, enabled: false, tracks: [] };
-        state.sequence.enabled = en;
+    async function setTimelineEnabled(en) {
+        try {
+            await api('/api/v1/show/control', 'POST', {
+                mode: 'timeline',
+                action: en ? 'start' : 'stop'
+            });
+            toast(en ? 'Timeline playback started.' : 'Timeline playback stopped.');
+        } catch (e) {
+            toast(e.message, true);
+            const enEl = byId('timeline-enabled');
+            if (enEl) enEl.checked = !en;
+        }
     }
 
     async function saveTimeline() {
         try {
-            await api('/api/v1/sequence', 'PUT', state.sequence);
+            if (!state.sequence) state.sequence = { bpm: 120, tracks: [] };
+            const payload = {
+                schema: 2,
+                bpm: state.sequence.bpm || 120,
+                tracks: (state.sequence.tracks || []).map((t, idx) => ({
+                    channelId: idx,
+                    numSteps: (t.steps || []).length,
+                    enabled: t.enabled !== undefined ? Boolean(t.enabled) : ((t.steps || []).length > 0),
+                    steps: (t.steps || []).map(s => ({
+                        presetIndex: s.presetIndex || 0,
+                        lengthBeats: s.lengthBeats || 4
+                    }))
+                }))
+            };
+            const res = await api('/api/v1/sequence', 'PUT', payload);
+            if (res && res.checksum) state.sequence.checksum = res.checksum;
             toast('Timeline sequencer saved.');
         } catch (e) { toast(e.message, true); }
     }

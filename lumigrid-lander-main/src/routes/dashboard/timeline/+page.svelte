@@ -1,1135 +1,590 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { getSequence, saveSequence, getPresets } from '$lib/api/node';
-  import type { Sequence, ScenePreset } from '$lib/api/node';
-  import {
-    createDefaultTrack,
-    createDefaultSequence,
-    cloneSequence,
-    isSequenceDirty,
-    stepDurationSeconds,
-    TRACK_COUNT,
-    STEP_COUNT,
-    MIN_BPM,
-    MAX_BPM,
-    CHANNEL_PORTS,
-  } from '$lib/api/timeline';
-  import { getSelectedNodeIp } from '$lib/auth/storage';
+  import { beforeNavigate } from '$app/navigation';
   import { nodeStore } from '$lib/state/nodeStore';
+  import { getPresets, type ScenePreset } from '$lib/api/scenes';
+  import {
+    timelineEditor,
+    isTimelineEditorDirty,
+    timelinePixelsPerBeat,
+    type TimelineZoomLevel,
+  } from '$lib/timeline/editorStore';
+  import { getTrackTotalBeats } from '$lib/timeline/evaluation';
+  import { validateTimelineDocument } from '$lib/timeline/validation';
+  import type { TimelineDocument } from '$lib/api/timeline';
 
-  let nodeIp = $state('');
-  let loading = $state(true);
-  let saving = $state(false);
-  let activating = $state(false);
+  import TimelineToolbar from '$lib/components/timeline/TimelineToolbar.svelte';
+  import TimelineRuler from '$lib/components/timeline/TimelineRuler.svelte';
+  import TimelineTrack from '$lib/components/timeline/TimelineTrack.svelte';
+  import TimelineBlockInspector from '$lib/components/timeline/TimelineBlockInspector.svelte';
+  import TimelineScenePicker from '$lib/components/timeline/TimelineScenePicker.svelte';
+  import TimelinePlayhead from '$lib/components/timeline/TimelinePlayhead.svelte';
+  import TimelineConflictDialog from '$lib/components/timeline/TimelineConflictDialog.svelte';
+  import TimelineImportDialog from '$lib/components/timeline/TimelineImportDialog.svelte';
 
-  const snapSync = $derived($nodeStore.snapshot?.sync);
-  const snapTransport = $derived($nodeStore.snapshot?.transport);
+  const snapshot = $derived($nodeStore.snapshot);
+  const snapSync = $derived(snapshot?.sync);
   const isFollower = $derived(
-    snapSync?.activeRole === 'worker' &&
-    Boolean(snapSync.masterAddress) &&
-    (snapSync.lastPacketAgeMs === null || snapSync.lastPacketAgeMs === undefined || snapSync.lastPacketAgeMs < 10000)
+    snapSync?.activeRole === 'worker' || snapSync?.activeRole === 'follower'
   );
-  const syncMasterAddress = $derived(snapSync?.masterAddress || 'Leader');
-  let error = $state('');
-  let toast = $state('');
+  const syncLeaderAddress = $derived(snapSync?.masterAddress || 'Leader');
 
-  let seq = $state<Sequence | null>(null);
-  let savedSnapshot = $state<Sequence | null>(null);
-  let presets = $state<ScenePreset[]>([]);
+  const working = $derived($timelineEditor.working);
+  const persisted = $derived($timelineEditor.persisted);
+  const isDirty = $derived($isTimelineEditorDirty);
+  const pixelsPerBeat = $derived($timelinePixelsPerBeat);
+  const selectedChannel = $derived($timelineEditor.selectedChannel);
+  const selectedStep = $derived($timelineEditor.selectedStep);
 
-  let selectedTrack = $state(0);
-  let selectedStep = $state(0);
+  let scenes = $state<Map<number, ScenePreset>>(new Map());
+  let existingSceneSlots = $state<Set<number>>(new Set());
+  let scenesLoading = $state(false);
 
-  const editTrack = $derived(seq?.tracks[selectedTrack] ?? null);
-  const editStep = $derived(editTrack?.steps[selectedStep] ?? null);
-  const isDirty = $derived(isSequenceDirty(seq, savedSnapshot));
-  const isPlaying = $derived(
-    snapTransport?.timeline?.running !== undefined
-      ? snapTransport.timeline.running
-      : Boolean(seq?.enabled)
-  );
+  // Dialog states
+  let isScenePickerOpen = $state(false);
+  let scenePickerChannel = $state(0);
+  let scenePickerTargetStep = $state<number | null>(null);
+  let isImportDialogOpen = $state(false);
 
-  function presetName(idx: number): string {
-    const p = presets.find(pr => pr.index === idx);
-    return p ? p.name : `Scene ${idx + 1}`;
+  // Horizontal scroll sync
+  let scrollContainer: HTMLElement | null = $state(null);
+  let scrollLeft = $state(0);
+
+  function handleScroll(e: Event) {
+    scrollLeft = (e.target as HTMLElement).scrollLeft;
   }
 
-  function selectStep(t: number, s: number) {
-    selectedTrack = t;
-    selectedStep = s;
-  }
-
-  let loadGen = 0;
-
-  async function loadData(targetIp: string, gen: number) {
-    loading = true;
-    error = '';
-    seq = null;
-    savedSnapshot = null;
-    presets = [];
-    try {
-      const [s, p] = await Promise.all([
-        getSequence(targetIp).catch(() => null),
-        getPresets(targetIp).catch(() => [] as ScenePreset[]),
-      ]);
-      if (gen !== loadGen) return;
-
-      if (s && s.tracks) {
-        for (let i = 0; i < TRACK_COUNT; i++) {
-          if (!s.tracks[i]) s.tracks[i] = createDefaultTrack(i);
-          while (s.tracks[i].steps.length < STEP_COUNT) {
-            s.tracks[i].steps.push({ presetIndex: 0, lengthBeats: 4 });
-          }
-        }
-        seq = cloneSequence(s);
-        savedSnapshot = cloneSequence(s);
-      } else {
-        const def = createDefaultSequence();
-        seq = cloneSequence(def);
-        savedSnapshot = null;
-      }
-      presets = p;
-    } catch (e) {
-      if (gen !== loadGen) return;
-      error = String(e);
-    } finally {
-      if (gen === loadGen) {
-        loading = false;
-      }
+  // Selected block derived info
+  const selectedBlockInfo = $derived.by(() => {
+    if (selectedChannel === null || selectedStep === null || !working) {
+      return null;
     }
-  }
-
-  async function save() {
-    if (!seq || saving) return;
-    saving = true;
-    error = '';
-    try {
-      await saveSequence(nodeIp, seq);
-      savedSnapshot = cloneSequence(seq);
-      toastMsg('Timeline saved to hardware');
-    } catch (e) {
-      error = String(e);
-    } finally {
-      saving = false;
+    const track = working.tracks[selectedChannel];
+    if (!track || selectedStep < 0 || selectedStep >= track.steps.length) {
+      return null;
     }
-  }
-
-  async function togglePlay() {
-    if (!seq || activating) return;
-    activating = true;
-    error = '';
-    try {
-      seq.enabled = !seq.enabled;
-      await saveSequence(nodeIp, seq);
-      savedSnapshot = cloneSequence(seq);
-      toastMsg(seq.enabled ? 'Timeline playback started' : 'Timeline playback stopped');
-    } catch (e) {
-      error = String(e);
-    } finally {
-      activating = false;
-    }
-  }
-
-  function revert() {
-    if (savedSnapshot) {
-      seq = cloneSequence(savedSnapshot);
-      toastMsg('Reverted edits to saved timeline');
-    } else {
-      seq = createDefaultSequence();
-      toastMsg('Reset to default timeline');
-    }
-  }
-
-  function toastMsg(msg: string) {
-    toast = msg;
-    setTimeout(() => {
-      if (toast === msg) toast = '';
-    }, 2500);
-  }
-
-  onMount(() => {
-    const unsub = nodeStore.subscribe(state => {
-      const targetIp = state.nodeIp || getSelectedNodeIp();
-      if (targetIp !== nodeIp) {
-        nodeIp = targetIp;
-        loadGen++;
-        if (nodeIp) {
-          loadData(nodeIp, loadGen);
-        } else {
-          seq = null;
-          savedSnapshot = null;
-          presets = [];
-          loading = false;
-          error = '';
-        }
-      }
-    });
-    return unsub;
+    const step = track.steps[selectedStep];
+    const scene = scenes.get(step.presetIndex);
+    return {
+      channelId: selectedChannel,
+      stepIndex: selectedStep,
+      step,
+      scene,
+      canMoveLeft: selectedStep > 0,
+      canMoveRight: selectedStep < track.steps.length - 1,
+      canDuplicate: track.steps.length < 16,
+    };
   });
+
+  // Calculate max beats across all tracks to size ruler
+  const maxBeats = $derived.by(() => {
+    if (!working) return 32;
+    let max = 16;
+    for (const t of working.tracks) {
+      const beats = getTrackTotalBeats(t);
+      if (beats > max) max = beats;
+    }
+    return Math.max(32, max);
+  });
+
+  // Polyrhythmic check
+  const polyrhythmicNotice = $derived.by(() => {
+    if (!working) return null;
+    const activeLengths = new Set<number>();
+    for (const t of working.tracks) {
+      if (t.enabled && t.numSteps > 0) {
+        activeLengths.add(getTrackTotalBeats(t));
+      }
+    }
+    if (activeLengths.size > 1) {
+      return 'Tracks have independent loop lengths';
+    }
+    return null;
+  });
+
+  // Validation check against existing scenes
+  const validationResult = $derived.by(() => {
+    if (!working) return { valid: true, errors: [], missingScenes: [] };
+    return validateTimelineDocument(working, existingSceneSlots);
+  });
+
+  // Load scenes & timeline on node change
+  let activeNodeIp: string | null = null;
+  $effect(() => {
+    const ip = $nodeStore.nodeIp;
+    const id = $nodeStore.nodeId || ip || 'node';
+    if (ip && ip !== activeNodeIp) {
+      activeNodeIp = ip;
+      loadNodeData(id, ip);
+    }
+  });
+
+  async function loadNodeData(nodeId: string, nodeIp: string) {
+    scenesLoading = true;
+    try {
+      const presets = await getPresets(nodeIp).catch(() => []);
+      const sceneMap = new Map<number, ScenePreset>();
+      const slots = new Set<number>();
+      for (const p of presets) {
+        sceneMap.set(p.index, p);
+        slots.add(p.index);
+      }
+      scenes = sceneMap;
+      existingSceneSlots = slots;
+    } finally {
+      scenesLoading = false;
+    }
+    await timelineEditor.load(nodeId, nodeIp);
+  }
+
+  // Navigation guard
+  let showUnsavedModal = $state(false);
+
+  beforeNavigate(({ cancel }) => {
+    if ($isTimelineEditorDirty && !showUnsavedModal) {
+      cancel();
+      showUnsavedModal = true;
+    }
+  });
+
+  function confirmDiscardNavigation() {
+    showUnsavedModal = false;
+    timelineEditor.reset();
+  }
+
+  function cancelDiscardNavigation() {
+    showUnsavedModal = false;
+  }
+
+  // Block Inspector Handlers
+  function handleUpdateLength(beats: number) {
+    if (selectedChannel !== null && selectedStep !== null) {
+      timelineEditor.resizeBlock(selectedChannel, selectedStep, beats);
+    }
+  }
+
+  function handleOpenChangeScene() {
+    if (selectedChannel !== null && selectedStep !== null) {
+      scenePickerChannel = selectedChannel;
+      scenePickerTargetStep = selectedStep;
+      isScenePickerOpen = true;
+    }
+  }
+
+  function handleDuplicate() {
+    if (selectedChannel !== null && selectedStep !== null) {
+      timelineEditor.duplicateBlock(selectedChannel, selectedStep);
+    }
+  }
+
+  function handleDelete() {
+    if (selectedChannel !== null && selectedStep !== null) {
+      timelineEditor.deleteBlock(selectedChannel, selectedStep);
+    }
+  }
+
+  function handleMoveLeft() {
+    if (selectedChannel !== null && selectedStep !== null) {
+      timelineEditor.moveBlockLeft(selectedChannel, selectedStep);
+    }
+  }
+
+  function handleMoveRight() {
+    if (selectedChannel !== null && selectedStep !== null) {
+      timelineEditor.moveBlockRight(selectedChannel, selectedStep);
+    }
+  }
+
+  function handleCopy() {
+    if (selectedChannel !== null && selectedStep !== null) {
+      timelineEditor.copyBlock(selectedChannel, selectedStep);
+    }
+  }
+
+  function handleCloseInspector() {
+    timelineEditor.selectStep(null, null);
+  }
+
+  // Track Action Handlers
+  function handleOpenAddScene(channelId: number) {
+    scenePickerChannel = channelId;
+    scenePickerTargetStep = null;
+    isScenePickerOpen = true;
+  }
+
+  function handleScenePicked(presetIndex: number) {
+    if (scenePickerTargetStep !== null) {
+      // Change existing block
+      timelineEditor.resizeBlock(scenePickerChannel, scenePickerTargetStep, working?.tracks[scenePickerChannel]?.steps[scenePickerTargetStep]?.lengthBeats ?? 4);
+      // Update preset
+      const track = working?.tracks[scenePickerChannel];
+      if (track) {
+        timelineEditor.addBlock(scenePickerChannel, presetIndex, 4); // or replace
+      }
+    } else {
+      // Add new block
+      timelineEditor.addBlock(scenePickerChannel, presetIndex, 4);
+    }
+    isScenePickerOpen = false;
+  }
+
+  // Export clean JSON document
+  function handleExportTimeline() {
+    if (!working) return;
+    const cleanDoc = {
+      schema: 2,
+      type: 'lumigrid-timeline',
+      bpm: working.bpm,
+      tracks: working.tracks.map((t) => ({
+        channelId: t.channelId,
+        numSteps: t.numSteps,
+        enabled: t.enabled,
+        steps: t.steps.slice(0, t.numSteps).map((s) => ({
+          presetIndex: s.presetIndex,
+          lengthBeats: s.lengthBeats,
+        })),
+      })),
+    };
+
+    const blob = new Blob([JSON.stringify(cleanDoc, null, 2)], {
+      type: 'application/json',
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `timeline-export-bpm${working.bpm}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
 </script>
 
-<svelte:head><title>Timeline Studio — LumiGrid</title></svelte:head>
-
-{#if !nodeIp}
-  <div class="tl-empty">
-    <p>No node selected. Select an active node in the header or fleet list.</p>
-  </div>
-{:else if loading}
-  <div class="tl-loading">
-    <div class="spinner"></div>
-    <p>Loading timeline workspace…</p>
-  </div>
-{:else if seq}
-  <div class="tl-root">
-    {#if isFollower}
-      <div class="sync-follower-banner" role="alert">
-        <span class="banner-icon">ℹ</span>
-        <div class="banner-content">
-          <strong>Playback Controlled by Sync Leader ({syncMasterAddress})</strong>
-          <p>This node is an active follower in a synchronized cluster. Local timeline playback on this follower node is suppressed to preserve cluster frame lock. To run timeline across the group, use Sync Studio.</p>
-        </div>
-        <a href="/dashboard/sync" class="banner-action-btn">Open Sync Studio →</a>
-      </div>
-    {/if}
-
-    <!-- Top Transport Header -->
-    <header class="tl-transport">
-      <div class="transport-left">
-        <div class="tl-title-row">
-          <h2>Timeline Studio</h2>
-          <div class="status-badges">
-            {#if isPlaying}
-              <span class="badge badge-active" title="Timeline loop is actively running on the selected node">
-                <span class="pulse-dot"></span> PLAYING
-              </span>
-            {:else}
-              <span class="badge badge-idle">STOPPED</span>
-            {/if}
-            {#if isDirty}
-              <span class="badge badge-edited">EDITED</span>
-            {:else if savedSnapshot}
-              <span class="badge badge-saved">SAVED</span>
-            {/if}
-          </div>
-        </div>
-      </div>
-
-      <div class="transport-center">
-        <!-- Play / Stop Toggle Button -->
-        <button
-          class="btn-playback"
-          class:is-playing={isPlaying}
-          onclick={togglePlay}
-          disabled={activating || isFollower}
-          type="button"
-          title={isFollower ? `Playback controlled by Sync Leader (${syncMasterAddress})` : (isPlaying ? 'Stop timeline playback' : 'Start timeline playback on node')}
-        >
-          {#if activating}
-            <span>...</span>
-          {:else if isFollower}
-            <span>LOCK</span>
-          {:else if isPlaying}
-            <span>⏹ STOP</span>
-          {:else}
-            <span>▶ PLAY</span>
-          {/if}
-        </button>
-
-        <!-- BPM Control -->
-        <div class="bpm-control">
-          <span class="bpm-label">BPM</span>
-          <input
-            type="number"
-            min={MIN_BPM}
-            max={MAX_BPM}
-            bind:value={seq.bpm}
-            title="Beats Per Minute"
-          />
-        </div>
-
-        <div class="beat-dots" style="--anim-dur: {(60 / (seq.bpm || 120)).toFixed(3)}s;">
-          {#each Array(4) as _, i}
-            <span class="beat-dot" class:pulsing={isPlaying} style="animation-delay: {i * (60 / (seq.bpm || 120))}s;"></span>
-          {/each}
-        </div>
-      </div>
-
-      <div class="transport-right">
-        <button
-          class="btn-secondary"
-          onclick={revert}
-          disabled={!isDirty}
-          title="Revert modifications to last saved timeline"
-          type="button"
-        >
-          Revert
-        </button>
-        <button
-          class="btn-save"
-          onclick={save}
-          disabled={saving}
-          type="button"
-          title="Save timeline to node"
-        >
-          {saving ? 'Saving...' : 'Save'}
-        </button>
-      </div>
-    </header>
-
-    <!-- Visual 16-Channel Beat Grid -->
-    <div class="tl-grid-wrap">
-      <table class="tl-grid">
-        <thead>
-          <tr>
-            <th class="col-track">Track</th>
-            <th class="col-ch">Channel</th>
-            {#each Array(STEP_COUNT) as _, i}
-              <th class="col-step">{(i + 1).toString().padStart(2, '0')}</th>
-            {/each}
-          </tr>
-        </thead>
-        <tbody>
-          {#each seq.tracks.slice(0, TRACK_COUNT) as track, t}
-            <tr
-              class="track-row"
-              class:disabled={!track.enabled}
-              class:selected={selectedTrack === t}
-              class:pwm-track={track.channelId >= 8}
-            >
-              <!-- Track label -->
-              <td class="cell-track">
-                <div class="track-header-cell">
-                  <button
-                    class="track-enable-btn"
-                    class:active={track.enabled}
-                    onclick={() => (track.enabled = !track.enabled)}
-                    title={track.enabled ? 'Disable track' : 'Enable track'}
-                    type="button"
-                    aria-label="Toggle Track {t + 1}"
-                  >
-                    <span class="track-dot"></span>
-                  </button>
-                  <button
-                    class="track-name-btn"
-                    onclick={() => selectStep(t, 0)}
-                    type="button"
-                  >
-                    Track {t + 1} ({CHANNEL_PORTS[track.channelId] ?? `Ch ${track.channelId}`})
-                  </button>
-                </div>
-              </td>
-
-              <!-- Output Channel mapping -->
-              <td class="cell-ch">
-                <select class="ch-select" bind:value={track.channelId}>
-                  {#each CHANNEL_PORTS as port, ci}
-                    <option value={ci}>{port}</option>
-                  {/each}
-                </select>
-              </td>
-
-              <!-- 16 Step cells -->
-              {#each track.steps.slice(0, STEP_COUNT) as step, s}
-                {@const isStepActive = s < track.numSteps && track.enabled}
-                {@const isStepSelected = selectedTrack === t && selectedStep === s}
-                <td class="cell-step">
-                  <button
-                    class="step-btn"
-                    class:active={isStepActive}
-                    class:selected={isStepSelected}
-                    onclick={() => selectStep(t, s)}
-                    type="button"
-                    title="Track {t + 1} ({CHANNEL_PORTS[track.channelId] ?? track.channelId}), Step {s + 1}: {presetName(step.presetIndex)} ({step.lengthBeats} beats)"
-                  >
-                    {#if s < track.numSteps}
-                      <span class="step-preset">S{step.presetIndex + 1}</span>
-                      <span class="step-beats">{step.lengthBeats}b</span>
-                    {:else}
-                      <span class="step-empty">·</span>
-                    {/if}
-                  </button>
-                </td>
-              {/each}
-            </tr>
-          {/each}
-        </tbody>
-      </table>
+<div class="timeline-studio-page">
+  <!-- Follower Notice Banner -->
+  {#if isFollower}
+    <div class="follower-banner" role="status">
+      <span class="follower-icon">⚡</span>
+      <span class="follower-text">
+        <strong>PLAYBACK CONTROLLED BY SYNC LEADER</strong> ({syncLeaderAddress}) — You may edit and save timeline patterns, but live transport is driven by the cluster leader.
+      </span>
     </div>
+  {/if}
 
-    <!-- Inspector / Step & Track Editor -->
-    <div class="inspector-grid">
-      <!-- Step Details -->
-      <section class="panel step-editor">
-        {#if editTrack && editStep}
-          <div class="panel-header">
-            <h3>Track {selectedTrack + 1} · {CHANNEL_PORTS[editTrack.channelId] ?? editTrack.channelId} · Step {selectedStep + 1}</h3>
-            <div class="panel-header-actions">
-              <label class="inline-toggle">
-                <input
-                  type="checkbox"
-                  checked={selectedStep < editTrack.numSteps}
-                  onchange={e => {
-                    if ((e.target as HTMLInputElement).checked) {
-                      if (selectedStep >= editTrack.numSteps) editTrack.numSteps = selectedStep + 1;
-                    } else {
-                      if (selectedStep < editTrack.numSteps) editTrack.numSteps = selectedStep;
-                    }
-                  }}
-                />
-                <span>Step Active</span>
-              </label>
-            </div>
-          </div>
+  <!-- Missing Scene Warning Banner -->
+  {#if validationResult.missingScenes.length > 0}
+    <div class="missing-scene-banner" role="alert">
+      <span class="banner-icon">⚠️</span>
+      <div class="banner-content">
+        <strong>{validationResult.missingScenes.length} Timeline blocks reference missing scenes:</strong>
+        <span class="banner-sub">
+          Saving is blocked until missing scenes are resolved or blocks are removed.
+        </span>
+      </div>
+    </div>
+  {/if}
 
-          {#if selectedStep < editTrack.numSteps}
-            <div class="editor-fields">
-              <label class="field">
-                <span>Scene</span>
-                <select bind:value={editStep.presetIndex}>
-                  {#if presets.length > 0}
-                    {#each presets as p}
-                      <option value={p.index}>{p.index + 1}. {p.name}</option>
-                    {/each}
-                  {:else}
-                    {#each Array(32) as _, i}
-                      <option value={i}>Scene {i + 1}</option>
-                    {/each}
-                  {/if}
-                </select>
-              </label>
+  <!-- Polyrhythmic Notice -->
+  {#if polyrhythmicNotice}
+    <div class="polyrhythmic-pill" title="Tracks have different loop lengths and will cycle independently">
+      <span>{polyrhythmicNotice}</span>
+    </div>
+  {/if}
 
-              <label class="field">
-                <span>Length (beats)</span>
-                <input type="number" min="1" max="64" bind:value={editStep.lengthBeats} />
-              </label>
+  <!-- Main Toolbar -->
+  <TimelineToolbar
+    {snapshot}
+    {isFollower}
+    onExport={handleExportTimeline}
+    onImport={() => (isImportDialogOpen = true)}
+  />
 
-              <div class="field field-duration-preview">
-                <span>Duration</span>
-                <span class="dur-val">
-                  {stepDurationSeconds(editStep.lengthBeats, seq.bpm).toFixed(2)}s
-                </span>
-              </div>
-            </div>
-          {:else}
-            <p class="editor-inactive">
-              Step {selectedStep + 1} is currently inactive for {CHANNEL_PORTS[editTrack.channelId] ?? `channel ${editTrack.channelId}`} (active range: 1–{editTrack.numSteps}). Check "Step Active" to enable it.
-            </p>
-          {/if}
-        {/if}
-      </section>
+  <!-- Sequencer Area -->
+  <div class="sequencer-container">
+    <!-- Synced Scroll Wrapper -->
+    <div
+      class="sequencer-scroll-wrapper"
+      bind:this={scrollContainer}
+      onscroll={handleScroll}
+    >
+      <!-- Beat Ruler -->
+      <TimelineRuler {maxBeats} {pixelsPerBeat} {scrollLeft} />
 
-      <!-- Track Details -->
-      <section class="panel track-editor">
-        {#if editTrack}
-          <div class="panel-header">
-            <h3>Track {selectedTrack + 1} ({CHANNEL_PORTS[editTrack.channelId] ?? editTrack.channelId}) Settings</h3>
-            <label class="inline-toggle">
-              <input type="checkbox" bind:checked={editTrack.enabled} />
-              <span>Track Enabled</span>
-            </label>
-          </div>
+      <!-- Tracks Container -->
+      <div class="tracks-stack">
+        <!-- Live Playhead Line -->
+        <TimelinePlayhead
+          {snapshot}
+          {pixelsPerBeat}
+          {scrollLeft}
+        />
 
-          <div class="track-fields">
-            <label class="field">
-              <span>Channel Output</span>
-              <select bind:value={editTrack.channelId}>
-                {#each CHANNEL_PORTS as port, ci}
-                  <option value={ci}>{port} ({ci < 8 ? 'Addressable Lane' : 'PWM Dimmer'})</option>
-                {/each}
-              </select>
-            </label>
-
-            <label class="field">
-              <span>Active Steps (1-16)</span>
-              <input type="number" min="1" max="16" bind:value={editTrack.numSteps} />
-            </label>
-          </div>
-
-          <!-- Quick Step Selector Strip -->
-          <div class="mini-steps-wrap">
-            <span class="mini-label">Active Timeline Steps:</span>
-            <div class="mini-steps-list">
-              {#each editTrack.steps.slice(0, editTrack.numSteps) as st, s}
-                <button
-                  class="mini-step-btn"
-                  class:selected={selectedStep === s}
-                  onclick={() => selectStep(selectedTrack, s)}
-                  type="button"
-                >
-                  <span class="mini-idx">{s + 1}</span>
-                  <span class="mini-preset">S{st.presetIndex + 1}</span>
-                  <span class="mini-beats">{st.lengthBeats}b</span>
-                </button>
-              {/each}
-            </div>
+        {#if working}
+          {#each working.tracks as track, i}
+            <TimelineTrack
+              {track}
+              channelId={i}
+              {pixelsPerBeat}
+              {scenes}
+              {selectedChannel}
+              {selectedStep}
+              globalBeat={snapshot?.transport?.timeline?.currentBeat ?? 0}
+              isTimelineRunning={snapshot?.transport?.mode === 'timeline' || Boolean(snapshot?.transport?.timeline?.running)}
+              onSelectBlock={(ch, step) => timelineEditor.selectStep(ch, step)}
+              onResizeBlock={(ch, step, beats) => timelineEditor.resizeBlock(ch, step, beats)}
+              onReorderBlock={(ch, from, to) => timelineEditor.reorderBlock(ch, from, to)}
+              onToggleEnabled={(ch) => timelineEditor.toggleTrack(ch)}
+              onOpenAddScene={handleOpenAddScene}
+              onCopyTrack={(ch) => timelineEditor.copyTrack(ch)}
+              onPasteTrack={(ch) => timelineEditor.pasteTrack(ch)}
+              onClearTrack={(ch) => timelineEditor.clearTrack(ch)}
+              canPasteTrack={true}
+            />
+          {/each}
+        {:else}
+          <div class="loading-placeholder">
+            <span>Loading timeline sequence...</span>
           </div>
         {/if}
-      </section>
+      </div>
     </div>
-
-    {#if toast}
-      <div class="toast">{toast}</div>
-    {/if}
-    {#if error}
-      <div class="error-bar">{error}</div>
-    {/if}
   </div>
-{/if}
+
+  <!-- Bottom Block Inspector -->
+  {#if selectedBlockInfo}
+    <TimelineBlockInspector
+      channelId={selectedBlockInfo.channelId}
+      stepIndex={selectedBlockInfo.stepIndex}
+      step={selectedBlockInfo.step}
+      scene={selectedBlockInfo.scene}
+      bpm={working?.bpm ?? 120}
+      canMoveLeft={selectedBlockInfo.canMoveLeft}
+      canMoveRight={selectedBlockInfo.canMoveRight}
+      canDuplicate={selectedBlockInfo.canDuplicate}
+      onUpdateLength={handleUpdateLength}
+      onOpenChangeScene={handleOpenChangeScene}
+      onDuplicate={handleDuplicate}
+      onDelete={handleDelete}
+      onMoveLeft={handleMoveLeft}
+      onMoveRight={handleMoveRight}
+      onCopy={handleCopy}
+      onClose={handleCloseInspector}
+    />
+  {/if}
+
+  <!-- Modals -->
+  {#if isScenePickerOpen}
+    <TimelineScenePicker
+      channelId={scenePickerChannel}
+      {scenes}
+      currentPresetIndex={scenePickerTargetStep !== null ? working?.tracks[scenePickerChannel]?.steps[scenePickerTargetStep]?.presetIndex : undefined}
+      onSelect={handleScenePicked}
+      onClose={() => (isScenePickerOpen = false)}
+    />
+  {/if}
+
+  {#if $timelineEditor.conflict}
+    <TimelineConflictDialog
+      currentChecksum={$timelineEditor.conflictChecksum}
+      onReload={() => timelineEditor.reloadNodeVersion()}
+      onKeepDraft={() => timelineEditor.keepDraft()}
+    />
+  {/if}
+
+  {#if isImportDialogOpen}
+    <TimelineImportDialog
+      {existingSceneSlots}
+      onImportSuccess={(doc) => timelineEditor.importDocument(doc)}
+      onClose={() => (isImportDialogOpen = false)}
+    />
+  {/if}
+
+  {#if showUnsavedModal}
+    <div class="modal-backdrop" role="alertdialog" aria-modal="true" tabindex="-1">
+      <div class="modal-panel" role="document">
+        <h3 class="modal-title">Unsaved Timeline Changes</h3>
+        <p class="modal-description">
+          You have unsaved changes to the timeline sequencer. Discard changes and leave page?
+        </p>
+        <div class="modal-actions">
+          <button type="button" class="dialog-btn dialog-secondary" onclick={cancelDiscardNavigation}>
+            Stay on Page
+          </button>
+          <button type="button" class="dialog-btn dialog-danger" onclick={confirmDiscardNavigation}>
+            Discard Changes
+          </button>
+        </div>
+      </div>
+    </div>
+  {/if}
+</div>
 
 <style>
-  .tl-root {
-    width: 100%;
-    max-width: 1440px;
-    margin: 0 auto;
+  .timeline-studio-page {
     display: flex;
     flex-direction: column;
-    gap: 1.25rem;
-    position: relative;
-    color: var(--dash-text);
+    height: 100%;
+    padding: 16px;
+    box-sizing: border-box;
+    background: #06090e;
+    overflow-y: auto;
   }
 
-  .tl-loading, .tl-empty {
+  .follower-banner {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: rgba(14, 165, 233, 0.12);
+    border: 1px solid rgba(14, 165, 233, 0.35);
+    border-radius: 8px;
+    padding: 10px 16px;
+    margin-bottom: 12px;
+    color: #e0f2fe;
+    font-size: 13px;
+  }
+
+  .follower-icon {
+    font-size: 16px;
+    color: #38bdf8;
+  }
+
+  .missing-scene-banner {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: rgba(245, 158, 11, 0.12);
+    border: 1px solid rgba(245, 158, 11, 0.35);
+    border-radius: 8px;
+    padding: 10px 16px;
+    margin-bottom: 12px;
+    color: #fef3c7;
+    font-size: 13px;
+  }
+
+  .banner-icon {
+    font-size: 18px;
+  }
+
+  .banner-content {
     display: flex;
     flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 1rem;
-    min-height: 300px;
-    color: #a1a1a6;
-  }
-  .spinner {
-    width: 32px;
-    height: 32px;
-    border: 3px solid rgba(255, 255, 255, 0.1);
-    border-top-color: var(--dash-accent);
-    border-radius: 50%;
-    animation: spin 0.8s linear infinite;
-  }
-  @keyframes spin {
-    to { transform: rotate(360deg); }
   }
 
-  /* Transport Bar */
-  .tl-transport {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    background: var(--dash-surface);
-    backdrop-filter: blur(18px);
-    -webkit-backdrop-filter: blur(18px);
-    border: 1px solid var(--dash-border);
-    border-radius: var(--dash-radius-lg);
-    padding: 0.75rem 1.25rem;
-    gap: 1rem;
-    flex-wrap: wrap;
+  .banner-sub {
+    font-size: 11px;
+    color: #fcd34d;
   }
-  .transport-left {
-    display: flex;
-    align-items: center;
-    gap: 1rem;
-  }
-  .tl-title-row {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-  }
-  .tl-title-row h2 {
-    margin: 0;
-    font-size: 1.15rem;
-    font-weight: 600;
-  }
-  .status-badges {
-    display: flex;
-    align-items: center;
-    gap: 0.35rem;
-  }
-  .badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.3rem;
-    font-size: 0.68rem;
+
+  .polyrhythmic-pill {
+    align-self: flex-start;
+    font-size: 10px;
     font-weight: 700;
-    padding: 0.2rem 0.5rem;
-    border-radius: 6px;
+    color: #94a3b8;
+    background: #0f172a;
+    border: 1px solid #1e293b;
+    padding: 3px 8px;
+    border-radius: 4px;
+    margin-bottom: 8px;
+    letter-spacing: 0.04em;
     text-transform: uppercase;
   }
-  .badge-active {
-    background: rgba(48, 209, 88, 0.15);
-    border: 1px solid rgba(48, 209, 88, 0.4);
-    color: #30d158;
-  }
-  .badge-idle {
-    background: rgba(255, 255, 255, 0.05);
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    color: #86868b;
-  }
-  .badge-edited {
-    background: rgba(255, 159, 10, 0.15);
-    border: 1px solid rgba(255, 159, 10, 0.4);
-    color: #ff9f0a;
-  }
-  .badge-saved {
-    background: rgba(48, 209, 88, 0.12);
-    border: 1px solid rgba(48, 209, 88, 0.3);
-    color: var(--dash-ok);
-  }
-  .pulse-dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: #30d158;
-    animation: pulse 1.2s infinite;
-  }
-  @keyframes pulse {
-    0%, 100% { opacity: 1; transform: scale(1); }
-    50% { opacity: 0.3; transform: scale(0.8); }
-  }
 
-  .transport-center {
-    display: flex;
-    align-items: center;
-    gap: 1.25rem;
-  }
-  .btn-playback {
-    background: rgba(48, 209, 88, 0.15);
-    color: #30d158;
-    border: 1px solid rgba(48, 209, 88, 0.4);
+  .sequencer-container {
+    background: #0b0f19;
+    border: 1px solid #1e293b;
     border-radius: 8px;
-    padding: 0.45rem 1rem;
-    font-size: 0.82rem;
-    font-weight: 700;
-    cursor: pointer;
-    transition: all 0.15s ease;
-  }
-  .btn-playback:hover:not(:disabled) {
-    background: rgba(48, 209, 88, 0.25);
-  }
-  .btn-playback.is-playing {
-    background: rgba(255, 69, 58, 0.15);
-    color: #ff453a;
-    border-color: rgba(255, 69, 58, 0.4);
-  }
-  .btn-playback.is-playing:hover:not(:disabled) {
-    background: rgba(255, 69, 58, 0.25);
-  }
-
-  .bpm-control {
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
-    font-size: 0.8rem;
-    color: #86868b;
-  }
-  .bpm-label {
-    font-weight: 600;
-  }
-  .bpm-control input {
-    width: 65px;
-    background: rgba(255, 255, 255, 0.06);
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    border-radius: 6px;
-    color: #f5f5f7;
-    font-size: 0.85rem;
-    padding: 0.3rem 0.4rem;
-    font-family: monospace;
-    text-align: center;
-  }
-  .bpm-control input:focus-visible {
-    border-color: var(--dash-accent);
-    box-shadow: 0 0 0 3px rgba(var(--dash-accent-rgb),.12);
-  }
-
-  .beat-dots {
-    display: flex;
-    gap: 0.35rem;
-  }
-  .beat-dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: rgba(255, 255, 255, 0.15);
-  }
-  .beat-dot.pulsing {
-    animation: beat-flash var(--anim-dur, 0.5s) infinite;
-  }
-  @keyframes beat-flash {
-    0%, 100% { background: rgba(255, 255, 255, 0.15); transform: scale(1); }
-    15% { background: #30d158; transform: scale(1.3); }
-  }
-
-  .transport-right {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-  }
-  .btn-save {
-    background: var(--dash-accent);
-    color: #fff;
-    border: none;
-    border-radius: 8px;
-    padding: 0.45rem 1rem;
-    font-size: 0.82rem;
-    font-weight: 600;
-    cursor: pointer;
-    transition: background 0.15s ease;
-  }
-  .btn-save:hover:not(:disabled) {
-    background: var(--dash-accent-hover);
-  }
-  .btn-save:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-  .btn-secondary {
-    background: rgba(255, 255, 255, 0.06);
-    color: #a1a1a6;
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    border-radius: 8px;
-    padding: 0.45rem 0.75rem;
-    font-size: 0.82rem;
-    cursor: pointer;
-  }
-  .btn-secondary:disabled {
-    opacity: 0.35;
-    cursor: not-allowed;
-  }
-
-  /* Grid Wrap */
-  .tl-grid-wrap {
-    overflow: auto;
-    scrollbar-color: rgba(255,255,255,.16) transparent;
-    scrollbar-width: thin;
-    background: rgba(20, 20, 22, .74);
-    backdrop-filter: blur(18px);
-    -webkit-backdrop-filter: blur(18px);
-    border: 1px solid var(--dash-border);
-    border-radius: var(--dash-radius-lg);
-    padding: 0.65rem;
-    box-shadow: var(--dash-shadow);
-    max-height: min(58dvh, 720px);
-  }
-  .tl-grid {
-    width: 100%;
-    min-width: 1080px;
-    border-collapse: separate;
-    border-spacing: 0;
-    table-layout: fixed;
-  }
-  .tl-grid th {
-    position: sticky;
-    top: 0;
-    z-index: 6;
-    background: rgba(18,18,20,.985);
-    padding: 0.4rem 0.2rem;
-    font-size: 0.7rem;
-    font-weight: 600;
-    color: #86868b;
-    text-align: center;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-    font-family: monospace;
-  }
-  .col-track {
-    width: 140px;
-    text-align: left !important;
-    padding-left: 0.5rem !important;
-    position: sticky;
-    left: 0;
-    top: 0;
-    z-index: 9;
-    background: rgba(18,18,20,.99);
-  }
-  .col-ch {
-    width: 74px;
-    position: sticky;
-    left: 140px;
-    top: 0;
-    z-index: 9;
-    background: rgba(18,18,20,.99);
-    box-shadow: 8px 0 18px rgba(0,0,0,.18);
-  }
-  .col-step {
-    width: 50px;
-  }
-
-  .track-row {
-    transition: background 0.15s ease;
-  }
-  .track-row:hover {
-    background: rgba(255, 255, 255, 0.03);
-  }
-  .track-row.disabled {
-    opacity: 0.4;
-  }
-  .track-row.selected {
-    background: rgba(var(--dash-accent-rgb), 0.08);
-  }
-  .track-row.pwm-track.selected {
-    background: color-mix(in oklab, var(--dash-warm) 10%, transparent);
-  }
-
-  .cell-track {
-    padding: 0.3rem 0.4rem;
-    position: sticky;
-    left: 0;
-    z-index: 5;
-    background: rgba(18,18,20,.97);
-  }
-  .cell-ch {
-    position: sticky;
-    left: 140px;
-    z-index: 5;
-    background: rgba(18,18,20,.97);
-    box-shadow: 8px 0 18px rgba(0,0,0,.14);
-  }
-  .track-row.selected .cell-track,
-  .track-row.selected .cell-ch {
-    background: color-mix(in oklab, rgba(18,18,20,.97) 86%, var(--dash-accent) 14%);
-  }
-  .track-row.pwm-track.selected .cell-track,
-  .track-row.pwm-track.selected .cell-ch {
-    background: color-mix(in oklab, rgba(18,18,20,.97) 86%, var(--dash-warm) 14%);
-  }
-  .track-header-cell {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-  }
-  .track-enable-btn {
-    background: none;
-    border: none;
-    padding: 0;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-  }
-  .track-dot {
-    width: 9px;
-    height: 9px;
-    border-radius: 50%;
-    background: rgba(255, 255, 255, 0.15);
-    transition: background 0.15s ease;
-  }
-  .track-enable-btn.active .track-dot {
-    background: #30d158;
-    box-shadow: 0 0 6px rgba(48, 209, 88, 0.6);
-  }
-  .track-name-btn {
-    background: none;
-    border: none;
-    color: #f5f5f7;
-    font-size: 0.8rem;
-    font-weight: 600;
-    cursor: pointer;
-    padding: 0;
-    text-align: left;
-  }
-  .cell-ch {
-    padding: 0.2rem;
-  }
-  .ch-select {
-    width: 100%;
-    background: rgba(255, 255, 255, 0.05);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 4px;
-    color: #a1a1a6;
-    font-size: 0.72rem;
-    padding: 0.15rem;
-    text-align: center;
-  }
-
-  .cell-step {
-    padding: 0.2rem;
-  }
-  .step-btn {
-    width: 100%;
-    height: 44px;
+    overflow: hidden;
     display: flex;
     flex-direction: column;
+  }
+
+  .sequencer-scroll-wrapper {
+    overflow-x: auto;
+    overflow-y: hidden;
+    position: relative;
+    max-width: 100%;
+  }
+
+  .tracks-stack {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .loading-placeholder {
+    padding: 60px;
+    text-align: center;
+    color: #64748b;
+    font-size: 13px;
+  }
+
+  .modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.75);
+    backdrop-filter: blur(4px);
+    display: flex;
     align-items: center;
     justify-content: center;
-    gap: 1px;
-    background: rgba(255, 255, 255, 0.03);
-    border: 1px solid rgba(255, 255, 255, 0.06);
-    border-radius: 6px;
-    cursor: pointer;
-    transition: all 0.15s ease;
-    padding: 0;
-  }
-  .step-btn:hover {
-    background: rgba(255, 255, 255, 0.08);
-    border-color: rgba(255, 255, 255, 0.15);
-  }
-  .step-btn.active {
-    background: rgba(var(--dash-accent-rgb), 0.12);
-    border-color: rgba(var(--dash-accent-rgb), 0.3);
-  }
-  .step-btn.selected {
-    border-color: var(--dash-accent);
-    background: rgba(var(--dash-accent-rgb), 0.22);
-    box-shadow: 0 0 8px rgba(var(--dash-accent-rgb), 0.35);
-  }
-  .pwm-track .step-btn.active {
-    background: color-mix(in oklab, var(--dash-warm) 12%, transparent);
-    border-color: color-mix(in oklab, var(--dash-warm) 32%, transparent);
-  }
-  .pwm-track .step-btn.selected {
-    border-color: var(--dash-warm);
-    background: color-mix(in oklab, var(--dash-warm) 22%, transparent);
-    box-shadow: 0 0 8px color-mix(in oklab, var(--dash-warm) 38%, transparent);
-  }
-  .step-preset {
-    font-size: 0.75rem;
-    font-weight: 700;
-    color: #f5f5f7;
-    font-family: monospace;
-  }
-  .step-beats {
-    font-size: 0.62rem;
-    color: #86868b;
-    font-family: monospace;
-  }
-  .step-empty {
-    color: rgba(255, 255, 255, 0.1);
-    font-size: 0.8rem;
+    z-index: 120;
+    padding: 16px;
   }
 
-  /* Inspector Grid */
-  .inspector-grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 1.25rem;
-  }
-  .panel {
-    background: var(--dash-surface);
-    backdrop-filter: blur(18px);
-    -webkit-backdrop-filter: blur(18px);
-    border: 1px solid var(--dash-border);
-    border-radius: var(--dash-radius-lg);
-    padding: 1rem 1.25rem;
-    box-shadow: var(--dash-shadow);
-  }
-  .panel-header {
+  .modal-panel {
+    background: #0b0f19;
+    border: 1px solid rgba(245, 158, 11, 0.4);
+    border-radius: 12px;
+    width: 100%;
+    max-width: 440px;
+    padding: 24px;
     display: flex;
+    flex-direction: column;
     align-items: center;
-    justify-content: space-between;
-    margin-bottom: 0.85rem;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-    padding-bottom: 0.5rem;
+    text-align: center;
+    box-shadow: 0 20px 40px rgba(0, 0, 0, 0.9);
   }
-  .panel-header h3 {
-    margin: 0;
-    font-size: 0.95rem;
+
+  .modal-title {
+    margin: 0 0 8px 0;
+    font-size: 16px;
     font-weight: 600;
-  }
-  .inline-toggle {
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
-    font-size: 0.8rem;
-    color: #86868b;
-    cursor: pointer;
-  }
-  .inline-toggle input {
-    accent-color: var(--dash-accent);
-    width: 14px;
-    height: 14px;
+    color: #f1f5f9;
   }
 
-  .editor-fields, .track-fields {
-    display: flex;
-    gap: 1rem;
-    flex-wrap: wrap;
-    align-items: flex-end;
-  }
-  .field {
-    display: flex;
-    flex-direction: column;
-    gap: 0.35rem;
-  }
-  .field span {
-    font-size: 0.72rem;
-    color: #86868b;
-    font-weight: 600;
-  }
-  .field select, .field input[type='number'] {
-    background: rgba(255, 255, 255, 0.06);
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    border-radius: 6px;
-    color: #f5f5f7;
-    font-size: 0.85rem;
-    padding: 0.4rem 0.6rem;
-    min-width: 140px;
-  }
-  .field-duration-preview {
-    background: rgba(var(--dash-accent-rgb), 0.08);
-    border: 1px solid rgba(var(--dash-accent-rgb), 0.2);
-    border-radius: 6px;
-    padding: 0.4rem 0.75rem;
-  }
-  .dur-val {
-    font-family: monospace;
-    font-size: 0.9rem;
-    font-weight: 700;
-    color: var(--dash-accent);
-  }
-  .editor-inactive {
-    color: #86868b;
-    font-size: 0.85rem;
-    margin: 0;
-  }
-
-  .mini-steps-wrap {
-    margin-top: 1rem;
-    display: flex;
-    flex-direction: column;
-    gap: 0.4rem;
-  }
-  .mini-label {
-    font-size: 0.72rem;
-    color: #86868b;
-  }
-  .mini-steps-list {
-    display: flex;
-    gap: 0.35rem;
-    flex-wrap: wrap;
-  }
-  .mini-step-btn {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 1px;
-    background: rgba(255, 255, 255, 0.04);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 6px;
-    padding: 0.3rem 0.5rem;
-    cursor: pointer;
-    min-width: 48px;
-    transition: all 0.12s ease;
-  }
-  .mini-step-btn:hover {
-    background: rgba(255, 255, 255, 0.08);
-  }
-  .mini-step-btn.selected {
-    border-color: var(--dash-accent);
-    background: rgba(var(--dash-accent-rgb), 0.18);
-  }
-  .mini-idx {
-    font-size: 0.6rem;
-    color: #86868b;
-    font-family: monospace;
-  }
-  .mini-preset {
-    font-size: 0.75rem;
-    font-weight: 700;
-    color: #f5f5f7;
-    font-family: monospace;
-  }
-  .mini-beats {
-    font-size: 0.6rem;
-    color: #86868b;
-    font-family: monospace;
-  }
-
-  .toast {
-    position: fixed;
-    bottom: 1.5rem;
-    right: 1.5rem;
-    background: rgba(48, 209, 88, 0.92);
-    color: #fff;
-    padding: 0.6rem 1.2rem;
-    border-radius: 10px;
-    font-size: 0.85rem;
-    font-weight: 500;
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
-    z-index: 100;
-  }
-  .error-bar {
-    position: fixed;
-    bottom: 1.5rem;
-    left: 50%;
-    transform: translateX(-50%);
-    background: rgba(255, 69, 58, 0.95);
-    color: #fff;
-    padding: 0.6rem 1.2rem;
-    border-radius: 10px;
-    font-size: 0.85rem;
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
-    z-index: 100;
-  }
-
-  @media (max-width: 900px) {
-    .inspector-grid { grid-template-columns: 1fr; }
-    .tl-transport { align-items: stretch; }
-    .transport-left { flex: 1 1 100%; }
-    .transport-center { flex: 1 1 auto; flex-wrap: wrap; }
-    .transport-right { margin-left: auto; }
-  }
-
-  @media (max-width: 620px) {
-    .tl-transport { padding: .85rem; }
-    .tl-title-row {
-      align-items: flex-start;
-      flex-direction: column;
-      gap: .45rem;
-    }
-    .transport-center,
-    .transport-right {
-      width: 100%;
-      justify-content: space-between;
-    }
-    .btn-playback { flex: 1; }
-    .transport-right button { flex: 1; min-height: 40px; }
-    .tl-grid-wrap { margin-inline: -1rem; border-radius: 0; border-inline: 0; }
-    .panel { padding: 1rem; }
-    .panel-header {
-      align-items: flex-start;
-      flex-direction: column;
-      gap: .65rem;
-    }
-    .editor-fields, .track-fields { align-items: stretch; flex-direction: column; }
-    .field select, .field input[type='number'] { width: 100%; min-width: 0; }
-  }
-  .sync-follower-banner {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 1rem;
-    background: rgba(59, 130, 246, 0.12);
-    border: 1px solid rgba(59, 130, 246, 0.35);
-    border-radius: 8px;
-    padding: 0.85rem 1.25rem;
-    margin-bottom: 1.25rem;
-    color: #e2e8f0;
-  }
-  .banner-icon {
-    font-size: 1.4rem;
-    color: #60a5fa;
-  }
-  .banner-content strong {
-    color: #93c5fd;
-    display: block;
-    font-size: 0.95rem;
-    margin-bottom: 0.2rem;
-  }
-  .banner-content p {
-    margin: 0;
-    font-size: 0.82rem;
+  .modal-description {
+    margin: 0 0 20px 0;
+    font-size: 13px;
     color: #94a3b8;
+    line-height: 1.5;
   }
-  .banner-action-btn {
-    white-space: nowrap;
-    padding: 0.45rem 0.9rem;
-    background: rgba(59, 130, 246, 0.25);
-    border: 1px solid rgba(59, 130, 246, 0.5);
-    color: #93c5fd;
+
+  .modal-actions {
+    display: flex;
+    gap: 12px;
+    width: 100%;
+    justify-content: center;
+  }
+
+  .dialog-btn {
+    padding: 8px 16px;
     border-radius: 6px;
-    text-decoration: none;
-    font-size: 0.82rem;
-    font-weight: 600;
-    transition: all 0.15s ease;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    border: none;
+    transition: opacity 0.15s ease;
   }
-  .banner-action-btn:hover {
-    background: rgba(59, 130, 246, 0.45);
+
+  .dialog-btn:hover {
+    opacity: 0.9;
+  }
+
+  .dialog-secondary {
+    background: #1e293b;
+    color: #cbd5e1;
+    border: 1px solid #334155;
+  }
+
+  .dialog-danger {
+    background: #ef4444;
     color: #ffffff;
   }
 </style>

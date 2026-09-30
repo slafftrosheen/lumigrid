@@ -186,6 +186,22 @@ RuntimeSnapshot collect_runtime_snapshot(FactoryApi* api, uint32_t stream_seq) {
     // 6. Transport State
     if (api->show_transport()) {
         auto st = api->show_transport()->snapshot();
+        if (api->scheduler()) {
+            uint64_t now_ms = api->show_clock_now_ms();
+            auto sched_st = api->scheduler()->transport_snapshot(now_ms);
+            if (st.mode == ShowTransportMode::Timeline || sched_st.mode == ShowTransportMode::Timeline) {
+                st.transport_generation = sched_st.transport_generation;
+                st.timeline_anchor_ms = sched_st.timeline_anchor_ms;
+                st.timeline_active_checksum = sched_st.timeline_active_checksum;
+                st.timeline_saved_checksum = sched_st.timeline_saved_checksum;
+                st.timeline_elapsed_ms = sched_st.timeline_elapsed_ms;
+                st.timeline_current_beat = sched_st.timeline_current_beat;
+                st.timeline_content_stale = sched_st.timeline_content_stale;
+                if (st.mode == ShowTransportMode::Timeline) {
+                    st.bpm = sched_st.bpm;
+                }
+            }
+        }
         snprintf(snap.transport.mode, sizeof(snap.transport.mode), "%s",
                  show_transport_mode_to_str(st.mode));
         snap.transport.generation = st.generation;
@@ -193,6 +209,13 @@ RuntimeSnapshot collect_runtime_snapshot(FactoryApi* api, uint32_t stream_seq) {
 
         snap.transport.timeline.running = st.timeline_running();
         snap.transport.timeline.bpm = st.bpm;
+        snap.transport.timeline.generation = st.transport_generation;
+        snap.transport.timeline.anchor_ms = st.timeline_anchor_ms;
+        snap.transport.timeline.elapsed_ms = static_cast<uint32_t>(st.timeline_elapsed_ms);
+        snap.transport.timeline.current_beat = st.timeline_current_beat;
+        snap.transport.timeline.active_checksum = st.timeline_active_checksum;
+        snap.transport.timeline.saved_checksum = st.timeline_saved_checksum;
+        snap.transport.timeline.content_stale = st.timeline_content_stale;
 
         snap.transport.cue.running = st.cue.active;
         if (st.cue.active) {
@@ -412,10 +435,14 @@ bool serialize_runtime_snapshot(const RuntimeSnapshot& snap, FixedJsonWriter& wr
     // Transport
     writer.append_printf(
         "\"transport\":{\"mode\":\"%s\",\"generation\":%" PRIu32 ",\"sceneIndex\":%u,"
-        "\"timeline\":{\"running\":%s,\"bpm\":%u},"
+        "\"timeline\":{\"running\":%s,\"bpm\":%u,\"generation\":%" PRIu32 ",\"anchorMs\":%" PRIu64 ",\"elapsedMs\":%" PRIu32 ",\"currentBeat\":%" PRIu32 ",\"activeChecksum\":%" PRIu32 ",\"savedChecksum\":%" PRIu32 ",\"contentStale\":%s},"
         "\"cue\":{\"running\":%s",
         snap.transport.mode, snap.transport.generation, snap.transport.scene_index,
         snap.transport.timeline.running ? "true" : "false", snap.transport.timeline.bpm,
+        snap.transport.timeline.generation, snap.transport.timeline.anchor_ms,
+        snap.transport.timeline.elapsed_ms, snap.transport.timeline.current_beat,
+        snap.transport.timeline.active_checksum, snap.transport.timeline.saved_checksum,
+        snap.transport.timeline.content_stale ? "true" : "false",
         snap.transport.cue.running ? "true" : "false"
     );
     if (snap.transport.cue.running) {

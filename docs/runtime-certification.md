@@ -59,6 +59,16 @@
 | **State (LG-031)** | Coalesced status broadcasts via atomic `status_pending_` CAS loop at max 5 Hz rate limit | `[PASS]` | Compile Verified, Unit Test |
 | **State (LG-031)** | Instance-scoped timing atomics `last_preview_ms_` and `last_status_broadcast_ms_` (zero process-global timing statics) | `[PASS]` | Compile Verified, Unit Test |
 | **State (LG-031)** | Decoupled heavy payload: DMX raw frame isolated behind dedicated `GET /api/v1/dmx/frame` (Installer+ role) | `[PASS]` | Compile Verified, Unit Test |
+| **Scenes (LG-032)** | Safe scene persistence invariant: saving preset does not alter live physical outputs until explicit activation | `[PASS]` | Compile Verified, Unit Test |
+| **Scenes (LG-032)** | CRC32 optimistic concurrency for SceneDocument saves returning 409 Conflict on concurrent modifications | `[PASS]` | Compile Verified, Unit Test |
+| **Scenes (LG-032)** | Preflight scene deletion reference check blocking removal when preset is referenced in Timeline or Cues | `[PASS]` | Compile Verified, Unit Test |
+| **Timeline (LG-033)** | Separation of timeline persistence from transport: `PUT /sequence` never mutates running playback | `[PASS]` | Compile Verified, Unit Test |
+| **Timeline (LG-033)** | Deprecated `Sequence.enabled` ignored for ordinary playback; legacy `enabled:true` cannot auto-run on reboot | `[PASS]` | Compile Verified, Unit Test |
+| **Timeline (LG-033)** | Immutable active sequence snapshot on RUN with deterministic Beat 0 start anchor clock (`timeline_anchor_ms`) | `[PASS]` | Compile Verified, Unit Test |
+| **Timeline (LG-033)** | Monotonic transport generation incremented on every RUN/restart; same generation does not reset anchor | `[PASS]` | Compile Verified, Unit Test |
+| **Timeline (LG-033)** | NodeSync protocol v5 transmitting 68-byte packed packets with generation, anchor, and checksum | `[PASS]` | Compile Verified, Unit Test |
+| **Timeline (LG-033)** | Follower timeline checksum validation with fail-closed rejection on mismatch (`SyncTransportError::TimelineMismatch`) | `[PASS]` | Compile Verified, Unit Test |
+| **Timeline (LG-033)** | Pure TimelineEvaluator helpers guaranteeing identical beat and step progression between firmware and dashboard | `[PASS]` | Compile Verified, Unit Test |
 
 ---
 
@@ -97,6 +107,7 @@
 - **Intentional Disconnect Handling**: `WifiService` maintains `intentional_disconnect_` (`std::atomic<bool>`) so administrative reconfigurations do not trigger the automatic reconnect retry loop.
 - **StaWithApFallback Lifecycle**: If STA fails to connect under `StaWithApFallback`, the recovery AP is activated for operator access, and a FreeRTOS timer performs bounded exponential backoff retries (`5s -> 10s -> 30s -> 60s -> capped at 60s`) until STA connects.
 - **Safe-Mode Recovery Guard**: When `safe_mode_` is active, non-recovery network reconfigurations are rejected with `400 safe_mode_network_locked`.
+
 ### 2.6 Canonical Runtime State & API v1 Cutover (LG-031)
 - **Side-Effect Free Collection**: `collect_runtime_snapshot` reads atomic state and acquires minimal locks purely for observation. Zero state transitions, zero command journal mutations, and zero hardware operations occur during telemetry collection or serialization.
 - **Authoritative Single State Contract**: Schema 3 `RuntimeSnapshot` is shared identically between HTTP `GET /api/v1/status` and authenticated WebSocket (`/ws`) broadcasts. Both channels deliver bit-compatible JSON payloads with identical field hierarchy (`system`, `output`, `dmx`, `network`, `transport`, `hardware`).
@@ -104,6 +115,18 @@
 - **Coalesced Status Broadcasting**: Status changes trigger WebSocket broadcasts through an atomic `status_pending_` CAS loop, rate-limited to a maximum of 5 Hz (200 ms). Preview frames are transmitted at up to 30 Hz.
 - **Zero Process-Global Statics**: Rate limiting and timing tracking use instance-scoped `std::atomic<uint32_t>` members (`last_preview_ms_`, `last_status_broadcast_ms_`) in `FactoryApi`, guaranteeing multi-instance thread safety.
 - **DMX Payload Decoupling**: Static capabilities (`CapabilitiesManifest`) are removed from live status to eliminate bandwidth waste, and raw DMX channel frames are decoupled into a dedicated `GET /api/v1/dmx/frame` endpoint restricted to `Installer+` role.
+
+### 2.7 Scene Studio v2 & Safe Persistence (LG-032)
+- **Safe Persistence Invariant**: Modifying or saving a scene preset via `PUT /api/v1/presets` persists data strictly to NVS. The active physical output remains completely unaltered until an explicit activation request (`POST /api/v1/show/control` or `POST /api/v1/activate`) is issued.
+- **Optimistic Concurrency & Conflict Protection**: Scene saves accept `expectedChecksum`. If the stored scene CRC32 differs, the endpoint responds with `409 Conflict` containing `currentChecksum`, preventing silent clobbering of edits.
+- **Dependency-Protected Deletion**: `DELETE /api/v1/presets?index=N` checks whether the target preset is in use by any step in the sequence or any cue in the cue lists. Active dependencies abort deletion with `400 Bad Request` and detailed reference metadata.
+
+### 2.8 Timeline Studio v2 — Anchored Transport & Safe Playback (LG-033)
+- **Persistence / Playback Decoupling**: `PUT /api/v1/sequence` persists validated Schema 2 Timeline documents. It does not start, stop, or mutate active playback, active sequence snapshots, or anchor timestamps.
+- **Immutable Active Sequence Snapshot**: Triggering RUN (`POST /api/v1/show/control` with `mode: "timeline"`) copies the latest persisted sequence into `active_sequence_`. Subsequent saves while running modify persisted storage but do NOT alter `active_sequence_`.
+- **Anchored Deterministic Timing**: Playback starts deterministically at Beat 0 from an explicit anchor timestamp (`timeline_anchor_ms`). Elapsed time is calculated as `current_clock_ms >= anchor_ms ? current_clock_ms - anchor_ms : 0`, and total beats as `elapsed_ms / ms_per_beat`.
+- **NodeSync Protocol v5**: Packets extend to 68 bytes, transmitting `transport_generation`, `timeline_anchor_ms`, and `timeline_checksum`. Followers compare local timeline checksum against the leader's active checksum, failing closed (`SyncTransportError::TimelineMismatch`) on mismatch.
+- **Late-Joining Follower Synchrony**: Late followers compute `elapsed = disciplinedClock - leaderAnchor` to seamlessly synchronize to the active playback phase without restarting from Beat 0.
 
 ---
 

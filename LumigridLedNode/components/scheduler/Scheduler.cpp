@@ -1,4 +1,5 @@
 #include "Scheduler.hpp"
+#include "TimelineEvaluator.hpp"
 #include "esp_log.h"
 #include "esp_sntp.h"
 #include "esp_timer.h"
@@ -63,15 +64,18 @@ void Scheduler::apply_sync_transport(SyncTransportMode mode, uint16_t bpm, uint3
     if (mode == SyncTransportMode::Scene) {
         sync_transport_.mode = RemoteShowMode::Scene;
         sync_transport_.timeline_enabled = false;
+        remote_timeline_running_ = false;
     } else if (mode == SyncTransportMode::Timeline) {
         sync_transport_.mode = RemoteShowMode::Timeline;
         sync_transport_.timeline_enabled = true;
     } else if (mode == SyncTransportMode::Cue) {
         sync_transport_.mode = RemoteShowMode::Cue;
         sync_transport_.timeline_enabled = false;
+        remote_timeline_running_ = false;
     } else {
         sync_transport_.mode = RemoteShowMode::None;
         sync_transport_.timeline_enabled = false;
+        remote_timeline_running_ = false;
     }
     sync_transport_.bpm = bpm;
     sync_transport_.updated_ms = now_ms;
@@ -103,6 +107,7 @@ void Scheduler::clear_sync_transport() {
     sync_transport_.mode = RemoteShowMode::None;
     sync_transport_.timeline_enabled = false;
     sync_transport_.bpm = 120;
+    remote_timeline_running_ = false;
     portEXIT_CRITICAL(&sync_transport_mutex_);
 
     if (cue_runner_) {
@@ -143,11 +148,64 @@ Scheduler::SyncTimelineTransport Scheduler::sync_transport() const {
     return copy;
 }
 
+void Scheduler::apply_remote_timeline(
+    uint32_t generation,
+    uint64_t anchor_ms,
+    uint32_t checksum,
+    uint16_t bpm,
+    uint64_t now_ms
+) {
+    portENTER_CRITICAL(&sync_transport_mutex_);
+    const bool is_new_generation = (!remote_timeline_running_ || generation != remote_timeline_generation_);
+    if (is_new_generation) {
+        // Snapshot stored timeline at trigger time
+        active_sequence_ = persisted_sequence_;
+        if (bpm > 0) {
+            active_sequence_.bpm = bpm;
+        }
+        timeline_anchor_ms_ = anchor_ms;
+        remote_timeline_generation_ = generation;
+        transport_generation_ = generation;
+        for (uint8_t& step_index : last_step_index_) {
+            step_index = 255;
+        }
+    }
+    remote_timeline_running_ = true;
+    remote_timeline_bpm_ = bpm > 0 ? bpm : (active_sequence_.bpm > 0 ? active_sequence_.bpm : 120);
+
+    transport_state_.mode = SyncTransportMode::Timeline;
+    transport_state_.bpm = remote_timeline_bpm_;
+    transport_state_.updated_ms = static_cast<uint32_t>(now_ms);
+
+    sync_transport_.active = true;
+    sync_transport_.mode = RemoteShowMode::Timeline;
+    sync_transport_.timeline_enabled = true;
+    sync_transport_.bpm = remote_timeline_bpm_;
+    sync_transport_.updated_ms = now_ms;
+    portEXIT_CRITICAL(&sync_transport_mutex_);
+
+    if (cue_runner_ && cue_runner_->is_running()) {
+        cue_runner_->stop(now_ms);
+    }
+}
+
 ShowTransportSnapshot Scheduler::transport_snapshot(uint64_t clock_ms) const {
+    if (clock_ms == 0) {
+        clock_ms = clock_.now_ms();
+    }
     ShowTransportSnapshot snap{};
 
     portENTER_CRITICAL(&sync_transport_mutex_);
     const SyncTransportState remote = transport_state_;
+    const bool is_timeline_active = (local_timeline_running_ || remote_timeline_running_ || calendar_sequence_active_);
+    const uint32_t current_generation = transport_generation_;
+    const uint64_t anchor = timeline_anchor_ms_;
+    const uint16_t effective_bpm = local_timeline_running_
+        ? (active_sequence_.bpm > 0 ? active_sequence_.bpm : (local_timeline_bpm_ > 0 ? local_timeline_bpm_ : 120))
+        : (remote_timeline_running_ ? (active_sequence_.bpm > 0 ? active_sequence_.bpm : (remote_timeline_bpm_ > 0 ? remote_timeline_bpm_ : 120))
+        : (active_sequence_.bpm > 0 ? active_sequence_.bpm : 120));
+    const uint32_t active_cs = active_sequence_.checksum;
+    const uint32_t saved_cs = persisted_sequence_.checksum;
     portEXIT_CRITICAL(&sync_transport_mutex_);
 
     // Phase 4.1: Deterministic Show transport precedence:
@@ -161,7 +219,7 @@ ShowTransportSnapshot Scheduler::transport_snapshot(uint64_t clock_ms) const {
         snap.cue_generation = cue_runner_->transport_generation();
         snap.cue_elapsed_ms = cue_runner_->cue_elapsed_ms(clock_ms);
         snap.manual_fade_q15 = cue_runner_->manual_fade_q15();
-        snap.bpm = sequence_.bpm > 0 ? sequence_.bpm : 120;
+        snap.bpm = persisted_sequence_.bpm > 0 ? persisted_sequence_.bpm : 120;
         snap.active_scene = engine_.active_scene_index();
 
         snap.cue.active = true;
@@ -172,19 +230,29 @@ ShowTransportSnapshot Scheduler::transport_snapshot(uint64_t clock_ms) const {
         snap.cue.generation = snap.cue_generation;
         snap.cue.paused_elapsed_ms = snap.cue_elapsed_ms;
         snap.cue.manual_fade_q15 = snap.manual_fade_q15;
-    } else if ((sequence_.enabled || local_timeline_running_ || calendar_sequence_active_) &&
+    } else if (is_timeline_active &&
                (remote.mode == SyncTransportMode::Standalone || remote.mode == SyncTransportMode::Timeline)) {
         snap.mode = ShowTransportMode::Timeline;
-        snap.bpm = local_timeline_running_
-            ? (local_timeline_bpm_ > 0 ? local_timeline_bpm_ : 120)
-            : (remote.mode == SyncTransportMode::Timeline ? remote.bpm : (sequence_.bpm > 0 ? sequence_.bpm : 120));
+        snap.bpm = effective_bpm;
         snap.active_scene = engine_.active_scene_index();
         snap.cue_state = CueRunnerState::Stopped;
+
+        snap.transport_generation = current_generation;
+        snap.timeline_anchor_ms = anchor;
+        snap.timeline_active_checksum = active_cs;
+        snap.timeline_saved_checksum = saved_cs;
+
+        const uint64_t elapsed = clock_ms >= anchor ? clock_ms - anchor : 0;
+        snap.timeline_elapsed_ms = elapsed;
+        const uint32_t ms_per_beat = 60000 / (snap.bpm > 0 ? snap.bpm : 120);
+        snap.timeline_current_beat = ms_per_beat > 0 ? static_cast<uint32_t>(elapsed / ms_per_beat) : 0;
+        snap.timeline_content_stale = (active_cs != saved_cs && active_cs != 0);
     } else {
         snap.mode = ShowTransportMode::Scene;
         snap.active_scene = engine_.active_scene_index();
-        snap.bpm = sequence_.bpm > 0 ? sequence_.bpm : 120;
+        snap.bpm = persisted_sequence_.bpm > 0 ? persisted_sequence_.bpm : 120;
         snap.cue_state = CueRunnerState::Stopped;
+        snap.timeline_saved_checksum = saved_cs;
     }
     return snap;
 }
@@ -266,42 +334,35 @@ void Scheduler::task() {
             continue;
         }
 
-        bool seq_enabled = sequence_.enabled;
-        uint16_t seq_bpm = sequence_.bpm;
-        bool suppress_timeline = false;
+        bool timeline_running = false;
+        uint16_t seq_bpm = 120;
+        uint64_t anchor_ms = 0;
 
         portENTER_CRITICAL(&sync_transport_mutex_);
         if (transport_state_.mode != SyncTransportMode::Standalone) {
-            if (transport_state_.mode == SyncTransportMode::Scene ||
-                transport_state_.mode == SyncTransportMode::Cue) {
-                // Phase 0.1 & 0.2: Remote Scene and Cue explicitly suppress follower Timeline
-                suppress_timeline = true;
-                seq_enabled = false;
-            } else if (transport_state_.mode == SyncTransportMode::Timeline) {
-                seq_enabled = true;
-                seq_bpm = transport_state_.bpm;
+            if (transport_state_.mode == SyncTransportMode::Timeline && remote_timeline_running_) {
+                timeline_running = true;
+                seq_bpm = active_sequence_.bpm > 0 ? active_sequence_.bpm : (remote_timeline_bpm_ > 0 ? remote_timeline_bpm_ : 120);
+                anchor_ms = timeline_anchor_ms_;
             }
         } else if (local_timeline_running_) {
-            seq_enabled = true;
-            seq_bpm = local_timeline_bpm_ > 0 ? local_timeline_bpm_ : 120;
+            timeline_running = true;
+            seq_bpm = active_sequence_.bpm > 0 ? active_sequence_.bpm : (local_timeline_bpm_ > 0 ? local_timeline_bpm_ : 120);
+            anchor_ms = timeline_anchor_ms_;
+        } else if (calendar_sequence_active_) {
+            timeline_running = true;
+            seq_bpm = active_sequence_.bpm > 0 ? active_sequence_.bpm : 120;
+            anchor_ms = calendar_sequence_started_ms_;
         }
         portEXIT_CRITICAL(&sync_transport_mutex_);
 
-        if (suppress_timeline || seq_bpm == 0 ||
-            (!seq_enabled && !calendar_sequence_active_)) {
+        if (!timeline_running || seq_bpm == 0) {
             engine_.release_control(ControlSource::Scheduler);
             continue;
         }
 
-        Sequence effective_seq = sequence_;
-        effective_seq.enabled = seq_enabled;
-        effective_seq.bpm = seq_bpm;
-
-        const uint64_t sequence_clock_ms =
-            calendar_sequence_active_ && clock_ms >= calendar_sequence_started_ms_
-                ? clock_ms - calendar_sequence_started_ms_
-                : calendar_sequence_active_ ? 0 : clock_ms;
-        evaluate(effective_seq, sequence_clock_ms);
+        const uint64_t elapsed_ms = clock_ms >= anchor_ms ? clock_ms - anchor_ms : 0;
+        evaluate(active_sequence_, elapsed_ms);
     }
 }
 
@@ -313,7 +374,13 @@ void Scheduler::refresh_config(uint64_t clock_ms) {
 
     Sequence sequence;
     if (config_.load_sequence(sequence) == ESP_OK) {
-        sequence_ = sequence;
+        portENTER_CRITICAL(&sync_transport_mutex_);
+        persisted_sequence_ = sequence;
+        // In idle state, keep active snapshot aligned with persisted content
+        if (!local_timeline_running_ && !remote_timeline_running_ && !calendar_sequence_active_) {
+            active_sequence_ = sequence;
+        }
+        portEXIT_CRITICAL(&sync_transport_mutex_);
     }
 
     CalendarSchedule calendar;
@@ -355,11 +422,16 @@ void Scheduler::evaluate_calendar(
 
         last_calendar_minute_[index] = current_minute;
         if (entry.action == CalendarAction::Sequence) {
+            portENTER_CRITICAL(&sync_transport_mutex_);
+            active_sequence_ = persisted_sequence_;
             calendar_sequence_active_ = true;
             calendar_sequence_started_ms_ = clock_ms;
+            timeline_anchor_ms_ = clock_ms;
+            transport_generation_++;
             for (uint8_t& step_index : last_step_index_) {
                 step_index = 255;
             }
+            portEXIT_CRITICAL(&sync_transport_mutex_);
             ESP_LOGI(TAG, "Calendar started sequence");
         } else if (entry.action == CalendarAction::CueList) {
             calendar_sequence_active_ = false;
@@ -382,14 +454,15 @@ void Scheduler::evaluate_calendar(
     }
 }
 
-void Scheduler::evaluate(const Sequence& seq, uint64_t clock_ms) {
-    const uint32_t ms_per_beat = 60000 / seq.bpm;
-    const uint64_t total_beats = clock_ms / ms_per_beat;
+void Scheduler::evaluate(const Sequence& seq, uint64_t elapsed_ms) {
+    const uint16_t bpm = seq.bpm > 0 ? seq.bpm : 120;
+    const uint32_t ms_per_beat = 60000 / bpm;
+    const uint64_t total_beats = elapsed_ms / ms_per_beat;
     engine_.set_beat_period(static_cast<uint16_t>(
         std::min<uint32_t>(ms_per_beat, UINT16_MAX)
     ));
 
-    SceneConfig active_composite;
+    SceneConfig active_composite{};
     strncpy(active_composite.name, "Sequenced", sizeof(active_composite.name) - 1);
     active_composite.name[sizeof(active_composite.name) - 1] = '\0';
     active_composite.global_brightness = 255;
@@ -409,33 +482,18 @@ void Scheduler::evaluate(const Sequence& seq, uint64_t clock_ms) {
         }
         any_track_enabled = true;
 
-        uint32_t track_total_length = 0;
-        for (uint8_t s = 0; s < track.num_steps; ++s) {
-            track_total_length += track.steps[s].length_beats;
-        }
-        if (track_total_length == 0) track_total_length = 1;
+        TimelineStepPosition pos = evaluate_timeline_track(track, total_beats);
 
-        const uint32_t beat_in_track = total_beats % track_total_length;
-        
-        uint32_t current_beat = 0;
-        uint8_t current_step = 0;
-        for (uint8_t s = 0; s < track.num_steps; ++s) {
-            if (beat_in_track >= current_beat && beat_in_track < current_beat + track.steps[s].length_beats) {
-                current_step = s;
-                break;
-            }
-            current_beat += track.steps[s].length_beats;
-        }
-
-        if (last_step_index_[i] != current_step) {
-            last_step_index_[i] = current_step;
+        if (last_step_index_[i] != pos.step_index) {
+            last_step_index_[i] = pos.step_index;
             state_changed = true;
         }
 
-        uint8_t preset_idx = track.steps[current_step].preset_index;
-        SceneConfig p;
-        if (config_.load_scene(preset_idx, p) == ESP_OK && track.channel_id < 16) {
-            active_composite.channels[track.channel_id] = p.channels[track.channel_id];
+        uint8_t preset_idx = pos.preset_index;
+        SceneConfig p{};
+        uint8_t ch = track.channel_id < 16 ? track.channel_id : i;
+        if (config_.load_scene(preset_idx, p) == ESP_OK) {
+            active_composite.channels[ch] = p.channels[ch];
             active_composite.global_brightness = std::min(
                 active_composite.global_brightness,
                 p.global_brightness
@@ -453,10 +511,19 @@ void Scheduler::evaluate(const Sequence& seq, uint64_t clock_ms) {
     }
 }
 
-void Scheduler::start_local_timeline(uint16_t bpm) {
+void Scheduler::start_local_timeline(uint16_t bpm, uint64_t anchor_ms) {
     portENTER_CRITICAL(&sync_transport_mutex_);
+    active_sequence_ = persisted_sequence_;
+    if (bpm > 0) {
+        active_sequence_.bpm = bpm;
+    }
     local_timeline_running_ = true;
-    local_timeline_bpm_ = bpm > 0 ? bpm : 120;
+    local_timeline_bpm_ = active_sequence_.bpm;
+    timeline_anchor_ms_ = (anchor_ms > 0) ? anchor_ms : clock_.now_ms();
+    transport_generation_++;
+    for (uint8_t& step_index : last_step_index_) {
+        step_index = 255;
+    }
     portEXIT_CRITICAL(&sync_transport_mutex_);
 }
 
@@ -464,6 +531,7 @@ void Scheduler::stop_local_timeline() {
     portENTER_CRITICAL(&sync_transport_mutex_);
     local_timeline_running_ = false;
     portEXIT_CRITICAL(&sync_transport_mutex_);
+    engine_.release_control(ControlSource::Scheduler);
 }
 
 bool Scheduler::local_timeline_active() const {
@@ -471,6 +539,71 @@ bool Scheduler::local_timeline_active() const {
     bool active = local_timeline_running_;
     portEXIT_CRITICAL(&sync_transport_mutex_);
     return active;
+}
+
+bool Scheduler::is_local_timeline_running() const {
+    portENTER_CRITICAL(&sync_transport_mutex_);
+    bool running = local_timeline_running_;
+    portEXIT_CRITICAL(&sync_transport_mutex_);
+    return running;
+}
+
+bool Scheduler::is_remote_timeline_running() const {
+    portENTER_CRITICAL(&sync_transport_mutex_);
+    bool running = remote_timeline_running_;
+    portEXIT_CRITICAL(&sync_transport_mutex_);
+    return running;
+}
+
+uint32_t Scheduler::transport_generation() const {
+    portENTER_CRITICAL(&sync_transport_mutex_);
+    uint32_t gen = transport_generation_;
+    portEXIT_CRITICAL(&sync_transport_mutex_);
+    return gen;
+}
+
+uint64_t Scheduler::timeline_anchor_ms() const {
+    portENTER_CRITICAL(&sync_transport_mutex_);
+    uint64_t anchor = timeline_anchor_ms_;
+    portEXIT_CRITICAL(&sync_transport_mutex_);
+    return anchor;
+}
+
+bool Scheduler::is_timeline_content_stale() const {
+    portENTER_CRITICAL(&sync_transport_mutex_);
+    bool stale = (active_sequence_.checksum != persisted_sequence_.checksum);
+    portEXIT_CRITICAL(&sync_transport_mutex_);
+    return stale;
+}
+
+const Sequence& Scheduler::active_sequence() const {
+    return active_sequence_;
+}
+
+const Sequence& Scheduler::persisted_sequence() const {
+    return persisted_sequence_;
+}
+
+void Scheduler::reload_sequence() {
+    portENTER_CRITICAL(&sync_transport_mutex_);
+    config_.load_sequence(persisted_sequence_);
+    portEXIT_CRITICAL(&sync_transport_mutex_);
+}
+
+void Scheduler::clear_remote_timeline() {
+    portENTER_CRITICAL(&sync_transport_mutex_);
+    remote_timeline_running_ = false;
+    portEXIT_CRITICAL(&sync_transport_mutex_);
+    engine_.release_control(ControlSource::Scheduler);
+}
+
+void Scheduler::apply_remote_timeline(
+    uint32_t generation,
+    uint16_t bpm,
+    uint64_t anchor_ms,
+    uint32_t checksum
+) {
+    apply_remote_timeline(generation, anchor_ms, checksum, bpm, clock_.now_ms());
 }
 
 } // namespace lg

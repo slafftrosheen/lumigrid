@@ -45,6 +45,13 @@ export interface ManualRuntimeState {
 export interface TransportTimelineRuntime {
   running: boolean;
   bpm: number;
+  generation?: number;
+  anchorMs?: number;
+  elapsedMs?: number;
+  currentBeat?: number;
+  activeChecksum?: number;
+  savedChecksum?: number;
+  contentStale?: boolean;
 }
 
 export interface TransportCueRuntime {
