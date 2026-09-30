@@ -118,7 +118,7 @@
 
   // Recent scene colors (for quick picker)
   const recentColors = $derived.by(() => {
-    if (!editScene) return ['#ffffff', '#ff9900', '#3b82f6', '#10b981'];
+    if (!editScene) return ['#ffffff', '#ff9900', '#6366f1', '#10b981'];
     const colors = new Set<string>();
     for (const ch of activeChannels) {
       for (const l of ch.layers) {
@@ -895,17 +895,17 @@
 
             <div class="ed-status-pills">
               {#if isActive}
-                <span class="pill pill-active"><span class="dot-pulse"></span> ACTIVE</span>
+                <span class="sc-pill pill-active"><span class="dot-pulse"></span> ACTIVE</span>
               {/if}
               {#if isDirty}
-                <span class="pill pill-edited">EDITED</span>
+                <span class="sc-pill pill-edited">EDITED</span>
               {:else if persistedDocument}
-                <span class="pill pill-saved">SAVED</span>
+                <span class="sc-pill pill-saved">SAVED</span>
               {:else}
-                <span class="pill pill-new">DRAFT</span>
+                <span class="sc-pill pill-new">DRAFT</span>
               {/if}
               {#if currentMotion && currentMotion.tracks.length > 0}
-                <span class="pill pill-motion">{currentMotion.tracks.length} motion track{currentMotion.tracks.length > 1 ? 's' : ''}</span>
+                <span class="sc-pill pill-motion">{currentMotion.tracks.length} motion track{currentMotion.tracks.length > 1 ? 's' : ''}</span>
               {/if}
             </div>
           </div>
@@ -1843,7 +1843,7 @@
     align-items: center;
   }
 
-  .pill {
+  .sc-pill {
     font-size: 0.68rem;
     font-weight: 700;
     padding: 2px 7px;
