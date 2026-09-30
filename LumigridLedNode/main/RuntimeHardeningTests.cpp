@@ -4455,6 +4455,91 @@ bool test_lg029_node_backed_authentication() {
         return true;
     }
 
+    bool test_lg032_scene_studio_and_persistence() {
+        ESP_LOGI(TAG, "Testing LG-032 Scene Studio v2 & Safe Persistence...");
+
+        // 1. Authoritative Effect Metadata
+        assert(kSignageEffectCount == 12);
+        for (size_t i = 0; i < kSignageEffectCount; ++i) {
+            const auto& meta = signage_effect_metadata(static_cast<SignageEffect>(i));
+            assert(meta.id != nullptr && strlen(meta.id) > 0);
+            assert(meta.label != nullptr && strlen(meta.label) > 0);
+            // Verify capability flags
+            if (strcmp(meta.id, "solid") == 0) {
+                assert(!meta.supports_speed);
+                assert(!meta.supports_secondary_color);
+                assert(meta.pwm_recommended);
+            } else if (strcmp(meta.id, "breathe") == 0) {
+                assert(meta.supports_speed);
+                assert(meta.pwm_recommended);
+            } else if (strcmp(meta.id, "rainbow") == 0) {
+                assert(meta.spatial);
+                assert(!meta.pwm_recommended);
+            }
+        }
+
+        // 2. Scene and Motion Persistence via ConfigStore
+        ConfigStore cfg_store;
+        cfg_store.init();
+
+        SceneConfig scene{};
+        scene.schema_version = 2;
+        std::strncpy(scene.name, "Lobby Warm", sizeof(scene.name) - 1);
+        scene.global_brightness = 200;
+        scene.transition_ms = 1500;
+        for (uint8_t c = 0; c < 16; ++c) {
+            scene.channels[c].layers[0].enabled = true;
+            scene.channels[c].layers[0].effect = static_cast<uint8_t>(SignageEffect::Solid);
+            scene.channels[c].layers[0].opacity = 255;
+            scene.channels[c].layers[0].primary_color = {255, 140, 40};
+        }
+
+        SceneMotionConfig motion{};
+        motion.schema_version = 1;
+        motion.transition_curve = TransitionCurve::EaseInOut;
+        motion.track_count = 1;
+        motion.tracks[0].target = AutomationTarget::GlobalBrightness;
+        motion.tracks[0].period_ms = 4000;
+        motion.tracks[0].curve = AutomationCurve::Linear;
+        motion.tracks[0].point_count = 2;
+        motion.tracks[0].points[0] = {0, 50};
+        motion.tracks[0].points[1] = {65535, 255};
+
+        // Save scene and motion (ConfigStore computes checksums internally)
+        const uint8_t test_slot = 7;
+        assert(cfg_store.save_scene(test_slot, scene) == ESP_OK);
+        assert(cfg_store.save_scene_motion(test_slot, motion) == ESP_OK);
+
+        // Verify readback
+        SceneConfig loaded_scene{};
+        assert(cfg_store.load_scene(test_slot, loaded_scene) == ESP_OK);
+        assert(std::strcmp(loaded_scene.name, "Lobby Warm") == 0);
+        assert(loaded_scene.checksum != 0);
+
+        SceneMotionConfig loaded_motion{};
+        assert(cfg_store.load_scene_motion(test_slot, loaded_motion) == ESP_OK);
+        assert(loaded_motion.track_count == 1);
+        assert(loaded_motion.checksum != 0);
+
+        // Clean up
+        cfg_store.delete_scene(test_slot);
+        cfg_store.delete_scene_motion(test_slot);
+
+        // 3. Strict Layer & Motion constraints
+        // Name byte limit: max 23 bytes (plus null terminator in 24-byte array)
+        const char* valid_name = "12345678901234567890123"; // exactly 23 bytes
+        assert(strlen(valid_name) == 23);
+        const char* too_long_name = "123456789012345678901234"; // 24 bytes -> invalid!
+        assert(strlen(too_long_name) == 24);
+
+        // Motion track limits: max 4 tracks, max 6 points
+        assert(kAutomationTracksPerScene == 4);
+        assert(kAutomationPointsPerTrack == 6);
+
+        ESP_LOGI(TAG, "[PASS] LG-032 Scene Studio v2 & Safe Persistence Tests passed.");
+        return true;
+    }
+
 } // namespace
 
 bool run_runtime_hardening_tests() {
@@ -4552,6 +4637,9 @@ bool run_runtime_hardening_tests() {
 
     // LG-031 Canonical Runtime State & API v1 Cutover
     all_ok &= test_lg031_runtime_snapshot_and_api_cutover();
+
+    // LG-032 Scene Studio v2 & Safe Persistence
+    all_ok &= test_lg032_scene_studio_and_persistence();
 
     if (all_ok) {
         ESP_LOGI(TAG, "==================================================");

@@ -364,32 +364,44 @@ enum class SignageEffect : uint8_t {
     StaticPulse = 11
 };
 
+constexpr size_t kSignageEffectCount = 12;
+
 struct EffectMetadata {
     const char* id;
     const char* label;
     const char* description;
+
+    bool supports_speed;
+    bool supports_secondary_color;
+    bool supports_palette;
+
+    bool spatial;
+    bool pwm_recommended;
+
     const char* parameter_label;
     const char* parameter_unit;
+
     uint8_t parameter_min;
     uint8_t parameter_max;
     uint8_t parameter_default;
+
     bool has_parameter;
 };
 
 inline const EffectMetadata& signage_effect_metadata(SignageEffect effect) {
     static constexpr EffectMetadata kMetadata[] = {
-        {"solid",    "Steady color",  "A constant, even wash of color.",                         "",              "",         0,  0,   0, false},
-        {"breathe",  "Smooth pulse",  "Gently fades between a soft glow and full brightness.",    "Minimum glow",  "%",        1, 100,   4, true},
-        {"chase",    "Moving comet",  "A bright comet travels along the strip.",                  "Tail length",   "pixels",   1,   8,   3, true},
-        {"sweep",    "Color sweep",   "Builds color across the strip from end to end.",           "",              "",         0,   0,   0, false},
-        {"reveal",   "Soft reveal",   "Fades the lane in for a polished sign-on.",                "Fade length",   "%",       10,  90,  25, true},
-        {"sparkle",  "Random twinkle","Adds crisp white twinkles over the base color.",           "Twinkles",      "per lane", 1,  12,   2, true},
-        {"gradient", "Flowing glow",  "Moves a soft wave of light along the strip.",              "Wave contrast", "%",        0, 100, 100, true},
-        {"strobe",   "Beat strobe",   "Flashes the lane with an adjustable on-time.",             "Flash time",    "%",        5,  95,  50, true},
-        {"fire",     "Living flame",  "Creates a flickering flame texture from the selected color.","Flame height", "%",       20, 100,  70, true},
-        {"aurora",   "Aurora glow",   "Gentle shifting colors across the strip.",                 "Hue shift",     "deg",      1, 255, 120, true},
-        {"colorwave","Color wave",    "Smooth sine wave color interpolation.",                    "Wave length",   "px",       10, 255,  50, true},
-        {"staticpulse","Static pulse", "Slow dimmer pulse for main/ambiance lights.",             "Min dim",       "%",        0, 100,  20, true},
+        {"solid",      "Steady color",  "A constant, even wash of color.",                             false, false, false, false, true,  "",              "",         0,   0,   0, false},
+        {"breathe",    "Smooth pulse",  "Gently fades between a soft glow and full brightness.",        true,  false, false, false, true,  "Minimum glow",  "%",        1, 100,   4, true},
+        {"chase",      "Moving comet",  "A bright comet travels along the strip.",                      true,  true,  true,  true,  false, "Tail length",   "pixels",   1,   8,   3, true},
+        {"sweep",      "Color sweep",   "Builds color across the strip from end to end.",               true,  true,  true,  true,  false, "",              "",         0,   0,   0, false},
+        {"reveal",     "Soft reveal",   "Fades the lane in for a polished sign-on.",                    true,  false, false, true,  true,  "Fade length",   "%",       10,  90,  25, true},
+        {"sparkle",    "Random twinkle","Adds crisp white twinkles over the base color.",               true,  true,  false, true,  false, "Twinkles",      "per lane", 1,  12,   2, true},
+        {"gradient",   "Flowing glow",  "Moves a soft wave of light along the strip.",                  true,  true,  true,  true,  false, "Wave contrast", "%",        0, 100, 100, true},
+        {"strobe",     "Beat strobe",   "Flashes the lane with an adjustable on-time.",                 true,  false, false, false, true,  "Flash time",    "%",        5,  95,  50, true},
+        {"fire",       "Living flame",  "Creates a flickering flame texture from the selected color.",  true,  true,  true,  true,  false, "Flame height",  "%",       20, 100,  70, true},
+        {"aurora",     "Aurora glow",   "Gentle shifting colors across the strip.",                     true,  true,  true,  true,  false, "Hue shift",     "deg",      1, 255, 120, true},
+        {"colorwave",  "Color wave",    "Smooth sine wave color interpolation.",                        true,  true,  true,  true,  false, "Wave length",   "px",       10, 255,  50, true},
+        {"staticpulse","Static pulse",  "Slow dimmer pulse for main/ambiance lights.",                 true,  false, false, false, true,  "Min dim",       "%",        0, 100,  20, true},
     };
 
     const uint8_t index = static_cast<uint8_t>(effect);

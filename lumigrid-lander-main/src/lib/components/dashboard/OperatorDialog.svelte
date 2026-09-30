@@ -1,5 +1,6 @@
 <script lang="ts">
   import { tick } from 'svelte';
+  import type { Snippet } from 'svelte';
 
   type DialogTone = 'neutral' | 'warning' | 'danger';
 
@@ -17,6 +18,8 @@
     confirmDisabled = false,
     onconfirm,
     oncancel,
+    onClose,
+    children,
   } = $props<{
     open?: boolean;
     title: string;
@@ -31,7 +34,14 @@
     confirmDisabled?: boolean;
     onconfirm?: (value: string) => void | Promise<void>;
     oncancel?: () => void;
+    /** Alias for oncancel – used by wrapper-style dialogs that need a simple close callback */
+    onClose?: () => void;
+    /** Optional children snippet for wrapper-style usage (renders below description, above actions) */
+    children?: Snippet;
   }>();
+
+  /** Resolve the effective close/cancel handler */
+  const handleClose = $derived(oncancel ?? onClose);
 
   let dialogEl = $state<HTMLElement | null>(null);
 
@@ -56,7 +66,7 @@
   });
 
   function cancel() {
-    if (!busy) oncancel?.();
+    if (!busy) handleClose?.();
   }
 
   async function submit(event: SubmitEvent) {
@@ -142,26 +152,30 @@
         </label>
       {/if}
 
-      <div class="dialog-actions">
-        <button
-          class="dialog-btn secondary"
-          type="button"
-          data-dialog-cancel
-          onclick={cancel}
-          disabled={busy}
-        >
-          {cancelLabel}
-        </button>
-        <button
-          class="dialog-btn primary"
-          class:warning={tone === 'warning'}
-          class:danger={tone === 'danger'}
-          type="submit"
-          disabled={busy || confirmDisabled}
-        >
-          {busy ? 'Working…' : confirmLabel}
-        </button>
-      </div>
+      {#if children}
+        {@render children()}
+      {:else}
+        <div class="dialog-actions">
+          <button
+            class="dialog-btn secondary"
+            type="button"
+            data-dialog-cancel
+            onclick={cancel}
+            disabled={busy}
+          >
+            {cancelLabel}
+          </button>
+          <button
+            class="dialog-btn primary"
+            class:warning={tone === 'warning'}
+            class:danger={tone === 'danger'}
+            type="submit"
+            disabled={busy || confirmDisabled}
+          >
+            {busy ? 'Working…' : confirmLabel}
+          </button>
+        </div>
+      {/if}
     </form>
   </div>
 {/if}

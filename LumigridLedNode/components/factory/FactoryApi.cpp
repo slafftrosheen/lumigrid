@@ -1053,6 +1053,7 @@ cJSON* build_scene_json(uint8_t i, const SceneConfig& scene) {
     cJSON_AddStringToObject(obj, "name", scene.name);
     cJSON_AddNumberToObject(obj, "globalBrightness", scene.global_brightness);
     cJSON_AddNumberToObject(obj, "transitionMs", scene.transition_ms);
+    cJSON_AddNumberToObject(obj, "checksum", scene.checksum);
 
     cJSON* channels = cJSON_CreateArray();
     for (uint8_t c = 0; c < 16; ++c) {
@@ -1174,6 +1175,129 @@ esp_err_t get_presets(httpd_req_t* request) {
     return ESP_OK;
 }
 
+struct SceneReferences {
+    uint8_t scene_index = 0;
+    bool active = false;
+    bool fallback = false;
+    std::vector<uint8_t> cues;
+    std::vector<uint8_t> timeline_tracks;
+    std::vector<uint8_t> schedules;
+
+    bool in_use() const {
+        return active || fallback || !cues.empty() || !timeline_tracks.empty() || !schedules.empty();
+    }
+};
+
+static SceneReferences evaluate_scene_references(FactoryApi* api_ptr, uint8_t scene_index) {
+    SceneReferences refs;
+    refs.scene_index = scene_index;
+    if (!api_ptr || !api_ptr->config()) return refs;
+
+    // 1. Active scene
+    if (api_ptr->signage() && api_ptr->signage()->scene_manager().active_scene_index() == scene_index) {
+        refs.active = true;
+    }
+
+    // 2. Fallback preset in device config
+    DeviceConfig dcfg;
+    if (api_ptr->config()->load_config(dcfg) == ESP_OK) {
+        if (dcfg.fallback_preset_index == scene_index) {
+            refs.fallback = true;
+        }
+    }
+
+    // 3. Cue Lists
+    for (uint8_t i = 0; i < kMaxCueLists; ++i) {
+        CueList cl;
+        if (api_ptr->config()->load_cue_list(i, cl) == ESP_OK && cl.count > 0) {
+            for (uint8_t c = 0; c < cl.count && c < kMaxCuesPerList; ++c) {
+                if (cl.cues[c].scene_index == scene_index) {
+                    refs.cues.push_back(i);
+                    break;
+                }
+            }
+        }
+    }
+
+    // 4. Timeline sequence tracks
+    Sequence seq;
+    if (api_ptr->config()->load_sequence(seq) == ESP_OK) {
+        for (uint8_t t = 0; t < 16; ++t) {
+            if (seq.tracks[t].enabled) {
+                for (uint8_t s = 0; s < seq.tracks[t].num_steps && s < 16; ++s) {
+                    if (seq.tracks[t].steps[s].preset_index == scene_index) {
+                        refs.timeline_tracks.push_back(t);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // 5. Calendar schedule
+    CalendarSchedule sched;
+    if (api_ptr->config()->load_calendar_schedule(sched) == ESP_OK) {
+        for (uint8_t i = 0; i < 8; ++i) {
+            if (sched.entries[i].enabled && sched.entries[i].action == CalendarAction::Preset && sched.entries[i].preset_index == scene_index) {
+                refs.schedules.push_back(i);
+            }
+        }
+    }
+
+    return refs;
+}
+
+esp_err_t get_preset_references(httpd_req_t* request) {
+    if (!api::authorize(request, api::ApiRole::Operator)) return ESP_OK;
+
+    FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+    if (!api_ptr->config()) return send_error(request, "503 Service Unavailable", "config_not_ready");
+
+    uint8_t target_index = 0;
+    size_t qlen = httpd_req_get_url_query_len(request);
+    if (qlen > 0 && qlen < 64) {
+        char query[64];
+        if (httpd_req_get_url_query_str(request, query, sizeof(query)) == ESP_OK) {
+            char param[16];
+            if (httpd_query_key_value(query, "index", param, sizeof(param)) == ESP_OK) {
+                int idx = atoi(param);
+                if (idx < 0 || idx >= kMaxPresets) {
+                    return send_error(request, "400 Bad Request", "invalid_index");
+                }
+                target_index = static_cast<uint8_t>(idx);
+            }
+        }
+    } else {
+        return send_error(request, "400 Bad Request", "missing_index");
+    }
+
+    SceneReferences refs = evaluate_scene_references(api_ptr, target_index);
+
+    cJSON* obj = cJSON_CreateObject();
+    cJSON_AddNumberToObject(obj, "sceneIndex", refs.scene_index);
+    cJSON_AddBoolToObject(obj, "active", refs.active);
+    cJSON_AddBoolToObject(obj, "fallback", refs.fallback);
+
+    cJSON* cues_arr = cJSON_CreateArray();
+    for (uint8_t c : refs.cues) cJSON_AddItemToArray(cues_arr, cJSON_CreateNumber(c));
+    cJSON_AddItemToObject(obj, "cues", cues_arr);
+
+    cJSON* tt_arr = cJSON_CreateArray();
+    for (uint8_t t : refs.timeline_tracks) cJSON_AddItemToArray(tt_arr, cJSON_CreateNumber(t));
+    cJSON_AddItemToObject(obj, "timelineTracks", tt_arr);
+
+    cJSON* s_arr = cJSON_CreateArray();
+    for (uint8_t s : refs.schedules) cJSON_AddItemToArray(s_arr, cJSON_CreateNumber(s));
+    cJSON_AddItemToObject(obj, "schedules", s_arr);
+
+    char* json = cJSON_PrintUnformatted(obj);
+    cJSON_Delete(obj);
+    if (!json) return send_error(request, "500 Internal Server Error", "out_of_memory");
+    esp_err_t res = send_json(request, json);
+    cJSON_free(json);
+    return res;
+}
+
 esp_err_t delete_preset(httpd_req_t* request) {
     if (!api::authorize(request, api::ApiRole::Operator)) return ESP_OK;
 
@@ -1207,8 +1331,55 @@ esp_err_t delete_preset(httpd_req_t* request) {
         return send_error(request, "400 Bad Request", "invalid_or_missing_index");
     }
 
-    api_ptr->config()->delete_scene(static_cast<uint8_t>(index));
-    api_ptr->config()->delete_scene_motion(static_cast<uint8_t>(index));
+    uint8_t u_idx = static_cast<uint8_t>(index);
+    SceneReferences refs = evaluate_scene_references(api_ptr, u_idx);
+    if (refs.in_use()) {
+        cJSON* err_obj = cJSON_CreateObject();
+        cJSON_AddStringToObject(err_obj, "error", "scene_in_use");
+        cJSON* ref_arr = cJSON_CreateArray();
+        if (refs.active) {
+            cJSON* item = cJSON_CreateObject();
+            cJSON_AddStringToObject(item, "type", "active");
+            cJSON_AddNumberToObject(item, "index", u_idx);
+            cJSON_AddItemToArray(ref_arr, item);
+        }
+        if (refs.fallback) {
+            cJSON* item = cJSON_CreateObject();
+            cJSON_AddStringToObject(item, "type", "fallback");
+            cJSON_AddNumberToObject(item, "index", u_idx);
+            cJSON_AddItemToArray(ref_arr, item);
+        }
+        for (uint8_t c : refs.cues) {
+            cJSON* item = cJSON_CreateObject();
+            cJSON_AddStringToObject(item, "type", "cueList");
+            cJSON_AddNumberToObject(item, "index", c);
+            cJSON_AddItemToArray(ref_arr, item);
+        }
+        for (uint8_t t : refs.timeline_tracks) {
+            cJSON* item = cJSON_CreateObject();
+            cJSON_AddStringToObject(item, "type", "timelineTrack");
+            cJSON_AddNumberToObject(item, "index", t);
+            cJSON_AddItemToArray(ref_arr, item);
+        }
+        for (uint8_t s : refs.schedules) {
+            cJSON* item = cJSON_CreateObject();
+            cJSON_AddStringToObject(item, "type", "schedule");
+            cJSON_AddNumberToObject(item, "index", s);
+            cJSON_AddItemToArray(ref_arr, item);
+        }
+        cJSON_AddItemToObject(err_obj, "references", ref_arr);
+        char* json = cJSON_PrintUnformatted(err_obj);
+        cJSON_Delete(err_obj);
+        if (!json) return send_error(request, "500 Internal Server Error", "out_of_memory");
+        httpd_resp_set_status(request, "409 Conflict");
+        httpd_resp_set_type(request, "application/json");
+        httpd_resp_send(request, json, strlen(json));
+        cJSON_free(json);
+        return ESP_OK;
+    }
+
+    api_ptr->config()->delete_scene(u_idx);
+    api_ptr->config()->delete_scene_motion(u_idx);
 
     char audit_detail[64];
     snprintf(audit_detail, sizeof(audit_detail), "Preset %d deleted", index);
@@ -1353,6 +1524,299 @@ esp_err_t get_show_manifest(httpd_req_t* request) {
     return ret;
 }
 
+static bool parse_and_validate_layer_obj(const cJSON* l_item, LayerConfig& layer, const char*& err_code) {
+    if (!l_item || !cJSON_IsObject(l_item)) {
+        err_code = "invalid_layer_object";
+        return false;
+    }
+
+    const cJSON* effect_j = cJSON_GetObjectItemCaseSensitive(l_item, "effect");
+    if (effect_j) {
+        if (cJSON_IsString(effect_j)) {
+            SignageEffect eff = SignageEffect::Solid;
+            if (!parse_signage_effect(effect_j->valuestring, eff)) {
+                err_code = "invalid_layer_effect";
+                return false;
+            }
+            layer.effect = static_cast<uint8_t>(eff);
+        } else if (cJSON_IsNumber(effect_j)) {
+            if (effect_j->valueint < 0 || effect_j->valueint >= static_cast<int>(kSignageEffectCount)) {
+                err_code = "invalid_layer_effect";
+                return false;
+            }
+            layer.effect = static_cast<uint8_t>(effect_j->valueint);
+        } else {
+            err_code = "invalid_layer_effect";
+            return false;
+        }
+    }
+
+    const cJSON* blend_j = cJSON_GetObjectItemCaseSensitive(l_item, "blendMode");
+    if (blend_j) {
+        if (cJSON_IsString(blend_j)) {
+            if (!parse_blend_mode(blend_j->valuestring, layer.blend_mode)) {
+                err_code = "invalid_blend_mode";
+                return false;
+            }
+        } else if (cJSON_IsNumber(blend_j)) {
+            if (blend_j->valueint < 0 || blend_j->valueint > 3) {
+                err_code = "invalid_blend_mode";
+                return false;
+            }
+            layer.blend_mode = static_cast<BlendMode>(blend_j->valueint);
+        } else {
+            err_code = "invalid_blend_mode";
+            return false;
+        }
+    }
+
+    const cJSON* pc = cJSON_GetObjectItemCaseSensitive(l_item, "primaryColor");
+    if (pc) {
+        if (!cJSON_IsObject(pc)) { err_code = "invalid_layer_color"; return false; }
+        const cJSON* r = cJSON_GetObjectItemCaseSensitive(pc, "r");
+        const cJSON* g = cJSON_GetObjectItemCaseSensitive(pc, "g");
+        const cJSON* b = cJSON_GetObjectItemCaseSensitive(pc, "b");
+        if (!r || !cJSON_IsNumber(r) || r->valuedouble < 0 || r->valuedouble > 255 ||
+            !g || !cJSON_IsNumber(g) || g->valuedouble < 0 || g->valuedouble > 255 ||
+            !b || !cJSON_IsNumber(b) || b->valuedouble < 0 || b->valuedouble > 255) {
+            err_code = "invalid_layer_color";
+            return false;
+        }
+        layer.primary_color.r = static_cast<uint8_t>(r->valueint);
+        layer.primary_color.g = static_cast<uint8_t>(g->valueint);
+        layer.primary_color.b = static_cast<uint8_t>(b->valueint);
+    }
+
+    const cJSON* sc = cJSON_GetObjectItemCaseSensitive(l_item, "secondaryColor");
+    if (sc) {
+        if (!cJSON_IsObject(sc)) { err_code = "invalid_layer_color"; return false; }
+        const cJSON* r = cJSON_GetObjectItemCaseSensitive(sc, "r");
+        const cJSON* g = cJSON_GetObjectItemCaseSensitive(sc, "g");
+        const cJSON* b = cJSON_GetObjectItemCaseSensitive(sc, "b");
+        if (!r || !cJSON_IsNumber(r) || r->valuedouble < 0 || r->valuedouble > 255 ||
+            !g || !cJSON_IsNumber(g) || g->valuedouble < 0 || g->valuedouble > 255 ||
+            !b || !cJSON_IsNumber(b) || b->valuedouble < 0 || b->valuedouble > 255) {
+            err_code = "invalid_layer_color";
+            return false;
+        }
+        layer.secondary_color.r = static_cast<uint8_t>(r->valueint);
+        layer.secondary_color.g = static_cast<uint8_t>(g->valueint);
+        layer.secondary_color.b = static_cast<uint8_t>(b->valueint);
+    }
+
+    const cJSON* spd = cJSON_GetObjectItemCaseSensitive(l_item, "speedMs");
+    if (spd) {
+        if (!cJSON_IsNumber(spd) || spd->valuedouble < 10 || spd->valuedouble > 60000) {
+            err_code = "invalid_layer_speed";
+            return false;
+        }
+        layer.speed_ms = static_cast<uint16_t>(spd->valueint);
+    }
+
+    const cJSON* fx = cJSON_GetObjectItemCaseSensitive(l_item, "fxParam");
+    if (fx) {
+        if (!cJSON_IsNumber(fx) || fx->valuedouble < 0 || fx->valuedouble > 255) {
+            err_code = "invalid_layer_fx_param";
+            return false;
+        }
+        layer.fx_param = static_cast<uint8_t>(fx->valueint);
+    }
+
+    const cJSON* pal = cJSON_GetObjectItemCaseSensitive(l_item, "paletteId");
+    if (pal) {
+        if (!cJSON_IsNumber(pal) || pal->valuedouble < 0 || pal->valuedouble > 5) {
+            err_code = "invalid_layer_palette";
+            return false;
+        }
+        layer.palette_id = static_cast<uint8_t>(pal->valueint);
+    }
+
+    const cJSON* op = cJSON_GetObjectItemCaseSensitive(l_item, "opacity");
+    if (op) {
+        if (!cJSON_IsNumber(op) || op->valuedouble < 0 || op->valuedouble > 255) {
+            err_code = "invalid_layer_opacity";
+            return false;
+        }
+        layer.opacity = static_cast<uint8_t>(op->valueint);
+    }
+
+    const cJSON* en = cJSON_GetObjectItemCaseSensitive(l_item, "enabled");
+    if (en) {
+        if (!cJSON_IsBool(en)) {
+            err_code = "invalid_layer_enabled";
+            return false;
+        }
+        layer.enabled = cJSON_IsTrue(en);
+    }
+
+    return true;
+}
+
+static bool parse_and_validate_motion_json(const cJSON* motion_j, uint8_t index, SceneMotionConfig& motion, const char*& err_code) {
+    if (!motion_j || !cJSON_IsObject(motion_j)) {
+        err_code = "invalid_motion_object";
+        return false;
+    }
+    motion.schema_version = 1;
+
+    const cJSON* cur_j = cJSON_GetObjectItemCaseSensitive(motion_j, "transitionCurve");
+    if (cur_j && cJSON_IsString(cur_j)) {
+        if (!parse_transition_curve(cur_j->valuestring, motion.transition_curve)) {
+            err_code = "invalid_transition_curve";
+            return false;
+        }
+    } else {
+        motion.transition_curve = TransitionCurve::EaseInOut;
+    }
+
+    const cJSON* tracks = cJSON_GetObjectItemCaseSensitive(motion_j, "tracks");
+    if (tracks) {
+        if (!cJSON_IsArray(tracks)) {
+            err_code = "invalid_motion_tracks";
+            return false;
+        }
+        int t_len = cJSON_GetArraySize(tracks);
+        if (t_len > kAutomationTracksPerScene) {
+            err_code = "too_many_motion_tracks";
+            return false;
+        }
+        uint8_t t_count = 0;
+        const cJSON* t_item = nullptr;
+        cJSON_ArrayForEach(t_item, tracks) {
+            auto& tr = motion.tracks[t_count];
+
+            const cJSON* tgt_j = cJSON_GetObjectItemCaseSensitive(t_item, "target");
+            if (!tgt_j || !cJSON_IsString(tgt_j) || !parse_automation_target(tgt_j->valuestring, tr.target)) {
+                err_code = "invalid_motion_target";
+                return false;
+            }
+
+            const cJSON* ch_j = cJSON_GetObjectItemCaseSensitive(t_item, "channel");
+            const cJSON* z_j = cJSON_GetObjectItemCaseSensitive(t_item, "zone");
+            if (ch_j && cJSON_IsNumber(ch_j)) {
+                if (ch_j->valueint < 0 || ch_j->valueint > 15) {
+                    err_code = "invalid_motion_channel";
+                    return false;
+                }
+                tr.channel = static_cast<uint8_t>(ch_j->valueint);
+            } else if (z_j && cJSON_IsNumber(z_j)) {
+                if (z_j->valueint < 0 || z_j->valueint > 15) {
+                    err_code = "invalid_motion_channel";
+                    return false;
+                }
+                tr.channel = static_cast<uint8_t>(z_j->valueint);
+            } else {
+                tr.channel = 0;
+            }
+
+            const cJSON* l_j = cJSON_GetObjectItemCaseSensitive(t_item, "layer");
+            if (l_j) {
+                if (!cJSON_IsNumber(l_j) || l_j->valueint < 0 || l_j->valueint > 2) {
+                    err_code = "invalid_motion_layer";
+                    return false;
+                }
+                tr.layer = static_cast<uint8_t>(l_j->valueint);
+            } else {
+                tr.layer = 0;
+            }
+
+            const cJSON* c_j = cJSON_GetObjectItemCaseSensitive(t_item, "curve");
+            if (c_j && cJSON_IsString(c_j)) {
+                if (!parse_automation_curve(c_j->valuestring, tr.curve)) {
+                    err_code = "invalid_motion_curve";
+                    return false;
+                }
+            } else {
+                tr.curve = AutomationCurve::EaseInOut;
+            }
+
+            const cJSON* loop_j = cJSON_GetObjectItemCaseSensitive(t_item, "loop");
+            if (loop_j) {
+                if (!cJSON_IsBool(loop_j)) {
+                    err_code = "invalid_motion_loop";
+                    return false;
+                }
+                tr.loop = cJSON_IsTrue(loop_j);
+            } else {
+                tr.loop = true;
+            }
+
+            const cJSON* per_j = cJSON_GetObjectItemCaseSensitive(t_item, "periodMs");
+            if (per_j) {
+                if (!cJSON_IsNumber(per_j) || per_j->valuedouble < 100 || per_j->valuedouble > 3600000) {
+                    err_code = "invalid_motion_period";
+                    return false;
+                }
+                tr.period_ms = static_cast<uint32_t>(per_j->valuedouble);
+            } else {
+                tr.period_ms = 5000;
+            }
+
+            const cJSON* pts = cJSON_GetObjectItemCaseSensitive(t_item, "points");
+            if (pts) {
+                if (!cJSON_IsArray(pts)) {
+                    err_code = "invalid_motion_points";
+                    return false;
+                }
+                int p_len = cJSON_GetArraySize(pts);
+                if (p_len > kAutomationPointsPerTrack) {
+                    err_code = "too_many_motion_points";
+                    return false;
+                }
+                uint8_t p_count = 0;
+                const cJSON* p_item = nullptr;
+                int prev_pos = -1;
+                cJSON_ArrayForEach(p_item, pts) {
+                    const cJSON* pos_j = cJSON_GetObjectItemCaseSensitive(p_item, "position");
+                    const cJSON* val_j = cJSON_GetObjectItemCaseSensitive(p_item, "value");
+                    if (!pos_j || !cJSON_IsNumber(pos_j) || pos_j->valuedouble < 0 || pos_j->valuedouble > 65535) {
+                        err_code = "invalid_motion_point_position";
+                        return false;
+                    }
+                    if (!val_j || !cJSON_IsNumber(val_j) || val_j->valuedouble < 0 || val_j->valuedouble > 65535) {
+                        err_code = "invalid_motion_point_value";
+                        return false;
+                    }
+
+                    int pos_int = static_cast<int>(pos_j->valuedouble);
+                    int val_int = static_cast<int>(val_j->valuedouble);
+
+                    if (tr.target == AutomationTarget::GlobalBrightness && val_int > 255) {
+                        err_code = "invalid_motion_point_value";
+                        return false;
+                    }
+                    if (tr.target == AutomationTarget::LayerOpacity && val_int > 255) {
+                        err_code = "invalid_motion_point_value";
+                        return false;
+                    }
+                    if (tr.target == AutomationTarget::LayerSpeed && (val_int < 10 || val_int > 60000)) {
+                        err_code = "invalid_motion_point_value";
+                        return false;
+                    }
+                    if (tr.target == AutomationTarget::LayerParameter && val_int > 255) {
+                        err_code = "invalid_motion_point_value";
+                        return false;
+                    }
+
+                    if (p_count > 0 && pos_int <= prev_pos) {
+                        err_code = "invalid_motion_points_order";
+                        return false;
+                    }
+                    prev_pos = pos_int;
+
+                    tr.points[p_count].position = static_cast<uint16_t>(pos_int);
+                    tr.points[p_count].value = static_cast<uint16_t>(val_int);
+                    p_count++;
+                }
+                tr.point_count = p_count;
+            }
+            t_count++;
+        }
+        motion.track_count = t_count;
+    }
+    return true;
+}
+
 esp_err_t put_preset(httpd_req_t* request) {
     if (!api::authorize(request, api::ApiRole::Operator)) return ESP_OK;
 
@@ -1370,77 +1834,61 @@ esp_err_t put_preset(httpd_req_t* request) {
         return send_error(request, "400 Bad Request", "missing_index");
     }
 
-#define P_VALIDATE_U8(obj, field, min, max, target)     do {         const cJSON* v = cJSON_GetObjectItemCaseSensitive(obj, field);         if (v) {             if (!cJSON_IsNumber(v) || v->valuedouble < (min) || v->valuedouble > (max)) {                 cJSON_Delete(root);                 return send_error(request, "400 Bad Request", "invalid_field_" field);             }             target = static_cast<uint8_t>(v->valueint);         }     } while(0)
+    // Check revision conflicts if expectedChecksum is provided
+    const cJSON* exp_sc = cJSON_GetObjectItemCaseSensitive(root, "expectedSceneChecksum");
+    if (exp_sc && cJSON_IsNumber(exp_sc)) {
+        SceneConfig cur_sc{};
+        if (api_ptr->config()->load_scene(index, cur_sc) == ESP_OK) {
+            if (cur_sc.checksum != static_cast<uint32_t>(exp_sc->valuedouble)) {
+                cJSON_Delete(root);
+                return send_error(request, "409 Conflict", "scene_conflict");
+            }
+        }
+    }
 
-#define P_VALIDATE_U16(obj, field, min, max, target)     do {         const cJSON* v = cJSON_GetObjectItemCaseSensitive(obj, field);         if (v) {             if (!cJSON_IsNumber(v) || v->valuedouble < (min) || v->valuedouble > (max)) {                 cJSON_Delete(root);                 return send_error(request, "400 Bad Request", "invalid_field_" field);             }             target = static_cast<uint16_t>(v->valueint);         }     } while(0)
+    const cJSON* exp_mc = cJSON_GetObjectItemCaseSensitive(root, "expectedMotionChecksum");
+    if (exp_mc && cJSON_IsNumber(exp_mc)) {
+        SceneMotionConfig cur_mc{};
+        if (api_ptr->config()->load_scene_motion(index, cur_mc) == ESP_OK) {
+            if (cur_mc.checksum != static_cast<uint32_t>(exp_mc->valuedouble)) {
+                cJSON_Delete(root);
+                return send_error(request, "409 Conflict", "scene_conflict");
+            }
+        }
+    }
 
     SceneConfig scene{};
     const cJSON* name_j = cJSON_GetObjectItemCaseSensitive(root, "name");
     if (name_j) {
-        if (!cJSON_IsString(name_j) || strlen(name_j->valuestring) >= sizeof(scene.name)) {
+        if (!cJSON_IsString(name_j)) {
             cJSON_Delete(root);
             return send_error(request, "400 Bad Request", "invalid_field_name");
+        }
+        if (strlen(name_j->valuestring) > 23) {
+            cJSON_Delete(root);
+            return send_error(request, "400 Bad Request", "invalid_scene_name_length");
         }
         strncpy(scene.name, name_j->valuestring, sizeof(scene.name) - 1);
         scene.name[sizeof(scene.name) - 1] = '\0';
     }
 
-    P_VALIDATE_U8(root, "globalBrightness", 0, 255, scene.global_brightness);
-    P_VALIDATE_U16(root, "transitionMs", 0, 10000, scene.transition_ms);
-
-    auto parse_layer_obj = [](const cJSON* l_item, LayerConfig& layer) {
-        const cJSON* effect_j = cJSON_GetObjectItemCaseSensitive(l_item, "effect");
-        if (effect_j && cJSON_IsString(effect_j)) {
-            SignageEffect eff = SignageEffect::Solid;
-            if (parse_signage_effect(effect_j->valuestring, eff)) {
-                layer.effect = static_cast<uint8_t>(eff);
-            }
-        } else if (effect_j && cJSON_IsNumber(effect_j)) {
-            layer.effect = static_cast<uint8_t>(effect_j->valueint);
+    const cJSON* gb_j = cJSON_GetObjectItemCaseSensitive(root, "globalBrightness");
+    if (gb_j) {
+        if (!cJSON_IsNumber(gb_j) || gb_j->valuedouble < 0 || gb_j->valuedouble > 255) {
+            cJSON_Delete(root);
+            return send_error(request, "400 Bad Request", "invalid_field_globalBrightness");
         }
+        scene.global_brightness = static_cast<uint8_t>(gb_j->valueint);
+    }
 
-        const cJSON* blend_j = cJSON_GetObjectItemCaseSensitive(l_item, "blendMode");
-        if (blend_j && cJSON_IsString(blend_j)) {
-            parse_blend_mode(blend_j->valuestring, layer.blend_mode);
-        } else if (blend_j && cJSON_IsNumber(blend_j)) {
-            layer.blend_mode = static_cast<BlendMode>(blend_j->valueint);
+    const cJSON* tr_j = cJSON_GetObjectItemCaseSensitive(root, "transitionMs");
+    if (tr_j) {
+        if (!cJSON_IsNumber(tr_j) || tr_j->valuedouble < 0 || tr_j->valuedouble > 10000) {
+            cJSON_Delete(root);
+            return send_error(request, "400 Bad Request", "invalid_field_transitionMs");
         }
-
-        const cJSON* pc = cJSON_GetObjectItemCaseSensitive(l_item, "primaryColor");
-        if (pc) {
-            const cJSON* r = cJSON_GetObjectItemCaseSensitive(pc, "r");
-            const cJSON* g = cJSON_GetObjectItemCaseSensitive(pc, "g");
-            const cJSON* b = cJSON_GetObjectItemCaseSensitive(pc, "b");
-            if (r && cJSON_IsNumber(r)) layer.primary_color.r = static_cast<uint8_t>(r->valueint);
-            if (g && cJSON_IsNumber(g)) layer.primary_color.g = static_cast<uint8_t>(g->valueint);
-            if (b && cJSON_IsNumber(b)) layer.primary_color.b = static_cast<uint8_t>(b->valueint);
-        }
-
-        const cJSON* sc = cJSON_GetObjectItemCaseSensitive(l_item, "secondaryColor");
-        if (sc) {
-            const cJSON* r = cJSON_GetObjectItemCaseSensitive(sc, "r");
-            const cJSON* g = cJSON_GetObjectItemCaseSensitive(sc, "g");
-            const cJSON* b = cJSON_GetObjectItemCaseSensitive(sc, "b");
-            if (r && cJSON_IsNumber(r)) layer.secondary_color.r = static_cast<uint8_t>(r->valueint);
-            if (g && cJSON_IsNumber(g)) layer.secondary_color.g = static_cast<uint8_t>(g->valueint);
-            if (b && cJSON_IsNumber(b)) layer.secondary_color.b = static_cast<uint8_t>(b->valueint);
-        }
-
-        const cJSON* spd = cJSON_GetObjectItemCaseSensitive(l_item, "speedMs");
-        if (spd && cJSON_IsNumber(spd)) layer.speed_ms = static_cast<uint16_t>(spd->valueint);
-
-        const cJSON* fx = cJSON_GetObjectItemCaseSensitive(l_item, "fxParam");
-        if (fx && cJSON_IsNumber(fx)) layer.fx_param = static_cast<uint8_t>(fx->valueint);
-
-        const cJSON* pal = cJSON_GetObjectItemCaseSensitive(l_item, "paletteId");
-        if (pal && cJSON_IsNumber(pal)) layer.palette_id = static_cast<uint8_t>(pal->valueint);
-
-        const cJSON* op = cJSON_GetObjectItemCaseSensitive(l_item, "opacity");
-        if (op && cJSON_IsNumber(op)) layer.opacity = static_cast<uint8_t>(op->valueint);
-
-        const cJSON* en = cJSON_GetObjectItemCaseSensitive(l_item, "enabled");
-        if (en && cJSON_IsBool(en)) layer.enabled = cJSON_IsTrue(en);
-    };
+        scene.transition_ms = static_cast<uint16_t>(tr_j->valueint);
+    }
 
     const cJSON* channels = cJSON_GetObjectItemCaseSensitive(root, "channels");
     if (channels && cJSON_IsArray(channels)) {
@@ -1454,7 +1902,11 @@ esp_err_t put_preset(httpd_req_t* request) {
                 cJSON* l_item = nullptr;
                 cJSON_ArrayForEach(l_item, layers) {
                     if (l_idx >= 3) break;
-                    parse_layer_obj(l_item, scene.channels[c_idx].layers[l_idx]);
+                    const char* l_err = nullptr;
+                    if (!parse_and_validate_layer_obj(l_item, scene.channels[c_idx].layers[l_idx], l_err)) {
+                        cJSON_Delete(root);
+                        return send_error(request, "400 Bad Request", l_err ? l_err : "invalid_layer");
+                    }
                     l_idx++;
                 }
             }
@@ -1473,7 +1925,11 @@ esp_err_t put_preset(httpd_req_t* request) {
                     cJSON* l_item = nullptr;
                     cJSON_ArrayForEach(l_item, layers) {
                         if (l_idx >= 3) break;
-                        parse_layer_obj(l_item, scene.channels[z_idx].layers[l_idx]);
+                        const char* l_err = nullptr;
+                        if (!parse_and_validate_layer_obj(l_item, scene.channels[z_idx].layers[l_idx], l_err)) {
+                            cJSON_Delete(root);
+                            return send_error(request, "400 Bad Request", l_err ? l_err : "invalid_layer");
+                        }
                         l_idx++;
                     }
                 }
@@ -1481,21 +1937,76 @@ esp_err_t put_preset(httpd_req_t* request) {
             }
         }
     }
-#undef P_VALIDATE_U8
-#undef P_VALIDATE_U16
+
+    // Optional motion inside scene payload
+    SceneMotionConfig motion{};
+    bool has_motion = false;
+    const cJSON* motion_j = cJSON_GetObjectItemCaseSensitive(root, "motion");
+    if (motion_j && !cJSON_IsNull(motion_j)) {
+        const char* m_err = nullptr;
+        if (!parse_and_validate_motion_json(motion_j, index, motion, m_err)) {
+            cJSON_Delete(root);
+            return send_error(request, "400 Bad Request", m_err ? m_err : "invalid_motion");
+        }
+        has_motion = true;
+    }
 
     cJSON_Delete(root);
+
+    // Backup previous state for transactional rollback
+    SceneConfig prev_scene{};
+    bool prev_scene_exists = (api_ptr->config()->load_scene(index, prev_scene) == ESP_OK);
+    SceneMotionConfig prev_motion{};
+    bool prev_motion_exists = (api_ptr->config()->load_scene_motion(index, prev_motion) == ESP_OK);
 
     esp_err_t err = api_ptr->config()->save_scene(index, scene);
     if (err != ESP_OK) {
         return send_error(request, "500 Internal Server Error", "nvs_write_failed");
     }
 
+    if (has_motion) {
+        err = api_ptr->config()->save_scene_motion(index, motion);
+        if (err != ESP_OK) {
+            // Rollback scene
+            if (prev_scene_exists) api_ptr->config()->save_scene(index, prev_scene);
+            else api_ptr->config()->delete_scene(index);
+            return send_error(request, "500 Internal Server Error", "nvs_write_failed");
+        }
+
+        // Verify readback
+        SceneConfig verify_sc{};
+        SceneMotionConfig verify_mc{};
+        if (api_ptr->config()->load_scene(index, verify_sc) != ESP_OK ||
+            api_ptr->config()->load_scene_motion(index, verify_mc) != ESP_OK) {
+            // Rollback both
+            if (prev_scene_exists) api_ptr->config()->save_scene(index, prev_scene);
+            else api_ptr->config()->delete_scene(index);
+            if (prev_motion_exists) api_ptr->config()->save_scene_motion(index, prev_motion);
+            else api_ptr->config()->delete_scene_motion(index);
+            return send_error(request, "500 Internal Server Error", "nvs_readback_failed");
+        }
+        scene.checksum = verify_sc.checksum;
+        motion.checksum = verify_mc.checksum;
+    } else {
+        SceneConfig verify_sc{};
+        if (api_ptr->config()->load_scene(index, verify_sc) == ESP_OK) {
+            scene.checksum = verify_sc.checksum;
+        }
+    }
+
     char detail[64];
     snprintf(detail, sizeof(detail), "Preset %d updated", index);
     api::AuditLog::instance().log(api::ApiRole::Operator, "preset_update", detail);
 
-    return send_json(request, R"({"saved":true})", "200 OK");
+    char resp[128];
+    if (has_motion) {
+        snprintf(resp, sizeof(resp), "{\"saved\":true,\"index\":%u,\"sceneChecksum\":%" PRIu32 ",\"motionChecksum\":%" PRIu32 "}",
+                 index, scene.checksum, motion.checksum);
+    } else {
+        snprintf(resp, sizeof(resp), "{\"saved\":true,\"index\":%u,\"sceneChecksum\":%" PRIu32 "}",
+                 index, scene.checksum);
+    }
+    return send_json(request, resp, "200 OK");
 }
 
 esp_err_t get_scene_motion(httpd_req_t* request) {
@@ -1520,6 +2031,7 @@ esp_err_t get_scene_motion(httpd_req_t* request) {
         cJSON* obj = cJSON_CreateObject();
         cJSON_AddNumberToObject(obj, "schema_version", sm.schema_version);
         cJSON_AddNumberToObject(obj, "index", idx);
+        cJSON_AddNumberToObject(obj, "checksum", sm.checksum);
         cJSON_AddStringToObject(obj, "transitionCurve", transition_curve_name(sm.transition_curve));
         cJSON_AddNumberToObject(obj, "trackCount", sm.track_count);
         cJSON* tracks = cJSON_CreateArray();
@@ -1613,65 +2125,23 @@ esp_err_t put_scene_motion(httpd_req_t* request) {
         return send_error(request, "400 Bad Request", "invalid_index");
     }
 
-    SceneMotionConfig motion{};
-    motion.schema_version = 1;
-
-    const cJSON* cur_j = cJSON_GetObjectItemCaseSensitive(root, "transitionCurve");
-    if (cur_j && cJSON_IsString(cur_j)) {
-        parse_transition_curve(cur_j->valuestring, motion.transition_curve);
+    const cJSON* exp_mc = cJSON_GetObjectItemCaseSensitive(root, "expectedChecksum");
+    if (!exp_mc) exp_mc = cJSON_GetObjectItemCaseSensitive(root, "expectedMotionChecksum");
+    if (exp_mc && cJSON_IsNumber(exp_mc)) {
+        SceneMotionConfig cur_mc{};
+        if (api_ptr->config()->load_scene_motion(index, cur_mc) == ESP_OK) {
+            if (cur_mc.checksum != static_cast<uint32_t>(exp_mc->valuedouble)) {
+                cJSON_Delete(root);
+                return send_error(request, "409 Conflict", "scene_conflict");
+            }
+        }
     }
 
-    const cJSON* tracks = cJSON_GetObjectItemCaseSensitive(root, "tracks");
-    if (tracks && cJSON_IsArray(tracks)) {
-        uint8_t t_count = 0;
-        const cJSON* t_item = nullptr;
-        cJSON_ArrayForEach(t_item, tracks) {
-            if (t_count >= kAutomationTracksPerScene) break;
-            auto& tr = motion.tracks[t_count];
-
-            const cJSON* tgt_j = cJSON_GetObjectItemCaseSensitive(t_item, "target");
-            if (tgt_j && cJSON_IsString(tgt_j)) parse_automation_target(tgt_j->valuestring, tr.target);
-
-            const cJSON* ch_j = cJSON_GetObjectItemCaseSensitive(t_item, "channel");
-            const cJSON* z_j = cJSON_GetObjectItemCaseSensitive(t_item, "zone");
-            if (ch_j && cJSON_IsNumber(ch_j)) {
-                tr.channel = std::min<uint8_t>(15, std::max<int>(0, ch_j->valueint));
-            } else if (z_j && cJSON_IsNumber(z_j)) {
-                // Legacy 8-zone payload fallback.
-                tr.channel = std::min<uint8_t>(7, std::max<int>(0, z_j->valueint));
-            }
-
-            const cJSON* l_j = cJSON_GetObjectItemCaseSensitive(t_item, "layer");
-            if (l_j && cJSON_IsNumber(l_j)) tr.layer = std::min<uint8_t>(2, std::max<int>(0, l_j->valueint));
-
-            const cJSON* c_j = cJSON_GetObjectItemCaseSensitive(t_item, "curve");
-            if (c_j && cJSON_IsString(c_j)) parse_automation_curve(c_j->valuestring, tr.curve);
-
-            const cJSON* loop_j = cJSON_GetObjectItemCaseSensitive(t_item, "loop");
-            if (loop_j && cJSON_IsBool(loop_j)) tr.loop = cJSON_IsTrue(loop_j);
-
-            const cJSON* per_j = cJSON_GetObjectItemCaseSensitive(t_item, "periodMs");
-            if (per_j && cJSON_IsNumber(per_j)) tr.period_ms = std::max<uint32_t>(100, std::min<uint32_t>(3600000, per_j->valueint));
-
-            const cJSON* pts = cJSON_GetObjectItemCaseSensitive(t_item, "points");
-            if (pts && cJSON_IsArray(pts)) {
-                uint8_t p_count = 0;
-                const cJSON* p_item = nullptr;
-                cJSON_ArrayForEach(p_item, pts) {
-                    if (p_count >= kAutomationPointsPerTrack) break;
-                    const cJSON* pos_j = cJSON_GetObjectItemCaseSensitive(p_item, "position");
-                    const cJSON* val_j = cJSON_GetObjectItemCaseSensitive(p_item, "value");
-                    if (pos_j && val_j && cJSON_IsNumber(pos_j) && cJSON_IsNumber(val_j)) {
-                        tr.points[p_count].position = static_cast<uint16_t>(std::max<int>(0, std::min<int>(65535, pos_j->valueint)));
-                        tr.points[p_count].value = static_cast<uint16_t>(std::max<int>(0, std::min<int>(65535, val_j->valueint)));
-                        p_count++;
-                    }
-                }
-                tr.point_count = p_count;
-            }
-            t_count++;
-        }
-        motion.track_count = t_count;
+    SceneMotionConfig motion{};
+    const char* m_err = nullptr;
+    if (!parse_and_validate_motion_json(root, index, motion, m_err)) {
+        cJSON_Delete(root);
+        return send_error(request, "400 Bad Request", m_err ? m_err : "invalid_motion");
     }
 
     cJSON_Delete(root);
@@ -1679,15 +2149,20 @@ esp_err_t put_scene_motion(httpd_req_t* request) {
     esp_err_t err = api_ptr->config()->save_scene_motion(index, motion);
     if (err != ESP_OK) return send_error(request, "500 Internal Server Error", "nvs_write_failed");
 
-    if (api_ptr->signage()) {
-        api_ptr->signage()->scene_manager().reload_motion(index);
+    // Requirement 5: Saving must NEVER alter live output.
+    // Explicitly do NOT reload running scene motion.
+
+    SceneMotionConfig verify_mc{};
+    uint32_t motion_cs = 0;
+    if (api_ptr->config()->load_scene_motion(index, verify_mc) == ESP_OK) {
+        motion_cs = verify_mc.checksum;
     }
 
     uint32_t cmd_id = api_ptr->command_journal().accept(CommandDomain::SceneMotion);
     api_ptr->command_journal().applied(cmd_id);
 
-    char resp[96];
-    snprintf(resp, sizeof(resp), "{\"saved\":true,\"commandId\":%" PRIu32 "}", cmd_id);
+    char resp[128];
+    snprintf(resp, sizeof(resp), "{\"saved\":true,\"commandId\":%" PRIu32 ",\"checksum\":%" PRIu32 "}", cmd_id, motion_cs);
     return send_json(request, resp, "200 OK");
 }
 
@@ -3600,23 +4075,50 @@ esp_err_t delete_manual(httpd_req_t* request) {
 esp_err_t get_effects(httpd_req_t* request) {
     if (!api::authorize(request, api::ApiRole::Operator)) return ESP_OK;
 
-    static const char kEffectsJson[] =
+    cJSON* arr = cJSON_CreateArray();
+    for (size_t i = 0; i < kSignageEffectCount; ++i) {
+        const EffectMetadata& meta = signage_effect_metadata(static_cast<SignageEffect>(i));
+        cJSON* item = cJSON_CreateObject();
+        cJSON_AddStringToObject(item, "id", meta.id);
+        cJSON_AddStringToObject(item, "label", meta.label);
+        cJSON_AddStringToObject(item, "description", meta.description);
+        cJSON_AddBoolToObject(item, "supportsSpeed", meta.supports_speed);
+        cJSON_AddBoolToObject(item, "supportsSecondaryColor", meta.supports_secondary_color);
+        cJSON_AddBoolToObject(item, "supportsPalette", meta.supports_palette);
+        cJSON_AddBoolToObject(item, "spatial", meta.spatial);
+        cJSON_AddBoolToObject(item, "pwmRecommended", meta.pwm_recommended);
+        cJSON_AddBoolToObject(item, "hasParameter", meta.has_parameter);
+        if (meta.has_parameter) {
+            cJSON_AddStringToObject(item, "parameterLabel", meta.parameter_label);
+            cJSON_AddStringToObject(item, "parameterUnit", meta.parameter_unit);
+            cJSON_AddNumberToObject(item, "parameterMin", meta.parameter_min);
+            cJSON_AddNumberToObject(item, "parameterMax", meta.parameter_max);
+            cJSON_AddNumberToObject(item, "parameterDefault", meta.parameter_default);
+        }
+        cJSON_AddItemToArray(arr, item);
+    }
+    char* json = cJSON_PrintUnformatted(arr);
+    cJSON_Delete(arr);
+    if (!json) return send_error(request, "500 Internal Server Error", "out_of_memory");
+    esp_err_t res = send_json(request, json);
+    cJSON_free(json);
+    return res;
+}
+
+esp_err_t get_palettes(httpd_req_t* request) {
+    if (!api::authorize(request, api::ApiRole::Operator)) return ESP_OK;
+
+    static const char kPalettesJson[] =
         "["
-        "{\"id\":\"solid\",\"label\":\"Steady color\",\"description\":\"A constant, even wash of color.\",\"hasParameter\":false},"
-        "{\"id\":\"breathe\",\"label\":\"Smooth pulse\",\"description\":\"Gently fades between a soft glow and full brightness.\",\"hasParameter\":true,\"parameterLabel\":\"Minimum glow\",\"parameterUnit\":\"%\",\"parameterMin\":1,\"parameterMax\":100,\"parameterDefault\":4},"
-        "{\"id\":\"chase\",\"label\":\"Moving comet\",\"description\":\"A bright comet travels along the strip.\",\"hasParameter\":true,\"parameterLabel\":\"Tail length\",\"parameterUnit\":\"pixels\",\"parameterMin\":1,\"parameterMax\":8,\"parameterDefault\":3},"
-        "{\"id\":\"sweep\",\"label\":\"Color sweep\",\"description\":\"Builds color across the strip from end to end.\",\"hasParameter\":false},"
-        "{\"id\":\"reveal\",\"label\":\"Soft reveal\",\"description\":\"Fades the lane in for a polished sign-on.\",\"hasParameter\":true,\"parameterLabel\":\"Fade length\",\"parameterUnit\":\"%\",\"parameterMin\":10,\"parameterMax\":90,\"parameterDefault\":25},"
-        "{\"id\":\"sparkle\",\"label\":\"Random twinkle\",\"description\":\"Adds crisp white twinkles over the base color.\",\"hasParameter\":true,\"parameterLabel\":\"Twinkles\",\"parameterUnit\":\"per lane\",\"parameterMin\":1,\"parameterMax\":12,\"parameterDefault\":2},"
-        "{\"id\":\"gradient\",\"label\":\"Flowing glow\",\"description\":\"Moves a soft wave of light along the strip.\",\"hasParameter\":true,\"parameterLabel\":\"Wave contrast\",\"parameterUnit\":\"%\",\"parameterMin\":0,\"parameterMax\":100,\"parameterDefault\":100},"
-        "{\"id\":\"strobe\",\"label\":\"Beat strobe\",\"description\":\"Flashes the lane with an adjustable on-time.\",\"hasParameter\":true,\"parameterLabel\":\"Flash time\",\"parameterUnit\":\"%\",\"parameterMin\":5,\"parameterMax\":95,\"parameterDefault\":50},"
-        "{\"id\":\"fire\",\"label\":\"Living flame\",\"description\":\"Creates a flickering flame texture from the selected color.\",\"hasParameter\":true,\"parameterLabel\":\"Flame height\",\"parameterUnit\":\"%\",\"parameterMin\":20,\"parameterMax\":100,\"parameterDefault\":70},"
-        "{\"id\":\"aurora\",\"label\":\"Aurora glow\",\"description\":\"Gentle shifting colors across the strip.\",\"hasParameter\":true,\"parameterLabel\":\"Hue shift\",\"parameterUnit\":\"deg\",\"parameterMin\":1,\"parameterMax\":255,\"parameterDefault\":120},"
-        "{\"id\":\"colorwave\",\"label\":\"Color wave\",\"description\":\"Smooth sine wave color interpolation.\",\"hasParameter\":true,\"parameterLabel\":\"Wave length\",\"parameterUnit\":\"px\",\"parameterMin\":10,\"parameterMax\":255,\"parameterDefault\":50},"
-        "{\"id\":\"staticpulse\",\"label\":\"Static pulse\",\"description\":\"Slow dimmer pulse for main/ambiance lights.\",\"hasParameter\":true,\"parameterLabel\":\"Min dim\",\"parameterUnit\":\"%\",\"parameterMin\":0,\"parameterMax\":100,\"parameterDefault\":20}"
+        "{\"id\":0,\"label\":\"Custom\",\"usesSceneColors\":true},"
+        "{\"id\":1,\"label\":\"Rainbow\"},"
+        "{\"id\":2,\"label\":\"Ocean\"},"
+        "{\"id\":3,\"label\":\"Lava\"},"
+        "{\"id\":4,\"label\":\"Forest\"},"
+        "{\"id\":5,\"label\":\"Sunset\"}"
         "]";
 
-    return send_json(request, kEffectsJson);
+    return send_json(request, kPalettesJson);
 }
 
 esp_err_t get_calendar_schedule(httpd_req_t* request) {
@@ -4660,6 +5162,7 @@ esp_err_t FactoryApi::start(
         { .uri = "/api/v1/jobs/current",      .method = HTTP_GET,  .handler = get_current_job,    .user_ctx = this },
         { .uri = "/api/v1/channels",          .method = HTTP_GET,  .handler = get_channels,       .user_ctx = this },
         { .uri = "/api/v1/channel/test",      .method = HTTP_POST, .handler = post_channel_test,  .user_ctx = this },
+        { .uri = "/api/v1/presets/references",.method = HTTP_GET,  .handler = get_preset_references, .user_ctx = this },
         { .uri = "/api/v1/presets",           .method = HTTP_GET,  .handler = get_presets,      .user_ctx = this },
         { .uri = "/api/v1/presets",           .method = HTTP_PUT,  .handler = put_preset,       .user_ctx = this },
         { .uri = "/api/v1/presets",           .method = HTTP_DELETE,.handler = delete_preset,    .user_ctx = this },
@@ -4674,6 +5177,7 @@ esp_err_t FactoryApi::start(
         { .uri = "/api/v1/manual",            .method = HTTP_PUT,   .handler = put_manual,        .user_ctx = this },
         { .uri = "/api/v1/manual",            .method = HTTP_DELETE,.handler = delete_manual,     .user_ctx = this },
         { .uri = "/api/v1/effects",           .method = HTTP_GET,  .handler = get_effects,        .user_ctx = this },
+        { .uri = "/api/v1/palettes",          .method = HTTP_GET,  .handler = get_palettes,       .user_ctx = this },
         { .uri = "/api/v1/health",            .method = HTTP_GET,  .handler = get_health,         .user_ctx = this },
         { .uri = "/api/v1/logs",              .method = HTTP_GET,  .handler = get_logs,           .user_ctx = this },
         { .uri = "/api/v1/sequence",          .method = HTTP_GET,  .handler = get_sequence,     .user_ctx = this },

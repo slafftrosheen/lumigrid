@@ -1,4 +1,33 @@
 import { apiJson } from './transport';
+import type { SceneMotionConfig, AutomationTrackConfig } from './sceneMotion';
+
+export const MAX_SCENE_NAME_BYTES = 23;
+export const ZONE_COUNT = 8;
+export const CHANNEL_COUNT = 16;
+export const LAYER_COUNT = 3;
+export const MAX_PRESETS = 32;
+export const BLEND_MODES = ['normal', 'add', 'multiply', 'screen'] as const;
+export type BlendMode = typeof BLEND_MODES[number];
+
+export function getUtf8ByteLength(str: string): number {
+  if (typeof str !== 'string') return 0;
+  return new TextEncoder().encode(str).length;
+}
+
+export function isValidSceneName(name: string): boolean {
+  if (typeof name !== 'string') return false;
+  const len = getUtf8ByteLength(name.trim());
+  return len >= 0 && len <= MAX_SCENE_NAME_BYTES;
+}
+
+export function truncateUtf8Bytes(str: string, maxBytes: number = MAX_SCENE_NAME_BYTES): string {
+  if (typeof str !== 'string') return '';
+  const encoder = new TextEncoder();
+  const decoder = new TextDecoder('utf-8');
+  const encoded = encoder.encode(str);
+  if (encoded.length <= maxBytes) return str;
+  return decoder.decode(encoded.slice(0, maxBytes)).replace(/\uFFFD$/, '');
+}
 
 export interface RgbColor {
   r: number;
@@ -31,18 +60,46 @@ export interface ScenePreset {
   transitionMs: number;
   channels?: SceneChannel[];
   zones: SceneZone[];
+  checksum?: number;
 }
 
 export interface EffectMeta {
   id: string;
   label: string;
   description: string;
-  hasParameter: boolean;
+  supportsSpeed?: boolean;
+  supportsSecondaryColor?: boolean;
+  supportsPalette?: boolean;
+  spatial?: boolean;
+  pwmRecommended?: boolean;
   parameterLabel?: string;
   parameterUnit?: string;
   parameterMin?: number;
   parameterMax?: number;
   parameterDefault?: number;
+  hasParameter?: boolean;
+}
+
+export interface PaletteMeta {
+  id: number;
+  label: string;
+  usesSceneColors?: boolean;
+}
+
+export interface SceneReferences {
+  sceneIndex: number;
+  active: boolean;
+  fallback: boolean;
+  cues: number[];
+  timelineTracks: number[];
+  schedules: number[];
+}
+
+export interface SceneDocument {
+  scene: ScenePreset;
+  motion: SceneMotionConfig;
+  sceneChecksum?: number;
+  motionChecksum?: number;
 }
 
 export function getPresets(ip: string): Promise<ScenePreset[]> {
@@ -53,12 +110,107 @@ export function getPreset(ip: string, index: number): Promise<ScenePreset> {
   return apiJson<ScenePreset>(ip, `/api/v1/presets?index=${encodeURIComponent(index)}`);
 }
 
-export function savePreset(ip: string, preset: Partial<ScenePreset> & { index: number }): Promise<{ saved: true }> {
-  return apiJson<{ saved: true }>(ip, '/api/v1/presets', {
+export function getPalettes(ip: string): Promise<PaletteMeta[]> {
+  return apiJson<PaletteMeta[]>(ip, '/api/v1/palettes');
+}
+
+export function getSceneReferences(ip: string, index: number): Promise<SceneReferences> {
+  return apiJson<SceneReferences>(ip, `/api/v1/presets/references?index=${encodeURIComponent(index)}`);
+}
+
+export function getEffects(ip: string): Promise<EffectMeta[]> {
+  return apiJson<EffectMeta[]>(ip, '/api/v1/effects');
+}
+
+const effectsCache = new Map<string, EffectMeta[]>();
+const palettesCache = new Map<string, PaletteMeta[]>();
+
+export async function getEffectsCached(ip: string, cacheKey?: string): Promise<EffectMeta[]> {
+  if (cacheKey && effectsCache.has(cacheKey)) {
+    return effectsCache.get(cacheKey)!;
+  }
+  const data = await getEffects(ip);
+  if (cacheKey) {
+    effectsCache.set(cacheKey, data);
+  }
+  return data;
+}
+
+export async function getPalettesCached(ip: string, cacheKey?: string): Promise<PaletteMeta[]> {
+  if (cacheKey && palettesCache.has(cacheKey)) {
+    return palettesCache.get(cacheKey)!;
+  }
+  const data = await getPalettes(ip);
+  if (cacheKey) {
+    palettesCache.set(cacheKey, data);
+  }
+  return data;
+}
+
+export function savePreset(
+  ip: string,
+  preset: Partial<ScenePreset> & { index: number; motion?: unknown; expectedSceneChecksum?: number; expectedMotionChecksum?: number }
+): Promise<{ saved: true; checksum?: number; motionChecksum?: number }> {
+  return apiJson<{ saved: true; checksum?: number; motionChecksum?: number }>(ip, '/api/v1/presets', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(preset),
   });
+}
+
+export async function saveSceneDocument(
+  ip: string,
+  doc: SceneDocument,
+  options?: { expectedSceneChecksum?: number; expectedMotionChecksum?: number }
+): Promise<{ saved: true; checksum?: number; motionChecksum?: number }> {
+  const normScene = normalizeScene(doc.scene, doc.scene.index);
+  const channelsPayload = normScene.channels.map((ch) =>
+    ch.layers.map((l) => ({
+      effect: l.effect,
+      blendMode: l.blendMode,
+      primaryColor: l.primaryColor,
+      secondaryColor: l.secondaryColor,
+      speedMs: l.speedMs,
+      fxParam: l.fxParam,
+      paletteId: l.paletteId,
+      opacity: l.opacity,
+      enabled: l.enabled,
+    }))
+  );
+
+  const payload: Record<string, unknown> = {
+    index: normScene.index,
+    name: normScene.name,
+    globalBrightness: normScene.globalBrightness,
+    transitionMs: normScene.transitionMs,
+    channels: channelsPayload,
+    motion: {
+      transitionCurve: doc.motion?.transitionCurve ?? 'easeInOut',
+      tracks: doc.motion?.tracks ?? [],
+    },
+  };
+
+  if (options?.expectedSceneChecksum !== undefined) {
+    payload.expectedSceneChecksum = options.expectedSceneChecksum;
+  } else if (doc.sceneChecksum !== undefined) {
+    payload.expectedSceneChecksum = doc.sceneChecksum;
+  }
+
+  if (options?.expectedMotionChecksum !== undefined) {
+    payload.expectedMotionChecksum = options.expectedMotionChecksum;
+  } else if (doc.motionChecksum !== undefined) {
+    payload.expectedMotionChecksum = doc.motionChecksum;
+  }
+
+  return apiJson<{ saved: true; checksum?: number; motionChecksum?: number }>(
+    ip,
+    '/api/v1/presets',
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }
+  );
 }
 
 export interface ActivatePresetResult {
@@ -95,17 +247,6 @@ export function getSignageStatus(ip: string): Promise<SignageStatus> {
   return apiJson<SignageStatus>(ip, '/api/v1/status');
 }
 
-export function getEffects(ip: string): Promise<EffectMeta[]> {
-  return apiJson<EffectMeta[]>(ip, '/api/v1/effects');
-}
-
-export const ZONE_COUNT = 8;
-export const CHANNEL_COUNT = 16;
-export const LAYER_COUNT = 3;
-export const MAX_PRESETS = 32;
-export const BLEND_MODES = ['normal', 'add', 'multiply', 'screen'] as const;
-export type BlendMode = typeof BLEND_MODES[number];
-
 export function createDefaultLayer(): SceneLayer {
   return {
     effect: 'solid',
@@ -133,9 +274,11 @@ export function createDefaultChannel(): SceneChannel {
 }
 
 export function createDefaultPreset(index: number, name?: string): ScenePreset {
+  const rawName = name ?? `Scene ${index}`;
+  const validName = truncateUtf8Bytes(rawName, MAX_SCENE_NAME_BYTES);
   return {
     index,
-    name: name ?? `Scene ${index}`,
+    name: validName,
     globalBrightness: 128,
     transitionMs: 1000,
     channels: Array.from({ length: CHANNEL_COUNT }, () => createDefaultZone()),
@@ -200,7 +343,10 @@ export function normalizeScene(preset: Partial<ScenePreset> | null, defaultIndex
   const index = typeof preset?.index === 'number' && Number.isFinite(preset.index)
     ? Math.max(0, Math.min(MAX_PRESETS - 1, Math.round(preset.index)))
     : defaultIndex;
-  const name = typeof preset?.name === 'string' ? preset.name.slice(0, 31).trim() : `Scene ${index}`;
+  let name = typeof preset?.name === 'string' ? preset.name.trim() : `Scene ${index}`;
+  if (getUtf8ByteLength(name) > MAX_SCENE_NAME_BYTES) {
+    name = truncateUtf8Bytes(name, MAX_SCENE_NAME_BYTES);
+  }
   const globalBrightness = typeof preset?.globalBrightness === 'number' && Number.isFinite(preset.globalBrightness)
     ? Math.max(0, Math.min(255, Math.round(preset.globalBrightness)))
     : 128;
@@ -228,6 +374,7 @@ export function normalizeScene(preset: Partial<ScenePreset> | null, defaultIndex
     transitionMs,
     channels,
     zones,
+    checksum: typeof preset?.checksum === 'number' ? preset.checksum : undefined,
   };
 }
 
@@ -240,6 +387,157 @@ export function isPresetDirty(current: ScenePreset | null, saved: ScenePreset | 
   if (!current && !saved) return false;
   if (!current || !saved) return true;
   return serializePreset(current) !== serializePreset(saved);
+}
+
+export function isSceneDocumentDirty(
+  working: SceneDocument | null,
+  persisted: SceneDocument | null
+): boolean {
+  if (!working && !persisted) return false;
+  if (!working || !persisted) return true;
+  if (isPresetDirty(working.scene, persisted.scene)) return true;
+
+  const m1 = working.motion;
+  const m2 = persisted.motion;
+  if (!m1 && !m2) return false;
+  if (!m1 || !m2) return true;
+  if (m1.transitionCurve !== m2.transitionCurve) return true;
+
+  const t1 = m1.tracks || [];
+  const t2 = m2.tracks || [];
+  if (t1.length !== t2.length) return true;
+
+  for (let i = 0; i < t1.length; i++) {
+    const a = t1[i];
+    const b = t2[i];
+    if (
+      a.target !== b.target ||
+      a.channel !== b.channel ||
+      a.layer !== b.layer ||
+      a.curve !== b.curve ||
+      a.loop !== b.loop ||
+      a.periodMs !== b.periodMs
+    ) {
+      return true;
+    }
+    const p1 = a.points || [];
+    const p2 = b.points || [];
+    if (p1.length !== p2.length) return true;
+    for (let j = 0; j < p1.length; j++) {
+      if (p1[j].position !== p2[j].position || p1[j].value !== p2[j].value) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+export function exportSceneDocument(doc: SceneDocument): string {
+  const normScene = normalizeScene(doc.scene, doc.scene.index);
+  const data = {
+    schema: 1,
+    type: 'lumigrid-scene',
+    scene: {
+      index: normScene.index,
+      name: normScene.name,
+      globalBrightness: normScene.globalBrightness,
+      transitionMs: normScene.transitionMs,
+      channels: normScene.channels,
+    },
+    motion: {
+      transitionCurve: doc.motion?.transitionCurve ?? 'easeInOut',
+      tracks: doc.motion?.tracks ?? [],
+    },
+  };
+  return JSON.stringify(data, null, 2);
+}
+
+export function validateImportedSceneDocument(
+  rawInput: unknown
+): { valid: true; document: SceneDocument } | { valid: false; error: string } {
+  let data: any = rawInput;
+  if (typeof rawInput === 'string') {
+    try {
+      data = JSON.parse(rawInput);
+    } catch {
+      return { valid: false, error: 'Invalid JSON format' };
+    }
+  }
+
+  if (!data || typeof data !== 'object') {
+    return { valid: false, error: 'Expected scene document object' };
+  }
+
+  if (data.type !== 'lumigrid-scene') {
+    return { valid: false, error: 'Invalid file type: expected lumigrid-scene' };
+  }
+
+  if (data.schema !== 1) {
+    return { valid: false, error: `Unsupported schema version: ${data.schema}` };
+  }
+
+  const s = data.scene;
+  if (!s || typeof s !== 'object') {
+    return { valid: false, error: 'Missing scene data in document' };
+  }
+
+  if (typeof s.name === 'string' && getUtf8ByteLength(s.name.trim()) > MAX_SCENE_NAME_BYTES) {
+    return { valid: false, error: `Scene name exceeds ${MAX_SCENE_NAME_BYTES} UTF-8 bytes` };
+  }
+
+  if (s.channels && Array.isArray(s.channels) && s.channels.length > CHANNEL_COUNT) {
+    return { valid: false, error: `Channels count exceeds maximum ${CHANNEL_COUNT}` };
+  }
+
+  if (s.channels && Array.isArray(s.channels)) {
+    for (let c = 0; c < s.channels.length; c++) {
+      const ch = s.channels[c];
+      if (ch?.layers && Array.isArray(ch.layers) && ch.layers.length > LAYER_COUNT) {
+        return { valid: false, error: `Channel ${c} has more than ${LAYER_COUNT} layers` };
+      }
+    }
+  }
+
+  const m = data.motion;
+  if (m && typeof m === 'object') {
+    if (m.tracks && Array.isArray(m.tracks)) {
+      if (m.tracks.length > 4) {
+        return { valid: false, error: 'Maximum 4 automation tracks allowed' };
+      }
+      for (let t = 0; t < m.tracks.length; t++) {
+        const track = m.tracks[t];
+        if (track?.points && Array.isArray(track.points)) {
+          if (track.points.length > 6) {
+            return { valid: false, error: `Track ${t} has more than 6 automation points` };
+          }
+          // Check sorting and duplicates
+          for (let p = 1; p < track.points.length; p++) {
+            if (track.points[p].position <= track.points[p - 1].position) {
+              return { valid: false, error: `Track ${t} points must have strictly increasing positions` };
+            }
+          }
+        }
+      }
+    }
+  }
+
+  const normalizedScene = normalizeScene(s);
+  const normalizedMotion: SceneMotionConfig = {
+    schema_version: 1,
+    index: normalizedScene.index,
+    transitionCurve: m?.transitionCurve ?? 'easeInOut',
+    trackCount: m?.tracks?.length ?? 0,
+    tracks: Array.isArray(m?.tracks) ? m.tracks : [],
+  };
+
+  return {
+    valid: true,
+    document: {
+      scene: normalizedScene,
+      motion: normalizedMotion,
+    },
+  };
 }
 
 export function rgbToHex(c: RgbColor): string {
@@ -333,5 +631,3 @@ export function deleteSceneMotion(ip: string, index: number): Promise<{ deleted:
     method: 'DELETE',
   });
 }
-
-

@@ -186,4 +186,146 @@ describe('scenes model & serialization', () => {
       vi.stubGlobal('fetch', originalFetch);
     }
   });
+
+  it('enforces MAX_SCENE_NAME_BYTES = 23 validation and UTF-8 truncation', () => {
+    expect(scenesApi.MAX_SCENE_NAME_BYTES).toBe(23);
+    expect(scenesApi.isValidSceneName('12345678901234567890123')).toBe(true);
+    expect(scenesApi.isValidSceneName('123456789012345678901234')).toBe(false);
+    expect(scenesApi.isValidSceneName('Hello World')).toBe(true);
+
+    const truncated = scenesApi.truncateUtf8Bytes('12345678901234567890123456', 23);
+    expect(scenesApi.getUtf8ByteLength(truncated)).toBeLessThanOrEqual(23);
+    expect(truncated).toBe('12345678901234567890123');
+  });
+
+  it('detects dirty state on SceneDocument changes including motion tracks and curve', () => {
+    const p1 = createDefaultPreset(2, 'Stage Warm');
+    const m1 = {
+      schema_version: 1,
+      index: 2,
+      transitionCurve: 'easeInOut' as const,
+      trackCount: 1,
+      tracks: [
+        {
+          target: 'globalBrightness' as const,
+          channel: 0,
+          layer: 0,
+          curve: 'linear' as const,
+          loop: true,
+          periodMs: 3000,
+          points: [{ position: 0, value: 0 }, { position: 65535, value: 65535 }],
+        },
+      ],
+    };
+
+    const doc1: scenesApi.SceneDocument = { scene: p1, motion: m1 };
+    const doc2: scenesApi.SceneDocument = {
+      scene: clonePreset(p1),
+      motion: structuredClone(m1),
+    };
+
+    expect(scenesApi.isSceneDocumentDirty(doc1, doc2)).toBe(false);
+
+    // Modify motion curve
+    doc2.motion.transitionCurve = 'linear';
+    expect(scenesApi.isSceneDocumentDirty(doc1, doc2)).toBe(true);
+    doc2.motion.transitionCurve = 'easeInOut';
+
+    // Modify automation track point
+    doc2.motion.tracks[0].points[0].value = 100;
+    expect(scenesApi.isSceneDocumentDirty(doc1, doc2)).toBe(true);
+    doc2.motion.tracks[0].points[0].value = 0;
+
+    // Modify scene layer
+    doc2.scene.channels![0].layers[0].opacity = 180;
+    expect(scenesApi.isSceneDocumentDirty(doc1, doc2)).toBe(true);
+  });
+
+  it('exports and validates imported scene document with strict schema', () => {
+    const p = createDefaultPreset(4, 'Lobby Glow');
+    const m = {
+      schema_version: 1,
+      index: 4,
+      transitionCurve: 'easeOut' as const,
+      trackCount: 0,
+      tracks: [],
+    };
+    const doc: scenesApi.SceneDocument = { scene: p, motion: m };
+
+    const exportedStr = scenesApi.exportSceneDocument(doc);
+    expect(exportedStr).toContain('"type": "lumigrid-scene"');
+
+    const importRes = scenesApi.validateImportedSceneDocument(exportedStr);
+    expect(importRes.valid).toBe(true);
+    if (importRes.valid) {
+      expect(importRes.document.scene.name).toBe('Lobby Glow');
+      expect(importRes.document.motion.transitionCurve).toBe('easeOut');
+    }
+
+    // Reject invalid type
+    expect(scenesApi.validateImportedSceneDocument(JSON.stringify({ type: 'other' })).valid).toBe(false);
+
+    // Reject > 4 tracks
+    const tooManyTracks = {
+      schema: 1,
+      type: 'lumigrid-scene',
+      scene: p,
+      motion: {
+        transitionCurve: 'linear',
+        tracks: [{}, {}, {}, {}, {}], // 5 tracks
+      },
+    };
+    expect(scenesApi.validateImportedSceneDocument(JSON.stringify(tooManyTracks)).valid).toBe(false);
+  });
+
+  it('saves combined SceneDocument with expected checksums', async () => {
+    const originalFetch = globalThis.fetch;
+    const mockFetch = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ saved: true, checksum: 1111, motionChecksum: 2222 }), { status: 200 })
+    );
+    vi.stubGlobal('fetch', mockFetch);
+    try {
+      const p = createDefaultPreset(5, 'Dual Save');
+      const m = { schema_version: 1, index: 5, transitionCurve: 'linear' as const, trackCount: 0, tracks: [] };
+      const doc: scenesApi.SceneDocument = { scene: p, motion: m, sceneChecksum: 123, motionChecksum: 456 };
+
+      const res = await scenesApi.saveSceneDocument('192.168.1.50', doc);
+      expect(mockFetch).toHaveBeenCalled();
+      const [url, opts] = mockFetch.mock.calls[0];
+      expect(url).toBe('http://192.168.1.50/api/v1/presets');
+      expect(opts.method).toBe('PUT');
+      const parsedBody = JSON.parse(opts.body);
+      expect(parsedBody.expectedSceneChecksum).toBe(123);
+      expect(parsedBody.expectedMotionChecksum).toBe(456);
+      expect(parsedBody.motion).toBeDefined();
+      expect(res.saved).toBe(true);
+    } finally {
+      vi.stubGlobal('fetch', originalFetch);
+    }
+  });
+
+  it('fetches palettes and scene references', async () => {
+    const originalFetch = globalThis.fetch;
+    const mockFetch = vi.fn().mockImplementation((url: string) => {
+      if (url.includes('/api/v1/palettes')) {
+        return Promise.resolve(new Response(JSON.stringify([{ id: 0, label: 'Custom' }, { id: 1, label: 'Rainbow' }])));
+      }
+      if (url.includes('/api/v1/presets/references')) {
+        return Promise.resolve(new Response(JSON.stringify({ sceneIndex: 4, active: false, fallback: false, cues: [1], timelineTracks: [], schedules: [] })));
+      }
+      return Promise.reject(new Error('not found'));
+    });
+    vi.stubGlobal('fetch', mockFetch);
+    try {
+      const palettes = await scenesApi.getPalettes('192.168.1.50');
+      expect(palettes).toHaveLength(2);
+      expect(palettes[0].label).toBe('Custom');
+
+      const refs = await scenesApi.getSceneReferences('192.168.1.50', 4);
+      expect(refs.sceneIndex).toBe(4);
+      expect(refs.cues).toEqual([1]);
+    } finally {
+      vi.stubGlobal('fetch', originalFetch);
+    }
+  });
 });

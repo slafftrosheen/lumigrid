@@ -35,6 +35,7 @@ export interface SceneMotionConfig {
   transitionCurve: TransitionCurve;
   trackCount?: number;
   tracks: AutomationTrackConfig[];
+  checksum?: number;
 }
 
 function normalizeTarget(target: unknown): AutomationTarget {
@@ -99,6 +100,7 @@ function normalizeMotion(raw: any, fallbackIndex = 0): SceneMotionConfig {
     transitionCurve: raw?.transitionCurve ?? 'easeInOut',
     trackCount: tracks.length,
     tracks,
+    checksum: typeof raw?.checksum === 'number' ? raw.checksum : undefined,
   };
 }
 

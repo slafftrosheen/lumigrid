@@ -1,293 +1,170 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import SceneThumbnail from '$lib/components/dashboard/SceneThumbnail.svelte';
+  import TransitionEditor from '$lib/components/automation/TransitionEditor.svelte';
+  import AutomationTrackEditor from '$lib/components/automation/AutomationTrackEditor.svelte';
   import OperatorDialog from '$lib/components/dashboard/OperatorDialog.svelte';
-  import { getPresets, savePreset, activatePreset, getEffects } from '$lib/api/node';
-  import type { ScenePreset, EffectMeta } from '$lib/api/node';
+
   import {
+    getPresets,
+    getPreset,
+    saveSceneDocument,
+    activatePreset,
+    getEffectsCached,
+    getPalettesCached,
+    getSceneReferences,
+    deletePreset,
     createDefaultPreset,
     clonePreset,
-    isPresetDirty,
+    isSceneDocumentDirty,
+    normalizeScene,
+    exportSceneDocument,
+    validateImportedSceneDocument,
     computeZonePreviewColor,
     rgbToHex,
     hexToRgb,
-    deletePreset,
-    BLEND_MODES,
-    ZONE_COUNT,
+    isValidSceneName,
+    getUtf8ByteLength,
+    MAX_SCENE_NAME_BYTES,
+    CHANNEL_COUNT,
     LAYER_COUNT,
     MAX_PRESETS,
+    BLEND_MODES,
+    type ScenePreset,
+    type SceneDocument,
+    type SceneReferences,
+    type EffectMeta,
+    type PaletteMeta,
+    type SceneChannel,
+    type SceneLayer,
+    type BlendMode,
+    type RgbColor,
   } from '$lib/api/scenes';
+
+  import {
+    createDefaultSceneMotion,
+    createDefaultTrack,
+    getSceneMotion,
+    type SceneMotionConfig,
+    type AutomationTrackConfig,
+  } from '$lib/api/sceneMotion';
+
   import { getChannels, type HardwareChannel } from '$lib/api/channels';
   import { getSelectedNodeIp } from '$lib/auth/storage';
   import { nodeStore, commandTracker } from '$lib/state/nodeStore';
-  import {
-    getSceneMotion,
-    saveSceneMotion,
-    createDefaultSceneMotion,
-    createDefaultTrack,
-    type SceneMotionConfig,
-  } from '$lib/api/sceneMotion';
-  import TransitionEditor from '$lib/components/automation/TransitionEditor.svelte';
-  import AutomationTrackEditor from '$lib/components/automation/AutomationTrackEditor.svelte';
-  import type { TransitionCurve } from '$lib/runtime/curves';
 
+  // ── Global Node & State Tracking ──────────────────────────────────────────────
   let nodeIp = $state('');
-  let presets = $state<ScenePreset[]>([]);
-  let effects = $state<EffectMeta[]>([]);
-  let hwChannels = $state<HardwareChannel[]>([]);
-  let selectedIdx = $state<number | null>(null);
   let loading = $state(true);
   let saving = $state(false);
   let activating = $state(false);
+  let error = $state('');
+  let toast = $state('');
 
-  const snapSync = $derived($nodeStore.snapshot?.sync);
+  // Node telemetry from RuntimeSnapshot v3 (strict snapshot, no status fallback)
+  const snapshot = $derived($nodeStore.snapshot);
+  const snapSync = $derived(snapshot?.sync);
   const isFollower = $derived(
     snapSync?.activeRole === 'worker' &&
     Boolean(snapSync.masterAddress) &&
     (snapSync.lastPacketAgeMs === null || snapSync.lastPacketAgeMs === undefined || snapSync.lastPacketAgeMs < 10000)
   );
   const syncMasterAddress = $derived(snapSync?.masterAddress || 'Leader');
-  let error = $state('');
-  let toast = $state('');
-  let clearSceneIdx = $state<number | null>(null);
-  let clearingScene = $state(false);
-  let activePreset = $state(-1);
-  let sceneApplyPending = $state(false);
-  let activationGeneration = $state(0);
-  let activationPreset = $state(-1);
-  let expandedChannel = $state<number | null>(0);
-  let currentMotion = $state<SceneMotionConfig | null>(null);
-  let transitionCurve = $state<TransitionCurve>('easeInOut');
-  let showMotion = $state(false);
+  const activePreset = $derived(snapshot?.scene?.activePreset ?? -1);
+  const sceneApplyPending = $derived(snapshot?.scene?.applyPending ?? false);
 
-  let editScene = $state<ScenePreset | null>(null);
-  let savedSnapshot = $state<ScenePreset | null>(null);
+  // Authoritative hardware and effect metadata
+  let presets = $state<ScenePreset[]>([]);
+  let effects = $state<EffectMeta[]>([]);
+  let palettes = $state<PaletteMeta[]>([]);
+  let hwChannels = $state<HardwareChannel[]>([]);
 
-  const activeChannels = $derived(editScene?.channels ?? editScene?.zones ?? []);
+  // ── Scene Document Model ──────────────────────────────────────────────────────
+  let persistedDocument = $state<SceneDocument | null>(null);
+  let workingDocument = $state<SceneDocument | null>(null);
+  let selectedIdx = $state<number | null>(null);
 
-  function getChannelPort(idx: number): string {
-    return idx < 8 ? `A${idx + 1}` : `P${idx - 7}`;
-  }
+  // Dirty state computed over both scene and motion
+  const isDirty = $derived(isSceneDocumentDirty(workingDocument, persistedDocument));
 
-  function getChannelLabel(idx: number): string {
-    const port = getChannelPort(idx);
-    const ch = hwChannels.find(c => c.index === idx);
-    if (ch && ch.name) return `${port} · ${ch.name}`;
-    return `${port} · ${idx < 8 ? 'Addressable Lane' : 'PWM Dimmer'}`;
-  }
+  const editScene = $derived(workingDocument?.scene ?? null);
+  const currentMotion = $derived(workingDocument?.motion ?? null);
+  const activeChannels = $derived<SceneChannel[]>(editScene?.channels ?? editScene?.zones ?? []);
 
-  const isDirty = $derived(isPresetDirty(editScene, savedSnapshot));
   const isActive = $derived(
     editScene !== null &&
     activePreset === editScene.index &&
     !sceneApplyPending
   );
 
-  function selectPreset(idx: number) {
-    const found = presets.find(p => p.index === idx);
-    if (found) {
-      editScene = clonePreset(found);
-      savedSnapshot = clonePreset(found);
-    } else {
-      const def = createDefaultPreset(idx);
-      editScene = clonePreset(def);
-      savedSnapshot = null;
-    }
-    selectedIdx = idx;
-    error = '';
+  // Save Banner for active scene modifications
+  let showApplyChangesBanner = $state(false);
 
-    if (nodeIp) {
-      getSceneMotion(nodeIp, idx)
-        .then(m => {
-          currentMotion = m;
-          if (m.transitionCurve) transitionCurve = m.transitionCurve;
-        })
-        .catch(() => {
-          currentMotion = createDefaultSceneMotion(idx);
-        });
-    } else {
-      currentMotion = createDefaultSceneMotion(idx);
-    }
-  }
+  // Conflict state
+  let showConflictModal = $state(false);
 
-  function addMotionTrack() {
-    if (!currentMotion) return;
-    if (currentMotion.tracks.length >= 4) {
-      toastMsg('Maximum 4 motion tracks per scene');
-      return;
-    }
-    currentMotion.tracks = [...currentMotion.tracks, createDefaultTrack()];
-  }
+  // Editor mode tab
+  let editorTab = $state<'channels' | 'motion'>('channels');
 
-  function deleteMotionTrack(idx: number) {
-    if (!currentMotion) return;
-    currentMotion.tracks = currentMotion.tracks.filter((_, i) => i !== idx);
-  }
+  // Channel selection model
+  let selectedChannelIndices = $state<number[]>([0]);
+  let activeInspectorChannel = $derived(
+    selectedChannelIndices.length > 0 ? selectedChannelIndices[0] : 0
+  );
 
-  function findFreeSlot(): number {
-    const used = new Set(presets.map(p => p.index));
-    for (let i = 0; i < MAX_PRESETS; i++) {
-      if (!used.has(i)) return i;
-    }
-    return -1;
-  }
+  // Local Clipboard for copy/paste
+  let channelClipboard = $state<SceneChannel | null>(null);
+  let layerClipboard = $state<SceneLayer | null>(null);
 
-  function createScene() {
-    const slot = findFreeSlot();
-    if (slot < 0) {
-      toastMsg('All 32 slots are occupied');
-      return;
-    }
-    selectPreset(slot);
-  }
-
-  function duplicateScene() {
-    if (!editScene) return;
-    const slot = findFreeSlot();
-    if (slot < 0) {
-      toastMsg('All 32 slots are occupied');
-      return;
-    }
-    const dup = clonePreset(editScene);
-    dup.index = slot;
-    dup.name = `${editScene.name} (copy)`.slice(0, 23);
-    editScene = dup;
-    savedSnapshot = null;
-    selectedIdx = slot;
-    toastMsg(`Duplicated to scene slot ${slot + 1}`);
-  }
-
-  function revertEdits() {
-    if (!editScene) return;
-    if (savedSnapshot) {
-      editScene = clonePreset(savedSnapshot);
-      toastMsg('Reverted edits to saved scene');
-    } else if (selectedIdx !== null) {
-      editScene = createDefaultPreset(selectedIdx);
-      toastMsg('Reset to default scene');
-    }
-  }
-
-  async function saveScene() {
-    if (!editScene || saving) return;
-    saving = true;
-    error = '';
-    try {
-      if (editScene.channels && editScene.channels.length >= 8) {
-        editScene.zones = editScene.channels.slice(0, 8);
+  // Recent scene colors (for quick picker)
+  const recentColors = $derived.by(() => {
+    if (!editScene) return ['#ffffff', '#ff9900', '#3b82f6', '#10b981'];
+    const colors = new Set<string>();
+    for (const ch of activeChannels) {
+      for (const l of ch.layers) {
+        if (l.enabled) {
+          colors.add(rgbToHex(l.primaryColor));
+        }
       }
-      await savePreset(nodeIp, editScene);
-      if (currentMotion && nodeIp) {
-        currentMotion.transitionCurve = transitionCurve;
-        await saveSceneMotion(nodeIp, editScene.index, currentMotion).catch(() => {});
-      }
-      const idx = editScene.index;
-      const name = editScene.name;
-      const saved = clonePreset(editScene);
-      savedSnapshot = clonePreset(editScene);
-
-      const existing = presets.findIndex(p => p.index === idx);
-      if (existing >= 0) {
-        presets[existing] = saved;
-      } else {
-        presets = [...presets, saved].sort((a, b) => a.index - b.index);
-      }
-      toastMsg(`Saved “${name}” to scene slot ${idx + 1}`);
-    } catch (e) {
-      error = String(e);
-    } finally {
-      saving = false;
     }
-  }
+    return Array.from(colors).slice(0, 8);
+  });
 
-  async function doActivate(idx: number) {
-    if (activating) return;
-    activating = true;
-    error = '';
-    try {
-      const result = await activatePreset(nodeIp, idx);
-      activationGeneration = result.generation;
-      activationPreset = result.preset;
-      sceneApplyPending = true;
-
-      // Event-driven state acknowledgement via CommandTracker & WebSocket state path
-      const cmdId = result.commandId ?? Date.now();
-      commandTracker.register({
-        id: cmdId,
-        domain: 'scene',
-        nodeIp,
-        generation: result.generation,
-      });
-
-      await commandTracker.waitFor(cmdId, 5000);
-
-      const committedPreset = activationPreset;
-      activating = false;
-      activationGeneration = 0;
-      activationPreset = -1;
-      sceneApplyPending = false;
-      toastMsg(`Scene ${committedPreset + 1} committed to hardware`);
-    } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
-      activating = false;
-      activationGeneration = 0;
-      activationPreset = -1;
-      sceneApplyPending = false;
-    }
-  }
-
-  function removeScene(idx: number) {
-    clearSceneIdx = idx;
-  }
-
-  async function confirmRemoveScene() {
-    if (clearSceneIdx === null || clearingScene) return;
-    const idx = clearSceneIdx;
-    clearingScene = true;
-    try {
-      if (nodeIp) {
-        await deletePreset(nodeIp, idx);
-      }
-      presets = presets.filter(p => p.index !== idx);
-      if (selectedIdx === idx) {
-        editScene = null;
-        savedSnapshot = null;
-        selectedIdx = null;
-      }
-      toastMsg(`Cleared scene slot ${idx + 1}`);
-      clearSceneIdx = null;
-    } catch (e) {
-      error = String(e);
-    } finally {
-      clearingScene = false;
-    }
-  }
-
+  // ── Generation-Guarded Async Loading ──────────────────────────────────────────
   let loadGen = 0;
 
   async function loadData(targetIp: string, gen: number) {
     loading = true;
     error = '';
-    presets = [];
-    effects = [];
-    selectedIdx = null;
-    editScene = null;
-    savedSnapshot = null;
+    showApplyChangesBanner = false;
+    showConflictModal = false;
+
     try {
-      const [p, e, chList] = await Promise.all([
+      const nodeId = snapshot?.node?.id || targetIp;
+      const cacheKey = `${nodeId}`;
+
+      const [p, e, pals, chList] = await Promise.all([
         getPresets(targetIp),
-        getEffects(targetIp),
+        getEffectsCached(targetIp, cacheKey),
+        getPalettesCached(targetIp, cacheKey),
         getChannels(targetIp).catch(() => [] as HardwareChannel[]),
       ]);
+
       if (gen !== loadGen) return;
+
       presets = p;
       effects = e;
+      palettes = pals;
       hwChannels = chList;
+
       if (presets.length > 0 && selectedIdx === null) {
-        selectPreset(presets[0].index);
+        await selectScene(presets[0].index);
+      } else if (selectedIdx !== null) {
+        await selectScene(selectedIdx);
       }
     } catch (e) {
       if (gen !== loadGen) return;
-      error = String(e);
+      error = e instanceof Error ? e.message : String(e);
     } finally {
       if (gen === loadGen) {
         loading = false;
@@ -295,26 +172,547 @@
     }
   }
 
-  onMount(() => {
-    const unsub = nodeStore.subscribe(state => {
-      const sceneSnap = state.snapshot?.scene ?? state.status;
-      if (sceneSnap && typeof sceneSnap.activePreset === 'number') {
-        activePreset = sceneSnap.activePreset;
+  // ── Scene Selection & Navigation Protection ───────────────────────────────────
+  let pendingAction = $state<(() => void) | null>(null);
+  let showUnsavedModal = $state(false);
+
+  function requestNavigation(action: () => void) {
+    if (isDirty) {
+      pendingAction = action;
+      showUnsavedModal = true;
+    } else {
+      action();
+    }
+  }
+
+  function confirmDiscard() {
+    showUnsavedModal = false;
+    if (pendingAction) {
+      const act = pendingAction;
+      pendingAction = null;
+      act();
+    }
+  }
+
+  function cancelDiscard() {
+    showUnsavedModal = false;
+    pendingAction = null;
+  }
+
+  async function selectScene(idx: number) {
+    selectedIdx = idx;
+    error = '';
+    showApplyChangesBanner = false;
+    showConflictModal = false;
+
+    let sceneObj = presets.find(p => p.index === idx);
+    if (!sceneObj && nodeIp) {
+      try {
+        sceneObj = await getPreset(nodeIp, idx);
+      } catch {
+        sceneObj = createDefaultPreset(idx);
       }
-      if (state.snapshot?.scene && typeof state.snapshot.scene.applyPending === 'boolean') {
-        sceneApplyPending = state.snapshot.scene.applyPending;
-      } else if (state.status && typeof (state.status as any).sceneApplyPending === 'boolean') {
-        sceneApplyPending = (state.status as any).sceneApplyPending;
+    }
+    if (!sceneObj) {
+      sceneObj = createDefaultPreset(idx);
+    }
+
+    let motionObj: SceneMotionConfig;
+    if (nodeIp) {
+      try {
+        motionObj = await getSceneMotion(nodeIp, idx);
+      } catch {
+        motionObj = createDefaultSceneMotion(idx);
       }
-      const outputSnap = state.snapshot?.output ?? state.status;
-      if (activating && outputSnap?.fault) {
-        activating = false;
-        activationGeneration = 0;
-        activationPreset = -1;
-        sceneApplyPending = false;
-        error = 'Scene was accepted, but the node reported a hardware output fault.';
+    } else {
+      motionObj = createDefaultSceneMotion(idx);
+    }
+
+    const doc: SceneDocument = {
+      scene: clonePreset(sceneObj),
+      motion: structuredClone(motionObj),
+      sceneChecksum: sceneObj.checksum,
+      motionChecksum: motionObj.checksum,
+    };
+
+    persistedDocument = structuredClone(doc);
+    workingDocument = structuredClone(doc);
+    selectedChannelIndices = [0];
+  }
+
+  // ── Save & Activate Flows ─────────────────────────────────────────────────────
+  async function saveDocument(activateAfter = false) {
+    if (!workingDocument || !nodeIp || saving) return;
+
+    // Validate Scene Name UTF-8 Bytes
+    const nameBytes = getUtf8ByteLength(workingDocument.scene.name.trim());
+    if (nameBytes > MAX_SCENE_NAME_BYTES) {
+      error = `Scene name exceeds ${MAX_SCENE_NAME_BYTES} UTF-8 bytes (currently ${nameBytes} bytes). Please shorten.`;
+      return;
+    }
+
+    saving = true;
+    error = '';
+
+    try {
+      const res = await saveSceneDocument(nodeIp, workingDocument, {
+        expectedSceneChecksum: persistedDocument?.sceneChecksum,
+        expectedMotionChecksum: persistedDocument?.motionChecksum,
+      });
+
+      // Update persisted state with server checksums
+      const updatedScene = clonePreset(workingDocument.scene);
+      updatedScene.checksum = res.checksum;
+      const updatedMotion = structuredClone(workingDocument.motion);
+      updatedMotion.checksum = res.motionChecksum;
+
+      const newPersisted: SceneDocument = {
+        scene: updatedScene,
+        motion: updatedMotion,
+        sceneChecksum: res.checksum,
+        motionChecksum: res.motionChecksum,
+      };
+
+      persistedDocument = structuredClone(newPersisted);
+      workingDocument.sceneChecksum = res.checksum;
+      workingDocument.motionChecksum = res.motionChecksum;
+
+      // Update local presets library list
+      const existing = presets.findIndex(p => p.index === updatedScene.index);
+      if (existing >= 0) {
+        presets[existing] = updatedScene;
+      } else {
+        presets = [...presets, updatedScene].sort((a, b) => a.index - b.index);
       }
 
+      toastMsg(`Saved “${updatedScene.name}” (Slot ${(updatedScene.index + 1).toString().padStart(2, '0')})`);
+
+      // Saving must NEVER silently alter live output
+      if (isActive) {
+        if (activateAfter) {
+          await doActivate(updatedScene.index);
+        } else {
+          showApplyChangesBanner = true;
+        }
+      } else if (activateAfter) {
+        await doActivate(updatedScene.index);
+      }
+    } catch (e: any) {
+      if (e?.status === 409 || e?.message?.includes('conflict') || e?.error === 'scene_conflict') {
+        showConflictModal = true;
+      } else {
+        error = e?.message || String(e);
+      }
+    } finally {
+      saving = false;
+    }
+  }
+
+  async function doActivate(idx: number) {
+    if (isFollower || activating || !nodeIp) return;
+    activating = true;
+    error = '';
+    showApplyChangesBanner = false;
+
+    try {
+      const result = await activatePreset(nodeIp, idx);
+      const cmdId = result.commandId ?? Date.now();
+      commandTracker.register({
+        id: cmdId,
+        domain: 'scene',
+        nodeIp,
+        generation: result.generation,
+      });
+      await commandTracker.waitFor(cmdId, 5000);
+      toastMsg(`Scene ${(idx + 1).toString().padStart(2, '0')} activated on node`);
+    } catch (e: any) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      activating = false;
+    }
+  }
+
+  function reloadNodeVersion() {
+    showConflictModal = false;
+    if (selectedIdx !== null) {
+      selectScene(selectedIdx);
+    }
+  }
+
+  function keepDraft() {
+    showConflictModal = false;
+    // Strip expected checksums so next save can force-overwrite if operator chooses
+    if (persistedDocument) {
+      persistedDocument.sceneChecksum = undefined;
+      persistedDocument.motionChecksum = undefined;
+    }
+  }
+
+  // ── New Scene & Duplication Flows ─────────────────────────────────────────────
+  let showNewSceneModal = $state(false);
+  let newSceneSlot = $state<number | null>(null);
+  let newSceneMode = $state<'blank' | 'duplicate'>('blank');
+
+  const freeSlots = $derived.by(() => {
+    const used = new Set(presets.map(p => p.index));
+    const free: number[] = [];
+    for (let i = 0; i < MAX_PRESETS; i++) {
+      if (!used.has(i)) free.push(i);
+    }
+    return free;
+  });
+
+  function openNewSceneModal() {
+    requestNavigation(() => {
+      newSceneSlot = freeSlots.length > 0 ? freeSlots[0] : null;
+      newSceneMode = 'blank';
+      showNewSceneModal = true;
+    });
+  }
+
+  function confirmNewScene() {
+    if (newSceneSlot === null) return;
+    const target = newSceneSlot;
+    showNewSceneModal = false;
+
+    if (newSceneMode === 'duplicate' && workingDocument) {
+      const dupScene = clonePreset(workingDocument.scene);
+      dupScene.index = target;
+      dupScene.name = `${dupScene.name} (copy)`.slice(0, 23);
+      delete dupScene.checksum;
+
+      const dupMotion = structuredClone(workingDocument.motion);
+      dupMotion.index = target;
+      delete dupMotion.checksum;
+
+      workingDocument = {
+        scene: dupScene,
+        motion: dupMotion,
+      };
+      persistedDocument = null; // Unsaved new draft!
+      selectedIdx = target;
+      toastMsg(`Duplicated current scene into Slot ${(target + 1).toString().padStart(2, '0')} (unsaved draft)`);
+    } else {
+      const defScene = createDefaultPreset(target, `Scene ${target + 1}`);
+      const defMotion = createDefaultSceneMotion(target);
+
+      workingDocument = {
+        scene: defScene,
+        motion: defMotion,
+      };
+      persistedDocument = null;
+      selectedIdx = target;
+      toastMsg(`Created new scene in Slot ${(target + 1).toString().padStart(2, '0')} (unsaved draft)`);
+    }
+  }
+
+  // ── Safe Deletion with Reference Protection ───────────────────────────────────
+  let showDeleteModal = $state(false);
+  let deleteTargetIdx = $state<number | null>(null);
+  let deleteReferences = $state<SceneReferences | null>(null);
+  let checkingReferences = $state(false);
+  let deletingScene = $state(false);
+
+  async function openDeleteModal(idx: number) {
+    deleteTargetIdx = idx;
+    checkingReferences = true;
+    deleteReferences = null;
+    showDeleteModal = true;
+
+    if (nodeIp) {
+      try {
+        deleteReferences = await getSceneReferences(nodeIp, idx);
+      } catch {
+        deleteReferences = null;
+      } finally {
+        checkingReferences = false;
+      }
+    } else {
+      checkingReferences = false;
+    }
+  }
+
+  const isSceneBlockedFromDelete = $derived.by(() => {
+    if (!deleteReferences) return false;
+    return (
+      deleteReferences.active ||
+      deleteReferences.fallback ||
+      deleteReferences.cues.length > 0 ||
+      deleteReferences.timelineTracks.length > 0 ||
+      deleteReferences.schedules.length > 0
+    );
+  });
+
+  async function confirmDeleteScene() {
+    if (deleteTargetIdx === null || deletingScene || !nodeIp) return;
+    deletingScene = true;
+    const idx = deleteTargetIdx;
+
+    try {
+      await deletePreset(nodeIp, idx);
+      presets = presets.filter(p => p.index !== idx);
+      if (selectedIdx === idx) {
+        workingDocument = null;
+        persistedDocument = null;
+        selectedIdx = presets.length > 0 ? presets[0].index : null;
+        if (selectedIdx !== null) {
+          await selectScene(selectedIdx);
+        }
+      }
+      toastMsg(`Deleted Scene ${(idx + 1).toString().padStart(2, '0')}`);
+      showDeleteModal = false;
+    } catch (e: any) {
+      error = e?.message || String(e);
+    } finally {
+      deletingScene = false;
+    }
+  }
+
+  // ── Import / Export Workflows ─────────────────────────────────────────────────
+  let fileInputRef: HTMLInputElement | null = $state(null);
+
+  function triggerExport() {
+    if (!workingDocument) return;
+    const jsonStr = exportSceneDocument(workingDocument);
+    const blob = new Blob([jsonStr], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `scene_${(workingDocument.scene.index + 1).toString().padStart(2, '0')}_${workingDocument.scene.name.replace(/\s+/g, '_')}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    toastMsg('Exported scene file');
+  }
+
+  function triggerImportClick() {
+    if (fileInputRef) {
+      fileInputRef.click();
+    }
+  }
+
+  async function handleImportFile(e: Event) {
+    const input = e.target as HTMLInputElement;
+    if (!input.files || input.files.length === 0) return;
+    const file = input.files[0];
+    try {
+      const text = await file.text();
+      const valRes = validateImportedSceneDocument(text);
+      if (valRes.valid === false) {
+        error = `Cannot import scene: ${valRes.error}`;
+        return;
+      }
+      requestNavigation(() => {
+        // Load into working document as unsaved draft for operator to choose slot and save
+        const slot = selectedIdx ?? (freeSlots.length > 0 ? freeSlots[0] : 0);
+        valRes.document.scene.index = slot;
+        valRes.document.motion.index = slot;
+        delete valRes.document.sceneChecksum;
+        delete valRes.document.motionChecksum;
+
+        workingDocument = valRes.document;
+        persistedDocument = null;
+        toastMsg(`Imported “${workingDocument.scene.name}” as unsaved draft in Slot ${(slot + 1).toString().padStart(2, '0')}`);
+      });
+    } catch (err: any) {
+      error = `Import failed: ${err?.message || String(err)}`;
+    } finally {
+      input.value = '';
+    }
+  }
+
+  // ── Channel Canvas & Selection ────────────────────────────────────────────────
+  function isChannelSelected(idx: number): boolean {
+    return selectedChannelIndices.includes(idx);
+  }
+
+  function handleChannelClick(idx: number, e: MouseEvent) {
+    if (e.shiftKey || e.ctrlKey || e.metaKey) {
+      if (selectedChannelIndices.includes(idx)) {
+        if (selectedChannelIndices.length > 1) {
+          selectedChannelIndices = selectedChannelIndices.filter(i => i !== idx);
+        }
+      } else {
+        selectedChannelIndices = [...selectedChannelIndices, idx];
+      }
+    } else {
+      selectedChannelIndices = [idx];
+    }
+  }
+
+  function selectAllA() {
+    selectedChannelIndices = [0, 1, 2, 3, 4, 5, 6, 7];
+  }
+
+  function selectAllP() {
+    selectedChannelIndices = [8, 9, 10, 11, 12, 13, 14, 15];
+  }
+
+  function selectConfigured() {
+    const configured: number[] = [];
+    for (let i = 0; i < 16; i++) {
+      const ch = hwChannels.find(c => c.index === i);
+      if (ch && ch.configured) configured.push(i);
+    }
+    if (configured.length > 0) {
+      selectedChannelIndices = configured;
+    } else {
+      toastMsg('No configured hardware channels found');
+    }
+  }
+
+  function getChannelLabel(idx: number): string {
+    const port = idx < 8 ? `A${idx + 1}` : `P${idx - 7}`;
+    const ch = hwChannels.find(c => c.index === idx);
+    if (ch && ch.name) return `${port} · ${ch.name}`;
+    return `${port} · ${idx < 8 ? 'Addressable' : 'PWM Dimmer'}`;
+  }
+
+  // ── Clipboard Copy/Paste with PWM Normalization ────────────────────────────────
+  function copyCurrentChannel() {
+    if (!editScene) return;
+    const ch = activeChannels[activeInspectorChannel];
+    if (ch) {
+      channelClipboard = structuredClone(ch);
+      toastMsg(`Copied ${getChannelLabel(activeInspectorChannel)} to clipboard`);
+    }
+  }
+
+  function pasteCurrentChannel() {
+    if (!editScene || !channelClipboard) return;
+    for (const chIdx of selectedChannelIndices) {
+      const targetCh = activeChannels[chIdx];
+      if (!targetCh) continue;
+      const isTargetPwm = chIdx >= 8;
+
+      for (let l = 0; l < 3; l++) {
+        const srcLayer = channelClipboard.layers[l];
+        targetCh.layers[l] = normalizeLayerForChannel(srcLayer, isTargetPwm);
+      }
+    }
+    toastMsg(`Pasted channel to ${selectedChannelIndices.length} channel${selectedChannelIndices.length > 1 ? 's' : ''}`);
+  }
+
+  function copyLayer(lIdx: number) {
+    if (!editScene) return;
+    const ch = activeChannels[activeInspectorChannel];
+    if (ch && ch.layers[lIdx]) {
+      layerClipboard = structuredClone(ch.layers[lIdx]);
+      toastMsg(`Copied Layer ${lIdx + 1} to clipboard`);
+    }
+  }
+
+  function pasteLayer(lIdx: number) {
+    if (!editScene || !layerClipboard) return;
+    for (const chIdx of selectedChannelIndices) {
+      const targetCh = activeChannels[chIdx];
+      if (!targetCh) continue;
+      const isTargetPwm = chIdx >= 8;
+      targetCh.layers[lIdx] = normalizeLayerForChannel(layerClipboard, isTargetPwm);
+    }
+    toastMsg(`Pasted Layer ${lIdx + 1} to ${selectedChannelIndices.length} channel${selectedChannelIndices.length > 1 ? 's' : ''}`);
+  }
+
+  function normalizeLayerForChannel(src: SceneLayer, isPwm: boolean): SceneLayer {
+    const clone = structuredClone(src);
+    if (isPwm) {
+      // Normalization through PWM dimmer semantics:
+      // derive intensity from max RGB component, set grayscale R=G=B
+      const maxCol = Math.max(clone.primaryColor.r, clone.primaryColor.g, clone.primaryColor.b);
+      clone.primaryColor = { r: maxCol, g: maxCol, b: maxCol };
+      clone.secondaryColor = { r: 0, g: 0, b: 0 };
+      clone.paletteId = 0;
+    }
+    return clone;
+  }
+
+  // ── Batch Editing Helpers ─────────────────────────────────────────────────────
+  function applyLayerToSelection(layerIdx: number) {
+    if (!editScene || selectedChannelIndices.length <= 1) return;
+    const srcLayer = activeChannels[activeInspectorChannel]?.layers[layerIdx];
+    if (!srcLayer) return;
+
+    for (const chIdx of selectedChannelIndices) {
+      if (chIdx === activeInspectorChannel) continue;
+      const targetCh = activeChannels[chIdx];
+      if (targetCh) {
+        targetCh.layers[layerIdx] = normalizeLayerForChannel(srcLayer, chIdx >= 8);
+      }
+    }
+    toastMsg(`Applied Layer ${layerIdx + 1} across ${selectedChannelIndices.length} selected channels`);
+  }
+
+  // ── Layer Reordering & Actions ────────────────────────────────────────────────
+  function moveLayer(lIdx: number, dir: -1 | 1) {
+    const targetIdx = lIdx + dir;
+    if (targetIdx < 0 || targetIdx >= 3) return;
+    for (const chIdx of selectedChannelIndices) {
+      const ch = activeChannels[chIdx];
+      if (!ch) continue;
+      const tmp = ch.layers[lIdx];
+      ch.layers[lIdx] = ch.layers[targetIdx];
+      ch.layers[targetIdx] = tmp;
+    }
+  }
+
+  function clearLayer(lIdx: number) {
+    for (const chIdx of selectedChannelIndices) {
+      const ch = activeChannels[chIdx];
+      if (ch && ch.layers[lIdx]) {
+        ch.layers[lIdx].enabled = false;
+      }
+    }
+  }
+
+  // ── Effect Change Normalization ───────────────────────────────────────────────
+  function handleEffectChange(layer: SceneLayer, newEffectId: string) {
+    layer.effect = newEffectId;
+    const meta = effects.find(e => e.id === newEffectId);
+    if (meta && meta.hasParameter) {
+      layer.fxParam = meta.parameterDefault ?? 0;
+    }
+  }
+
+  // ── PWM Intensity Helper ──────────────────────────────────────────────────────
+  function getPwmIntensity(layer: SceneLayer): number {
+    return Math.max(layer.primaryColor.r, layer.primaryColor.g, layer.primaryColor.b);
+  }
+
+  function setPwmIntensity(layer: SceneLayer, val: number) {
+    const clamped = Math.max(0, Math.min(255, Math.round(val)));
+    layer.primaryColor = { r: clamped, g: clamped, b: clamped };
+    layer.secondaryColor = { r: 0, g: 0, b: 0 };
+  }
+
+  // ── Motion Helpers ────────────────────────────────────────────────────────────
+  function addMotionTrack() {
+    if (!workingDocument) return;
+    if (workingDocument.motion.tracks.length >= 4) {
+      toastMsg('Maximum 4 motion tracks allowed');
+      return;
+    }
+    workingDocument.motion.tracks = [
+      ...workingDocument.motion.tracks,
+      createDefaultTrack('globalBrightness'),
+    ];
+  }
+
+  function deleteMotionTrack(idx: number) {
+    if (!workingDocument) return;
+    workingDocument.motion.tracks = workingDocument.motion.tracks.filter((_, i) => i !== idx);
+  }
+
+  // ── Lifecycle & Invariant Guards ──────────────────────────────────────────────
+  onMount(() => {
+    // Unload protection for browser tab closing/reload when dirty
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (isDirty) {
+        e.preventDefault();
+        e.returnValue = '';
+      }
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+
+    const unsub = nodeStore.subscribe(state => {
       const targetIp = state.nodeIp || getSelectedNodeIp();
       if (targetIp !== nodeIp) {
         nodeIp = targetIp;
@@ -323,16 +721,18 @@
           loadData(nodeIp, loadGen);
         } else {
           presets = [];
-          effects = [];
+          workingDocument = null;
+          persistedDocument = null;
           selectedIdx = null;
-          editScene = null;
-          savedSnapshot = null;
           loading = false;
-          error = '';
         }
       }
     });
-    return unsub;
+
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+      unsub();
+    };
   });
 
   function toastMsg(msg: string) {
@@ -343,1139 +743,1605 @@
   }
 </script>
 
-<svelte:head><title>Scene Studio — LumiGrid</title></svelte:head>
+<svelte:head>
+  <title>Scene Studio — LumiGrid</title>
+</svelte:head>
+
+<!-- Hidden file input for single-scene import -->
+<input
+  type="file"
+  accept=".json"
+  style="display: none;"
+  bind:this={fileInputRef}
+  onchange={handleImportFile}
+/>
 
 {#if loading}
   <div class="scene-root">
     <div class="loading-box">
       <div class="spinner"></div>
-      <p>Loading scene workspace…</p>
+      <p>Loading Scene Studio v2 workspace…</p>
     </div>
   </div>
 {:else}
   <div class="scene-root">
-    <!-- Scene Library Sidebar -->
+    <!-- ═══════════════════════════════════════════════════════════════════════ -->
+    <!-- 1. SCENE LIBRARY SIDEBAR (Visual Cards)                              -->
+    <!-- ═══════════════════════════════════════════════════════════════════════ -->
     <aside class="library">
       <div class="lib-header">
         <div class="lib-title-row">
           <h2>Scene Library</h2>
           <span class="lib-count">{presets.length}/{MAX_PRESETS}</span>
         </div>
-        <button class="btn-primary btn-sm" onclick={createScene} title="Create new scene">+ New</button>
+        <div class="lib-header-actions">
+          <button class="btn-import" onclick={triggerImportClick} title="Import single scene">Import</button>
+          <button class="btn-primary btn-sm" onclick={openNewSceneModal} title="Create new scene">+ New Scene</button>
+        </div>
       </div>
 
       <div class="lib-list">
-        {#each Array(MAX_PRESETS) as _, i}
-          {@const preset = presets.find(p => p.index === i)}
-          <button
-            class="lib-item"
-            class:active={selectedIdx === i}
-            class:empty={!preset}
-            aria-pressed={selectedIdx === i}
-            onclick={() => selectPreset(i)}
-            type="button"
-          >
-            <span class="lib-idx">{(i + 1).toString().padStart(2, '0')}</span>
-            <span class="lib-name">{preset ? preset.name : '— empty slot —'}</span>
-            {#if preset}
-              <span class="lib-bri" title="Global brightness">{preset.globalBrightness}</span>
-              {#if activePreset === i}
-                <span class="lib-active-dot" title="Active on hardware"></span>
-              {/if}
-            {/if}
-          </button>
-        {/each}
+        {#if presets.length === 0}
+          <div class="empty-library-hint">
+            <p>No occupied scenes.</p>
+            <button class="btn-primary btn-sm" onclick={openNewSceneModal}>Create First Scene</button>
+          </div>
+        {:else}
+          {#each presets as preset (preset.index)}
+            {@const isPresetActive = activePreset === preset.index && !sceneApplyPending}
+            {@const isPresetSelected = selectedIdx === preset.index}
+            <div
+              class="scene-card"
+              class:selected={isPresetSelected}
+              class:active={isPresetActive}
+              onclick={() => requestNavigation(() => selectScene(preset.index))}
+              onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') selectScene(preset.index); }}
+              role="button"
+              tabindex="0"
+              aria-pressed={isPresetSelected}
+            >
+              <div class="card-top-row">
+                <span class="card-name" title={preset.name}>{preset.name}</span>
+                <span class="card-slot">{(preset.index + 1).toString().padStart(2, '0')}</span>
+              </div>
+
+              <!-- Reusable Scene Visual Thumbnail -->
+              <div class="card-preview">
+                <SceneThumbnail
+                  {preset}
+                  active={isPresetActive}
+                  motionTracksCount={selectedIdx === preset.index ? currentMotion?.tracks.length ?? 0 : 0}
+                />
+              </div>
+
+              <div class="card-meta-row">
+                <span class="card-meta">
+                  {Math.round((preset.globalBrightness / 255) * 100)}% · {(preset.transitionMs / 1000).toFixed(1)} s
+                </span>
+                {#if isPresetActive}
+                  <span class="badge-active-live">ACTIVE</span>
+                {/if}
+              </div>
+            </div>
+          {/each}
+        {/if}
       </div>
     </aside>
 
-    <!-- Scene Editor Workspace -->
-    <section class="editor">
+    <!-- ═══════════════════════════════════════════════════════════════════════ -->
+    <!-- 2. SCENE WORKSPACE & EDITING CANVAS                                   -->
+    <!-- ═══════════════════════════════════════════════════════════════════════ -->
+    <main class="editor">
+      <!-- Sync Follower Banner -->
       {#if isFollower}
         <div class="sync-follower-banner" role="alert">
           <span class="banner-icon">ℹ</span>
           <div class="banner-content">
-            <strong>Playback Controlled by Sync Leader ({syncMasterAddress})</strong>
-            <p>This node is an active follower in a synchronized cluster. Direct preset activation on this follower node is suppressed to preserve cluster frame lock. To trigger scenes across the group, use Sync Studio.</p>
+            <strong>Playback controlled by Sync Leader ({syncMasterAddress})</strong>
+            <p>Direct scene activation on this follower node is suppressed to protect cluster synchronization. Editing and saving remain available.</p>
           </div>
           <a href="/dashboard/sync" class="banner-action-btn">Open Sync Studio →</a>
         </div>
       {/if}
 
-      {#if editScene}
-        <!-- Top Toolbar -->
-        <div class="ed-toolbar">
-          <div class="ed-title-group">
-            <div class="ed-title-row">
+      <!-- Conflict Banner -->
+      {#if showConflictModal}
+        <div class="conflict-banner" role="alert">
+          <span class="banner-icon">⚠️</span>
+          <div class="banner-content">
+            <strong>This scene changed on the node since you opened it.</strong>
+            <p>Another operator or show trigger modified this preset slot.</p>
+          </div>
+          <div class="conflict-actions">
+            <button class="btn-conflict-reload" onclick={reloadNodeVersion}>Reload Node Version</button>
+            <button class="btn-conflict-draft" onclick={keepDraft}>Keep My Draft</button>
+          </div>
+        </div>
+      {/if}
+
+      <!-- Active Scene Saved Banner (Safe Persistence Invariant) -->
+      {#if showApplyChangesBanner}
+        <div class="apply-changes-banner" role="status">
+          <span class="banner-icon">💾</span>
+          <div class="banner-content">
+            <strong>Saved to Node Storage</strong>
+            <p>The running hardware output still uses the previously activated version.</p>
+          </div>
+          {#if !isFollower}
+            <button class="btn-apply-changes" onclick={() => doActivate(editScene!.index)}>
+              Apply Changes
+            </button>
+          {/if}
+        </div>
+      {/if}
+
+      {#if editScene && workingDocument}
+        <!-- Top Workspace Header -->
+        <header class="ed-header">
+          <div class="ed-title-block">
+            <div class="ed-name-row">
               <input
-                class="ed-name"
-                bind:value={editScene.name}
-                maxlength={23}
+                class="ed-name-input"
+                bind:value={workingDocument.scene.name}
+                maxlength={MAX_SCENE_NAME_BYTES}
                 placeholder="Scene name"
+                aria-label="Scene Name"
               />
-              <span class="ed-slot">Slot {editScene.index + 1}</span>
+              <span class="ed-slot-tag">Slot {(editScene.index + 1).toString().padStart(2, '0')}</span>
+              <span class="name-bytes-counter" class:warn={getUtf8ByteLength(workingDocument.scene.name.trim()) > MAX_SCENE_NAME_BYTES}>
+                {getUtf8ByteLength(workingDocument.scene.name.trim())}/{MAX_SCENE_NAME_BYTES}B
+              </span>
             </div>
 
-            <!-- State Badges: EDITED / SAVED / ACTIVE -->
-            <div class="status-badges">
+            <div class="ed-status-pills">
               {#if isActive}
-                <span class="badge badge-active" title="Scene is currently live on the physical node">
-                  <span class="pulse-dot"></span> ACTIVE
-                </span>
+                <span class="pill pill-active"><span class="dot-pulse"></span> ACTIVE</span>
               {/if}
               {#if isDirty}
-                <span class="badge badge-edited" title="Unsaved modifications">
-                  EDITED
-                </span>
-              {:else if savedSnapshot}
-                <span class="badge badge-saved" title="Scene matches persisted node storage">
-                  SAVED
-                </span>
+                <span class="pill pill-edited">EDITED</span>
+              {:else if persistedDocument}
+                <span class="pill pill-saved">SAVED</span>
               {:else}
-                <span class="badge badge-new" title="New preset not yet written to node">
-                  NEW
-                </span>
+                <span class="pill pill-new">DRAFT</span>
+              {/if}
+              {#if currentMotion && currentMotion.tracks.length > 0}
+                <span class="pill pill-motion">{currentMotion.tracks.length} motion track{currentMotion.tracks.length > 1 ? 's' : ''}</span>
               {/if}
             </div>
           </div>
 
-          <div class="ed-actions">
-            <button
-              class="btn-primary"
-              onclick={saveScene}
-              disabled={saving}
-              title="Save preset to hardware"
-              type="button"
-            >
-              {saving ? 'Saving...' : 'Save'}
-            </button>
-
-            <button
-              class="btn-activate"
-              class:is-active-btn={isActive}
-              onclick={() => doActivate(editScene!.index)}
-              disabled={activating || isFollower}
-              title={isFollower ? `Playback controlled by Sync Leader (${syncMasterAddress})` : "Activate scene on the selected node"}
-              type="button"
-            >
-              {activating ? 'Activating...' : isFollower ? 'Controlled by Leader' : isActive ? 'Re-Activate' : 'Activate'}
-            </button>
-
-            <button
-              class="btn-secondary"
-              onclick={revertEdits}
-              disabled={!isDirty}
-              title="Revert modifications to last saved state"
-              type="button"
-            >
-              Revert
-            </button>
-
-            <button
-              class="btn-secondary"
-              onclick={duplicateScene}
-              title="Duplicate this preset into next free slot"
-              type="button"
-            >
-              Duplicate
-            </button>
-
-            {#if presets.some(p => p.index === editScene!.index)}
+          <div class="ed-header-actions">
+            {#if isDirty}
               <button
-                class="btn-danger"
-                onclick={() => removeScene(editScene!.index)}
-                title="Clear this preset slot on hardware"
-                type="button"
+                class="btn-primary"
+                onclick={() => saveDocument(true)}
+                disabled={saving || activating || isFollower}
+                title="Save document and immediately activate live"
               >
-                Clear Slot
+                {saving ? 'Saving...' : activating ? 'Activating...' : 'Save & Activate'}
+              </button>
+              <button
+                class="btn-secondary"
+                onclick={() => saveDocument(false)}
+                disabled={saving}
+                title="Save document to node NVS storage only"
+              >
+                Save
+              </button>
+            {:else}
+              <button
+                class="btn-primary"
+                onclick={() => doActivate(editScene.index)}
+                disabled={activating || isFollower || isActive}
+                title="Activate saved version on live hardware"
+              >
+                {activating ? 'Activating...' : isActive ? 'Live Active' : 'Activate'}
+              </button>
+              <button
+                class="btn-secondary"
+                onclick={() => saveDocument(false)}
+                disabled={saving}
+                title="Save changes to NVS"
+              >
+                Save
               </button>
             {/if}
-          </div>
-        </div>
 
-        <!-- Visual Physical Preview (16 Channels) -->
-        <div class="preview-panel">
-          <div class="preview-header">
-            <span class="preview-title">Physical Hardware Preview</span>
-            <span class="preview-subtitle">16-Channel Hardware Synthesis (A1–A8 Addressable, P1–P8 PWM)</span>
-          </div>
-
-          <div class="preview-bank-title">Addressable Lanes (A1–A8)</div>
-          <div class="preview-strip">
-            {#each activeChannels.slice(0, 8) as channel, zi}
-              {@const port = getChannelPort(zi)}
-              {@const preview = computeZonePreviewColor(channel, editScene.globalBrightness)}
-              {@const activeLayers = channel.layers.filter(l => l.enabled).length}
-              <button
-                class="zone-preview-box"
-                class:selected={expandedChannel === zi}
-                aria-pressed={expandedChannel === zi}
-                onclick={() => (expandedChannel = zi)}
-                style="background: rgb({preview.r}, {preview.g}, {preview.b});"
-                type="button"
-                title="{port} (RGB {preview.r},{preview.g},{preview.b}) - Click to edit"
-              >
-                <div class="zone-preview-overlay">
-                  <span class="zp-num">{port}</span>
-                  <span class="zp-layers">{activeLayers}/3</span>
-                </div>
-              </button>
-            {/each}
-          </div>
-
-          {#if activeChannels.length > 8}
-            <div class="preview-bank-title pwm-title">PWM Dimmers (P1–P8)</div>
-            <div class="preview-strip">
-              {#each activeChannels.slice(8, 16) as channel, pi}
-                {@const ci = pi + 8}
-                {@const port = getChannelPort(ci)}
-                {@const preview = computeZonePreviewColor(channel, editScene.globalBrightness)}
-                {@const activeLayers = channel.layers.filter(l => l.enabled).length}
-                <button
-                  class="zone-preview-box pwm-box"
-                  class:selected={expandedChannel === ci}
-                  onclick={() => (expandedChannel = ci)}
-                  style="background: rgb({preview.r}, {preview.g}, {preview.b});"
-                  type="button"
-                  title="{port} (RGB {preview.r},{preview.g},{preview.b}) - Click to edit"
-                >
-                  <div class="zone-preview-overlay">
-                    <span class="zp-num pwm-text">{port}</span>
-                    <span class="zp-layers">{activeLayers}/3</span>
-                  </div>
-                </button>
-              {/each}
+            <div class="header-menu">
+              <button class="btn-icon" onclick={triggerExport} title="Export Scene JSON">Export</button>
+              <button class="btn-icon" onclick={() => openDeleteModal(editScene.index)} title="Delete Scene">Delete</button>
             </div>
-          {/if}
+          </div>
+        </header>
+
+        <!-- Global Scene Controls (Brightness & Integrated Transition) -->
+        <section class="global-scene-strip">
+          <div class="global-field">
+            <label for="global-bri-slider">Global Brightness</label>
+            <div class="slider-row">
+              <input
+                id="global-bri-slider"
+                type="range"
+                min="0"
+                max="255"
+                bind:value={workingDocument.scene.globalBrightness}
+                class="range-slider"
+              />
+              <span class="slider-val">{Math.round((workingDocument.scene.globalBrightness / 255) * 100)}%</span>
+            </div>
+          </div>
+
+          <!-- Integrated Transition Section (Requirement 29) -->
+          <div class="global-transition">
+            <TransitionEditor
+              bind:durationMs={workingDocument.scene.transitionMs}
+              bind:curve={workingDocument.motion.transitionCurve}
+            />
+          </div>
+        </section>
+
+        <!-- Tabs: Channels vs Motion -->
+        <div class="editor-tabs-bar">
+          <button
+            class="tab-btn"
+            class:active={editorTab === 'channels'}
+            onclick={() => (editorTab = 'channels')}
+          >
+            16-Channel Canvas
+          </button>
+          <button
+            class="tab-btn"
+            class:active={editorTab === 'motion'}
+            onclick={() => (editorTab = 'motion')}
+          >
+            Motion & Automation ({currentMotion?.tracks.length ?? 0}/4)
+          </button>
         </div>
 
-        <!-- Global Properties -->
-        <div class="ed-globals">
-          <label class="field">
-            <span class="field-label">Global Brightness</span>
-            <input
-              type="range"
-              min="0"
-              max="255"
-              bind:value={editScene.globalBrightness}
-            />
-            <span class="field-val">{editScene.globalBrightness}</span>
-          </label>
+        {#if editorTab === 'channels'}
+          <!-- ═══════════════════════════════════════════════════════════════════ -->
+          <!-- 3. 16-CHANNEL CANVAS (Addressable A1–A8 & PWM P1–P8)                -->
+          <!-- ═══════════════════════════════════════════════════════════════════ -->
+          <section class="canvas-section">
+            <div class="canvas-toolbar">
+              <span class="canvas-label">
+                Scene Preview
+                <small class="preview-subtext">(Editor draft visualization)</small>
+              </span>
 
-          <label class="field">
-            <span class="field-label">Transition (ms)</span>
-            <input
-              type="range"
-              min="0"
-              max="10000"
-              step="100"
-              bind:value={editScene.transitionMs}
-            />
-            <span class="field-val">{editScene.transitionMs} ms</span>
-          </label>
-        </div>
-
-        <!-- Transition & Motion Engine (LG-022) -->
-        <div class="ed-motion-section">
-          <TransitionEditor
-            bind:curve={transitionCurve}
-            bind:durationMs={editScene.transitionMs}
-          />
-
-          {#if currentMotion}
-            <div class="motion-tracks-card">
-              <div class="motion-header">
+              <div class="selection-controls">
+                <span class="sel-count">Selected: {selectedChannelIndices.length}</span>
+                <button class="btn-sel-chip" onclick={selectAllA}>All A</button>
+                <button class="btn-sel-chip" onclick={selectAllP}>All P</button>
+                <button class="btn-sel-chip" onclick={selectConfigured}>Configured</button>
+                <button class="btn-sel-chip" onclick={copyCurrentChannel} title="Copy active channel">Copy Ch</button>
                 <button
-                  type="button"
-                  class="btn-motion-toggle"
-                  onclick={() => (showMotion = !showMotion)}
-                >
-                  <span class="chevron">{showMotion ? '▾' : '▸'}</span>
-                  <span class="motion-title">Value Curves & Automation ({currentMotion.tracks.length}/4)</span>
-                </button>
-                {#if showMotion}
-                  <button
-                    type="button"
-                    class="btn-add-track"
-                    onclick={addMotionTrack}
-                    disabled={currentMotion.tracks.length >= 4}
-                  >
-                    + Add Track
-                  </button>
-                {/if}
+                  class="btn-sel-chip"
+                  onclick={pasteCurrentChannel}
+                  disabled={!channelClipboard}
+                  title="Paste channel onto selected"
+                >Paste Ch</button>
               </div>
-
-              {#if showMotion}
-                <div class="motion-tracks-list">
-                  {#if currentMotion.tracks.length === 0}
-                    <p class="no-tracks-hint">No automation tracks configured. Click "+ Add Track" to animate parameters.</p>
-                  {/if}
-                  {#each currentMotion.tracks as track, ti}
-                    <AutomationTrackEditor
-                      bind:track={currentMotion.tracks[ti]}
-                      trackIndex={ti}
-                      onDelete={() => deleteMotionTrack(ti)}
-                    />
-                  {/each}
-                </div>
-              {/if}
             </div>
-          {/if}
-        </div>
 
-        <!-- Channels and Layers Editor -->
-        <div class="zones">
-          {#each activeChannels as channel, ci}
-            {@const port = getChannelPort(ci)}
-            {@const label = getChannelLabel(ci)}
-            {@const preview = computeZonePreviewColor(channel, editScene.globalBrightness)}
-            {@const enabledCount = channel.layers.filter(l => l.enabled).length}
-            <div class="zone-card" class:active-zone={expandedChannel === ci} class:pwm-channel={ci >= 8}>
-              <button
-                class="zone-header"
-                aria-expanded={expandedChannel === ci}
-                onclick={() => (expandedChannel = expandedChannel === ci ? null : ci)}
-                type="button"
-              >
-                <div
-                  class="zone-swatch"
-                  style="background: rgb({preview.r}, {preview.g}, {preview.b});"
-                ></div>
-                <span class="zone-chevron">{expandedChannel === ci ? '▾' : '▸'}</span>
-                <span class="port-tag" class:pwm-tag={ci >= 8}>{port}</span>
-                <span class="zone-title">{label}</span>
-                <span class="zone-layer-count">
-                  {enabledCount}/{LAYER_COUNT} layers enabled
-                </span>
-              </button>
-
-              {#if expandedChannel === ci}
-                <div class="zone-body">
-                  {#each channel.layers as layer, li}
-                    <div class="layer-card" class:disabled={!layer.enabled}>
-                      <div class="layer-header">
-                        <label class="toggle">
-                          <input type="checkbox" bind:checked={layer.enabled} />
-                          <span class="layer-title">Layer {li + 1}</span>
-                        </label>
-
-                        {#if layer.enabled}
-                          <div class="layer-controls">
-                            <!-- Effect dropdown -->
-                            <label class="field-compact">
-                              <span>Effect</span>
-                              <select bind:value={layer.effect}>
-                                {#if effects.length > 0}
-                                  {#each effects as fx}
-                                    <option value={fx.id}>{fx.label}</option>
-                                  {/each}
-                                {:else}
-                                  <option value="solid">Solid</option>
-                                  <option value="breathe">Breathe</option>
-                                  <option value="chase">Chase</option>
-                                  <option value="rainbow">Rainbow</option>
-                                  <option value="sparkle">Sparkle</option>
-                                  <option value="gradient">Gradient</option>
-                                {/if}
-                              </select>
-                            </label>
-
-                            <!-- Blend Mode -->
-                            <label class="field-compact">
-                              <span>Blend</span>
-                              <select bind:value={layer.blendMode}>
-                                {#each BLEND_MODES as bm}
-                                  <option value={bm}>{bm}</option>
-                                {/each}
-                              </select>
-                            </label>
-
-                            <!-- Colors -->
-                            <label class="field-compact color-field">
-                              <span>Primary</span>
-                              <input
-                                type="color"
-                                value={rgbToHex(layer.primaryColor)}
-                                onchange={e => {
-                                  const parsed = hexToRgb((e.target as HTMLInputElement).value);
-                                  if (parsed) layer.primaryColor = parsed;
-                                }}
-                              />
-                            </label>
-
-                            <label class="field-compact color-field">
-                              <span>Secondary</span>
-                              <input
-                                type="color"
-                                value={rgbToHex(layer.secondaryColor)}
-                                onchange={e => {
-                                  const parsed = hexToRgb((e.target as HTMLInputElement).value);
-                                  if (parsed) layer.secondaryColor = parsed;
-                                }}
-                              />
-                            </label>
-
-                            <!-- Speed -->
-                            <label class="field-compact">
-                              <span>Speed (ms)</span>
-                              <input
-                                type="number"
-                                min="10"
-                                max="60000"
-                                step="50"
-                                bind:value={layer.speedMs}
-                              />
-                            </label>
-
-                            <!-- Opacity -->
-                            <label class="field-compact">
-                              <span>Opacity</span>
-                              <input
-                                type="range"
-                                min="0"
-                                max="255"
-                                bind:value={layer.opacity}
-                              />
-                              <span class="field-val-sm">{layer.opacity}</span>
-                            </label>
-
-                            <!-- Param if effect supports it -->
-                            {#if effects.find(fx => fx.id === layer.effect)?.hasParameter}
-                              {@const fx = effects.find(fx => fx.id === layer.effect)}
-                              <label class="field-compact">
-                                <span>{fx?.parameterLabel ?? 'Param'}</span>
-                                <input
-                                  type="number"
-                                  min={fx?.parameterMin ?? 0}
-                                  max={fx?.parameterMax ?? 255}
-                                  bind:value={layer.fxParam}
-                                />
-                              </label>
-                            {/if}
-                          </div>
-                        {/if}
+            <!-- Two Explicit Banks: ADDRESSABLE & PWM -->
+            <div class="banks-container">
+              <!-- Addressable Bank A1–A8 -->
+              <div class="bank-group">
+                <div class="bank-title">Addressable Channels (A1–A8)</div>
+                <div class="bank-grid">
+                  {#each Array(8) as _, i}
+                    {@const ch = activeChannels[i]}
+                    {@const isSel = isChannelSelected(i)}
+                    {@const col = ch ? computeZonePreviewColor(ch, workingDocument.scene.globalBrightness) : { r: 0, g: 0, b: 0 }}
+                    {@const hex = rgbToHex(col)}
+                    {@const activeLayerCount = ch?.layers.filter(l => l.enabled).length ?? 0}
+                    <div
+                      class="channel-card"
+                      class:selected={isSel}
+                      class:pwm={false}
+                      onclick={(e) => handleChannelClick(i, e)}
+                      role="button"
+                      tabindex="0"
+                      onkeydown={(e) => { if (e.key === 'Enter') handleChannelClick(i, e as any); }}
+                    >
+                      <div class="ch-head">
+                        <span class="ch-port">A{i + 1}</span>
+                        <span class="ch-layers">{activeLayerCount} L</span>
+                      </div>
+                      <div class="ch-swatch" style="background-color: {activeLayerCount > 0 ? hex : '#1a1f2c'};"></div>
+                      <div class="ch-name" title={getChannelLabel(i)}>
+                        {hwChannels.find(c => c.index === i)?.name || 'Addressable'}
                       </div>
                     </div>
                   {/each}
                 </div>
+              </div>
+
+              <!-- PWM Bank P1–P8 -->
+              <div class="bank-group">
+                <div class="bank-title">PWM Dimmer Channels (P1–P8)</div>
+                <div class="bank-grid">
+                  {#each Array(8) as _, i}
+                    {@const chIdx = i + 8}
+                    {@const ch = activeChannels[chIdx]}
+                    {@const isSel = isChannelSelected(chIdx)}
+                    {@const col = ch ? computeZonePreviewColor(ch, workingDocument.scene.globalBrightness) : { r: 0, g: 0, b: 0 }}
+                    {@const intensityPct = Math.round((Math.max(col.r, col.g, col.b) / 255) * 100)}
+                    {@const activeLayerCount = ch?.layers.filter(l => l.enabled).length ?? 0}
+                    <div
+                      class="channel-card"
+                      class:selected={isSel}
+                      class:pwm={true}
+                      onclick={(e) => handleChannelClick(chIdx, e)}
+                      role="button"
+                      tabindex="0"
+                      onkeydown={(e) => { if (e.key === 'Enter') handleChannelClick(chIdx, e as any); }}
+                    >
+                      <div class="ch-head">
+                        <span class="ch-port">P{i + 1}</span>
+                        <span class="ch-layers">{activeLayerCount} L</span>
+                      </div>
+                      <div class="pwm-bar-track">
+                        <div class="pwm-bar-fill" style="height: {activeLayerCount > 0 ? intensityPct : 0}%;"></div>
+                      </div>
+                      <div class="ch-name" title={getChannelLabel(chIdx)}>
+                        {hwChannels.find(c => c.index === chIdx)?.name || 'Dimmer'} · {intensityPct}%
+                      </div>
+                    </div>
+                  {/each}
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <!-- ═══════════════════════════════════════════════════════════════════ -->
+          <!-- 4. CHANNEL INSPECTOR (Addressable vs PWM Dimmer Oriented)          -->
+          <!-- ═══════════════════════════════════════════════════════════════════ -->
+          <section class="inspector-section">
+            <div class="inspector-header">
+              <div class="ins-title-row">
+                <h3>{getChannelLabel(activeInspectorChannel)}</h3>
+                {#if selectedChannelIndices.length > 1}
+                  <span class="batch-badge">Editing {selectedChannelIndices.length} channels simultaneously</span>
+                {/if}
+              </div>
+
+              {#if selectedChannelIndices.length > 1}
+                <div class="batch-actions-strip">
+                  <button class="btn-batch" onclick={() => applyLayerToSelection(0)}>Apply L1 to Selection</button>
+                  <button class="btn-batch" onclick={() => applyLayerToSelection(1)}>Apply L2 to Selection</button>
+                  <button class="btn-batch" onclick={() => applyLayerToSelection(2)}>Apply L3 to Selection</button>
+                </div>
               {/if}
             </div>
-          {/each}
-        </div>
+
+            <!-- Ordered 3-Layer Stack -->
+            <div class="layers-stack">
+              {#each [0, 1, 2] as lIdx}
+                {@const layer = activeChannels[activeInspectorChannel]?.layers[lIdx]}
+                {#if layer}
+                  {@const isPwm = activeInspectorChannel >= 8}
+                  {@const effectMeta = effects.find(e => e.id === layer.effect)}
+                  {@const pwmRecommended = effectMeta ? (effectMeta.pwmRecommended ?? !effectMeta.spatial) : true}
+
+                  <div class="layer-card" class:disabled={!layer.enabled}>
+                    <div class="layer-header-row">
+                      <div class="layer-toggle-wrap">
+                        <input
+                          type="checkbox"
+                          bind:checked={layer.enabled}
+                          id={`l-toggle-${lIdx}`}
+                          class="toggle-checkbox"
+                        />
+                        <label for={`l-toggle-${lIdx}`} class="layer-title">Layer {lIdx + 1}</label>
+                      </div>
+
+                      <div class="layer-quick-actions">
+                        <button class="btn-layer-act" onclick={() => copyLayer(lIdx)} title="Copy layer">Copy</button>
+                        <button class="btn-layer-act" onclick={() => pasteLayer(lIdx)} disabled={!layerClipboard} title="Paste layer">Paste</button>
+                        <button class="btn-layer-act" onclick={() => moveLayer(lIdx, -1)} disabled={lIdx === 0} title="Move Up">↑</button>
+                        <button class="btn-layer-act" onclick={() => moveLayer(lIdx, 1)} disabled={lIdx === 2} title="Move Down">↓</button>
+                        <button class="btn-layer-act btn-clear" onclick={() => clearLayer(lIdx)} title="Clear layer">Clear</button>
+                      </div>
+                    </div>
+
+                    {#if layer.enabled}
+                      <div class="layer-controls-grid">
+                        <!-- Effect Selection -->
+                        <div class="ctrl-field">
+                          <label for={`effect-sel-${lIdx}`}>Effect</label>
+                          <select
+                            id={`effect-sel-${lIdx}`}
+                            value={layer.effect}
+                            onchange={(e) => handleEffectChange(layer, (e.target as HTMLSelectElement).value)}
+                            class="input-select"
+                          >
+                            {#each effects as eff}
+                              <option value={eff.id}>
+                                {eff.label} {isPwm && !eff.pwmRecommended ? '(Not recommended for PWM)' : ''}
+                              </option>
+                            {/each}
+                          </select>
+                          {#if isPwm && effectMeta && !effectMeta.pwmRecommended}
+                            <span class="pwm-warn-badge">⚠️ Not recommended for PWM dimmer</span>
+                          {/if}
+                        </div>
+
+                        {#if isPwm}
+                          <!-- PWM DIMMER-ORIENTED INSPECTOR (Requirement 22) -->
+                          <!-- NO RGB Color Wheel! Grayscale intensity slider -->
+                          <div class="ctrl-field">
+                            <label for={`pwm-int-${lIdx}`}>Intensity ({Math.round((getPwmIntensity(layer) / 255) * 100)}%)</label>
+                            <input
+                              id={`pwm-int-${lIdx}`}
+                              type="range"
+                              min="0"
+                              max="255"
+                              value={getPwmIntensity(layer)}
+                              oninput={(e) => setPwmIntensity(layer, Number((e.target as HTMLInputElement).value))}
+                              class="range-slider"
+                            />
+                          </div>
+                        {:else}
+                          <!-- ADDRESSABLE CHANNEL INSPECTOR (Requirement 21) -->
+                          <!-- Primary Color with visual picker, hex, and recent palette -->
+                          <div class="ctrl-field color-field">
+                            <label for={`primary-col-${lIdx}`}>Primary Color</label>
+                            <div class="color-picker-row">
+                              <input
+                                id={`primary-col-${lIdx}`}
+                                type="color"
+                                value={rgbToHex(layer.primaryColor)}
+                                oninput={(e) => {
+                                  const rgb = hexToRgb((e.target as HTMLInputElement).value);
+                                  if (rgb) layer.primaryColor = rgb;
+                                }}
+                                class="native-color"
+                              />
+                              <input
+                                type="text"
+                                class="input-text hex-input"
+                                value={rgbToHex(layer.primaryColor)}
+                                onchange={(e) => {
+                                  const rgb = hexToRgb((e.target as HTMLInputElement).value);
+                                  if (rgb) layer.primaryColor = rgb;
+                                }}
+                              />
+                            </div>
+                            <!-- Recent Scene Colors -->
+                            <div class="recent-colors-row">
+                              {#each recentColors as rCol}
+                                <button
+                                  type="button"
+                                  class="swatch-btn"
+                                  style="background-color: {rCol};"
+                                  onclick={() => {
+                                    const rgb = hexToRgb(rCol);
+                                    if (rgb) layer.primaryColor = rgb;
+                                  }}
+                                  title={rCol}
+                                ></button>
+                              {/each}
+                            </div>
+                          </div>
+
+                          <!-- Secondary Color (when supported) -->
+                          {#if effectMeta?.supportsSecondaryColor}
+                            <div class="ctrl-field color-field">
+                              <label for={`sec-col-${lIdx}`}>Secondary Color</label>
+                              <div class="color-picker-row">
+                                <input
+                                  id={`sec-col-${lIdx}`}
+                                  type="color"
+                                  value={rgbToHex(layer.secondaryColor)}
+                                  oninput={(e) => {
+                                    const rgb = hexToRgb((e.target as HTMLInputElement).value);
+                                    if (rgb) layer.secondaryColor = rgb;
+                                  }}
+                                  class="native-color"
+                                />
+                                <input
+                                  type="text"
+                                  class="input-text hex-input"
+                                  value={rgbToHex(layer.secondaryColor)}
+                                  onchange={(e) => {
+                                    const rgb = hexToRgb((e.target as HTMLInputElement).value);
+                                    if (rgb) layer.secondaryColor = rgb;
+                                  }}
+                                />
+                              </div>
+                            </div>
+                          {/if}
+
+                          <!-- Palette Dropdown (when supported) -->
+                          {#if effectMeta?.supportsPalette}
+                            <div class="ctrl-field">
+                              <label for={`pal-sel-${lIdx}`}>Palette</label>
+                              <select id={`pal-sel-${lIdx}`} bind:value={layer.paletteId} class="input-select">
+                                {#each palettes as pal}
+                                  <option value={pal.id}>{pal.label}</option>
+                                {/each}
+                              </select>
+                            </div>
+                          {/if}
+                        {/if}
+
+                        <!-- Speed (when supported) -->
+                        {#if effectMeta?.supportsSpeed ?? true}
+                          <div class="ctrl-field">
+                            <label for={`spd-${lIdx}`}>Speed ({(layer.speedMs / 1000).toFixed(1)} s)</label>
+                            <input
+                              id={`spd-${lIdx}`}
+                              type="range"
+                              min="10"
+                              max="10000"
+                              step="50"
+                              bind:value={layer.speedMs}
+                              class="range-slider"
+                            />
+                          </div>
+                        {/if}
+
+                        <!-- Effect Parameter (when supported) -->
+                        {#if effectMeta?.hasParameter}
+                          <div class="ctrl-field">
+                            <label for={`param-${lIdx}`}>
+                              {effectMeta.parameterLabel || 'Parameter'}
+                              ({layer.fxParam}{effectMeta.parameterUnit ? ` ${effectMeta.parameterUnit}` : ''})
+                            </label>
+                            <input
+                              id={`param-${lIdx}`}
+                              type="range"
+                              min={effectMeta.parameterMin ?? 0}
+                              max={effectMeta.parameterMax ?? 255}
+                              bind:value={layer.fxParam}
+                              class="range-slider"
+                            />
+                          </div>
+                        {/if}
+
+                        <!-- Opacity -->
+                        <div class="ctrl-field">
+                          <label for={`opac-${lIdx}`}>Opacity ({Math.round((layer.opacity / 255) * 100)}%)</label>
+                          <input
+                            id={`opac-${lIdx}`}
+                            type="range"
+                            min="0"
+                            max="255"
+                            bind:value={layer.opacity}
+                            class="range-slider"
+                          />
+                        </div>
+
+                        <!-- Blend Mode -->
+                        <div class="ctrl-field">
+                          <label for={`blend-${lIdx}`}>Blend Mode</label>
+                          <select id={`blend-${lIdx}`} bind:value={layer.blendMode} class="input-select">
+                            {#each BLEND_MODES as bm}
+                              <option value={bm}>{bm}</option>
+                            {/each}
+                          </select>
+                        </div>
+                      </div>
+                    {/if}
+                  </div>
+                {/if}
+              {/each}
+            </div>
+          </section>
+        {:else if editorTab === 'motion'}
+          <!-- ═══════════════════════════════════════════════════════════════════ -->
+          <!-- 5. MOTION & AUTOMATION PANEL (Requirement 30, 31, 32, 33)           -->
+          <!-- ═══════════════════════════════════════════════════════════════════ -->
+          <section class="motion-section">
+            <div class="motion-header">
+              <div>
+                <h3>Automation Tracks ({workingDocument.motion.tracks.length}/4)</h3>
+                <p class="motion-subtext">Dynamic curve timelines synchronized to the scene cycle.</p>
+              </div>
+              <button
+                class="btn-primary btn-sm"
+                onclick={addMotionTrack}
+                disabled={workingDocument.motion.tracks.length >= 4}
+              >
+                + Add Track
+              </button>
+            </div>
+
+            {#if workingDocument.motion.tracks.length === 0}
+              <div class="no-tracks-card">
+                <p>No automation tracks in this scene.</p>
+                <button class="btn-secondary btn-sm" onclick={addMotionTrack}>+ Add First Automation Track</button>
+              </div>
+            {:else}
+              <div class="tracks-list">
+                {#each workingDocument.motion.tracks as track, tIdx}
+                  <AutomationTrackEditor
+                    bind:track={workingDocument.motion.tracks[tIdx]}
+                    trackIndex={tIdx}
+                    {effects}
+                    channels={activeChannels}
+                    onDelete={() => deleteMotionTrack(tIdx)}
+                  />
+                {/each}
+              </div>
+            {/if}
+          </section>
+        {/if}
       {:else}
-        <div class="editor-empty">
-          <div class="empty-icon">🎨</div>
-          <h3>Scene Studio</h3>
-          <p>Select a scene from the library or click <strong>+ New</strong> to build a preset.</p>
+        <div class="no-scene-selected">
+          <p>Select a scene from the library or create a new one to begin editing.</p>
+          <button class="btn-primary" onclick={openNewSceneModal}>Create New Scene</button>
         </div>
       {/if}
-    </section>
-
-    {#if toast}
-      <div class="toast">{toast}</div>
-    {/if}
-    {#if error}
-      <div class="error-bar">
-        <span>{error}</span>
-        <button class="err-close" onclick={() => (error = '')} type="button" title="Dismiss error" aria-label="Dismiss error">✕</button>
-      </div>
-    {/if}
+    </main>
   </div>
 {/if}
 
-<OperatorDialog
-  open={clearSceneIdx !== null}
-  title="Clear scene slot?"
-  description={clearSceneIdx !== null
-    ? `Scene slot ${clearSceneIdx + 1} will be reset on the selected node. This cannot be undone unless you have the scene saved elsewhere.`
-    : ''}
-  confirmLabel="Clear Scene"
-  tone="danger"
-  busy={clearingScene}
-  onconfirm={confirmRemoveScene}
-  oncancel={() => (clearSceneIdx = null)}
-/>
+<!-- ═══════════════════════════════════════════════════════════════════════════ -->
+<!-- MODAL DIALOGS                                                              -->
+<!-- ═══════════════════════════════════════════════════════════════════════════ -->
+
+<!-- 1. New Scene Free Slot Selector Dialog (Requirement 13) -->
+{#if showNewSceneModal}
+  <OperatorDialog
+    title="Create New Scene"
+    onClose={() => (showNewSceneModal = false)}
+  >
+    <div class="modal-body-pad">
+      <div class="modal-field">
+        <div class="modal-field-label" id="slot-selector-label">Available Slots (01–32)</div>
+        <div class="slot-chips-grid" aria-labelledby="slot-selector-label">
+          {#each freeSlots as slot}
+            <button
+              type="button"
+              class="slot-chip"
+              class:selected={newSceneSlot === slot}
+              onclick={() => (newSceneSlot = slot)}
+            >
+              {(slot + 1).toString().padStart(2, '0')}
+            </button>
+          {/each}
+        </div>
+      </div>
+
+      <div class="modal-field">
+        <div class="modal-field-label">Starting Point</div>
+        <div class="radio-row">
+          <label class="radio-lbl">
+            <input type="radio" bind:group={newSceneMode} value="blank" />
+            <span>Blank Scene</span>
+          </label>
+          <label class="radio-lbl">
+            <input type="radio" bind:group={newSceneMode} value="duplicate" disabled={!workingDocument} />
+            <span>Duplicate Current Scene</span>
+          </label>
+        </div>
+      </div>
+
+      <div class="modal-actions-right">
+        <button class="btn-secondary" onclick={() => (showNewSceneModal = false)}>Cancel</button>
+        <button class="btn-primary" onclick={confirmNewScene} disabled={newSceneSlot === null}>
+          Create Scene
+        </button>
+      </div>
+    </div>
+  </OperatorDialog>
+{/if}
+
+<!-- 2. Delete Scene Confirmation Dialog with Dependency Guard (Requirement 34, 35, 36) -->
+{#if showDeleteModal && deleteTargetIdx !== null}
+  <OperatorDialog
+    title={`Delete Scene ${(deleteTargetIdx + 1).toString().padStart(2, '0')}?`}
+    onClose={() => (showDeleteModal = false)}
+  >
+    <div class="modal-body-pad">
+      {#if checkingReferences}
+        <div class="loading-refs">
+          <div class="spinner-sm"></div>
+          <p>Evaluating scene dependencies...</p>
+        </div>
+      {:else if isSceneBlockedFromDelete}
+        <div class="blocked-delete-box" role="alert">
+          <h4>Scene cannot be deleted</h4>
+          <p>This scene is currently referenced by show dependencies:</p>
+          <ul>
+            {#if deleteReferences?.active}
+              <li>Currently active on node live output</li>
+            {/if}
+            {#if deleteReferences?.fallback}
+              <li>Configured as fallback preset</li>
+            {/if}
+            {#if deleteReferences && deleteReferences.cues.length > 0}
+              <li>Used in Cue List: {deleteReferences.cues.map(c => `List ${c}`).join(', ')}</li>
+            {/if}
+            {#if deleteReferences && deleteReferences.timelineTracks.length > 0}
+              <li>Used in Timeline Tracks: {deleteReferences.timelineTracks.join(', ')}</li>
+            {/if}
+            {#if deleteReferences && deleteReferences.schedules.length > 0}
+              <li>Used in Calendar Schedules: {deleteReferences.schedules.join(', ')}</li>
+            {/if}
+          </ul>
+          <p class="resolve-hint">Please resolve or reassign these references before deleting.</p>
+        </div>
+        <div class="modal-actions-right">
+          <button class="btn-secondary" onclick={() => (showDeleteModal = false)}>Close</button>
+        </div>
+      {:else}
+        <p class="delete-confirm-text">
+          Are you sure you want to delete <strong>“{presets.find(p => p.index === deleteTargetIdx)?.name || `Scene ${deleteTargetIdx + 1}`}”</strong>?
+          This will permanently remove both Scene and Motion data from the node.
+        </p>
+        <div class="modal-actions-right">
+          <button class="btn-secondary" onclick={() => (showDeleteModal = false)}>Cancel</button>
+          <button class="btn-danger" onclick={confirmDeleteScene} disabled={deletingScene}>
+            {deletingScene ? 'Deleting...' : 'Delete Scene'}
+          </button>
+        </div>
+      {/if}
+    </div>
+  </OperatorDialog>
+{/if}
+
+<!-- 3. Unsaved Changes Navigation Modal (Requirement 40) -->
+{#if showUnsavedModal}
+  <OperatorDialog
+    title="Unsaved Scene Changes"
+    onClose={cancelDiscard}
+  >
+    <div class="modal-body-pad">
+      <p>You have unsaved changes in the current scene document. If you proceed, these changes will be discarded.</p>
+      <div class="modal-actions-right">
+        <button class="btn-secondary" onclick={cancelDiscard}>Stay on Scene</button>
+        <button class="btn-danger" onclick={confirmDiscard}>Discard Changes</button>
+      </div>
+    </div>
+  </OperatorDialog>
+{/if}
+
+{#if toast}
+  <div class="toast" role="status">{toast}</div>
+{/if}
+
+{#if error}
+  <div class="error-banner" role="alert">
+    <span>{error}</span>
+    <button class="err-close" onclick={() => (error = '')}>✕</button>
+  </div>
+{/if}
 
 <style>
   .scene-root {
-    width: 100%;
-    max-width: 1440px;
-    margin: 0 auto;
     display: flex;
-    gap: 1.25rem;
-    min-height: calc(100dvh - 4rem);
-    position: relative;
+    height: calc(100vh - 64px);
+    background: #090d16;
+    color: #f1f5f9;
+    overflow: hidden;
+    font-family: inherit;
   }
 
   .loading-box {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 1rem;
-    width: 100%;
-    color: #a1a1a6;
-    min-height: 300px;
+    margin: auto;
+    text-align: center;
+    color: #94a3b8;
   }
+
   .spinner {
-    width: 32px;
-    height: 32px;
+    width: 36px;
+    height: 36px;
     border: 3px solid rgba(255, 255, 255, 0.1);
-    border-top-color: var(--dash-accent);
+    border-top-color: #6366f1;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    margin: 0 auto 12px;
+  }
+
+  .spinner-sm {
+    width: 20px;
+    height: 20px;
+    border: 2px solid rgba(255, 255, 255, 0.1);
+    border-top-color: #6366f1;
     border-radius: 50%;
     animation: spin 0.8s linear infinite;
   }
+
   @keyframes spin {
     to { transform: rotate(360deg); }
   }
 
-  /* Library Sidebar */
+  /* ── 1. Library Sidebar ─────────────────────────────────────────────────── */
   .library {
-    width: 278px;
-    flex-shrink: 0;
-    align-self: flex-start;
-    position: sticky;
-    top: 0;
+    width: 280px;
+    min-width: 280px;
+    background: #0f1422;
+    border-right: 1px solid rgba(255, 255, 255, 0.08);
     display: flex;
     flex-direction: column;
-    gap: 0.65rem;
-    padding: 1rem;
-    background: rgba(22,22,24,.90);
-    backdrop-filter: blur(22px);
-    -webkit-backdrop-filter: blur(18px);
-    border: 1px solid var(--dash-border);
-    border-radius: var(--dash-radius-lg);
-    box-shadow: var(--dash-shadow);
+    overflow: hidden;
   }
+
   .lib-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 0 0.25rem 0.5rem;
+    padding: 14px 16px;
     border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
   }
+
   .lib-title-row {
     display: flex;
     align-items: center;
-    gap: 0.5rem;
+    justify-content: space-between;
   }
-  .lib-header h2 {
+
+  .lib-title-row h2 {
+    font-size: 1rem;
+    font-weight: 700;
     margin: 0;
-    font-size: 1.1rem;
-    font-weight: 600;
-    color: #f5f5f7;
+    color: #f8fafc;
   }
+
   .lib-count {
-    font-size: 0.72rem;
-    color: #86868b;
-    font-family: monospace;
+    font-size: 0.75rem;
+    color: #64748b;
   }
+
+  .lib-header-actions {
+    display: flex;
+    gap: 8px;
+  }
+
+  .btn-import {
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    color: #cbd5e1;
+    border-radius: 6px;
+    padding: 5px 10px;
+    font-size: 0.78rem;
+    cursor: pointer;
+  }
+
+  .btn-import:hover {
+    background: rgba(255, 255, 255, 0.1);
+    color: #fff;
+  }
+
   .lib-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 12px;
     display: flex;
     flex-direction: column;
-    gap: 3px;
-    overflow-y: auto;
-    max-height: calc(100dvh - 10.5rem);
-    padding-right: 0.2rem;
+    gap: 8px;
   }
-  .lib-item {
+
+  .empty-library-hint {
+    padding: 24px 12px;
+    text-align: center;
+    color: #64748b;
+    font-size: 0.85rem;
     display: flex;
+    flex-direction: column;
     align-items: center;
-    gap: 0.5rem;
-    padding: 0.5rem 0.65rem;
-    background: rgba(255, 255, 255, 0.03);
-    border: 1px solid rgba(255, 255, 255, 0.06);
+    gap: 12px;
+  }
+
+  .scene-card {
+    background: rgba(255, 255, 255, 0.025);
+    border: 1px solid rgba(255, 255, 255, 0.07);
     border-radius: 8px;
-    color: #a1a1a6;
-    font-size: 0.82rem;
+    padding: 10px;
     cursor: pointer;
-    text-align: left;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
     transition: all 0.15s ease;
   }
-  .lib-item:hover {
-    background: rgba(255, 255, 255, 0.06);
-    color: #f5f5f7;
-    border-color: rgba(255, 255, 255, 0.12);
+
+  .scene-card:hover {
+    background: rgba(255, 255, 255, 0.05);
+    border-color: rgba(255, 255, 255, 0.15);
   }
-  .lib-item.active {
-    background: linear-gradient(90deg, rgba(var(--dash-accent-rgb),.18), rgba(var(--dash-accent-rgb),.08));
-    border-color: rgba(var(--dash-accent-rgb), 0.34);
-    color: #fff;
-    box-shadow: inset 3px 0 0 var(--dash-accent);
+
+  .scene-card.selected {
+    background: rgba(99, 102, 241, 0.08);
+    border-color: #6366f1;
   }
-  .lib-item.empty {
-    opacity: 0.45;
+
+  .scene-card.active {
+    box-shadow: 0 0 10px rgba(99, 102, 241, 0.2);
   }
-  .lib-idx {
-    width: 22px;
-    text-align: center;
-    font-size: 0.72rem;
-    font-weight: 700;
-    color: #86868b;
-    font-family: monospace;
+
+  .card-top-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
   }
-  .lib-name {
-    flex: 1;
+
+  .card-name {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: #f1f5f9;
+    white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .lib-bri {
-    font-size: 0.7rem;
-    color: #666;
-    font-family: monospace;
-  }
-  .lib-active-dot {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: #30d158;
-    box-shadow: 0 0 8px rgba(48, 209, 88, 0.8);
   }
 
-  /* Editor Workspace */
+  .card-slot {
+    font-size: 0.72rem;
+    font-family: monospace;
+    color: #64748b;
+  }
+
+  .card-preview {
+    margin: 2px 0;
+  }
+
+  .card-meta-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  .card-meta {
+    font-size: 0.72rem;
+    color: #94a3b8;
+  }
+
+  .badge-active-live {
+    font-size: 0.65rem;
+    font-weight: 700;
+    color: #10b981;
+    background: rgba(16, 185, 129, 0.12);
+    border: 1px solid rgba(16, 185, 129, 0.3);
+    padding: 1px 5px;
+    border-radius: 4px;
+    letter-spacing: 0.04em;
+  }
+
+  /* ── 2. Editor Workspace ────────────────────────────────────────────────── */
   .editor {
     flex: 1;
+    overflow-y: auto;
     display: flex;
     flex-direction: column;
-    gap: 1.25rem;
-    min-width: 0;
-  }
-  .editor-empty {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 0.75rem;
-    color: #a1a1a6;
-    min-height: 400px;
-    background: rgba(255, 255, 255, 0.02);
-    border: 1px dashed rgba(255, 255, 255, 0.1);
-    border-radius: 12px;
-  }
-  .empty-icon {
-    font-size: 2.5rem;
+    background: #090d16;
   }
 
-  .ed-toolbar {
-    position: sticky;
-    top: 0;
-    z-index: 20;
+  .sync-follower-banner {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    background: rgba(59, 130, 246, 0.1);
+    border-bottom: 1px solid rgba(59, 130, 246, 0.3);
+    padding: 10px 20px;
+    color: #93c5fd;
+    font-size: 0.82rem;
+  }
+
+  .conflict-banner {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 1rem;
-    flex-wrap: wrap;
-    background: var(--dash-surface);
-    backdrop-filter: blur(18px);
-    -webkit-backdrop-filter: blur(18px);
-    border: 1px solid var(--dash-border);
-    padding: .85rem 1rem;
-    border-radius: var(--dash-radius-lg);
-    box-shadow: var(--dash-shadow);
-  }
-  .ed-title-group {
-    display: flex;
-    align-items: center;
-    gap: 1rem;
-    flex-wrap: wrap;
-  }
-  .ed-title-row {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-  }
-  .ed-name {
-    background: rgba(255, 255, 255, 0.06);
-    border: 1px solid rgba(255, 255, 255, 0.14);
-    border-radius: 8px;
-    color: #f5f5f7;
-    font-size: 1.1rem;
-    font-weight: 600;
-    padding: 0.4rem 0.7rem;
-    width: 220px;
-  }
-  .ed-name:focus-visible {
-    border-color: var(--dash-accent);
-    box-shadow: 0 0 0 3px rgba(var(--dash-accent-rgb), 0.16);
-  }
-  .ed-slot {
-    font-size: 0.75rem;
-    color: #86868b;
-    font-family: monospace;
-    background: rgba(255, 255, 255, 0.04);
-    padding: 0.25rem 0.5rem;
-    border-radius: 6px;
+    gap: 12px;
+    background: rgba(239, 68, 68, 0.12);
+    border-bottom: 1px solid rgba(239, 68, 68, 0.4);
+    padding: 10px 20px;
+    color: #fca5a5;
+    font-size: 0.82rem;
   }
 
-  /* Status Badges */
-  .status-badges {
+  .conflict-actions {
+    display: flex;
+    gap: 8px;
+  }
+
+  .btn-conflict-reload {
+    background: #ef4444;
+    color: #fff;
+    border: none;
+    border-radius: 6px;
+    padding: 6px 12px;
+    font-size: 0.78rem;
+    font-weight: 600;
+    cursor: pointer;
+  }
+
+  .btn-conflict-draft {
+    background: rgba(255, 255, 255, 0.1);
+    color: #fff;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: 6px;
+    padding: 6px 12px;
+    font-size: 0.78rem;
+    cursor: pointer;
+  }
+
+  .apply-changes-banner {
     display: flex;
     align-items: center;
-    gap: 0.4rem;
+    justify-content: space-between;
+    gap: 12px;
+    background: rgba(16, 185, 129, 0.1);
+    border-bottom: 1px solid rgba(16, 185, 129, 0.3);
+    padding: 10px 20px;
+    color: #6ee7b7;
+    font-size: 0.82rem;
   }
-  .badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.3rem;
-    font-size: 0.7rem;
+
+  .btn-apply-changes {
+    background: #10b981;
+    color: #042f2e;
+    border: none;
     font-weight: 700;
-    letter-spacing: 0.04em;
-    padding: 0.25rem 0.55rem;
     border-radius: 6px;
-    text-transform: uppercase;
+    padding: 6px 14px;
+    font-size: 0.8rem;
+    cursor: pointer;
   }
-  .badge-active {
-    background: rgba(48, 209, 88, 0.15);
-    border: 1px solid rgba(48, 209, 88, 0.4);
-    color: #30d158;
+
+  .ed-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 16px 24px;
+    background: #0f1422;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
   }
-  .badge-edited {
-    background: rgba(255, 159, 10, 0.15);
-    border: 1px solid rgba(255, 159, 10, 0.4);
-    color: #ff9f0a;
+
+  .ed-title-block {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
   }
-  .badge-saved {
-    background: rgba(48, 209, 88, 0.12);
-    border: 1px solid rgba(48, 209, 88, 0.3);
-    color: var(--dash-ok);
+
+  .ed-name-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
   }
-  .badge-new {
-    background: rgba(191, 90, 242, 0.15);
-    border: 1px solid rgba(191, 90, 242, 0.4);
-    color: #bf5af2;
+
+  .ed-name-input {
+    background: transparent;
+    border: none;
+    font-size: 1.25rem;
+    font-weight: 700;
+    color: #f8fafc;
+    border-bottom: 1px dashed rgba(255, 255, 255, 0.3);
+    padding: 2px 4px;
+    font-family: inherit;
+    outline: none;
   }
-  .pulse-dot {
+
+  .ed-name-input:focus {
+    border-bottom-color: #6366f1;
+  }
+
+  .ed-slot-tag {
+    font-size: 0.75rem;
+    color: #64748b;
+    background: rgba(255, 255, 255, 0.05);
+    padding: 3px 8px;
+    border-radius: 4px;
+    font-family: monospace;
+  }
+
+  .name-bytes-counter {
+    font-size: 0.7rem;
+    color: #64748b;
+  }
+
+  .name-bytes-counter.warn {
+    color: #ef4444;
+    font-weight: 700;
+  }
+
+  .ed-status-pills {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+  }
+
+  .pill {
+    font-size: 0.68rem;
+    font-weight: 700;
+    padding: 2px 7px;
+    border-radius: 4px;
+    letter-spacing: 0.04em;
+  }
+
+  .pill-active {
+    color: #10b981;
+    background: rgba(16, 185, 129, 0.15);
+    display: flex;
+    align-items: center;
+    gap: 5px;
+  }
+
+  .dot-pulse {
     width: 6px;
     height: 6px;
     border-radius: 50%;
-    background: #30d158;
-    animation: pulse 1.5s infinite;
-  }
-  @keyframes pulse {
-    0%, 100% { opacity: 1; transform: scale(1); }
-    50% { opacity: 0.4; transform: scale(0.8); }
+    background: #10b981;
+    box-shadow: 0 0 6px #10b981;
   }
 
-  .ed-actions {
+  .pill-edited {
+    color: #f59e0b;
+    background: rgba(245, 158, 11, 0.15);
+  }
+
+  .pill-saved {
+    color: #94a3b8;
+    background: rgba(255, 255, 255, 0.08);
+  }
+
+  .pill-new {
+    color: #38bdf8;
+    background: rgba(56, 189, 248, 0.15);
+  }
+
+  .pill-motion {
+    color: #a5b4fc;
+    background: rgba(99, 102, 241, 0.12);
+  }
+
+  .ed-header-actions {
     display: flex;
-    gap: 0.4rem;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .header-menu {
+    display: flex;
+    gap: 6px;
+    margin-left: 6px;
+  }
+
+  .btn-icon {
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    color: #cbd5e1;
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-size: 0.78rem;
+    cursor: pointer;
+  }
+
+  .btn-icon:hover {
+    background: rgba(255, 255, 255, 0.1);
+    color: #fff;
+  }
+
+  /* ── Global Scene Controls ──────────────────────────────────────────────── */
+  .global-scene-strip {
+    display: flex;
+    gap: 24px;
+    padding: 14px 24px;
+    background: rgba(255, 255, 255, 0.02);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
     flex-wrap: wrap;
-  }
-
-  /* Preview Panel */
-  .preview-panel {
-    display: flex;
-    flex-direction: column;
-    gap: 0.5rem;
-    padding: 0.75rem 1rem;
-    background: rgba(255, 255, 255, 0.03);
-    border: 1px solid rgba(255, 255, 255, 0.07);
-    border-radius: 12px;
-  }
-  .preview-header {
-    display: flex;
-    justify-content: space-between;
     align-items: center;
   }
-  .preview-title {
-    font-size: 0.8rem;
-    font-weight: 600;
-    color: #f5f5f7;
+
+  .global-field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 220px;
   }
-  .preview-subtitle {
-    font-size: 0.7rem;
-    color: #86868b;
-  }
-  .preview-bank-title {
-    font-size: 0.7rem;
-    font-weight: 700;
+
+  .global-field label {
+    font-size: 0.75rem;
+    color: #94a3b8;
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    color: var(--dash-accent);
-    margin: 0.5rem 0 0.25rem;
-  }
-  .preview-bank-title.pwm-title {
-    color: #ff9f0a;
-    margin-top: 0.75rem;
-  }
-  .preview-strip {
-    display: grid;
-    grid-template-columns: repeat(8, 1fr);
-    gap: 0.5rem;
-    min-height: 54px;
-  }
-  .zone-preview-box {
-    position: relative;
-    border: 1px solid rgba(255, 255, 255, 0.15);
-    border-radius: 8px;
-    cursor: pointer;
-    overflow: hidden;
-    padding: 0;
-    transition: transform 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
-  }
-  .zone-preview-box.pwm-box {
-    border-color: rgba(255, 159, 10, 0.25);
-  }
-  .zone-preview-box.pwm-box.selected {
-    border: 2px solid #ff9f0a;
-    box-shadow: 0 0 10px rgba(255, 159, 10, 0.5);
-  }
-  .zp-num.pwm-text {
-    color: #ff9f0a;
-  }
-  .port-tag {
-    font-family: monospace;
-    font-size: 0.72rem;
-    font-weight: 700;
-    color: var(--dash-accent);
-    background: rgba(var(--dash-accent-rgb), 0.12);
-    border: 1px solid rgba(var(--dash-accent-rgb), 0.25);
-    padding: 0.1rem 0.4rem;
-    border-radius: 4px;
-  }
-  .port-tag.pwm-tag {
-    color: #ff9f0a;
-    background: rgba(255, 159, 10, 0.12);
-    border-color: rgba(255, 159, 10, 0.25);
-  }
-  .zone-preview-box:hover {
-    transform: translateY(-2px);
-    border-color: rgba(255, 255, 255, 0.4);
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
-  }
-  .zone-preview-box.selected {
-    border: 2px solid var(--dash-accent);
-    box-shadow: 0 0 10px rgba(var(--dash-accent-rgb), 0.42);
-  }
-  .zone-preview-overlay {
-    position: absolute;
-    inset: 0;
-    background: linear-gradient(to top, rgba(0, 0, 0, 0.75), transparent 70%);
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-end;
-    padding: 0.3rem 0.4rem;
-  }
-  .zp-num {
-    font-size: 0.72rem;
-    font-weight: 700;
-    color: #fff;
-    font-family: monospace;
-  }
-  .zp-layers {
-    font-size: 0.65rem;
-    color: #ddd;
-    font-family: monospace;
   }
 
-  /* Globals */
-  .ed-globals {
-    display: flex;
-    gap: 1.5rem;
-    padding: 0.75rem 1rem;
-    background: rgba(255, 255, 255, 0.03);
-    border: 1px solid rgba(255, 255, 255, 0.07);
-    border-radius: 12px;
-  }
-
-  /* Zones */
-  .zones {
-    display: flex;
-    flex-direction: column;
-    gap: 0.5rem;
-  }
-  .zone-card {
-    background: rgba(255, 255, 255, 0.02);
-    border: 1px solid rgba(255, 255, 255, 0.06);
-    border-radius: 10px;
-    overflow: hidden;
-    transition: border-color 0.15s ease;
-  }
-  .zone-card.active-zone {
-    border-color: rgba(var(--dash-accent-rgb), 0.35);
-    background: linear-gradient(180deg, rgba(var(--dash-accent-rgb),.055), rgba(255,255,255,.018));
-    box-shadow: inset 3px 0 0 rgba(var(--dash-accent-rgb),.5);
-  }
-  .zone-card.pwm-channel.active-zone {
-    border-color: color-mix(in oklab, var(--dash-warm) 36%, transparent);
-    background: linear-gradient(180deg, color-mix(in oklab, var(--dash-warm) 6%, transparent), rgba(255,255,255,.018));
-    box-shadow: inset 3px 0 0 color-mix(in oklab, var(--dash-warm) 58%, transparent);
-  }
-  .zone-header {
+  .slider-row {
     display: flex;
     align-items: center;
-    gap: 0.6rem;
-    width: 100%;
-    padding: 0.65rem 0.85rem;
+    gap: 10px;
+  }
+
+  .slider-val {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: #f1f5f9;
+    min-width: 40px;
+  }
+
+  .global-transition {
+    flex: 1;
+    min-width: 320px;
+  }
+
+  /* ── Tabs Bar ───────────────────────────────────────────────────────────── */
+  .editor-tabs-bar {
+    display: flex;
+    gap: 2px;
+    padding: 0 24px;
+    background: #0f1422;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  }
+
+  .tab-btn {
     background: transparent;
     border: none;
-    color: #f5f5f7;
-    font-size: 0.88rem;
-    font-weight: 600;
-    cursor: pointer;
-    text-align: left;
-  }
-  .zone-header:hover {
-    background: rgba(255, 255, 255, 0.03);
-  }
-  .zone-swatch {
-    width: 14px;
-    height: 14px;
-    border-radius: 4px;
-    border: 1px solid rgba(255, 255, 255, 0.2);
-  }
-  .zone-chevron {
-    color: #86868b;
-    font-size: 0.8rem;
-    width: 1rem;
-  }
-  .zone-title {
-    flex: 1;
-  }
-  .zone-layer-count {
-    font-size: 0.72rem;
-    color: #86868b;
-    font-weight: 400;
-  }
-  .zone-body {
-    padding: 0.35rem 0.85rem 0.85rem;
-    display: flex;
-    flex-direction: column;
-    gap: 0.5rem;
-  }
-
-  /* Layers */
-  .layer-card {
-    padding: 0.72rem 0.8rem;
-    background: linear-gradient(180deg, rgba(255,255,255,.035), rgba(255,255,255,.02));
-    border: 1px solid rgba(255, 255, 255, 0.06);
-    border-radius: 8px;
-    transition: opacity 0.2s ease;
-  }
-  .layer-card.disabled {
-    opacity: 0.45;
-  }
-  .layer-header {
-    display: flex;
-    flex-direction: column;
-    gap: 0.45rem;
-  }
-  .toggle {
-    display: flex;
-    align-items: center;
-    gap: 0.45rem;
-    cursor: pointer;
-    font-size: 0.8rem;
-    font-weight: 600;
-    color: #f5f5f7;
-  }
-  .toggle input[type='checkbox'] {
-    accent-color: var(--dash-accent);
-    width: 15px;
-    height: 15px;
-  }
-  .layer-title {
-    font-family: monospace;
-  }
-  .layer-controls {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.65rem;
-    padding-top: 0.35rem;
-  }
-
-  /* Fields */
-  .field {
-    display: flex;
-    align-items: center;
-    gap: 0.6rem;
-    font-size: 0.82rem;
-    color: #a1a1a6;
-  }
-  .field-label {
-    white-space: nowrap;
-    font-size: 0.78rem;
-  }
-  .field input[type='range'] {
-    flex: 1;
-    min-width: 90px;
-    accent-color: var(--dash-accent);
-  }
-  .field-val {
-    font-family: monospace;
-    font-size: 0.75rem;
-    min-width: 48px;
-    text-align: right;
-    color: #f5f5f7;
-  }
-  .field-compact {
-    display: flex;
-    align-items: center;
-    gap: 0.35rem;
-    font-size: 0.75rem;
-    color: #86868b;
-  }
-  .field-compact span {
-    white-space: nowrap;
-  }
-  .field-compact select,
-  .field-compact input[type='number'] {
-    background: rgba(255, 255, 255, 0.06);
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    border-radius: 6px;
-    color: #f5f5f7;
-    font-size: 0.78rem;
-    padding: 0.25rem 0.45rem;
-    width: 95px;
-  }
-  .field-compact select {
-    width: 105px;
-  }
-  .field-compact input[type='range'] {
-    width: 65px;
-    accent-color: var(--dash-accent);
-  }
-  .field-val-sm {
-    font-family: monospace;
-    font-size: 0.68rem;
-    min-width: 24px;
-    color: #ccc;
-  }
-  .color-field input[type='color'] {
-    width: 28px;
-    height: 24px;
-    border: 1px solid rgba(255, 255, 255, 0.15);
-    border-radius: 4px;
-    padding: 0;
-    cursor: pointer;
-    background: transparent;
-  }
-
-  /* Buttons */
-  .btn-sm {
-    padding: 0.3rem 0.6rem;
-    font-size: 0.75rem;
-  }
-  .btn-primary {
-    background: var(--dash-accent);
-    color: #fff;
-    border: none;
-    border-radius: 8px;
-    padding: 0.45rem 0.95rem;
-    font-size: 0.82rem;
-    font-weight: 600;
-    cursor: pointer;
-    transition: background 0.15s ease;
-  }
-  .btn-primary:hover:not(:disabled) {
-    background: var(--dash-accent-hover);
-  }
-  .btn-primary:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-  .btn-activate {
-    background: rgba(48, 209, 88, 0.18);
-    color: #30d158;
-    border: 1px solid rgba(48, 209, 88, 0.4);
-    border-radius: 8px;
-    padding: 0.45rem 0.85rem;
-    font-size: 0.82rem;
-    font-weight: 600;
-    cursor: pointer;
-    transition: all 0.15s ease;
-  }
-  .btn-activate:hover:not(:disabled) {
-    background: rgba(48, 209, 88, 0.28);
-  }
-  .btn-activate.is-active-btn {
-    background: #30d158;
-    color: #000;
-  }
-  .btn-secondary {
-    background: rgba(255, 255, 255, 0.06);
-    color: #a1a1a6;
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    border-radius: 8px;
-    padding: 0.45rem 0.75rem;
-    font-size: 0.82rem;
-    cursor: pointer;
-    transition: all 0.15s ease;
-  }
-  .btn-secondary:hover:not(:disabled) {
-    background: rgba(255, 255, 255, 0.1);
-    color: #f5f5f7;
-  }
-  .btn-secondary:disabled {
-    opacity: 0.35;
-    cursor: not-allowed;
-  }
-  .btn-danger {
-    background: rgba(255, 69, 58, 0.15);
-    color: #ff453a;
-    border: 1px solid rgba(255, 69, 58, 0.3);
-    border-radius: 8px;
-    padding: 0.45rem 0.75rem;
-    font-size: 0.82rem;
-    cursor: pointer;
-    transition: all 0.15s ease;
-  }
-  .btn-danger:hover {
-    background: rgba(255, 69, 58, 0.25);
-  }
-
-  /* Toasts & Errors */
-  .toast {
-    position: fixed;
-    bottom: 1.5rem;
-    right: 1.5rem;
-    background: rgba(48, 209, 88, 0.92);
-    color: #fff;
-    padding: 0.6rem 1.2rem;
-    border-radius: 10px;
+    color: #94a3b8;
+    padding: 10px 16px;
     font-size: 0.85rem;
-    font-weight: 500;
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
-    z-index: 100;
-  }
-  .error-bar {
-    position: fixed;
-    bottom: 1.5rem;
-    left: 50%;
-    transform: translateX(-50%);
-    background: rgba(255, 69, 58, 0.95);
-    color: #fff;
-    padding: 0.6rem 1.2rem;
-    border-radius: 10px;
-    font-size: 0.85rem;
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
-    z-index: 100;
-  }
-  .err-close {
-    background: none;
-    border: none;
-    color: #fff;
+    font-weight: 600;
     cursor: pointer;
-    font-weight: bold;
+    border-bottom: 2px solid transparent;
   }
 
-  /* Motion Section */
-  .ed-motion-section {
+  .tab-btn.active {
+    color: #6366f1;
+    border-bottom-color: #6366f1;
+  }
+
+  /* ── 3. Canvas Section ─────────────────────────────────────────────────── */
+  .canvas-section {
+    padding: 16px 24px;
     display: flex;
     flex-direction: column;
     gap: 12px;
-    margin-top: 8px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
   }
 
-  .motion-tracks-card {
-    background: var(--dash-surface);
-    border: 1px solid var(--dash-border);
-    border-radius: var(--dash-radius-lg);
-    padding: 1rem;
-    box-shadow: var(--dash-shadow);
+  .canvas-toolbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+
+  .canvas-label {
+    font-size: 0.9rem;
+    font-weight: 700;
+    color: #f8fafc;
+  }
+
+  .preview-subtext {
+    font-size: 0.72rem;
+    color: #64748b;
+    font-weight: normal;
+    margin-left: 6px;
+  }
+
+  .selection-controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .sel-count {
+    font-size: 0.75rem;
+    color: #94a3b8;
+  }
+
+  .btn-sel-chip {
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    color: #cbd5e1;
+    border-radius: 4px;
+    padding: 4px 8px;
+    font-size: 0.72rem;
+    cursor: pointer;
+  }
+
+  .btn-sel-chip:hover {
+    background: rgba(255, 255, 255, 0.1);
+    color: #fff;
+  }
+
+  .banks-container {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .bank-group {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .bank-title {
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #64748b;
+    font-weight: 600;
+  }
+
+  .bank-grid {
+    display: grid;
+    grid-template-columns: repeat(8, 1fr);
+    gap: 8px;
+  }
+
+  @media (max-width: 1024px) {
+    .bank-grid {
+      grid-template-columns: repeat(4, 1fr);
+    }
+  }
+
+  .channel-card {
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 6px;
+    padding: 6px 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+
+  .channel-card:hover {
+    border-color: rgba(255, 255, 255, 0.2);
+  }
+
+  .channel-card.selected {
+    border-color: #6366f1;
+    background: rgba(99, 102, 241, 0.1);
+  }
+
+  .ch-head {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.72rem;
+    color: #94a3b8;
+  }
+
+  .ch-port {
+    font-weight: 700;
+    color: #f1f5f9;
+  }
+
+  .ch-swatch {
+    height: 20px;
+    border-radius: 3px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+  }
+
+  .pwm-bar-track {
+    height: 20px;
+    background: rgba(255, 255, 255, 0.05);
+    border-radius: 3px;
+    display: flex;
+    align-items: flex-end;
+    overflow: hidden;
+  }
+
+  .pwm-bar-fill {
+    width: 100%;
+    background: #e2e8f0;
+    transition: height 0.15s ease;
+  }
+
+  .ch-name {
+    font-size: 0.68rem;
+    color: #64748b;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* ── 4. Inspector Section ───────────────────────────────────────────────── */
+  .inspector-section {
+    padding: 16px 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .inspector-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+
+  .ins-title-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .ins-title-row h3 {
+    margin: 0;
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: #f8fafc;
+  }
+
+  .batch-badge {
+    font-size: 0.75rem;
+    color: #a5b4fc;
+    background: rgba(99, 102, 241, 0.15);
+    padding: 3px 8px;
+    border-radius: 4px;
+  }
+
+  .batch-actions-strip {
+    display: flex;
+    gap: 8px;
+  }
+
+  .btn-batch {
+    background: rgba(99, 102, 241, 0.12);
+    border: 1px solid rgba(99, 102, 241, 0.3);
+    color: #a5b4fc;
+    border-radius: 4px;
+    padding: 4px 8px;
+    font-size: 0.72rem;
+    cursor: pointer;
+  }
+
+  .btn-batch:hover {
+    background: rgba(99, 102, 241, 0.25);
+    color: #fff;
+  }
+
+  .layers-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .layer-card {
+    background: rgba(255, 255, 255, 0.025);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 8px;
+    padding: 12px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .layer-card.disabled {
+    opacity: 0.55;
+  }
+
+  .layer-header-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  .layer-toggle-wrap {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .layer-title {
+    font-size: 0.88rem;
+    font-weight: 700;
+    color: #f1f5f9;
+    cursor: pointer;
+  }
+
+  .layer-quick-actions {
+    display: flex;
+    gap: 6px;
+  }
+
+  .btn-layer-act {
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    color: #94a3b8;
+    border-radius: 4px;
+    padding: 2px 6px;
+    font-size: 0.7rem;
+    cursor: pointer;
+  }
+
+  .btn-layer-act:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.1);
+    color: #fff;
+  }
+
+  .btn-layer-act:disabled {
+    opacity: 0.3;
+    cursor: not-allowed;
+  }
+
+  .btn-clear:hover {
+    color: #ef4444;
+  }
+
+  .layer-controls-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 12px;
+    padding-top: 4px;
+  }
+
+  .ctrl-field {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+
+  .ctrl-field label {
+    font-size: 0.72rem;
+    color: #94a3b8;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .input-select, .input-text {
+    min-height: 32px;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 6px;
+    color: #fff;
+    padding: 4px 8px;
+    font-size: 0.82rem;
+    font-family: inherit;
+    box-sizing: border-box;
+  }
+
+  .range-slider {
+    width: 100%;
+    accent-color: #6366f1;
+  }
+
+  .pwm-warn-badge {
+    font-size: 0.68rem;
+    color: #f59e0b;
+    margin-top: 2px;
+  }
+
+  .color-picker-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .native-color {
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    border: none;
+    border-radius: 4px;
+    background: transparent;
+    cursor: pointer;
+  }
+
+  .hex-input {
+    width: 90px;
+    font-family: monospace;
+  }
+
+  .recent-colors-row {
+    display: flex;
+    gap: 4px;
+    margin-top: 4px;
+  }
+
+  .swatch-btn {
+    width: 16px;
+    height: 16px;
+    border-radius: 3px;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    cursor: pointer;
+    padding: 0;
+  }
+
+  /* ── 5. Motion Section ──────────────────────────────────────────────────── */
+  .motion-section {
+    padding: 16px 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
   }
 
   .motion-header {
@@ -1484,134 +2350,258 @@
     align-items: center;
   }
 
-  .btn-motion-toggle {
-    background: none;
-    border: none;
+  .motion-header h3 {
+    margin: 0;
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: #f8fafc;
+  }
+
+  .motion-subtext {
+    font-size: 0.78rem;
+    color: #64748b;
+    margin: 2px 0 0;
+  }
+
+  .no-tracks-card {
+    background: rgba(255, 255, 255, 0.02);
+    border: 1px dashed rgba(255, 255, 255, 0.1);
+    border-radius: 8px;
+    padding: 32px;
+    text-align: center;
+    color: #64748b;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .tracks-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  /* ── General Buttons & Modals ───────────────────────────────────────────── */
+  .btn-primary {
+    background: #6366f1;
     color: #fff;
-    font-size: 0.9rem;
+    border: none;
+    border-radius: 6px;
+    padding: 8px 16px;
+    font-size: 0.85rem;
     font-weight: 600;
     cursor: pointer;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 0;
+    transition: background 0.15s ease;
   }
 
-  .motion-title {
-    color: var(--dash-accent);
+  .btn-primary:hover:not(:disabled) {
+    background: #4f46e5;
   }
 
-  .btn-add-track {
-    background: rgba(var(--dash-accent-rgb), 0.1);
-    border: 1px solid rgba(var(--dash-accent-rgb), 0.3);
-    color: var(--dash-accent);
-    border-radius: 8px;
-    padding: 6px 11px;
-    font-size: 0.8rem;
-    cursor: pointer;
-    transition: all 0.15s ease;
-  }
-
-  .btn-add-track:hover:not(:disabled) {
-    background: rgba(var(--dash-accent-rgb), 0.18);
-  }
-
-  .btn-add-track:disabled {
-    opacity: 0.4;
+  .btn-primary:disabled {
+    opacity: 0.5;
     cursor: not-allowed;
   }
 
-  .motion-tracks-list {
-    margin-top: 12px;
+  .btn-primary.btn-sm {
+    padding: 5px 12px;
+    font-size: 0.78rem;
+  }
+
+  .btn-secondary {
+    background: rgba(255, 255, 255, 0.08);
+    color: #e2e8f0;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 6px;
+    padding: 8px 14px;
+    font-size: 0.85rem;
+    cursor: pointer;
+  }
+
+  .btn-secondary:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.12);
+    color: #fff;
+  }
+
+  .btn-danger {
+    background: #ef4444;
+    color: #fff;
+    border: none;
+    border-radius: 6px;
+    padding: 8px 14px;
+    font-size: 0.85rem;
+    font-weight: 600;
+    cursor: pointer;
+  }
+
+  .btn-danger:hover:not(:disabled) {
+    background: #dc2626;
+  }
+
+  .no-scene-selected {
+    margin: auto;
+    text-align: center;
+    color: #64748b;
     display: flex;
     flex-direction: column;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .modal-body-pad {
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .modal-field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .modal-field label,
+  .modal-field-label {
+    font-size: 0.78rem;
+    color: #94a3b8;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .slot-chips-grid {
+    display: grid;
+    grid-template-columns: repeat(8, 1fr);
+    gap: 6px;
+    max-height: 160px;
+    overflow-y: auto;
+    padding: 4px;
+    background: rgba(0, 0, 0, 0.2);
+    border-radius: 6px;
+  }
+
+  .slot-chip {
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    color: #cbd5e1;
+    border-radius: 4px;
+    padding: 6px 4px;
+    font-family: monospace;
+    font-size: 0.8rem;
+    cursor: pointer;
+  }
+
+  .slot-chip:hover {
+    background: rgba(255, 255, 255, 0.12);
+  }
+
+  .slot-chip.selected {
+    background: #6366f1;
+    border-color: #6366f1;
+    color: #fff;
+    font-weight: 700;
+  }
+
+  .radio-row {
+    display: flex;
+    gap: 16px;
+  }
+
+  .radio-lbl {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.85rem;
+    color: #e2e8f0;
+    cursor: pointer;
+  }
+
+  .modal-actions-right {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 8px;
+  }
+
+  .blocked-delete-box {
+    background: rgba(239, 68, 68, 0.1);
+    border: 1px solid rgba(239, 68, 68, 0.3);
+    border-radius: 6px;
+    padding: 12px;
+    color: #fca5a5;
+  }
+
+  .blocked-delete-box h4 {
+    margin: 0 0 6px;
+    font-size: 0.9rem;
+    color: #ef4444;
+  }
+
+  .blocked-delete-box ul {
+    margin: 6px 0 8px 18px;
+    padding: 0;
+    font-size: 0.82rem;
+  }
+
+  .resolve-hint {
+    font-size: 0.78rem;
+    color: #fca5a5;
+    margin: 4px 0 0;
+    font-style: italic;
+  }
+
+  .delete-confirm-text {
+    font-size: 0.88rem;
+    color: #cbd5e1;
+    margin: 0;
+    line-height: 1.5;
+  }
+
+  .loading-refs {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: #94a3b8;
+    padding: 12px 0;
+  }
+
+  .toast {
+    position: fixed;
+    bottom: 24px;
+    right: 24px;
+    background: #1e293b;
+    border: 1px solid #334155;
+    color: #f8fafc;
+    padding: 10px 18px;
+    border-radius: 8px;
+    font-size: 0.85rem;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.3);
+    z-index: 1000;
+  }
+
+  .error-banner {
+    position: fixed;
+    top: 24px;
+    right: 24px;
+    background: #7f1d1d;
+    border: 1px solid #b91c1c;
+    color: #fef2f2;
+    padding: 10px 16px;
+    border-radius: 8px;
+    font-size: 0.85rem;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+    z-index: 1000;
+    display: flex;
+    align-items: center;
     gap: 10px;
   }
 
-  .no-tracks-hint {
-    font-size: 0.8rem;
-    color: rgba(255, 255, 255, 0.4);
-    font-style: italic;
-    margin: 4px 0;
-  }
-
-  @media (max-width: 900px) {
-    .scene-root { flex-direction: column; min-height: 0; }
-    .library {
-      width: 100%;
-      position: static;
-      padding: .85rem;
-    }
-    .ed-toolbar { position: static; }
-    .lib-list {
-      flex-direction: row;
-      flex-wrap: nowrap;
-      max-height: none;
-      overflow-x: auto;
-      overflow-y: hidden;
-      scroll-snap-type: x proximity;
-      padding-bottom: .15rem;
-    }
-    .lib-item {
-      flex: 0 0 min(245px, 76vw);
-      scroll-snap-align: start;
-    }
-    .preview-strip { grid-template-columns: repeat(4, 1fr); }
-  }
-
-  @media (max-width: 620px) {
-    .scene-root { gap: 1rem; }
-    .ed-toolbar { align-items: stretch; }
-    .ed-title-group, .ed-title-row { width: 100%; }
-    .ed-title-row { align-items: stretch; flex-direction: column; }
-    .ed-name { width: 100%; }
-    .status-badges { flex-wrap: wrap; }
-    .ed-actions { width: 100%; }
-    .ed-actions button { flex: 1; min-height: 40px; }
-    .preview-strip { grid-template-columns: repeat(2, 1fr); }
-    .zone-card { border-radius: var(--dash-radius-md); }
-  }
-  .sync-follower-banner {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 1rem;
-    background: rgba(59, 130, 246, 0.12);
-    border: 1px solid rgba(59, 130, 246, 0.35);
-    border-radius: 8px;
-    padding: 0.85rem 1.25rem;
-    margin-bottom: 1.25rem;
-    color: #e2e8f0;
-  }
-  .banner-icon {
-    font-size: 1.4rem;
-    color: #60a5fa;
-  }
-  .banner-content strong {
-    color: #93c5fd;
-    display: block;
-    font-size: 0.95rem;
-    margin-bottom: 0.2rem;
-  }
-  .banner-content p {
-    margin: 0;
-    font-size: 0.82rem;
-    color: #94a3b8;
-  }
-  .banner-action-btn {
-    white-space: nowrap;
-    padding: 0.45rem 0.9rem;
-    background: rgba(59, 130, 246, 0.25);
-    border: 1px solid rgba(59, 130, 246, 0.5);
-    color: #93c5fd;
-    border-radius: 6px;
-    text-decoration: none;
-    font-size: 0.82rem;
-    font-weight: 600;
-    transition: all 0.15s ease;
-  }
-  .banner-action-btn:hover {
-    background: rgba(59, 130, 246, 0.45);
-    color: #ffffff;
+  .err-close {
+    background: none;
+    border: none;
+    color: #fca5a5;
+    cursor: pointer;
+    font-size: 0.9rem;
   }
 </style>
