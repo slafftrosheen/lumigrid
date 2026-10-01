@@ -1,6 +1,6 @@
 # LumiGrid Next Phase — Operator Platform v2
 
-Baseline: `c5dbc6fe7d47740bbe796ec6be2cedd587abadb6`.
+Baseline: `ea586e39aca19df0d051e2534cf336c73316f582`.
 
 This phase is deliberately **integration-first**. The runtime/lifecycle architecture is frozen unless a concrete defect requires change. The objective is to make the existing firmware and dashboard behave like one coherent lighting-control product before adding another large feature family.
 
@@ -208,6 +208,24 @@ Execute the documented matrix: boot, networking, API, WebSocket, pixel output, P
 - **Cue Studio v2 (Operator Console):** Schema-2 editor library (typed document helpers, clipboard, throttled Q15 T-Bar sender, editor store with checksum-conflict workflow), Save vs Save & Run/Restart separation, save/run divergence banner with one-click "Run saved version" (restart), end-action selector, conflict dialog, dependency-aware delete dialog, and unsaved-changes navigation guard. Embedded dashboard gains a Cue transport page (list select, Run/Stop/Pause/Resume/Prev/Next/Restart, manual T-Bar, live telemetry).
 - **Editor Validation Parity:** The Svelte editor library enforces the same byte and timing caps as the firmware so clients cannot author documents the node would reject.
 
+### 18. Diagnostics, Factory Validation & Burn-In Workflow (LG-035 Complete - Software Capabilities)
+
+- **Factory Runner & Test State Machine:** Built-in hardware test runner supporting addressable validation (A1–A8), PWM validation (P1–P8), visual test patterns (solid primary/secondary colors, walking white pixel chase, color cycle, full-on white), and time-bounded burn-in cycles.
+- **Factory API Surface:** `/api/v1/factory/start`, `/api/v1/factory/stop`, `/api/v1/factory/status`, `/api/v1/factory/report` with Operator+ authorization and command journal integration.
+- **Diagnostics Dashboard & Hardware Validation UI:** Dedicated web dashboard pages for real-time diagnostics (runtime state, configuration integrity, network, sync offset, DMX routing, audit log) and factory validation workflow.
+- **Physical Validation Status:** Note that LG-035 is complete for *software capabilities only*. Physical bench testing (A1–A8, P1–P8, thermal power budget, multi-node synchronization offset) requires physical hardware bench execution.
+
+### 19. Configuration, Recovery, Backup/Restore & OTA Hardening (LG-036 Active)
+
+- **Removal of Universal Recovery AP Credentials:** Eliminate default `lumigrid123` credentials from production firmware builds; recovery AP uses MAC-derived transitional credentials (`lg_<mac-fragment>`).
+- **Physical-Only Factory Reset:** Preserves GPIO0 5-second hold as the sole trust boundary; no unauthenticated or remote software factory reset URLs.
+- **Explicit RecoveryStatus:** Runtime-owned recovery model exposed via `GET /api/v1/recovery/status` with fail-safe Safe Mode guarantees.
+- **Authoritative DeviceConfig Checksum Contract:** Checksum exposure on `GET /api/v1/config`, optimistic concurrency with `expectedChecksum` on `PUT /api/v1/config` (`409 Conflict`), and strict fail-closed nested bounds validation.
+- **Runtime Config Apply Plan:** `ConfigApplyPlan` diff classification, central runtime transition in `LumigridRuntime::apply_device_config`, transactional persistence with readback verification and rollback, and `POST /api/v1/config/validate`.
+- **LumiGrid Recovery Package v4:** Streaming newline-delimited JSON (`.lgbak`) with zero auth/network/sync secrets, complete recoverable content coverage, two-stage restore UI, in-memory rollback snapshots, and power-loss-safe `restore_in_progress` NVS marker.
+- **OTA Hardening with Bootloader Rollback:** `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y` enabled in production, canonical `POST /api/v1/ota`, partition size and descriptor verification (`lumigrid_led_node`), `OtaBootVerifier` runtime component with bounded core self-test, and cross-reboot OTA state tracking (`GET /api/v1/ota/status`).
+- **First-Install Commissioning Wizard:** Step-by-step setup flow reusing existing Identity, Network, Channels, Safety, and Factory validation systems.
+
 ## Explicit non-goals for this phase
 
 - No new node families.
@@ -215,8 +233,10 @@ Execute the documented matrix: boot, networking, API, WebSocket, pixel output, P
 - No cloud service.
 - No proliferation of new effects before the existing scene/effect system is excellent.
 - No second independent dashboard architecture.
+- No Secure Boot or flash encryption in this batch.
 
 ## Definition of done
 
 A new operator can discover/add a node, see its real live state, compose a scene, preview it, activate it, sequence it, schedule it, run synchronized cue shows across a cluster, diagnose a fault, run a factory test, and recover/update the node without needing to understand firmware internals.
+
 

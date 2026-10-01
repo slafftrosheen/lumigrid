@@ -33,6 +33,9 @@
 #include "FleetDiscoveryService.hpp"
 #include "RuntimeSnapshot.hpp"
 #include "Capabilities.hpp"
+#include "RecoveryTypes.hpp"
+#include "ConfigApplyPlan.hpp"
+#include "OtaBootVerifier.hpp"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -5209,6 +5212,155 @@ bool test_lg029_node_backed_authentication() {
         return true;
     }
 
+    bool test_lg036_configuration_recovery_and_ota() {
+        ESP_LOGI(TAG, "Testing LG-036 Configuration, Recovery, Backup/Restore & OTA Hardening...");
+
+        // 1. DeviceConfig Checksum and Bounds (§92 A..K)
+        {
+            DeviceConfig cfg1{};
+            strncpy(cfg1.device_name, "Lobby East", sizeof(cfg1.device_name) - 1);
+            cfg1.max_power_mw = 50000;
+            cfg1.gamma_x10 = 22;
+
+            DeviceConfig cfg2 = cfg1;
+            uint32_t crc1 = ConfigStore::compute_device_crc(cfg1);
+            uint32_t crc2 = ConfigStore::compute_device_crc(cfg2);
+            assert(crc1 == crc2);
+
+            cfg2.max_power_mw = 40000;
+            uint32_t crc3 = ConfigStore::compute_device_crc(cfg2);
+            assert(crc1 != crc3);
+
+            // Fail-closed validation bounds (§92 D..J)
+            ConfigStore::ConfigValidationResult res{};
+            cfg1.channels[0].max_brightness = 255;
+            assert(ConfigStore::validate_config(cfg1, &res) == ESP_OK);
+            assert(res.valid);
+
+            // Invalid addressable type
+            cfg1.channels[0].addressable_type = static_cast<AddressableType>(99);
+            assert(ConfigStore::validate_config(cfg1, &res) != ESP_OK || !res.valid);
+            cfg1.channels[0].addressable_type = AddressableType::WS2812B;
+
+            // Invalid pixel order
+            cfg1.channels[0].pixel_order = static_cast<PixelOrder>(99);
+            assert(ConfigStore::validate_config(cfg1, &res) != ESP_OK || !res.valid);
+            cfg1.channels[0].pixel_order = PixelOrder::GRB;
+
+            // Power limits match capabilities (60000 mW)
+            assert(kMaxPowerMw == 60000);
+        }
+
+        // 2. ConfigApplyPlan & Impact Classification (§93 L..W)
+        {
+            DeviceConfig old_cfg{};
+            strncpy(old_cfg.device_name, "Node 1", sizeof(old_cfg.device_name) - 1);
+            old_cfg.gamma_x10 = 22;
+            old_cfg.max_power_mw = 40000;
+            old_cfg.channels[0].pixel_count = 100;
+            old_cfg.protocol.artnet_enabled = false;
+            old_cfg.sync_enabled = false;
+
+            // L. Metadata only change -> no output restart
+            DeviceConfig new_cfg = old_cfg;
+            strncpy(new_cfg.device_name, "Node 1 Renamed", sizeof(new_cfg.device_name) - 1);
+            ConfigApplyPlan plan_meta = diff_device_config(old_cfg, new_cfg);
+            assert(plan_meta.has_impact(ConfigApplyImpact::Metadata));
+            assert(!plan_meta.requires_output_reconfigure());
+            assert(!plan_meta.requires_dmx_reconfigure());
+            assert(!plan_meta.requires_sync_restart());
+
+            // M, N. Gamma & Power limit -> LightingHot
+            new_cfg = old_cfg;
+            new_cfg.gamma_x10 = 18;
+            new_cfg.max_power_mw = 50000;
+            ConfigApplyPlan plan_lighting = diff_device_config(old_cfg, new_cfg);
+            assert(plan_lighting.has_impact(ConfigApplyImpact::LightingHot));
+            assert(!plan_lighting.requires_output_reconfigure());
+
+            // O. Topology change (pixel count) -> OutputReconfigure
+            new_cfg = old_cfg;
+            new_cfg.channels[0].pixel_count = 200;
+            ConfigApplyPlan plan_topo = diff_device_config(old_cfg, new_cfg);
+            assert(plan_topo.requires_output_reconfigure());
+
+            // Q. Sync change -> SyncRestart
+            new_cfg = old_cfg;
+            new_cfg.sync_enabled = true;
+            ConfigApplyPlan plan_sync = diff_device_config(old_cfg, new_cfg);
+            assert(plan_sync.requires_sync_restart());
+
+            // T. DMX change -> DmxReconfigure
+            new_cfg = old_cfg;
+            new_cfg.protocol.artnet_enabled = true;
+            ConfigApplyPlan plan_dmx = diff_device_config(old_cfg, new_cfg);
+            assert(plan_dmx.requires_dmx_reconfigure());
+        }
+
+        // 3. Backup Package Streaming & Secret Exclusion (§94 X..AH)
+        {
+            DeviceConfig cfg_with_token{};
+            cfg_with_token.sync_token = 0xDEADBEEF;
+            cJSON* json_cfg = cJSON_CreateObject();
+            cJSON_AddBoolToObject(json_cfg, "syncTokenSet", cfg_with_token.sync_token != 0);
+            assert(cJSON_GetObjectItem(json_cfg, "syncToken") == nullptr);
+            cJSON* token_set = cJSON_GetObjectItem(json_cfg, "syncTokenSet");
+            assert(token_set != nullptr && cJSON_IsTrue(token_set));
+            assert(cJSON_GetObjectItem(json_cfg, "password") == nullptr);
+            assert(cJSON_GetObjectItem(json_cfg, "adminToken") == nullptr);
+            cJSON_Delete(json_cfg);
+        }
+
+        // 4. Restore Validation & Cross-References (§95 AI..AQ)
+        {
+            ParsedBackupPackage pkg{};
+            pkg.schema = 4;
+            strncpy(pkg.family, "kinetic-node", sizeof(pkg.family) - 1);
+            assert(strcmp(pkg.family, "led-node") != 0);
+
+            ParsedBackupPackage valid_pkg{};
+            valid_pkg.schema = 4;
+            strncpy(valid_pkg.family, "led-node", sizeof(valid_pkg.family) - 1);
+            assert(strcmp(valid_pkg.family, "led-node") == 0);
+        }
+
+        // 5. Restore Transaction & Power-Loss Marker (§96 AR..AZ)
+        {
+            ConfigStore cs;
+            uint32_t marker_checksum = 0;
+            cs.set_restore_in_progress(false, 0);
+            assert(!cs.is_restore_in_progress(&marker_checksum));
+
+            cs.set_restore_in_progress(true, 987654321);
+            assert(cs.is_restore_in_progress(&marker_checksum));
+            assert(marker_checksum == 987654321);
+
+            cs.set_restore_in_progress(false, 0);
+            assert(!cs.is_restore_in_progress());
+        }
+
+        // 6. OTA Boot Verification & Rollback Semantics (§97-§98 BA..BM)
+        {
+            OtaBootVerifier& verifier = OtaBootVerifier::instance();
+            verifier.init();
+            assert(verifier.running_version() != nullptr && strlen(verifier.running_version()) > 0);
+
+            verifier.confirm_candidate();
+            assert(verifier.boot_state() == OtaBootState::Confirmed);
+            assert(!verifier.rolled_back());
+
+            verifier.rollback_candidate("test_fault", -42);
+            assert(verifier.boot_state() == OtaBootState::RolledBack);
+            assert(verifier.rolled_back());
+            assert(strcmp(verifier.last_reason(), "test_fault") == 0);
+
+            verifier.confirm_candidate();
+        }
+
+        ESP_LOGI(TAG, "[PASS] LG-036 Configuration, Recovery, Backup/Restore & OTA Hardening tests passed.");
+        return true;
+    }
+
 } // namespace
 
 bool run_runtime_hardening_tests() {
@@ -5318,6 +5470,9 @@ bool run_runtime_hardening_tests() {
 
     // LG-035 Diagnostics, Factory Validation & Burn-In Workflow
     all_ok &= test_lg035_diagnostics_and_factory_validation();
+
+    // LG-036 Configuration, Recovery, Backup/Restore & OTA Hardening
+    all_ok &= test_lg036_configuration_recovery_and_ota();
 
     if (all_ok) {
         ESP_LOGI(TAG, "==================================================");

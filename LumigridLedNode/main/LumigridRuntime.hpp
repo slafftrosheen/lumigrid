@@ -19,8 +19,12 @@
 #include "AuthStore.hpp"
 #include "AuthManager.hpp"
 #include "FleetDiscoveryService.hpp"
+#include "RecoveryTypes.hpp"
+#include "ConfigApplyPlan.hpp"
+#include "OtaBootVerifier.hpp"
 #include "esp_err.h"
 #include <atomic>
+
 
 namespace lg {
 
@@ -142,7 +146,17 @@ public:
     const char* last_apply_error() const { return last_apply_error_; }
     bool is_network_apply_in_progress() const { return apply_in_progress_.load(); }
 
+    RecoveryStatus get_recovery_status() const;
+    esp_err_t apply_device_config(const DeviceConfig& old_cfg, const DeviceConfig& new_cfg, const ConfigApplyPlan& plan);
+
+    MaintenanceMode maintenance_mode() const { return maintenance_mode_.load(std::memory_order_acquire); }
+    void set_maintenance_mode(MaintenanceMode m) { maintenance_mode_.store(m, std::memory_order_release); }
+
+    RestoreState restore_state() const { return restore_state_; }
+    void set_restore_state(RestoreState s) { restore_state_ = s; }
+
 private:
+
     static void recovery_task(void* arg);
     static void net_apply_worker(void* arg);
     void execute_network_apply(const NetworkApplyRequest& req);
@@ -207,6 +221,11 @@ private:
     std::atomic<NetworkApplyState> apply_state_{NetworkApplyState::Idle};
     std::atomic<uint32_t> pending_apply_command_id_{0};
     const char* last_apply_error_ = nullptr;
+
+    std::atomic<MaintenanceMode> maintenance_mode_{MaintenanceMode::None};
+    RestoreState restore_state_ = RestoreState::Idle;
+    char recovery_reason_[64] = {0};
 };
+
 
 } // namespace lg

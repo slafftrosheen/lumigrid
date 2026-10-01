@@ -172,6 +172,13 @@ public:
     esp_err_t save_network_settings(const NetworkSettings& settings);
     esp_err_t load_network_settings(NetworkSettings& settings);
 
+    // ── Restore marker (power-loss-safe restore) ──
+    bool is_restore_in_progress(uint32_t* out_checksum = nullptr);
+    esp_err_t set_restore_in_progress(bool in_progress, uint32_t package_checksum = 0);
+
+    // ── Checksum helper ──
+    static uint32_t compute_device_crc(const DeviceConfig& dc);
+
 private:
     nvs_handle_t handle_ = 0;
 

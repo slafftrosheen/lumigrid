@@ -7,6 +7,8 @@
 #include "JobManager.hpp"
 #include "NodeIdentity.hpp"
 #include "NetworkSettings.hpp"
+#include "RecoveryTypes.hpp"
+#include "ConfigApplyPlan.hpp"
 #include <atomic>
 #include <functional>
 
@@ -167,6 +169,31 @@ public:
         return config_apply_callback_;
     }
 
+    using RecoveryStatusProvider = std::function<RecoveryStatus()>;
+    void set_recovery_status_provider(RecoveryStatusProvider provider) {
+        recovery_status_provider_ = std::move(provider);
+    }
+    const RecoveryStatusProvider& recovery_status_provider() const {
+        return recovery_status_provider_;
+    }
+
+    using RuntimeApplyFunc = std::function<esp_err_t(const DeviceConfig& old_cfg, const DeviceConfig& new_cfg, const ConfigApplyPlan& plan)>;
+    void set_runtime_apply_func(RuntimeApplyFunc func) {
+        runtime_apply_func_ = std::move(func);
+    }
+    const RuntimeApplyFunc& runtime_apply_func() const {
+        return runtime_apply_func_;
+    }
+
+    using MaintenanceModeCheckFunc = std::function<MaintenanceMode()>;
+    void set_maintenance_mode_func(MaintenanceModeCheckFunc func) {
+        maintenance_mode_func_ = std::move(func);
+    }
+    MaintenanceMode current_maintenance_mode() const {
+        return maintenance_mode_func_ ? maintenance_mode_func_() : MaintenanceMode::None;
+    }
+
+
     using NetworkApplyQueueFunc = std::function<esp_err_t(const NetworkApplyRequest&)>;
     using NetworkApplyStatusFunc = std::function<void(NetworkApplyState& state, uint32_t& cmd_id, const char*& err_str)>;
     using SafeModeCheckFunc = std::function<bool()>;
@@ -219,8 +246,12 @@ public:
     NetworkApplyQueueFunc network_apply_queue_{};
     NetworkApplyStatusFunc network_apply_status_{};
     SafeModeCheckFunc safe_mode_check_{};
+    RecoveryStatusProvider recovery_status_provider_{};
+    RuntimeApplyFunc runtime_apply_func_{};
+    MaintenanceModeCheckFunc maintenance_mode_func_{};
 
     NetworkApplyStatusFunc network_apply_status_func() const { return network_apply_status_; }
 };
+
 
 } // namespace lg

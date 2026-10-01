@@ -11,7 +11,11 @@
 #include "ApiAuth.hpp"
 #include "NodeIdentity.hpp"
 #include "NetworkSettings.hpp"
+#include "OtaBootVerifier.hpp"
+#include "RecoveryTypes.hpp"
+#include "ConfigApplyPlan.hpp"
 #include <cstring>
+#include <cinttypes>
 
 namespace lg {
 
@@ -188,6 +192,31 @@ esp_err_t LumigridRuntime::init() {
     }
     startup_stage_ = StartupStage::ConfigStoreInitialized;
     vTaskDelay(pdMS_TO_TICKS(500));
+
+    // Power-loss-safe restore marker check (LG-036 §41)
+    uint32_t restore_chk = 0;
+    if (config_.is_restore_in_progress(&restore_chk)) {
+        safe_mode_ = true;
+        startup_state_ = StartupState::SafeMode;
+        failing_stage_ = StartupStage::ConfigLoaded;
+        failing_error_ = ESP_ERR_INVALID_STATE;
+        restore_state_ = RestoreState::Interrupted;
+        configuration_valid_ = false;
+        std::strncpy(configuration_first_error_, "Previous restore was interrupted before completion", sizeof(configuration_first_error_) - 1);
+        output_.blackout();
+        output_.set_output_enabled(false);
+        ESP_LOGE("lumigrid", "RESTORE INTERRUPTED DETECTED ON BOOT (checksum %08" PRIx32 ")! Entering SAFE MODE!", restore_chk);
+    }
+
+    // OTA boot verification initialization (LG-036 §56)
+    OtaBootVerifier::instance().init();
+
+    // Wire recovery and transactional config apply hooks
+    api_.set_recovery_status_provider([this]() { return get_recovery_status(); });
+    api_.set_runtime_apply_func([this](const DeviceConfig& old_cfg, const DeviceConfig& new_cfg, const ConfigApplyPlan& plan) {
+        return apply_device_config(old_cfg, new_cfg, plan);
+    });
+    api_.set_maintenance_mode_func([this]() { return maintenance_mode(); });
 
     // Initialize AuthStore and AuthManager
     auth_store_.init();
@@ -433,17 +462,19 @@ esp_err_t LumigridRuntime::start() {
     esp_read_mac(mac, ESP_MAC_WIFI_STA);
 
     std::string ap_pass;
-#if defined(CONFIG_LUMIGRID_ENABLE_DEV_CREDENTIALS)
+#if defined(CONFIG_LUMIGRID_ENABLE_DEV_CREDENTIALS) && defined(CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS)
     ap_pass = "lumigrid123";
 #else
-    if (strlen(dev_cfg.installer_token) >= 8) {
-        ap_pass = dev_cfg.installer_token;
-    } else {
-        char mac_pass[32];
-        snprintf(mac_pass, sizeof(mac_pass), "lg_%02x%02x%02x%02x", mac[2], mac[3], mac[4], mac[5]);
-        ap_pass = mac_pass;
-    }
+    // LG-036: Recovery AP credential semantics.
+    // The MAC-derived passphrase "lg_<mac-fragment>" serves strictly as transitional
+    // layer-2 wireless access to reach the node during first-boot commissioning or recovery.
+    // NOTE: Recovery AP access password != node authentication boundary.
+    // Actual authorization remains strictly gated by AuthManager and physical recovery.
+    char mac_pass[32];
+    snprintf(mac_pass, sizeof(mac_pass), "lg_%02x%02x%02x%02x", mac[2], mac[3], mac[4], mac[5]);
+    ap_pass = mac_pass;
 #endif
+
 
     // Derive AP SSID:
     //   safe_mode            -> "LumiGrid-Recovery"  (config invalid / crash loop)
@@ -763,6 +794,13 @@ esp_err_t LumigridRuntime::start() {
         startup_state_ = StartupState::Ready;
     }
     lifecycle_state_ = RuntimeLifecycle::Running;
+
+    if (OtaBootVerifier::instance().is_pending_verify()) {
+        if (startup_state_ != StartupState::Faulted && started_subsystems_.api) {
+            ESP_LOGI("lumigrid", "OTA candidate image reached stable state. Confirming image and cancelling rollback...");
+            OtaBootVerifier::instance().confirm_candidate();
+        }
+    }
     return ESP_OK;
 }
 
@@ -986,19 +1024,21 @@ void LumigridRuntime::execute_network_apply(const NetworkApplyRequest& req) {
     }
 
     std::string ap_pass;
-#if defined(CONFIG_LUMIGRID_ENABLE_DEV_CREDENTIALS)
+#if defined(CONFIG_LUMIGRID_ENABLE_DEV_CREDENTIALS) && defined(CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS)
     ap_pass = "lumigrid123";
 #else
-    if (strlen(dev_cfg.installer_token) >= 8) {
-        ap_pass = dev_cfg.installer_token;
-    } else {
-        uint8_t mac[6] = {};
-        esp_read_mac(mac, ESP_MAC_WIFI_STA);
-        char mac_pass[32];
-        snprintf(mac_pass, sizeof(mac_pass), "lg_%02x%02x%02x%02x", mac[2], mac[3], mac[4], mac[5]);
-        ap_pass = mac_pass;
-    }
+    // LG-036: Recovery AP credential semantics.
+    // The MAC-derived passphrase "lg_<mac-fragment>" serves strictly as transitional
+    // layer-2 wireless access to reach the node during first-boot commissioning or recovery.
+    // NOTE: Recovery AP access password != node authentication boundary.
+    // Actual authorization remains strictly gated by AuthManager and physical recovery.
+    uint8_t mac[6] = {};
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    char mac_pass[32];
+    snprintf(mac_pass, sizeof(mac_pass), "lg_%02x%02x%02x%02x", mac[2], mac[3], mac[4], mac[5]);
+    ap_pass = mac_pass;
 #endif
+
 
     WifiMode target_wifi_mode = WifiMode::ApOnly;
     switch (req.desired.mode) {
@@ -1137,6 +1177,119 @@ void LumigridRuntime::execute_network_apply(const NetworkApplyRequest& req) {
     apply_state_.store(NetworkApplyState::Failed);
     pending_apply_command_id_.store(0);
     apply_in_progress_.store(false);
+}
+
+RecoveryStatus LumigridRuntime::get_recovery_status() const {
+    RecoveryStatus st{};
+    st.safe_mode = is_safe_mode();
+    st.config_valid = is_configuration_valid();
+    st.commissioning_state = auth_manager_.commissioning_state();
+    st.startup_state = static_cast<uint8_t>(startup_state_);
+    st.failing_stage = static_cast<uint8_t>(failing_stage_);
+    st.failing_error = static_cast<int32_t>(failing_error_);
+    WifiState ws = wifi_.state();
+    st.recovery_network_active = (ws == WifiState::ApActive || ws == WifiState::FallbackAp);
+    st.outputs_forced_off = !output_.output_enabled() || output_.is_estop_latched() || is_safe_mode();
+    st.ota_state = OtaBootVerifier::instance().boot_state();
+    st.restore_state = restore_state_;
+    if (configuration_first_error_[0] != '\0') {
+        std::strncpy(st.failure_reason, configuration_first_error_, sizeof(st.failure_reason) - 1);
+        st.failure_reason[sizeof(st.failure_reason) - 1] = '\0';
+    }
+    return st;
+}
+
+esp_err_t LumigridRuntime::apply_device_config(
+    const DeviceConfig& old_cfg,
+    const DeviceConfig& new_cfg,
+    const ConfigApplyPlan& plan
+) {
+    if (plan.impact == ConfigApplyImpact::None) {
+        return ESP_OK;
+    }
+
+    // 1. Output reconfigure if topology changed (pixel count, type, order, enabled channels)
+    if (plan.requires_output_reconfigure()) {
+        ESP_LOGI("lumigrid", "Output topology change detected. Reconfiguring OutputController...");
+        set_maintenance_mode(MaintenanceMode::ConfigApply);
+        output_.blackout();
+
+        esp_err_t reconf_err = output_.reconfigure(new_cfg);
+        if (reconf_err != ESP_OK) {
+            ESP_LOGE("lumigrid", "Output reconfigure failed (%s), rolling back to previous output topology", esp_err_to_name(reconf_err));
+            output_.reconfigure(old_cfg);
+            set_maintenance_mode(MaintenanceMode::None);
+            return reconf_err;
+        }
+        set_maintenance_mode(MaintenanceMode::None);
+    }
+
+    // 2. Lighting hot updates (gamma, power budget, soft-start, watchdog)
+    if (plan.requires_lighting_hot()) {
+        lighting_.reload_device_config();
+    }
+
+    // 3. DMX protocol reconfigure
+    if (plan.requires_dmx_reconfigure()) {
+        dmx_router_.update_config(new_cfg);
+        uint16_t active_unis[16];
+        size_t u_count = dmx_router_.get_active_universes(active_unis, 16);
+        uint8_t port_count = (u_count > 0 && u_count <= 4) ? static_cast<uint8_t>(u_count) : (u_count > 4 ? 4 : 0);
+        sacn_.set_subscribed_universes(active_unis, u_count);
+        artnet_.set_output_universes(active_unis, port_count);
+    }
+
+    // 4. Scheduler restart (e.g. timezone changed)
+    if (plan.requires_scheduler_restart()) {
+        if (started_subsystems_.scheduler) {
+            scheduler_.stop();
+            started_subsystems_.scheduler = false;
+        }
+        scheduler_.start(new_cfg.timezone);
+        started_subsystems_.scheduler = true;
+    }
+
+    // 5. Sync restart
+    if (plan.requires_sync_restart()) {
+        if (started_subsystems_.node_sync) {
+            node_sync_.stop(1000);
+            started_subsystems_.node_sync = false;
+        }
+        if (new_cfg.sync_enabled && !safe_mode_) {
+            esp_err_t sync_err = node_sync_.start(static_cast<NodeRole>(new_cfg.sync_role));
+            if (sync_err != ESP_OK) {
+                ESP_LOGE("lumigrid", "Sync restart failed (%s), rolling back Sync state", esp_err_to_name(sync_err));
+                if (old_cfg.sync_enabled) {
+                    node_sync_.start(static_cast<NodeRole>(old_cfg.sync_role));
+                    started_subsystems_.node_sync = true;
+                }
+                return sync_err;
+            }
+            started_subsystems_.node_sync = true;
+        }
+    }
+
+    // 6. MQTT restart
+    if (plan.requires_mqtt_restart()) {
+        if (started_subsystems_.mqtt) {
+            DiagnosticLog::instance().set_stream_callback(nullptr);
+            mqtt_.stop();
+            started_subsystems_.mqtt = false;
+        }
+        if (new_cfg.mqtt_enabled && strlen(new_cfg.mqtt_broker) > 0 && !safe_mode_) {
+            char broker_uri[128];
+            snprintf(broker_uri, sizeof(broker_uri), "mqtt://%s:%d", new_cfg.mqtt_broker, new_cfg.mqtt_port);
+            NodeIdentity id = get_node_identity(new_cfg.device_name);
+            char prefix[64];
+            snprintf(prefix, sizeof(prefix), "lumigrid/%s", id.id);
+            if (mqtt_.init(broker_uri, id.id, prefix, &lighting_) == ESP_OK) {
+                mqtt_.start();
+                started_subsystems_.mqtt = true;
+            }
+        }
+    }
+
+    return ESP_OK;
 }
 
 } // namespace lg

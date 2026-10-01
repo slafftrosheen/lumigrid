@@ -1585,7 +1585,39 @@ void ConfigStore::ensure_defaults() {
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to save default scene 1: %s", esp_err_to_name(err));
     }
+}
 
+uint32_t ConfigStore::compute_device_crc(const DeviceConfig& dc) {
+    return calc_device_crc(dc);
+}
+
+bool ConfigStore::is_restore_in_progress(uint32_t* out_checksum) {
+    if (!handle_) return false;
+    uint8_t flag = 0;
+    esp_err_t err = nvs_get_u8(handle_, "rst_prog", &flag);
+    if (err == ESP_OK && flag != 0) {
+        if (out_checksum) {
+            nvs_get_u32(handle_, "rst_crc", out_checksum);
+        }
+        return true;
+    }
+    return false;
+}
+
+esp_err_t ConfigStore::set_restore_in_progress(bool in_progress, uint32_t package_checksum) {
+    if (!handle_) return ESP_ERR_INVALID_STATE;
+    uint8_t flag = in_progress ? 1 : 0;
+    esp_err_t err = nvs_set_u8(handle_, "rst_prog", flag);
+    if (err == ESP_OK) {
+        if (in_progress) {
+            nvs_set_u32(handle_, "rst_crc", package_checksum);
+        } else {
+            nvs_erase_key(handle_, "rst_crc");
+        }
+        nvs_commit(handle_);
+    }
+    return err;
 }
 
 } // namespace lg
+

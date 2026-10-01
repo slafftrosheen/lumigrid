@@ -78,8 +78,8 @@ inline bool parse_zone_role(const char* name, ZoneRole& out) {
     if (strcmp(name, "Sign Element") == 0) { out = ZoneRole::SignElement; return true; }
     if (strcmp(name, "Ambiance Light") == 0) { out = ZoneRole::AmbianceLight; return true; }
     if (strcmp(name, "Main Light") == 0) { out = ZoneRole::MainLight; return true; }
-    out = ZoneRole::Unassigned;
-    return true;
+    if (strcmp(name, "Unassigned") == 0) { out = ZoneRole::Unassigned; return true; }
+    return false;
 }
 
 struct ChannelConfig {

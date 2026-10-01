@@ -3,6 +3,7 @@
 #include "RuntimeSnapshot.hpp"
 #include "esp_ota_ops.h"
 #include "esp_app_format.h"
+#include "OtaBootVerifier.hpp"
 #include "ApiAuth.hpp"
 #include "AuditLog.hpp"
 #include "DiagnosticLog.hpp"
@@ -3443,8 +3444,11 @@ esp_err_t get_device_config(httpd_req_t* request) {
 
     DeviceConfig cfg;
     api_ptr->config()->load_config(cfg);
+    uint32_t checksum = ConfigStore::compute_device_crc(cfg);
 
     cJSON* response = cJSON_CreateObject();
+    cJSON_AddNumberToObject(response, "schema", 3);
+    cJSON_AddNumberToObject(response, "checksum", checksum);
     cJSON_AddStringToObject(response, "deviceName", cfg.device_name);
     cJSON_AddStringToObject(response, "serialNumber", cfg.serial_number);
     cJSON_AddStringToObject(response, "hardwareRevision", cfg.hardware_revision);
@@ -3461,10 +3465,20 @@ esp_err_t get_device_config(httpd_req_t* request) {
     cJSON_AddStringToObject(response, "timezone", cfg.timezone);
     cJSON_AddBoolToObject(response, "syncEnabled", cfg.sync_enabled);
     cJSON_AddNumberToObject(response, "syncRole", cfg.sync_role);
-    cJSON_AddNumberToObject(response, "syncToken", cfg.sync_token);
+    // LG-036 §14: syncToken is strictly write-only, never returned in GET /api/v1/config
+    cJSON_AddBoolToObject(response, "syncTokenSet", cfg.sync_token != 0);
     cJSON_AddBoolToObject(response, "mqttEnabled", cfg.mqtt_enabled);
     cJSON_AddStringToObject(response, "mqttBroker", cfg.mqtt_broker);
     cJSON_AddNumberToObject(response, "mqttPort", cfg.mqtt_port);
+
+    // LG-036 §13: single source of truth for numeric limits
+    cJSON* limits = cJSON_CreateObject();
+    cJSON_AddNumberToObject(limits, "maxPowerMw", 60000);
+    cJSON_AddNumberToObject(limits, "maxPixelsPerChannel", 512);
+    cJSON_AddNumberToObject(limits, "maxGroups", 8);
+    cJSON_AddNumberToObject(limits, "maxChannels", 16);
+    cJSON_AddNumberToObject(limits, "maxDmxUniverse", 63999);
+    cJSON_AddItemToObject(response, "limits", limits);
 
     cJSON* channels = cJSON_CreateArray();
     for (uint8_t i = 0; i < 16; ++i) {
@@ -3549,6 +3563,457 @@ esp_err_t get_device_config(httpd_req_t* request) {
     return result;
 }
 
+static bool parse_and_validate_device_config(const cJSON* root, const DeviceConfig& current_cfg, DeviceConfig& out_cfg, char* err_code, size_t err_len) {
+    out_cfg = current_cfg;
+
+    #define PARSE_INT_BOUNDS(json_name, min_v, max_v, target, code_on_err) \
+    do { \
+        const cJSON* item = cJSON_GetObjectItemCaseSensitive(root, json_name); \
+        if (item) { \
+            if (!cJSON_IsNumber(item) || item->valuedouble < (min_v) || item->valuedouble > (max_v)) { \
+                snprintf(err_code, err_len, "%s", code_on_err); \
+                return false; \
+            } \
+            target = static_cast<decltype(target)>(item->valuedouble); \
+        } \
+    } while(0)
+
+    #define PARSE_STRING_BOUNDS(json_name, max_len, target, code_on_err) \
+    do { \
+        const cJSON* item = cJSON_GetObjectItemCaseSensitive(root, json_name); \
+        if (item) { \
+            if (!cJSON_IsString(item) || strlen(item->valuestring) >= (max_len)) { \
+                snprintf(err_code, err_len, "%s", code_on_err); \
+                return false; \
+            } \
+            strncpy(target, item->valuestring, (max_len) - 1); \
+            target[(max_len) - 1] = '\0'; \
+        } \
+    } while(0)
+
+    PARSE_STRING_BOUNDS("deviceName", sizeof(out_cfg.device_name), out_cfg.device_name, "invalid_field_deviceName");
+    PARSE_STRING_BOUNDS("serialNumber", sizeof(out_cfg.serial_number), out_cfg.serial_number, "invalid_field_serialNumber");
+    PARSE_STRING_BOUNDS("hardwareRevision", sizeof(out_cfg.hardware_revision), out_cfg.hardware_revision, "invalid_field_hardwareRevision");
+    PARSE_STRING_BOUNDS("siteLabel", sizeof(out_cfg.site_label), out_cfg.site_label, "invalid_field_siteLabel");
+    PARSE_STRING_BOUNDS("groupLabel", sizeof(out_cfg.group_label), out_cfg.group_label, "invalid_field_groupLabel");
+
+    const cJSON* ap = cJSON_GetObjectItemCaseSensitive(root, "activePreset");
+    if (!ap) ap = cJSON_GetObjectItemCaseSensitive(root, "activePresetIndex");
+    if (ap) {
+        if (!cJSON_IsNumber(ap) || ap->valuedouble < 0 || ap->valuedouble > (kMaxPresets - 1)) {
+            snprintf(err_code, err_len, "invalid_field_activePreset");
+            return false;
+        }
+        out_cfg.active_preset_index = static_cast<uint8_t>(ap->valueint);
+    }
+
+    const cJSON* fp = cJSON_GetObjectItemCaseSensitive(root, "fallbackPreset");
+    if (!fp) fp = cJSON_GetObjectItemCaseSensitive(root, "fallbackPresetIndex");
+    if (fp) {
+        if (!cJSON_IsNumber(fp) || fp->valuedouble < 0 || fp->valuedouble > (kMaxPresets - 1)) {
+            snprintf(err_code, err_len, "invalid_field_fallbackPreset");
+            return false;
+        }
+        out_cfg.fallback_preset_index = static_cast<uint8_t>(fp->valueint);
+    }
+
+    PARSE_INT_BOUNDS("watchdogTimeoutS", 0, 3600, out_cfg.watchdog_timeout_s, "invalid_field_watchdogTimeoutS");
+    PARSE_INT_BOUNDS("maxPowerMw", 0, 60000, out_cfg.max_power_mw, "invalid_field_maxPowerMw");
+    PARSE_INT_BOUNDS("softStartMs", 0, 5000, out_cfg.soft_start_ms, "invalid_field_softStartMs");
+
+    const cJSON* gm = cJSON_GetObjectItemCaseSensitive(root, "gamma");
+    if (!gm) gm = cJSON_GetObjectItemCaseSensitive(root, "gammaX10");
+    if (gm) {
+        if (!cJSON_IsNumber(gm)) {
+            snprintf(err_code, err_len, "invalid_field_gamma");
+            return false;
+        }
+        if (gm->valuedouble >= 10.0 && gm->valuedouble <= 30.0) {
+            out_cfg.gamma_x10 = static_cast<uint8_t>(gm->valueint);
+        } else if (gm->valuedouble >= 1.0 && gm->valuedouble <= 3.0) {
+            out_cfg.gamma_x10 = static_cast<uint8_t>(std::round(gm->valuedouble * 10.0));
+        } else {
+            snprintf(err_code, err_len, "invalid_field_gamma");
+            return false;
+        }
+    }
+
+    const cJSON* ss = cJSON_GetObjectItemCaseSensitive(root, "softStart");
+    if (!ss) ss = cJSON_GetObjectItemCaseSensitive(root, "softStartEnabled");
+    if (ss) {
+        if (!cJSON_IsBool(ss)) {
+            snprintf(err_code, err_len, "invalid_field_softStart");
+            return false;
+        }
+        out_cfg.soft_start_enabled = cJSON_IsTrue(ss);
+    }
+
+    PARSE_STRING_BOUNDS("timezone", sizeof(out_cfg.timezone), out_cfg.timezone, "invalid_field_timezone");
+
+    const cJSON* se = cJSON_GetObjectItemCaseSensitive(root, "syncEnabled");
+    if (se) {
+        if (!cJSON_IsBool(se)) {
+            snprintf(err_code, err_len, "invalid_field_syncEnabled");
+            return false;
+        }
+        out_cfg.sync_enabled = cJSON_IsTrue(se);
+    }
+
+    PARSE_INT_BOUNDS("syncRole", 0, 2, out_cfg.sync_role, "invalid_field_syncRole");
+
+    // Sync token write-only semantics (LG-036 §14)
+    const cJSON* clear_st = cJSON_GetObjectItemCaseSensitive(root, "clearSyncToken");
+    if (clear_st && cJSON_IsTrue(clear_st)) {
+        out_cfg.sync_token = 0;
+    } else {
+        const cJSON* st = cJSON_GetObjectItemCaseSensitive(root, "syncToken");
+        if (st && !cJSON_IsNull(st)) {
+            if (!cJSON_IsNumber(st) || st->valuedouble < 0 || st->valuedouble > 4294967295.0) {
+                snprintf(err_code, err_len, "invalid_field_syncToken");
+                return false;
+            }
+            out_cfg.sync_token = static_cast<uint32_t>(st->valuedouble);
+        }
+        // If omitted or null, out_cfg retains current_cfg.sync_token
+    }
+
+    const cJSON* me = cJSON_GetObjectItemCaseSensitive(root, "mqttEnabled");
+    if (me) {
+        if (!cJSON_IsBool(me)) {
+            snprintf(err_code, err_len, "invalid_field_mqttEnabled");
+            return false;
+        }
+        out_cfg.mqtt_enabled = cJSON_IsTrue(me);
+    }
+    PARSE_STRING_BOUNDS("mqttBroker", sizeof(out_cfg.mqtt_broker), out_cfg.mqtt_broker, "invalid_field_mqttBroker");
+    PARSE_INT_BOUNDS("mqttPort", 1, 65535, out_cfg.mqtt_port, "invalid_field_mqttPort");
+
+    // Channel array validation (LG-036 §9, §10)
+    const cJSON* channels_arr = cJSON_GetObjectItemCaseSensitive(root, "channels");
+    if (channels_arr) {
+        if (!cJSON_IsArray(channels_arr)) {
+            snprintf(err_code, err_len, "invalid_channels_format");
+            return false;
+        }
+        int arr_size = cJSON_GetArraySize(channels_arr);
+        if (arr_size > 16) {
+            snprintf(err_code, err_len, "too_many_channels");
+            return false;
+        }
+        int ch_idx = 0;
+        cJSON* ch_item = nullptr;
+        cJSON_ArrayForEach(ch_item, channels_arr) {
+            if (!cJSON_IsObject(ch_item)) {
+                snprintf(err_code, err_len, "invalid_channel_item");
+                return false;
+            }
+            const cJSON* name_j = cJSON_GetObjectItemCaseSensitive(ch_item, "name");
+            if (name_j) {
+                if (!cJSON_IsString(name_j) || strlen(name_j->valuestring) >= sizeof(out_cfg.channels[ch_idx].name)) {
+                    snprintf(err_code, err_len, "invalid_field_channel_name");
+                    return false;
+                }
+                strncpy(out_cfg.channels[ch_idx].name, name_j->valuestring, sizeof(out_cfg.channels[ch_idx].name) - 1);
+                out_cfg.channels[ch_idx].name[sizeof(out_cfg.channels[ch_idx].name) - 1] = '\0';
+            }
+            const cJSON* en_j = cJSON_GetObjectItemCaseSensitive(ch_item, "enabled");
+            if (en_j) {
+                if (!cJSON_IsBool(en_j)) {
+                    snprintf(err_code, err_len, "invalid_field_channel_enabled");
+                    return false;
+                }
+                out_cfg.channels[ch_idx].enabled = cJSON_IsTrue(en_j);
+            }
+            const cJSON* mb_j = cJSON_GetObjectItemCaseSensitive(ch_item, "maxBrightness");
+            if (mb_j) {
+                if (!cJSON_IsNumber(mb_j) || mb_j->valuedouble < 0 || mb_j->valuedouble > 255) {
+                    snprintf(err_code, err_len, "invalid_field_maxBrightness");
+                    return false;
+                }
+                out_cfg.channels[ch_idx].max_brightness = static_cast<uint8_t>(mb_j->valueint);
+            }
+            const cJSON* gc_j = cJSON_GetObjectItemCaseSensitive(ch_item, "gammaCorrection");
+            if (gc_j) {
+                if (!cJSON_IsBool(gc_j)) {
+                    snprintf(err_code, err_len, "invalid_field_gammaCorrection");
+                    return false;
+                }
+                out_cfg.channels[ch_idx].gamma_correction = cJSON_IsTrue(gc_j);
+            }
+            const cJSON* mw_j = cJSON_GetObjectItemCaseSensitive(ch_item, "maxMilliwatts");
+            if (mw_j) {
+                if (!cJSON_IsNumber(mw_j) || mw_j->valuedouble < 0 || mw_j->valuedouble > 60000) {
+                    snprintf(err_code, err_len, "invalid_field_maxMilliwatts");
+                    return false;
+                }
+                out_cfg.channels[ch_idx].max_milliwatts = static_cast<uint16_t>(mw_j->valueint);
+            }
+            const cJSON* du_j = cJSON_GetObjectItemCaseSensitive(ch_item, "dmxUniverse");
+            if (du_j) {
+                if (!cJSON_IsNumber(du_j) || du_j->valuedouble < 0 || du_j->valuedouble > 63999) {
+                    snprintf(err_code, err_len, "invalid_field_dmxUniverse");
+                    return false;
+                }
+                out_cfg.channels[ch_idx].dmx_universe = static_cast<uint16_t>(du_j->valueint);
+            }
+            const cJSON* ds_j = cJSON_GetObjectItemCaseSensitive(ch_item, "dmxStartChannel");
+            if (ds_j) {
+                if (!cJSON_IsNumber(ds_j) || ds_j->valuedouble < 0 || ds_j->valuedouble > 512) {
+                    snprintf(err_code, err_len, "invalid_field_dmxStartChannel");
+                    return false;
+                }
+                out_cfg.channels[ch_idx].dmx_start_channel = static_cast<uint16_t>(ds_j->valueint);
+            }
+            const cJSON* dm_j = cJSON_GetObjectItemCaseSensitive(ch_item, "dmxMode");
+            if (dm_j) {
+                if (!cJSON_IsNumber(dm_j) || dm_j->valuedouble < 0 || dm_j->valuedouble > 2) {
+                    snprintf(err_code, err_len, "invalid_field_dmxMode");
+                    return false;
+                }
+                out_cfg.channels[ch_idx].dmx_mode = static_cast<uint8_t>(dm_j->valueint);
+            }
+
+            // Addressable configuration for channels 0..7 (A1..A8)
+            const cJSON* addr_obj = cJSON_GetObjectItemCaseSensitive(ch_item, "addressable");
+            const cJSON* src_addr = addr_obj ? addr_obj : ch_item;
+            const cJSON* atype_j = cJSON_GetObjectItemCaseSensitive(src_addr, "type");
+            if (!atype_j) atype_j = cJSON_GetObjectItemCaseSensitive(src_addr, "addressableType");
+            if (atype_j) {
+                if (ch_idx < 8) {
+                    if (cJSON_IsString(atype_j)) {
+                        if (strcmp(atype_j->valuestring, "SK6812") == 0) out_cfg.channels[ch_idx].addressable_type = AddressableType::SK6812;
+                        else if (strcmp(atype_j->valuestring, "WS2812") == 0) out_cfg.channels[ch_idx].addressable_type = AddressableType::WS2812;
+                        else {
+                            snprintf(err_code, err_len, "invalid_field_addressableType");
+                            return false;
+                        }
+                    } else if (cJSON_IsNumber(atype_j) && (atype_j->valueint == 0 || atype_j->valueint == 1)) {
+                        out_cfg.channels[ch_idx].addressable_type = static_cast<AddressableType>(atype_j->valueint);
+                    } else {
+                        snprintf(err_code, err_len, "invalid_field_addressableType");
+                        return false;
+                    }
+                }
+            }
+            const cJSON* px_j = cJSON_GetObjectItemCaseSensitive(src_addr, "pixels");
+            if (!px_j) px_j = cJSON_GetObjectItemCaseSensitive(src_addr, "pixelCount");
+            if (px_j) {
+                if (ch_idx < 8) {
+                    if (!cJSON_IsNumber(px_j) || px_j->valuedouble < 0 || px_j->valuedouble > MAX_PIXELS) {
+                        snprintf(err_code, err_len, "invalid_field_pixelCount");
+                        return false;
+                    }
+                    out_cfg.channels[ch_idx].pixel_count = static_cast<uint16_t>(px_j->valueint);
+                }
+            }
+            const cJSON* po_j = cJSON_GetObjectItemCaseSensitive(src_addr, "pixelOrder");
+            if (po_j) {
+                if (ch_idx < 8) {
+                    if (cJSON_IsNumber(po_j)) {
+                        if (po_j->valueint < 0 || po_j->valueint > 3) {
+                            snprintf(err_code, err_len, "invalid_field_pixelOrder");
+                            return false;
+                        }
+                        out_cfg.channels[ch_idx].pixel_order = static_cast<PixelOrder>(po_j->valueint);
+                    } else if (cJSON_IsString(po_j)) {
+                        if (!parse_pixel_order(po_j->valuestring, out_cfg.channels[ch_idx].pixel_order)) {
+                            snprintf(err_code, err_len, "invalid_field_pixelOrder");
+                            return false;
+                        }
+                    } else {
+                        snprintf(err_code, err_len, "invalid_field_pixelOrder");
+                        return false;
+                    }
+                }
+            }
+
+            ++ch_idx;
+        }
+    }
+
+    // Groups array validation (LG-036 §10, §12)
+    const cJSON* groups_arr = cJSON_GetObjectItemCaseSensitive(root, "groups");
+    if (groups_arr) {
+        if (!cJSON_IsArray(groups_arr)) {
+            snprintf(err_code, err_len, "invalid_groups_format");
+            return false;
+        }
+        int arr_size = cJSON_GetArraySize(groups_arr);
+        if (arr_size > 8) {
+            snprintf(err_code, err_len, "too_many_groups");
+            return false;
+        }
+        int g_idx = 0;
+        cJSON* g_item = nullptr;
+        cJSON_ArrayForEach(g_item, groups_arr) {
+            if (!cJSON_IsObject(g_item)) {
+                snprintf(err_code, err_len, "invalid_group_item");
+                return false;
+            }
+            const cJSON* name_j = cJSON_GetObjectItemCaseSensitive(g_item, "name");
+            if (name_j) {
+                if (!cJSON_IsString(name_j) || strlen(name_j->valuestring) >= sizeof(out_cfg.groups[g_idx].name)) {
+                    snprintf(err_code, err_len, "invalid_field_group_name");
+                    return false;
+                }
+                strncpy(out_cfg.groups[g_idx].name, name_j->valuestring, sizeof(out_cfg.groups[g_idx].name) - 1);
+                out_cfg.groups[g_idx].name[sizeof(out_cfg.groups[g_idx].name) - 1] = '\0';
+            }
+            const cJSON* mask_j = cJSON_GetObjectItemCaseSensitive(g_item, "channelMask");
+            if (mask_j) {
+                if (!cJSON_IsNumber(mask_j) || mask_j->valuedouble < 0 || mask_j->valuedouble > 0xFFFF) {
+                    snprintf(err_code, err_len, "invalid_field_channelMask");
+                    return false;
+                }
+                out_cfg.groups[g_idx].channel_mask = static_cast<uint16_t>(mask_j->valueint);
+            }
+            const cJSON* en_j = cJSON_GetObjectItemCaseSensitive(g_item, "enabled");
+            if (en_j) {
+                if (!cJSON_IsBool(en_j)) {
+                    snprintf(err_code, err_len, "invalid_field_group_enabled");
+                    return false;
+                }
+                out_cfg.groups[g_idx].enabled = cJSON_IsTrue(en_j);
+            }
+            const cJSON* role_j = cJSON_GetObjectItemCaseSensitive(g_item, "role");
+            if (role_j) {
+                if (cJSON_IsString(role_j)) {
+                    if (!parse_zone_role(role_j->valuestring, out_cfg.groups[g_idx].role)) {
+                        snprintf(err_code, err_len, "invalid_field_group_role");
+                        return false;
+                    }
+                } else if (cJSON_IsNumber(role_j)) {
+                    if (role_j->valueint < 0 || role_j->valueint > 4) {
+                        snprintf(err_code, err_len, "invalid_field_group_role");
+                        return false;
+                    }
+                    out_cfg.groups[g_idx].role = static_cast<ZoneRole>(role_j->valueint);
+                } else {
+                    snprintf(err_code, err_len, "invalid_field_group_role");
+                    return false;
+                }
+            }
+            ++g_idx;
+        }
+    }
+
+    // Protocol config validation (LG-036 §11)
+    const cJSON* prot = cJSON_GetObjectItemCaseSensitive(root, "protocol");
+    if (prot) {
+        if (!cJSON_IsObject(prot)) {
+            snprintf(err_code, err_len, "invalid_protocol_format");
+            return false;
+        }
+        const cJSON* item = cJSON_GetObjectItemCaseSensitive(prot, "artnetEnabled");
+        if (item) {
+            if (!cJSON_IsBool(item)) { snprintf(err_code, err_len, "invalid_field_artnetEnabled"); return false; }
+            out_cfg.protocol.artnet_enabled = cJSON_IsTrue(item);
+        }
+        item = cJSON_GetObjectItemCaseSensitive(prot, "sacnEnabled");
+        if (item) {
+            if (!cJSON_IsBool(item)) { snprintf(err_code, err_len, "invalid_field_sacnEnabled"); return false; }
+            out_cfg.protocol.sacn_enabled = cJSON_IsTrue(item);
+        }
+        item = cJSON_GetObjectItemCaseSensitive(prot, "universeStart");
+        if (item) {
+            if (!cJSON_IsNumber(item) || item->valuedouble < 0 || item->valuedouble > 63999) {
+                snprintf(err_code, err_len, "invalid_field_universeStart");
+                return false;
+            }
+            out_cfg.protocol.universe_start = static_cast<uint16_t>(item->valueint);
+        }
+        item = cJSON_GetObjectItemCaseSensitive(prot, "mergeMode");
+        if (item) {
+            if (!cJSON_IsString(item)) { snprintf(err_code, err_len, "invalid_field_mergeMode"); return false; }
+            if (strcmp(item->valuestring, "LTP") == 0) out_cfg.protocol.merge_mode = MergeMode::LTP;
+            else if (strcmp(item->valuestring, "HTP") == 0) out_cfg.protocol.merge_mode = MergeMode::HTP;
+            else { snprintf(err_code, err_len, "invalid_field_mergeMode"); return false; }
+        }
+        item = cJSON_GetObjectItemCaseSensitive(prot, "streamTimeoutMs");
+        if (item) {
+            if (!cJSON_IsNumber(item) || item->valuedouble < 100 || item->valuedouble > 60000) {
+                snprintf(err_code, err_len, "invalid_field_streamTimeoutMs");
+                return false;
+            }
+            out_cfg.protocol.stream_timeout_ms = static_cast<uint16_t>(item->valueint);
+        }
+        item = cJSON_GetObjectItemCaseSensitive(prot, "liveStreamLayer");
+        if (item) {
+            if (!cJSON_IsNumber(item) || item->valuedouble < 0 || item->valuedouble > 2) {
+                snprintf(err_code, err_len, "invalid_field_liveStreamLayer");
+                return false;
+            }
+            out_cfg.protocol.live_stream_layer = static_cast<uint8_t>(item->valueint);
+        }
+        item = cJSON_GetObjectItemCaseSensitive(prot, "zoneStartChannel");
+        if (item) {
+            if (!cJSON_IsNumber(item) || item->valuedouble < 0 || item->valuedouble > 512) {
+                snprintf(err_code, err_len, "invalid_field_zoneStartChannel");
+                return false;
+            }
+            out_cfg.protocol.zone_start_channel = static_cast<uint16_t>(item->valueint);
+        }
+    }
+
+    #undef PARSE_INT_BOUNDS
+    #undef PARSE_STRING_BOUNDS
+    return true;
+}
+
+esp_err_t post_config_validate(httpd_req_t* request) {
+    if (!api::authorize(request, api::ApiRole::Admin)) return ESP_OK;
+
+    FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+    if (!api_ptr->config()) return send_error(request, "503 Service Unavailable", "config_not_ready");
+
+    cJSON* root = nullptr;
+    if (read_json(request, &root) != ESP_OK) {
+        return send_error(request, "400 Bad Request", "invalid_json");
+    }
+
+    DeviceConfig current_cfg{};
+    api_ptr->config()->load_config(current_cfg);
+    uint32_t current_crc = ConfigStore::compute_device_crc(current_cfg);
+
+    DeviceConfig candidate_cfg{};
+    char err_buf[64] = "";
+    if (!parse_and_validate_device_config(root, current_cfg, candidate_cfg, err_buf, sizeof(err_buf))) {
+        cJSON_Delete(root);
+        cJSON* err_resp = cJSON_CreateObject();
+        cJSON_AddBoolToObject(err_resp, "valid", false);
+        cJSON_AddStringToObject(err_resp, "error", err_buf);
+        return send_error_json(request, "400 Bad Request", err_resp);
+    }
+
+    ConfigApplyPlan plan = diff_device_config(current_cfg, candidate_cfg);
+    cJSON_Delete(root);
+
+    cJSON* resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "valid", true);
+    cJSON_AddNumberToObject(resp, "currentChecksum", current_crc);
+
+    cJSON* impact = cJSON_CreateObject();
+    cJSON_AddBoolToObject(impact, "hotApply", (plan.impact == ConfigApplyImpact::None || plan.impact == ConfigApplyImpact::Metadata || plan.impact == ConfigApplyImpact::LightingHot));
+    cJSON_AddBoolToObject(impact, "outputRestart", plan.requires_output_reconfigure());
+    cJSON_AddBoolToObject(impact, "dmxRestart", plan.requires_dmx_reconfigure());
+    cJSON_AddBoolToObject(impact, "syncRestart", plan.requires_sync_restart());
+    cJSON_AddBoolToObject(impact, "schedulerRestart", plan.requires_scheduler_restart());
+    cJSON_AddBoolToObject(impact, "mqttRestart", plan.requires_mqtt_restart());
+    cJSON_AddBoolToObject(impact, "rebootRequired", false);
+    cJSON_AddItemToObject(resp, "impact", impact);
+
+    cJSON* warnings = cJSON_CreateArray();
+    if (candidate_cfg.max_power_mw == 0) {
+        cJSON_AddItemToArray(warnings, cJSON_CreateString("no_power_limit_configured"));
+    }
+    if (!api_ptr->config()->scene_exists(candidate_cfg.fallback_preset_index)) {
+        cJSON_AddItemToArray(warnings, cJSON_CreateString("fallback_scene_not_found"));
+    }
+    cJSON_AddItemToObject(resp, "warnings", warnings);
+
+    return send_json(request, resp);
+}
+
 esp_err_t put_device_config(httpd_req_t* request) {
     if (!api::authorize(request, api::ApiRole::Admin)) return ESP_OK;
 
@@ -3560,284 +4025,80 @@ esp_err_t put_device_config(httpd_req_t* request) {
         return send_error(request, "400 Bad Request", "invalid_json");
     }
 
-#define VALIDATE_U8(field, min, max, target) \
-    do { \
-        const cJSON* v = cJSON_GetObjectItemCaseSensitive(root, field); \
-        if (v) { \
-            if (!cJSON_IsNumber(v) || v->valuedouble < (min) || v->valuedouble > (max)) { \
-                cJSON_Delete(root); \
-                return send_error(request, "400 Bad Request", "invalid_field_" field); \
-            } \
-            target = static_cast<uint8_t>(v->valueint); \
-        } \
-    } while(0)
+    DeviceConfig old_cfg{};
+    api_ptr->config()->load_config(old_cfg);
+    uint32_t current_crc = ConfigStore::compute_device_crc(old_cfg);
 
-#define VALIDATE_U16(field, min, max, target) \
-    do { \
-        const cJSON* v = cJSON_GetObjectItemCaseSensitive(root, field); \
-        if (v) { \
-            if (!cJSON_IsNumber(v) || v->valuedouble < (min) || v->valuedouble > (max)) { \
-                cJSON_Delete(root); \
-                return send_error(request, "400 Bad Request", "invalid_field_" field); \
-            } \
-            target = static_cast<uint16_t>(v->valueint); \
-        } \
-    } while(0)
-
-#define VALIDATE_STRING(field, max_len, target) \
-    do { \
-        const cJSON* v = cJSON_GetObjectItemCaseSensitive(root, field); \
-        if (v) { \
-            if (!cJSON_IsString(v) || strlen(v->valuestring) >= (max_len)) { \
-                cJSON_Delete(root); \
-                return send_error(request, "400 Bad Request", "invalid_field_" field); \
-            } \
-            strncpy(target, v->valuestring, (max_len) - 1); \
-            target[(max_len) - 1] = '\0'; \
-        } \
-    } while(0)
-
-    DeviceConfig cfg;
-    api_ptr->config()->load_config(cfg);
-    DeviceConfig old_cfg = cfg;
-
-    VALIDATE_STRING("deviceName", sizeof(cfg.device_name), cfg.device_name);
-    VALIDATE_STRING("serialNumber", sizeof(cfg.serial_number), cfg.serial_number);
-    VALIDATE_STRING("hardwareRevision", sizeof(cfg.hardware_revision), cfg.hardware_revision);
-    VALIDATE_STRING("siteLabel", sizeof(cfg.site_label), cfg.site_label);
-    VALIDATE_STRING("groupLabel", sizeof(cfg.group_label), cfg.group_label);
-
-    const cJSON* ap = cJSON_GetObjectItemCaseSensitive(root, "activePreset");
-    if (!ap) ap = cJSON_GetObjectItemCaseSensitive(root, "activePresetIndex");
-    if (ap) {
-        if (!cJSON_IsNumber(ap) || ap->valuedouble < 0 || ap->valuedouble > (kMaxPresets - 1)) {
+    const cJSON* exp = cJSON_GetObjectItemCaseSensitive(root, "expectedChecksum");
+    if (exp && cJSON_IsNumber(exp)) {
+        uint32_t expected = static_cast<uint32_t>(exp->valuedouble);
+        if (expected != current_crc) {
             cJSON_Delete(root);
-            return send_error(request, "400 Bad Request", "invalid_field_activePreset");
-        }
-        cfg.active_preset_index = static_cast<uint8_t>(ap->valueint);
-    }
-
-    const cJSON* fp = cJSON_GetObjectItemCaseSensitive(root, "fallbackPreset");
-    if (!fp) fp = cJSON_GetObjectItemCaseSensitive(root, "fallbackPresetIndex");
-    if (fp) {
-        if (!cJSON_IsNumber(fp) || fp->valuedouble < 0 || fp->valuedouble > (kMaxPresets - 1)) {
-            cJSON_Delete(root);
-            return send_error(request, "400 Bad Request", "invalid_field_fallbackPreset");
-        }
-        cfg.fallback_preset_index = static_cast<uint8_t>(fp->valueint);
-    }
-
-    VALIDATE_U16("watchdogTimeoutS", 0, 3600, cfg.watchdog_timeout_s);
-    VALIDATE_U16("maxPowerMw", 0, 60000, cfg.max_power_mw);
-    VALIDATE_U16("softStartMs", 0, 5000, cfg.soft_start_ms);
-
-    const cJSON* gm = cJSON_GetObjectItemCaseSensitive(root, "gamma");
-    if (!gm) gm = cJSON_GetObjectItemCaseSensitive(root, "gammaX10");
-    if (gm) {
-        if (!cJSON_IsNumber(gm)) {
-            cJSON_Delete(root);
-            return send_error(request, "400 Bad Request", "invalid_field_gamma");
-        }
-        if (gm->valuedouble >= 10.0 && gm->valuedouble <= 30.0) {
-            cfg.gamma_x10 = static_cast<uint8_t>(gm->valueint);
-        } else if (gm->valuedouble >= 1.0 && gm->valuedouble <= 3.0) {
-            cfg.gamma_x10 = static_cast<uint8_t>(std::round(gm->valuedouble * 10.0));
+            cJSON* conflict = cJSON_CreateObject();
+            cJSON_AddStringToObject(conflict, "error", "config_conflict");
+            cJSON_AddNumberToObject(conflict, "currentChecksum", current_crc);
+            return send_error_json(request, "409 Conflict", conflict);
         }
     }
 
-    const cJSON* ss = cJSON_GetObjectItemCaseSensitive(root, "softStart");
-    if (!ss) ss = cJSON_GetObjectItemCaseSensitive(root, "softStartEnabled");
-    if (ss) {
-        if (!cJSON_IsBool(ss)) {
-            cJSON_Delete(root);
-            return send_error(request, "400 Bad Request", "invalid_field_softStart");
-        }
-        cfg.soft_start_enabled = cJSON_IsTrue(ss);
+    DeviceConfig candidate_cfg{};
+    char err_buf[64] = "";
+    if (!parse_and_validate_device_config(root, old_cfg, candidate_cfg, err_buf, sizeof(err_buf))) {
+        cJSON_Delete(root);
+        return send_error(request, "400 Bad Request", err_buf);
     }
-
-    VALIDATE_STRING("timezone", sizeof(cfg.timezone), cfg.timezone);
-
-    const cJSON* se = cJSON_GetObjectItemCaseSensitive(root, "syncEnabled");
-    if (se) {
-        if (!cJSON_IsBool(se)) {
-            cJSON_Delete(root);
-            return send_error(request, "400 Bad Request", "invalid_field_syncEnabled");
-        }
-        cfg.sync_enabled = cJSON_IsTrue(se);
-    }
-
-    const cJSON* me = cJSON_GetObjectItemCaseSensitive(root, "mqttEnabled");
-    if (me) {
-        if (!cJSON_IsBool(me)) {
-            cJSON_Delete(root);
-            return send_error(request, "400 Bad Request", "invalid_field_mqttEnabled");
-        }
-        cfg.mqtt_enabled = cJSON_IsTrue(me);
-    }
-
-    VALIDATE_STRING("mqttBroker", sizeof(cfg.mqtt_broker), cfg.mqtt_broker);
-    VALIDATE_U16("mqttPort", 1, 65535, cfg.mqtt_port);
-
-    VALIDATE_U8("syncRole", 0, 2, cfg.sync_role);
-
-    const cJSON* st = cJSON_GetObjectItemCaseSensitive(root, "syncToken");
-    if (st) {
-        if (!cJSON_IsNumber(st) || st->valuedouble < 0 || st->valuedouble > 4294967295.0) {
-            cJSON_Delete(root);
-            return send_error(request, "400 Bad Request", "invalid_field_syncToken");
-        }
-        cfg.sync_token = static_cast<uint32_t>(st->valuedouble);
-    }
-
-    const cJSON* channels_arr = cJSON_GetObjectItemCaseSensitive(root, "channels");
-    if (channels_arr && cJSON_IsArray(channels_arr)) {
-        int ch_idx = 0;
-        cJSON* ch_item = nullptr;
-        cJSON_ArrayForEach(ch_item, channels_arr) {
-            if (ch_idx >= 16) break;
-            const cJSON* name_j = cJSON_GetObjectItemCaseSensitive(ch_item, "name");
-            if (name_j && cJSON_IsString(name_j)) {
-                strncpy(cfg.channels[ch_idx].name, name_j->valuestring, sizeof(cfg.channels[ch_idx].name) - 1);
-                cfg.channels[ch_idx].name[sizeof(cfg.channels[ch_idx].name) - 1] = '\0';
-            }
-            const cJSON* en_j = cJSON_GetObjectItemCaseSensitive(ch_item, "enabled");
-            if (en_j && cJSON_IsBool(en_j)) cfg.channels[ch_idx].enabled = cJSON_IsTrue(en_j);
-
-            const cJSON* mb_j = cJSON_GetObjectItemCaseSensitive(ch_item, "maxBrightness");
-            if (mb_j && cJSON_IsNumber(mb_j)) cfg.channels[ch_idx].max_brightness = static_cast<uint8_t>(mb_j->valueint);
-
-            const cJSON* gc_j = cJSON_GetObjectItemCaseSensitive(ch_item, "gammaCorrection");
-            if (gc_j && cJSON_IsBool(gc_j)) cfg.channels[ch_idx].gamma_correction = cJSON_IsTrue(gc_j);
-
-            const cJSON* mw_j = cJSON_GetObjectItemCaseSensitive(ch_item, "maxMilliwatts");
-            if (mw_j && cJSON_IsNumber(mw_j)) cfg.channels[ch_idx].max_milliwatts = static_cast<uint16_t>(mw_j->valueint);
-
-            const cJSON* du_j = cJSON_GetObjectItemCaseSensitive(ch_item, "dmxUniverse");
-            if (du_j && cJSON_IsNumber(du_j)) cfg.channels[ch_idx].dmx_universe = static_cast<uint16_t>(du_j->valueint);
-
-            const cJSON* ds_j = cJSON_GetObjectItemCaseSensitive(ch_item, "dmxStartChannel");
-            if (ds_j && cJSON_IsNumber(ds_j)) cfg.channels[ch_idx].dmx_start_channel = static_cast<uint16_t>(ds_j->valueint);
-
-            const cJSON* dm_j = cJSON_GetObjectItemCaseSensitive(ch_item, "dmxMode");
-            if (dm_j && cJSON_IsNumber(dm_j)) cfg.channels[ch_idx].dmx_mode = static_cast<uint8_t>(dm_j->valueint);
-
-            const cJSON* addr_obj = cJSON_GetObjectItemCaseSensitive(ch_item, "addressable");
-            const cJSON* src_addr = addr_obj ? addr_obj : ch_item;
-            const cJSON* atype_j = cJSON_GetObjectItemCaseSensitive(src_addr, "type");
-            if (!atype_j) atype_j = cJSON_GetObjectItemCaseSensitive(src_addr, "addressableType");
-            if (atype_j) {
-                if (cJSON_IsString(atype_j)) {
-                    cfg.channels[ch_idx].addressable_type = (strcmp(atype_j->valuestring, "SK6812") == 0) ? AddressableType::SK6812 : AddressableType::WS2812;
-                } else if (cJSON_IsNumber(atype_j)) {
-                    cfg.channels[ch_idx].addressable_type = static_cast<AddressableType>(atype_j->valueint);
-                }
-            }
-            const cJSON* px_j = cJSON_GetObjectItemCaseSensitive(src_addr, "pixels");
-            if (!px_j) px_j = cJSON_GetObjectItemCaseSensitive(src_addr, "pixelCount");
-            if (px_j && cJSON_IsNumber(px_j)) {
-                cfg.channels[ch_idx].pixel_count = static_cast<uint16_t>(std::min(px_j->valueint, static_cast<int>(MAX_PIXELS)));
-            }
-            const cJSON* po_j = cJSON_GetObjectItemCaseSensitive(src_addr, "pixelOrder");
-            if (po_j) {
-                if (cJSON_IsNumber(po_j)) cfg.channels[ch_idx].pixel_order = static_cast<PixelOrder>(po_j->valueint);
-                else if (cJSON_IsString(po_j)) parse_pixel_order(po_j->valuestring, cfg.channels[ch_idx].pixel_order);
-            }
-
-            ++ch_idx;
-        }
-    }
-
-    const cJSON* groups_arr = cJSON_GetObjectItemCaseSensitive(root, "groups");
-    if (groups_arr && cJSON_IsArray(groups_arr)) {
-        int g_idx = 0;
-        cJSON* g_item = nullptr;
-        cJSON_ArrayForEach(g_item, groups_arr) {
-            if (g_idx >= 8) break;
-            const cJSON* name_j = cJSON_GetObjectItemCaseSensitive(g_item, "name");
-            if (name_j && cJSON_IsString(name_j)) {
-                strncpy(cfg.groups[g_idx].name, name_j->valuestring, sizeof(cfg.groups[g_idx].name) - 1);
-                cfg.groups[g_idx].name[sizeof(cfg.groups[g_idx].name) - 1] = '\0';
-            }
-            const cJSON* mask_j = cJSON_GetObjectItemCaseSensitive(g_item, "channelMask");
-            if (mask_j && cJSON_IsNumber(mask_j)) cfg.groups[g_idx].channel_mask = static_cast<uint16_t>(mask_j->valueint);
-
-            const cJSON* en_j = cJSON_GetObjectItemCaseSensitive(g_item, "enabled");
-            if (en_j && cJSON_IsBool(en_j)) cfg.groups[g_idx].enabled = cJSON_IsTrue(en_j);
-
-            const cJSON* role_j = cJSON_GetObjectItemCaseSensitive(g_item, "role");
-            if (role_j && cJSON_IsString(role_j)) parse_zone_role(role_j->valuestring, cfg.groups[g_idx].role);
-
-            ++g_idx;
-        }
-    }
-
-    const cJSON* prot = cJSON_GetObjectItemCaseSensitive(root, "protocol");
-    if (prot && cJSON_IsObject(prot)) {
-        const cJSON* item = cJSON_GetObjectItemCaseSensitive(prot, "artnetEnabled");
-        if (item && cJSON_IsBool(item)) cfg.protocol.artnet_enabled = cJSON_IsTrue(item);
-
-        item = cJSON_GetObjectItemCaseSensitive(prot, "sacnEnabled");
-        if (item && cJSON_IsBool(item)) cfg.protocol.sacn_enabled = cJSON_IsTrue(item);
-
-        item = cJSON_GetObjectItemCaseSensitive(prot, "universeStart");
-        if (item && cJSON_IsNumber(item)) cfg.protocol.universe_start = static_cast<uint16_t>(item->valueint);
-
-        item = cJSON_GetObjectItemCaseSensitive(prot, "mergeMode");
-        if (item && cJSON_IsString(item)) {
-            if (strcmp(item->valuestring, "LTP") == 0) cfg.protocol.merge_mode = MergeMode::LTP;
-            else cfg.protocol.merge_mode = MergeMode::HTP;
-        }
-
-        item = cJSON_GetObjectItemCaseSensitive(prot, "streamTimeoutMs");
-        if (item && cJSON_IsNumber(item)) cfg.protocol.stream_timeout_ms = static_cast<uint16_t>(item->valueint);
-
-        item = cJSON_GetObjectItemCaseSensitive(prot, "liveStreamLayer");
-        if (item && cJSON_IsNumber(item)) cfg.protocol.live_stream_layer = static_cast<uint8_t>(item->valueint);
-
-        item = cJSON_GetObjectItemCaseSensitive(prot, "zoneStartChannel");
-        if (item && cJSON_IsNumber(item)) cfg.protocol.zone_start_channel = static_cast<uint16_t>(item->valueint);
-    }
-#undef VALIDATE_U8
-#undef VALIDATE_U16
-#undef VALIDATE_STRING
-
     cJSON_Delete(root);
 
+    ConfigApplyPlan plan = diff_device_config(old_cfg, candidate_cfg);
     uint32_t cmd_id = api_ptr->command_journal().accept(CommandDomain::Config);
-    if (api_ptr->config()->save_config(cfg) != ESP_OK) {
-        api_ptr->command_journal().failed(cmd_id, ESP_ERR_NVS_NOT_FOUND);
-        return send_error(request, "500 Internal Server Error", "nvs_write_failed");
-    }
 
-    bool sync_changed = (old_cfg.sync_enabled != cfg.sync_enabled) ||
-                        (old_cfg.sync_role != cfg.sync_role) ||
-                        (old_cfg.sync_token != cfg.sync_token);
-    if (sync_changed && api_ptr->config_apply_callback()) {
-        const auto apply_err = api_ptr->config_apply_callback()(old_cfg, cfg);
+    // Apply candidate to runtime first (LG-036 §18, §19)
+    if (api_ptr->runtime_apply_func()) {
+        esp_err_t apply_err = api_ptr->runtime_apply_func()(old_cfg, candidate_cfg, plan);
         if (apply_err != ESP_OK) {
-            api_ptr->config()->save_config(old_cfg);
-            const auto rollback_err = api_ptr->config_apply_callback()(cfg, old_cfg);
-            if (rollback_err != ESP_OK) {
-                api::AuditLog::instance().log(api::ApiRole::Admin, "sync_reconfig_rollback_failed", "Sync reconfig rollback failed");
-                api_ptr->command_journal().failed(cmd_id, rollback_err);
-                return send_error(request, "500 Internal Server Error", "sync_reconfig_rollback_failed");
-            }
-            api::AuditLog::instance().log(api::ApiRole::Admin, "sync_reconfig_failed", "Sync reconfig failed, rolled back");
+            api_ptr->runtime_apply_func()(candidate_cfg, old_cfg, plan); // rollback
+            api_ptr->command_journal().failed(cmd_id, apply_err);
+            api::AuditLog::instance().log(api::ApiRole::Admin, "config_apply_failed", "Runtime apply failed, rolled back");
+            return send_error(request, "500 Internal Server Error", "config_apply_failed");
+        }
+    } else if (api_ptr->config_apply_callback()) {
+        esp_err_t apply_err = api_ptr->config_apply_callback()(old_cfg, candidate_cfg);
+        if (apply_err != ESP_OK) {
+            api_ptr->config_apply_callback()(candidate_cfg, old_cfg);
             api_ptr->command_journal().failed(cmd_id, apply_err);
             return send_error(request, "500 Internal Server Error", "sync_reconfig_failed");
         }
     }
 
-    if (api_ptr->signage()) {
-        api_ptr->signage()->reload_device_config();
+    // Runtime apply succeeded, now persist candidate (LG-036 §18)
+    esp_err_t save_err = api_ptr->config()->save_config(candidate_cfg);
+    if (save_err != ESP_OK) {
+        // Rollback runtime to old_cfg!
+        if (api_ptr->runtime_apply_func()) {
+            api_ptr->runtime_apply_func()(candidate_cfg, old_cfg, plan);
+        } else if (api_ptr->config_apply_callback()) {
+            api_ptr->config_apply_callback()(candidate_cfg, old_cfg);
+        }
+        api_ptr->command_journal().failed(cmd_id, save_err);
+        api::AuditLog::instance().log(api::ApiRole::Admin, "config_persist_failed", "Persistence failed, runtime rolled back");
+        return send_error(request, "500 Internal Server Error", "nvs_write_failed");
     }
-    
+
+    // Read back and verify checksum
+    DeviceConfig verified_cfg{};
+    api_ptr->config()->load_config(verified_cfg);
+    uint32_t resulting_crc = ConfigStore::compute_device_crc(verified_cfg);
+
     api_ptr->command_journal().applied(cmd_id);
     api_ptr->notify_status_async();
+    api::AuditLog::instance().log(api::ApiRole::Admin, "config_apply", "Config updated");
 
-    api::AuditLog::instance().log(api::ApiRole::Admin, "device_config", "Config updated");
-    char resp[96];
-    snprintf(resp, sizeof(resp), "{\"saved\":true,\"accepted\":true,\"commandId\":%" PRIu32 "}", cmd_id);
+    cJSON* resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "accepted", true);
+    cJSON_AddBoolToObject(resp, "saved", true);
+    cJSON_AddNumberToObject(resp, "commandId", cmd_id);
+    cJSON_AddNumberToObject(resp, "checksum", resulting_crc);
+    cJSON_AddStringToObject(resp, "apply", plan.requires_output_reconfigure() ? "output_reconfigure" : (plan.impact == ConfigApplyImpact::None ? "none" : "hot"));
     return send_json(request, resp);
 }
 
@@ -5067,6 +5328,31 @@ esp_err_t post_ota(httpd_req_t* request) {
     if (!api::authorize(request, api::ApiRole::Admin)) return ESP_OK;
 
     FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+
+    if (api_ptr->current_maintenance_mode() != MaintenanceMode::None) {
+        return send_error(request, "409 Conflict", "maintenance_job_active");
+    }
+
+    if (request->content_len <= 0) {
+        return send_error(request, "400 Bad Request", "empty_payload");
+    }
+
+    const esp_partition_t* update_partition = esp_ota_get_next_update_partition(nullptr);
+    if (!update_partition) {
+        return send_error(request, "500 Internal Server Error", "No OTA partition found");
+    }
+
+    // Validate OTA request size before writing (§51)
+    if (request->content_len > update_partition->size) {
+        char err_body[128];
+        snprintf(err_body, sizeof(err_body),
+                 "{\"error\":\"firmware_image_too_large\",\"maxBytes\":%" PRIu32 "}",
+                 update_partition->size);
+        httpd_resp_set_status(request, "400 Bad Request");
+        httpd_resp_set_type(request, "application/json");
+        return httpd_resp_sendstr(request, err_body);
+    }
+
     uint32_t cmd_id = api_ptr->command_journal().accept(CommandDomain::Ota);
     uint32_t job_id = 0;
     esp_err_t job_err = api_ptr->job_manager().start_job(JobType::Ota, &job_id);
@@ -5075,13 +5361,6 @@ esp_err_t post_ota(httpd_req_t* request) {
         return send_error(request, "409 Conflict", "job_already_running");
     }
     api_ptr->job_manager().update_progress(job_id, JobState::Preparing, 5);
-
-    const esp_partition_t* update_partition = esp_ota_get_next_update_partition(nullptr);
-    if (!update_partition) {
-        api_ptr->job_manager().fail_job(job_id, ESP_ERR_NOT_FOUND, "No OTA partition found");
-        api_ptr->command_journal().failed(cmd_id, ESP_ERR_NOT_FOUND);
-        return send_error(request, "500 Internal Server Error", "No OTA partition found");
-    }
 
     esp_ota_handle_t update_handle = 0;
     esp_err_t err = esp_ota_begin(update_partition, OTA_WITH_SEQUENTIAL_WRITES, &update_handle);
@@ -5128,6 +5407,16 @@ esp_err_t post_ota(httpd_req_t* request) {
         return send_error(request, "500 Internal Server Error", "OTA end failed");
     }
 
+    // Validate OTA image descriptor (§52)
+    esp_app_desc_t candidate{};
+    err = esp_ota_get_partition_description(update_partition, &candidate);
+    if (err != ESP_OK || strcmp(candidate.project_name, "lumigrid_led_node") != 0 || strlen(candidate.version) == 0) {
+        api_ptr->job_manager().fail_job(job_id, ESP_ERR_INVALID_ARG, "Invalid project descriptor");
+        api_ptr->command_journal().failed(cmd_id, ESP_ERR_INVALID_ARG);
+        api::AuditLog::instance().log(api::ApiRole::Admin, "ota_failed", "Invalid project descriptor or unknown project");
+        return send_error(request, "400 Bad Request", "invalid_project_descriptor");
+    }
+
     err = esp_ota_set_boot_partition(update_partition);
     if (err != ESP_OK) {
         api_ptr->job_manager().fail_job(job_id, err, "OTA set boot failed");
@@ -5135,34 +5424,85 @@ esp_err_t post_ota(httpd_req_t* request) {
         return send_error(request, "500 Internal Server Error", "OTA set boot failed");
     }
 
-    api_ptr->job_manager().complete_job(job_id);
+    // Persist OTA state for cross-reboot tracking (§61)
+    PersistedOtaState ota_st = OtaBootVerifier::instance().state();
+    ota_st.state = OtaBootState::PendingReboot;
+    strncpy(ota_st.previous_version, OtaBootVerifier::instance().running_version(), sizeof(ota_st.previous_version) - 1);
+    strncpy(ota_st.target_version, candidate.version, sizeof(ota_st.target_version) - 1);
+    strncpy(ota_st.target_partition, update_partition->label, sizeof(ota_st.target_partition) - 1);
+    OtaBootVerifier::instance().save_state(ota_st);
+
     api_ptr->command_journal().applied(cmd_id);
     api_ptr->notify_status_async();
 
-    char resp[160];
+    api::AuditLog::instance().log(api::ApiRole::Admin, "ota_start", "OTA image accepted, reboot pending");
+
+    char resp[256];
     snprintf(resp, sizeof(resp),
-        "{\"status\":\"success\",\"accepted\":true,\"commandId\":%" PRIu32 ",\"jobId\":%" PRIu32 ",\"message\":\"OTA update successful, rebooting...\"}",
-        cmd_id, job_id);
+        "{\"accepted\":true,\"commandId\":%" PRIu32 ",\"jobId\":%" PRIu32 ",\"targetVersion\":\"%s\",\"projectName\":\"%s\",\"state\":\"pending_reboot\"}",
+        cmd_id, job_id, candidate.version, candidate.project_name);
     send_json(request, resp);
     vTaskDelay(pdMS_TO_TICKS(1000));
     esp_restart();
     return ESP_OK;
 }
 
-esp_err_t get_backup(httpd_req_t* request) {
-    if (!api::authorize(request, api::ApiRole::Admin)) return ESP_OK;
+esp_err_t get_ota_status(httpd_req_t* request) {
+    if (!api::authorize(request, api::ApiRole::Operator)) return ESP_OK;
+
+    const auto& verifier = OtaBootVerifier::instance();
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "state", ota_boot_state_to_name(verifier.boot_state()));
+    cJSON_AddStringToObject(root, "runningVersion", verifier.running_version());
+    cJSON_AddStringToObject(root, "previousVersion", verifier.previous_version());
+    cJSON_AddStringToObject(root, "targetVersion", verifier.target_version());
+    cJSON_AddBoolToObject(root, "rolledBack", verifier.rolled_back());
+    if (strlen(verifier.last_reason()) > 0) {
+        cJSON_AddStringToObject(root, "reason", verifier.last_reason());
+    }
+
+    char* json_str = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    esp_err_t res = send_json(request, json_str);
+    cJSON_free(json_str);
+    return res;
+}
+
+esp_err_t get_recovery_status(httpd_req_t* request) {
+    if (!api::authorize(request, api::ApiRole::Operator)) return ESP_OK;
 
     FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
-    if (!api_ptr->config()) {
-        return send_error(request, "500 Internal Server Error", "ConfigStore not available");
+    RecoveryStatus st{};
+    if (api_ptr->recovery_status_provider()) {
+        st = api_ptr->recovery_status_provider()();
     }
 
     cJSON* root = cJSON_CreateObject();
-    cJSON_AddNumberToObject(root, "version", 3);
-    
-    // Config
-    DeviceConfig cfg;
-    api_ptr->config()->load_config(cfg);
+    cJSON_AddBoolToObject(root, "safeMode", st.safe_mode);
+    cJSON_AddBoolToObject(root, "configValid", st.config_valid);
+    // CommissioningState: map enum to string inline (no helper exists in auth namespace)
+    const char* cs_name = "none";
+    if (st.commissioning_state == auth::CommissioningState::FactoryFirstBoot) cs_name = "factory_first_boot";
+    else if (st.commissioning_state == auth::CommissioningState::PhysicalRecovery) cs_name = "physical_recovery";
+    cJSON_AddStringToObject(root, "commissioningState", cs_name);
+    cJSON_AddNumberToObject(root, "startupState", st.startup_state);
+    cJSON_AddNumberToObject(root, "failingStage", st.failing_stage);
+    cJSON_AddNumberToObject(root, "failingError", st.failing_error);
+    cJSON_AddBoolToObject(root, "recoveryNetworkActive", st.recovery_network_active);
+    cJSON_AddBoolToObject(root, "outputsForcedOff", st.outputs_forced_off);
+    cJSON_AddStringToObject(root, "otaState", ota_boot_state_to_name(st.ota_state));
+    cJSON_AddStringToObject(root, "restoreState", restore_state_to_name(st.restore_state));
+
+    char* json_str = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    esp_err_t res = send_json(request, json_str);
+    cJSON_free(json_str);
+    return res;
+}
+
+// ── Backup v4 & Restore Domain Serializers & Parsers ──
+
+static cJSON* serialize_device_config(const DeviceConfig& cfg) {
     cJSON* cfg_json = cJSON_CreateObject();
     cJSON_AddStringToObject(cfg_json, "deviceName", cfg.device_name);
     cJSON_AddNumberToObject(cfg_json, "activePresetIndex", cfg.active_preset_index);
@@ -5177,6 +5517,8 @@ esp_err_t get_backup(httpd_req_t* request) {
     cJSON_AddNumberToObject(cfg_json, "mqttPort", cfg.mqtt_port);
     cJSON_AddBoolToObject(cfg_json, "syncEnabled", cfg.sync_enabled);
     cJSON_AddNumberToObject(cfg_json, "syncRole", cfg.sync_role);
+    // Write-only sync token indicator (§14, §27) - token itself NEVER exported!
+    cJSON_AddBoolToObject(cfg_json, "syncTokenSet", cfg.sync_token != 0);
 
     // Protocol config
     cJSON* prot_json = cJSON_CreateObject();
@@ -5184,17 +5526,10 @@ esp_err_t get_backup(httpd_req_t* request) {
     cJSON_AddBoolToObject(prot_json, "sacnEnabled", cfg.protocol.sacn_enabled);
     cJSON_AddNumberToObject(prot_json, "universeStart", cfg.protocol.universe_start);
     cJSON_AddNumberToObject(prot_json, "liveStreamLayer", cfg.protocol.live_stream_layer);
+    cJSON_AddNumberToObject(prot_json, "mergeMode", static_cast<uint8_t>(cfg.protocol.merge_mode));
+    cJSON_AddNumberToObject(prot_json, "streamTimeoutMs", cfg.protocol.stream_timeout_ms);
+    cJSON_AddNumberToObject(prot_json, "zoneStartChannel", cfg.protocol.zone_start_channel);
     cJSON_AddItemToObject(cfg_json, "protocol", prot_json);
-
-    // Auth status (provisioned only, no secrets/hashes/salts)
-    bool is_prov = false;
-    auto* auth_mgr = api::get_auth_manager();
-    if (auth_mgr) {
-        is_prov = auth_mgr->is_provisioned();
-    }
-    cJSON* auth_json = cJSON_CreateObject();
-    cJSON_AddBoolToObject(auth_json, "provisioned", is_prov);
-    cJSON_AddItemToObject(cfg_json, "auth", auth_json);
 
     // Channels
     cJSON* channels_arr = cJSON_CreateArray();
@@ -5231,161 +5566,931 @@ esp_err_t get_backup(httpd_req_t* request) {
     }
     cJSON_AddItemToObject(cfg_json, "groups", groups_arr);
 
-    // Zones (compatibility mirror)
-    cJSON* zones_arr = cJSON_CreateArray();
-    for (uint8_t z = 0; z < 8; ++z) {
-        cJSON* zj = cJSON_CreateObject();
-        cJSON_AddStringToObject(zj, "name", cfg.groups[z].name);
-        cJSON_AddStringToObject(zj, "role", zone_role_name(cfg.groups[z].role));
-        cJSON_AddItemToArray(zones_arr, zj);
+    return cfg_json;
+}
+
+static cJSON* serialize_scene(const SceneConfig& sc, uint8_t index) {
+    cJSON* s = cJSON_CreateObject();
+    cJSON_AddNumberToObject(s, "index", index);
+    cJSON_AddStringToObject(s, "name", sc.name);
+    cJSON_AddNumberToObject(s, "globalBrightness", sc.global_brightness);
+    cJSON_AddNumberToObject(s, "transitionMs", sc.transition_ms);
+
+    cJSON* ch_arr = cJSON_CreateArray();
+    for (uint8_t c = 0; c < 16; ++c) {
+        cJSON* c_obj = cJSON_CreateObject();
+        cJSON* l_arr = cJSON_CreateArray();
+        for (uint8_t l = 0; l < 3; ++l) {
+            const auto& layer = sc.channels[c].layers[l];
+            cJSON* l_obj = cJSON_CreateObject();
+            cJSON_AddBoolToObject(l_obj, "enabled", layer.enabled);
+            cJSON_AddNumberToObject(l_obj, "effect", static_cast<int>(layer.effect));
+            cJSON_AddNumberToObject(l_obj, "speedMs", layer.speed_ms);
+
+            cJSON* pcol = cJSON_CreateObject();
+            cJSON_AddNumberToObject(pcol, "r", layer.primary_color.r);
+            cJSON_AddNumberToObject(pcol, "g", layer.primary_color.g);
+            cJSON_AddNumberToObject(pcol, "b", layer.primary_color.b);
+            cJSON_AddItemToObject(l_obj, "primaryColor", pcol);
+
+            cJSON* scol = cJSON_CreateObject();
+            cJSON_AddNumberToObject(scol, "r", layer.secondary_color.r);
+            cJSON_AddNumberToObject(scol, "g", layer.secondary_color.g);
+            cJSON_AddNumberToObject(scol, "b", layer.secondary_color.b);
+            cJSON_AddItemToObject(l_obj, "secondaryColor", scol);
+
+            cJSON_AddNumberToObject(l_obj, "opacity", layer.opacity);
+            cJSON_AddNumberToObject(l_obj, "blendMode", static_cast<int>(layer.blend_mode));
+            cJSON_AddNumberToObject(l_obj, "parameter", layer.fx_param);
+            cJSON_AddItemToArray(l_arr, l_obj);
+        }
+        cJSON_AddItemToObject(c_obj, "layers", l_arr);
+        cJSON_AddItemToArray(ch_arr, c_obj);
     }
-    cJSON_AddItemToObject(cfg_json, "zones", zones_arr);
+    cJSON_AddItemToObject(s, "channels", ch_arr);
+    return s;
+}
 
-    cJSON_AddItemToObject(root, "config", cfg_json);
+static cJSON* serialize_scene_motion(const SceneMotionConfig& sm, uint8_t index) {
+    cJSON* m_obj = cJSON_CreateObject();
+    cJSON_AddNumberToObject(m_obj, "index", index);
+    cJSON_AddStringToObject(m_obj, "transitionCurve", transition_curve_name(sm.transition_curve));
+    cJSON_AddNumberToObject(m_obj, "trackCount", sm.track_count);
+    cJSON* tracks = cJSON_CreateArray();
+    for (uint8_t t = 0; t < sm.track_count && t < kAutomationTracksPerScene; ++t) {
+        const auto& tr = sm.tracks[t];
+        cJSON* tobj = cJSON_CreateObject();
+        cJSON_AddStringToObject(tobj, "target", automation_target_name(tr.target));
+        cJSON_AddNumberToObject(tobj, "channel", tr.channel);
+        cJSON_AddNumberToObject(tobj, "layer", tr.layer);
+        cJSON_AddStringToObject(tobj, "curve", automation_curve_name(tr.curve));
+        cJSON_AddBoolToObject(tobj, "loop", tr.loop);
+        cJSON_AddNumberToObject(tobj, "periodMs", tr.period_ms);
+        cJSON* pts = cJSON_CreateArray();
+        for (uint8_t p = 0; p < tr.point_count && p < kAutomationPointsPerTrack; ++p) {
+            cJSON* pobj = cJSON_CreateObject();
+            cJSON_AddNumberToObject(pobj, "position", tr.points[p].position);
+            cJSON_AddNumberToObject(pobj, "value", tr.points[p].value);
+            cJSON_AddItemToArray(pts, pobj);
+        }
+        cJSON_AddItemToObject(tobj, "points", pts);
+        cJSON_AddItemToArray(tracks, tobj);
+    }
+    cJSON_AddItemToObject(m_obj, "tracks", tracks);
+    return m_obj;
+}
 
-    // Presets
-    cJSON* presets_arr = cJSON_CreateArray();
+static cJSON* serialize_timeline(const Sequence& seq) {
+    cJSON* seq_obj = cJSON_CreateObject();
+    cJSON_AddNumberToObject(seq_obj, "bpm", seq.bpm);
+    cJSON_AddBoolToObject(seq_obj, "enabled", seq.enabled);
+    cJSON* trs = cJSON_CreateArray();
+    for (uint8_t t = 0; t < 16; ++t) {
+        const auto& track = seq.tracks[t];
+        cJSON* trobj = cJSON_CreateObject();
+        cJSON_AddNumberToObject(trobj, "channel_id", track.channel_id);
+        cJSON_AddBoolToObject(trobj, "enabled", track.enabled);
+        cJSON* steps = cJSON_CreateArray();
+        for (uint8_t s = 0; s < track.num_steps && s < 16; ++s) {
+            cJSON* sobj = cJSON_CreateObject();
+            cJSON_AddNumberToObject(sobj, "preset_index", track.steps[s].preset_index);
+            cJSON_AddNumberToObject(sobj, "length_beats", track.steps[s].length_beats);
+            cJSON_AddItemToArray(steps, sobj);
+        }
+        cJSON_AddItemToObject(trobj, "steps", steps);
+        cJSON_AddItemToArray(trs, trobj);
+    }
+    cJSON_AddItemToObject(seq_obj, "tracks", trs);
+    return seq_obj;
+}
+
+static cJSON* serialize_calendar(const CalendarSchedule& cal) {
+    cJSON* cal_obj = cJSON_CreateObject();
+    cJSON* entries = cJSON_CreateArray();
+    for (uint8_t e = 0; e < 8; ++e) {
+        const auto& entry = cal.entries[e];
+        cJSON* eobj = cJSON_CreateObject();
+        cJSON_AddNumberToObject(eobj, "hour", entry.hour);
+        cJSON_AddNumberToObject(eobj, "minute", entry.minute);
+        cJSON_AddNumberToObject(eobj, "days_of_week", entry.days_of_week);
+        cJSON_AddNumberToObject(eobj, "preset_index", entry.preset_index);
+        cJSON_AddNumberToObject(eobj, "action", static_cast<int>(entry.action));
+        cJSON_AddBoolToObject(eobj, "enabled", entry.enabled);
+        cJSON_AddNumberToObject(eobj, "cue_list_index", entry.cue_list_index);
+        cJSON_AddItemToArray(entries, eobj);
+    }
+    cJSON_AddItemToObject(cal_obj, "entries", entries);
+    return cal_obj;
+}
+
+static cJSON* serialize_cue_list(const CueList& cl, uint8_t index) {
+    cJSON* cl_obj = cJSON_CreateObject();
+    cJSON_AddNumberToObject(cl_obj, "index", index);
+    cJSON_AddStringToObject(cl_obj, "name", cl.name);
+    cJSON_AddStringToObject(cl_obj, "mode", cue_run_mode_name(cl.mode));
+    cJSON_AddStringToObject(cl_obj, "endAction", cue_end_action_name(cl.end_action));
+    cJSON_AddNumberToObject(cl_obj, "checksum", cl.checksum);
+    cJSON* cues = cJSON_CreateArray();
+    for (uint8_t c = 0; c < cl.count && c < kMaxCuesPerList; ++c) {
+        cJSON* cobj = cJSON_CreateObject();
+        cJSON_AddNumberToObject(cobj, "sceneIndex", cl.cues[c].scene_index);
+        cJSON_AddNumberToObject(cobj, "holdMs", cl.cues[c].hold_ms);
+        cJSON_AddNumberToObject(cobj, "fadeMs", cl.cues[c].fade_ms);
+        cJSON_AddStringToObject(cobj, "curve", transition_curve_name(cl.cues[c].curve));
+        cJSON_AddStringToObject(cobj, "label", cl.cues[c].label);
+        cJSON_AddItemToArray(cues, cobj);
+    }
+    cJSON_AddItemToObject(cl_obj, "cues", cues);
+    return cl_obj;
+}
+
+static bool parse_scene_record(cJSON* obj, SceneConfig& sc, char* err_buf, size_t err_size) {
+    lg::json::get_string(obj, "name", sc.name, sizeof(sc.name));
+    int b = 255;
+    if (lg::json::get_number(obj, "globalBrightness", b)) {
+        if (b < 0 || b > 255) {
+            snprintf(err_buf, err_size, "invalid_global_brightness");
+            return false;
+        }
+        sc.global_brightness = static_cast<uint8_t>(b);
+    }
+    lg::json::get_number(obj, "transitionMs", sc.transition_ms);
+
+    cJSON* c_arr = cJSON_GetObjectItem(obj, "channels");
+    if (c_arr && cJSON_IsArray(c_arr)) {
+        if (cJSON_GetArraySize(c_arr) > 16) {
+            snprintf(err_buf, err_size, "too_many_scene_channels");
+            return false;
+        }
+        int c_idx = 0;
+        cJSON* cj;
+        cJSON_ArrayForEach(cj, c_arr) {
+            cJSON* l_arr = cJSON_GetObjectItem(cj, "layers");
+            if (l_arr && cJSON_IsArray(l_arr)) {
+                if (cJSON_GetArraySize(l_arr) > 3) {
+                    snprintf(err_buf, err_size, "too_many_scene_layers");
+                    return false;
+                }
+                int l_idx = 0;
+                cJSON* lj;
+                cJSON_ArrayForEach(lj, l_arr) {
+                    auto& layer = sc.channels[c_idx].layers[l_idx];
+                    lg::json::get_bool(lj, "enabled", layer.enabled);
+                    int fx = 0;
+                    if (lg::json::get_number(lj, "effect", fx)) layer.effect = fx;
+                    lg::json::get_number(lj, "speedMs", layer.speed_ms);
+                    int op = 255;
+                    if (lg::json::get_number(lj, "opacity", op)) {
+                        if (op < 0 || op > 255) { snprintf(err_buf, err_size, "invalid_opacity"); return false; }
+                        layer.opacity = static_cast<uint8_t>(op);
+                    }
+                    int blend = 0;
+                    if (lg::json::get_number(lj, "blendMode", blend)) {
+                        if (blend < 0 || blend > 5) { snprintf(err_buf, err_size, "invalid_blend_mode"); return false; }
+                        layer.blend_mode = static_cast<BlendMode>(blend);
+                    }
+                    int param = 0;
+                    if (lg::json::get_number(lj, "parameter", param)) {
+                        if (param < 0 || param > 255) { snprintf(err_buf, err_size, "invalid_parameter"); return false; }
+                        layer.fx_param = static_cast<uint8_t>(param);
+                    }
+                    cJSON* pcol = cJSON_GetObjectItem(lj, "primaryColor");
+                    if (pcol) {
+                        int r=0, g=0, b=0;
+                        lg::json::get_number(pcol, "r", r);
+                        lg::json::get_number(pcol, "g", g);
+                        lg::json::get_number(pcol, "b", b);
+                        layer.primary_color = { static_cast<uint8_t>(std::clamp(r,0,255)),
+                                                static_cast<uint8_t>(std::clamp(g,0,255)),
+                                                static_cast<uint8_t>(std::clamp(b,0,255)) };
+                    }
+                    cJSON* scol = cJSON_GetObjectItem(lj, "secondaryColor");
+                    if (scol) {
+                        int r=0, g=0, b=0;
+                        lg::json::get_number(scol, "r", r);
+                        lg::json::get_number(scol, "g", g);
+                        lg::json::get_number(scol, "b", b);
+                        layer.secondary_color = { static_cast<uint8_t>(std::clamp(r,0,255)),
+                                                  static_cast<uint8_t>(std::clamp(g,0,255)),
+                                                  static_cast<uint8_t>(std::clamp(b,0,255)) };
+                    }
+                    l_idx++;
+                }
+            }
+            c_idx++;
+        }
+    }
+    return true;
+}
+
+static bool parse_scene_motion_record(cJSON* obj, SceneMotionConfig& sm, char* err_buf, size_t err_size) {
+    sm.schema_version = 1;
+    cJSON* cur_j = cJSON_GetObjectItem(obj, "transitionCurve");
+    if (cur_j && cJSON_IsString(cur_j)) {
+        if (!parse_transition_curve(cur_j->valuestring, sm.transition_curve)) {
+            snprintf(err_buf, err_size, "invalid_transition_curve");
+            return false;
+        }
+    }
+    cJSON* trs = cJSON_GetObjectItem(obj, "tracks");
+    if (trs && cJSON_IsArray(trs)) {
+        if (cJSON_GetArraySize(trs) > kAutomationTracksPerScene) {
+            snprintf(err_buf, err_size, "too_many_motion_tracks");
+            return false;
+        }
+        uint8_t t_idx = 0;
+        cJSON* t_item;
+        cJSON_ArrayForEach(t_item, trs) {
+            auto& tr = sm.tracks[t_idx];
+            cJSON* target_j = cJSON_GetObjectItem(t_item, "target");
+            if (target_j && cJSON_IsString(target_j)) {
+                if (!parse_automation_target(target_j->valuestring, tr.target)) {
+                    snprintf(err_buf, err_size, "invalid_automation_target");
+                    return false;
+                }
+            }
+            int ch = 0;
+            if (lg::json::get_number(t_item, "channel", ch)) {
+                if (ch < 0 || ch >= 16) { snprintf(err_buf, err_size, "invalid_motion_channel"); return false; }
+                tr.channel = static_cast<uint8_t>(ch);
+            }
+            int layer = 0;
+            if (lg::json::get_number(t_item, "layer", layer)) {
+                if (layer < 0 || layer >= 3) { snprintf(err_buf, err_size, "invalid_motion_layer"); return false; }
+                tr.layer = static_cast<uint8_t>(layer);
+            }
+            cJSON* c_j = cJSON_GetObjectItem(t_item, "curve");
+            if (c_j && cJSON_IsString(c_j)) {
+                if (!parse_automation_curve(c_j->valuestring, tr.curve)) {
+                    snprintf(err_buf, err_size, "invalid_automation_curve");
+                    return false;
+                }
+            }
+            lg::json::get_bool(t_item, "loop", tr.loop);
+            lg::json::get_number(t_item, "periodMs", tr.period_ms);
+            cJSON* pts = cJSON_GetObjectItem(t_item, "points");
+            if (pts && cJSON_IsArray(pts)) {
+                if (cJSON_GetArraySize(pts) > kAutomationPointsPerTrack) {
+                    snprintf(err_buf, err_size, "too_many_motion_points");
+                    return false;
+                }
+                uint8_t p_idx = 0;
+                cJSON* p_item;
+                cJSON_ArrayForEach(p_item, pts) {
+                    int pos = 0, val = 0;
+                    if (lg::json::get_number(p_item, "position", pos) && lg::json::get_number(p_item, "value", val)) {
+                        tr.points[p_idx].position = static_cast<uint16_t>(std::clamp(pos, 0, 65535));
+                        tr.points[p_idx].value = static_cast<uint8_t>(std::clamp(val, 0, 255));
+                        p_idx++;
+                    }
+                }
+                tr.point_count = p_idx;
+            }
+            t_idx++;
+        }
+        sm.track_count = t_idx;
+    }
+    return true;
+}
+
+static bool parse_cue_list_record(cJSON* obj, CueList& cl, char* err_buf, size_t err_size) {
+    lg::json::get_string(obj, "name", cl.name, sizeof(cl.name));
+    cJSON* mode_j = cJSON_GetObjectItem(obj, "mode");
+    if (mode_j && cJSON_IsString(mode_j)) {
+        if (!parse_cue_run_mode(mode_j->valuestring, cl.mode)) {
+            snprintf(err_buf, err_size, "invalid_cue_run_mode");
+            return false;
+        }
+    }
+    cJSON* ea_j = cJSON_GetObjectItem(obj, "endAction");
+    if (ea_j && cJSON_IsString(ea_j)) {
+        if (!parse_cue_end_action(ea_j->valuestring, cl.end_action)) {
+            snprintf(err_buf, err_size, "invalid_cue_end_action");
+            return false;
+        }
+    } else if (ea_j && cJSON_IsNumber(ea_j)) {
+        if (ea_j->valueint < 0 || ea_j->valueint > 2) {
+            snprintf(err_buf, err_size, "invalid_cue_end_action");
+            return false;
+        }
+        cl.end_action = static_cast<CueEndAction>(ea_j->valueint);
+    }
+    cJSON* cues = cJSON_GetObjectItem(obj, "cues");
+    if (cues && cJSON_IsArray(cues)) {
+        if (cJSON_GetArraySize(cues) > kMaxCuesPerList) {
+            snprintf(err_buf, err_size, "too_many_cues");
+            return false;
+        }
+        uint8_t c_idx = 0;
+        cJSON* c_item;
+        cJSON_ArrayForEach(c_item, cues) {
+            int sc_idx = 0;
+            if (!lg::json::get_number(c_item, "sceneIndex", sc_idx) || sc_idx < 0 || sc_idx >= lg::kMaxPresets) {
+                snprintf(err_buf, err_size, "invalid_cue_scene_index");
+                return false;
+            }
+            cl.cues[c_idx].scene_index = static_cast<uint8_t>(sc_idx);
+            lg::json::get_number(c_item, "holdMs", cl.cues[c_idx].hold_ms);
+            lg::json::get_number(c_item, "fadeMs", cl.cues[c_idx].fade_ms);
+            cJSON* cur_j = cJSON_GetObjectItem(c_item, "curve");
+            if (cur_j && cJSON_IsString(cur_j)) {
+                if (!parse_transition_curve(cur_j->valuestring, cl.cues[c_idx].curve)) {
+                    snprintf(err_buf, err_size, "invalid_cue_curve");
+                    return false;
+                }
+            }
+            lg::json::get_string(c_item, "label", cl.cues[c_idx].label, sizeof(cl.cues[c_idx].label));
+            c_idx++;
+        }
+        cl.count = c_idx;
+    }
+    return true;
+}
+
+static bool parse_timeline_record(cJSON* obj, Sequence& seq, char* err_buf, size_t err_size) {
+    int bpm = 120;
+    if (lg::json::get_number(obj, "bpm", bpm)) {
+        if (bpm < 20 || bpm > 300) { snprintf(err_buf, err_size, "invalid_bpm"); return false; }
+        seq.bpm = static_cast<uint16_t>(bpm);
+    }
+    lg::json::get_bool(obj, "enabled", seq.enabled);
+    cJSON* trs = cJSON_GetObjectItem(obj, "tracks");
+    if (trs && cJSON_IsArray(trs)) {
+        if (cJSON_GetArraySize(trs) > 16) { snprintf(err_buf, err_size, "too_many_timeline_tracks"); return false; }
+        int t_idx = 0;
+        cJSON* tr;
+        cJSON_ArrayForEach(tr, trs) {
+            auto& track = seq.tracks[t_idx];
+            int ch = 0;
+            if (lg::json::get_number(tr, "channel_id", ch)) track.channel_id = static_cast<uint8_t>(ch & 0x0F);
+            lg::json::get_bool(tr, "enabled", track.enabled);
+            cJSON* steps = cJSON_GetObjectItem(tr, "steps");
+            if (steps && cJSON_IsArray(steps)) {
+                if (cJSON_GetArraySize(steps) > 16) { snprintf(err_buf, err_size, "too_many_timeline_steps"); return false; }
+                int s_idx = 0;
+                cJSON* st;
+                cJSON_ArrayForEach(st, steps) {
+                    int p_idx = 0, len = 1;
+                    lg::json::get_number(st, "preset_index", p_idx);
+                    lg::json::get_number(st, "length_beats", len);
+                    track.steps[s_idx].preset_index = static_cast<uint8_t>(p_idx & 0x1F);
+                    track.steps[s_idx].length_beats = static_cast<uint8_t>(std::clamp(len, 1, 64));
+                    s_idx++;
+                }
+                track.num_steps = static_cast<uint8_t>(s_idx);
+            }
+            t_idx++;
+        }
+    }
+    return true;
+}
+
+static bool parse_calendar_record(cJSON* obj, CalendarSchedule& cal, char* err_buf, size_t err_size) {
+    cJSON* entries = cJSON_GetObjectItem(obj, "entries");
+    if (entries && cJSON_IsArray(entries)) {
+        if (cJSON_GetArraySize(entries) > 8) { snprintf(err_buf, err_size, "too_many_calendar_entries"); return false; }
+        int e_idx = 0;
+        cJSON* ent;
+        cJSON_ArrayForEach(ent, entries) {
+            auto& e = cal.entries[e_idx];
+            int h = 0, m = 0, dow = 0x7F, pi = 0, act = 0, ci = 0;
+            lg::json::get_number(ent, "hour", h);
+            lg::json::get_number(ent, "minute", m);
+            lg::json::get_number(ent, "days_of_week", dow);
+            lg::json::get_number(ent, "preset_index", pi);
+            lg::json::get_number(ent, "action", act);
+            lg::json::get_number(ent, "cue_list_index", ci);
+            lg::json::get_bool(ent, "enabled", e.enabled);
+            e.hour = static_cast<uint8_t>(std::clamp(h, 0, 23));
+            e.minute = static_cast<uint8_t>(std::clamp(m, 0, 59));
+            e.days_of_week = static_cast<uint8_t>(dow & 0x7F);
+            e.preset_index = static_cast<uint8_t>(pi & 0x1F);
+            e.action = static_cast<CalendarAction>(std::clamp(act, 0, 2));
+            e.cue_list_index = static_cast<uint8_t>(ci & 0x07);
+            e_idx++;
+        }
+    }
+    return true;
+}
+
+// ── Streaming Backup Export (§25, §30, §31) ──
+
+esp_err_t get_backup(httpd_req_t* request) {
+    if (!api::authorize(request, api::ApiRole::Admin)) return ESP_OK;
+
+    FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+    if (!api_ptr->config()) {
+        return send_error(request, "500 Internal Server Error", "ConfigStore not available");
+    }
+
+    const auto& identity = api_ptr->identity();
+    char filename[128];
+    snprintf(filename, sizeof(filename), "attachment; filename=\"lumigrid-%s-backup.lgbak\"", identity.id);
+
+    httpd_resp_set_type(request, "application/x-lumigrid-backup");
+    httpd_resp_set_hdr(request, "Content-Disposition", filename);
+
+    uint32_t total_crc = 0;
+    uint32_t record_count = 0;
+
+    auto send_record = [&](cJSON* obj) -> esp_err_t {
+        char* str = cJSON_PrintUnformatted(obj);
+        cJSON_Delete(obj);
+        if (!str) return ESP_FAIL;
+        size_t len = strlen(str);
+        total_crc = esp_rom_crc32_le(total_crc, reinterpret_cast<const uint8_t*>(str), len);
+        esp_err_t err = httpd_resp_send_chunk(request, str, len);
+        cJSON_free(str);
+        if (err != ESP_OK) return err;
+        total_crc = esp_rom_crc32_le(total_crc, reinterpret_cast<const uint8_t*>("\n"), 1);
+        err = httpd_resp_send_chunk(request, "\n", 1);
+        if (err == ESP_OK) record_count++;
+        return err;
+    };
+
+    // 1. Header record (§26)
+    cJSON* hdr = cJSON_CreateObject();
+    cJSON_AddStringToObject(hdr, "type", "header");
+    cJSON_AddNumberToObject(hdr, "schema", 4);
+    cJSON* src = cJSON_CreateObject();
+    cJSON_AddStringToObject(src, "nodeId", identity.id);
+    cJSON_AddStringToObject(src, "family", "led-node");
+    cJSON_AddStringToObject(src, "model", identity.model);
+    cJSON_AddStringToObject(src, "firmwareVersion", identity.fw_version);
+    cJSON_AddStringToObject(src, "hardwareRevision", identity.hw_revision);
+    cJSON_AddItemToObject(hdr, "source", src);
+    cJSON* pol = cJSON_CreateObject();
+    cJSON_AddBoolToObject(pol, "authIncluded", false);
+    cJSON_AddBoolToObject(pol, "networkSecretsIncluded", false);
+    cJSON_AddBoolToObject(pol, "syncSecretIncluded", false);
+    cJSON_AddItemToObject(hdr, "policy", pol);
+    if (send_record(hdr) != ESP_OK) return ESP_FAIL;
+
+    // 2. DeviceConfig record
+    DeviceConfig cfg;
+    api_ptr->config()->load_config(cfg);
+    cJSON* cfg_rec = cJSON_CreateObject();
+    cJSON_AddStringToObject(cfg_rec, "type", "deviceConfig");
+    cJSON_AddItemToObject(cfg_rec, "data", serialize_device_config(cfg));
+    if (send_record(cfg_rec) != ESP_OK) return ESP_FAIL;
+
+    // 3. Scenes
     for (uint8_t i = 0; i < lg::kMaxPresets; ++i) {
         SceneConfig sc;
         if (api_ptr->config()->load_scene(i, sc) == ESP_OK) {
-            cJSON* s = cJSON_CreateObject();
-            cJSON_AddNumberToObject(s, "index", i);
-            cJSON_AddStringToObject(s, "name", sc.name);
-            cJSON_AddNumberToObject(s, "globalBrightness", sc.global_brightness);
-            cJSON_AddNumberToObject(s, "transitionMs", sc.transition_ms);
-
-            cJSON* ch_arr = cJSON_CreateArray();
-            for (uint8_t c = 0; c < 16; ++c) {
-                cJSON* c_obj = cJSON_CreateObject();
-                cJSON* l_arr = cJSON_CreateArray();
-                for (uint8_t l = 0; l < 3; ++l) {
-                    const auto& layer = sc.channels[c].layers[l];
-                    cJSON* l_obj = cJSON_CreateObject();
-                    cJSON_AddBoolToObject(l_obj, "enabled", layer.enabled);
-                    cJSON_AddNumberToObject(l_obj, "effect", static_cast<int>(layer.effect));
-                    cJSON_AddNumberToObject(l_obj, "speedMs", layer.speed_ms);
-                    
-                    cJSON* pcol = cJSON_CreateObject();
-                    cJSON_AddNumberToObject(pcol, "r", layer.primary_color.r);
-                    cJSON_AddNumberToObject(pcol, "g", layer.primary_color.g);
-                    cJSON_AddNumberToObject(pcol, "b", layer.primary_color.b);
-                    cJSON_AddItemToObject(l_obj, "primaryColor", pcol);
-
-                    cJSON* scol = cJSON_CreateObject();
-                    cJSON_AddNumberToObject(scol, "r", layer.secondary_color.r);
-                    cJSON_AddNumberToObject(scol, "g", layer.secondary_color.g);
-                    cJSON_AddNumberToObject(scol, "b", layer.secondary_color.b);
-                    cJSON_AddItemToObject(l_obj, "secondaryColor", scol);
-
-                    cJSON_AddNumberToObject(l_obj, "opacity", layer.opacity);
-                    cJSON_AddNumberToObject(l_obj, "blendMode", static_cast<int>(layer.blend_mode));
-                    cJSON_AddNumberToObject(l_obj, "parameter", layer.fx_param);
-                    cJSON_AddItemToArray(l_arr, l_obj);
-                }
-                cJSON_AddItemToObject(c_obj, "layers", l_arr);
-                cJSON_AddItemToArray(ch_arr, c_obj);
-            }
-            cJSON_AddItemToObject(s, "channels", ch_arr);
-
-            // Legacy zones mirror
-            cJSON* z_arr = cJSON_CreateArray();
-            for (uint8_t z = 0; z < 8; ++z) {
-                cJSON* z_obj = cJSON_CreateObject();
-                cJSON* l_arr = cJSON_CreateArray();
-                for (uint8_t l = 0; l < 3; ++l) {
-                    const auto& layer = sc.channels[z].layers[l];
-                    cJSON* l_obj = cJSON_CreateObject();
-                    cJSON_AddBoolToObject(l_obj, "enabled", layer.enabled);
-                    cJSON_AddNumberToObject(l_obj, "effect", static_cast<int>(layer.effect));
-                    cJSON_AddNumberToObject(l_obj, "speedMs", layer.speed_ms);
-                    cJSON_AddItemToArray(l_arr, l_obj);
-                }
-                cJSON_AddItemToObject(z_obj, "layers", l_arr);
-                cJSON_AddItemToArray(z_arr, z_obj);
-            }
-            cJSON_AddItemToObject(s, "zones", z_arr);
-
-            // Legacy v1 proxy fields
-            cJSON_AddNumberToObject(s, "effect", sc.channels[0].layers[0].effect);
-            cJSON_AddNumberToObject(s, "speedMs", sc.channels[0].layers[0].speed_ms);
-            
-            cJSON_AddItemToArray(presets_arr, s);
+            cJSON* sc_rec = cJSON_CreateObject();
+            cJSON_AddStringToObject(sc_rec, "type", "scene");
+            cJSON_AddNumberToObject(sc_rec, "index", i);
+            cJSON_AddItemToObject(sc_rec, "data", serialize_scene(sc, i));
+            if (send_record(sc_rec) != ESP_OK) return ESP_FAIL;
         }
     }
-    cJSON_AddItemToObject(root, "presets", presets_arr);
 
-    // Scene motion
-    cJSON* motion_arr = cJSON_CreateArray();
+    // 4. Scene Motion
     for (uint8_t i = 0; i < lg::kMaxPresets; ++i) {
         SceneMotionConfig sm;
         if (api_ptr->config()->load_scene_motion(i, sm) == ESP_OK && (sm.track_count > 0 || sm.transition_curve != TransitionCurve::EaseInOut)) {
-            cJSON* m_obj = cJSON_CreateObject();
-            cJSON_AddNumberToObject(m_obj, "index", i);
-            cJSON_AddStringToObject(m_obj, "transitionCurve", transition_curve_name(sm.transition_curve));
-            cJSON_AddNumberToObject(m_obj, "trackCount", sm.track_count);
-            cJSON* tracks = cJSON_CreateArray();
-            for (uint8_t t = 0; t < sm.track_count && t < kAutomationTracksPerScene; ++t) {
-                const auto& tr = sm.tracks[t];
-                cJSON* tobj = cJSON_CreateObject();
-                cJSON_AddStringToObject(tobj, "target", automation_target_name(tr.target));
-                cJSON_AddNumberToObject(tobj, "channel", tr.channel);
-                cJSON_AddNumberToObject(tobj, "zone", tr.channel); // deprecated compatibility alias
-                cJSON_AddNumberToObject(tobj, "layer", tr.layer);
-                cJSON_AddStringToObject(tobj, "curve", automation_curve_name(tr.curve));
-                cJSON_AddBoolToObject(tobj, "loop", tr.loop);
-                cJSON_AddNumberToObject(tobj, "periodMs", tr.period_ms);
-                cJSON* pts = cJSON_CreateArray();
-                for (uint8_t p = 0; p < tr.point_count && p < kAutomationPointsPerTrack; ++p) {
-                    cJSON* pobj = cJSON_CreateObject();
-                    cJSON_AddNumberToObject(pobj, "position", tr.points[p].position);
-                    cJSON_AddNumberToObject(pobj, "value", tr.points[p].value);
-                    cJSON_AddItemToArray(pts, pobj);
-                }
-                cJSON_AddItemToObject(tobj, "points", pts);
-                cJSON_AddItemToArray(tracks, tobj);
-            }
-            cJSON_AddItemToObject(m_obj, "tracks", tracks);
-            cJSON_AddItemToArray(motion_arr, m_obj);
+            cJSON* sm_rec = cJSON_CreateObject();
+            cJSON_AddStringToObject(sm_rec, "type", "sceneMotion");
+            cJSON_AddNumberToObject(sm_rec, "index", i);
+            cJSON_AddItemToObject(sm_rec, "data", serialize_scene_motion(sm, i));
+            if (send_record(sm_rec) != ESP_OK) return ESP_FAIL;
         }
     }
-    cJSON_AddItemToObject(root, "scene_motion", motion_arr);
 
-    // Cue lists
-    cJSON* cue_lists_arr = cJSON_CreateArray();
+    // 5. Timeline / Sequence
+    Sequence seq;
+    if (api_ptr->config()->load_sequence(seq) == ESP_OK) {
+        cJSON* seq_rec = cJSON_CreateObject();
+        cJSON_AddStringToObject(seq_rec, "type", "timeline");
+        cJSON_AddItemToObject(seq_rec, "data", serialize_timeline(seq));
+        if (send_record(seq_rec) != ESP_OK) return ESP_FAIL;
+    }
+
+    // 6. Calendar
+    CalendarSchedule cal;
+    if (api_ptr->config()->load_calendar_schedule(cal) == ESP_OK) {
+        cJSON* cal_rec = cJSON_CreateObject();
+        cJSON_AddStringToObject(cal_rec, "type", "calendar");
+        cJSON_AddItemToObject(cal_rec, "data", serialize_calendar(cal));
+        if (send_record(cal_rec) != ESP_OK) return ESP_FAIL;
+    }
+
+    // 7. Cue Lists
     for (uint8_t i = 0; i < lg::kMaxCueLists; ++i) {
         CueList cl;
         if (api_ptr->config()->load_cue_list(i, cl) == ESP_OK && cl.count > 0) {
-            cJSON* cl_obj = cJSON_CreateObject();
-            cJSON_AddNumberToObject(cl_obj, "index", i);
-            cJSON_AddStringToObject(cl_obj, "name", cl.name);
-            cJSON_AddStringToObject(cl_obj, "mode", cue_run_mode_name(cl.mode));
-            cJSON_AddNumberToObject(cl_obj, "endAction", static_cast<int>(cl.end_action));
-            cJSON_AddNumberToObject(cl_obj, "checksum", cl.checksum);
-            cJSON* cues = cJSON_CreateArray();
-            for (uint8_t c = 0; c < cl.count && c < kMaxCuesPerList; ++c) {
-                cJSON* cobj = cJSON_CreateObject();
-                cJSON_AddNumberToObject(cobj, "sceneIndex", cl.cues[c].scene_index);
-                cJSON_AddNumberToObject(cobj, "holdMs", cl.cues[c].hold_ms);
-                cJSON_AddNumberToObject(cobj, "fadeMs", cl.cues[c].fade_ms);
-                cJSON_AddStringToObject(cobj, "curve", transition_curve_name(cl.cues[c].curve));
-                cJSON_AddStringToObject(cobj, "label", cl.cues[c].label);
-                cJSON_AddItemToArray(cues, cobj);
-            }
-            cJSON_AddItemToObject(cl_obj, "cues", cues);
-            cJSON_AddItemToArray(cue_lists_arr, cl_obj);
+            cJSON* cl_rec = cJSON_CreateObject();
+            cJSON_AddStringToObject(cl_rec, "type", "cueList");
+            cJSON_AddNumberToObject(cl_rec, "index", i);
+            cJSON_AddItemToObject(cl_rec, "data", serialize_cue_list(cl, i));
+            if (send_record(cl_rec) != ESP_OK) return ESP_FAIL;
         }
     }
-    cJSON_AddItemToObject(root, "cue_lists", cue_lists_arr);
 
-    char* json_str = cJSON_PrintUnformatted(root);
-    cJSON_Delete(root);
+    // 8. End record
+    cJSON* end_rec = cJSON_CreateObject();
+    cJSON_AddStringToObject(end_rec, "type", "end");
+    cJSON_AddNumberToObject(end_rec, "records", record_count + 1);
+    cJSON_AddNumberToObject(end_rec, "checksum", total_crc);
+    if (send_record(end_rec) != ESP_OK) return ESP_FAIL;
 
-    httpd_resp_set_type(request, "application/json");
-    httpd_resp_set_hdr(request, "Content-Disposition", "attachment; filename=\"lumigrid_backup.json\"");
-    esp_err_t err = httpd_resp_sendstr(request, json_str);
-    cJSON_free(json_str);
-    return err;
+    api::AuditLog::instance().log(api::ApiRole::Admin, "backup_export", "Recovery package v4 exported");
+    return httpd_resp_send_chunk(request, nullptr, 0);
 }
+
+// ── Restore Parsed Package Model & Ingest ──
+
+struct ParsedBackupPackage {
+    uint8_t schema = 4;
+    char node_id[32] = "";
+    char family[32] = "led-node";
+    char model[32] = "lg-led-v1";
+    char firmware_version[32] = "";
+    uint32_t checksum = 0;
+
+    bool has_device_config = false;
+    DeviceConfig device_config{};
+
+    bool has_scenes[lg::kMaxPresets] = {};
+    SceneConfig scenes[lg::kMaxPresets] = {};
+
+    bool has_motions[lg::kMaxPresets] = {};
+    SceneMotionConfig motions[lg::kMaxPresets] = {};
+
+    bool has_timeline = false;
+    Sequence timeline{};
+
+    bool has_calendar = false;
+    CalendarSchedule calendar{};
+
+    bool has_cue_lists[lg::kMaxCueLists] = {};
+    CueList cue_lists[lg::kMaxCueLists] = {};
+
+    uint32_t scene_count = 0;
+    uint32_t motion_count = 0;
+    uint32_t cue_list_count = 0;
+
+    char error[128] = "";
+};
+
+static esp_err_t ingest_backup_package(httpd_req_t* request, ParsedBackupPackage& pkg, ConfigStore* store) {
+    if (request->content_len <= 0) {
+        snprintf(pkg.error, sizeof(pkg.error), "empty_payload");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // Allocate 16 KB line buffer for streaming NDJSON (§33)
+    constexpr size_t kMaxRecordSize = 16384;
+    std::unique_ptr<char[]> line_buf(new (std::nothrow) char[kMaxRecordSize + 1]);
+    if (!line_buf) {
+        snprintf(pkg.error, sizeof(pkg.error), "out_of_memory");
+        return ESP_ERR_NO_MEM;
+    }
+
+    int remaining = request->content_len;
+    size_t line_pos = 0;
+    bool is_first_line = true;
+    bool is_legacy_v3 = false;
+    std::string v3_payload;
+
+    while (remaining > 0) {
+        char ch = 0;
+        int ret = httpd_req_recv(request, &ch, 1);
+        if (ret == HTTPD_SOCK_ERR_TIMEOUT) continue;
+        if (ret <= 0) {
+            snprintf(pkg.error, sizeof(pkg.error), "receive_error");
+            return ESP_FAIL;
+        }
+        remaining--;
+
+        if (is_first_line && line_pos == 0 && ch == '{') {
+            // Check if legacy v3 (does not start with NDJSON header or is a single large JSON)
+        }
+
+        if (ch == '\n' || remaining == 0) {
+            if (ch != '\n' && remaining == 0) {
+                if (line_pos < kMaxRecordSize) line_buf[line_pos++] = ch;
+            }
+            line_buf[line_pos] = '\0';
+
+            if (line_pos > 0) {
+                // If legacy v3 detected on first line
+                if (is_first_line) {
+                    is_first_line = false;
+                    if (strstr(line_buf.get(), "\"version\":3") != nullptr || strstr(line_buf.get(), "\"presets\":") != nullptr) {
+                        is_legacy_v3 = true;
+                        v3_payload.reserve(std::min<int>(request->content_len, 32768));
+                    }
+                }
+
+                if (is_legacy_v3) {
+                    if (v3_payload.size() + line_pos > 32768) {
+                        snprintf(pkg.error, sizeof(pkg.error), "legacy_v3_payload_too_large");
+                        return ESP_ERR_INVALID_SIZE;
+                    }
+                    v3_payload.append(line_buf.get(), line_pos);
+                    if (ch == '\n') v3_payload.push_back('\n');
+                    line_pos = 0;
+                    continue;
+                }
+
+                // Parse v4 NDJSON record
+                cJSON* rec = cJSON_Parse(line_buf.get());
+                if (!rec) {
+                    snprintf(pkg.error, sizeof(pkg.error), "malformed_record");
+                    return ESP_ERR_INVALID_ARG;
+                }
+
+                cJSON* type_j = cJSON_GetObjectItem(rec, "type");
+                if (!type_j || !cJSON_IsString(type_j)) {
+                    cJSON_Delete(rec);
+                    snprintf(pkg.error, sizeof(pkg.error), "missing_record_type");
+                    return ESP_ERR_INVALID_ARG;
+                }
+
+                const char* rtype = type_j->valuestring;
+                if (strcmp(rtype, "header") == 0) {
+                    cJSON* sch_j = cJSON_GetObjectItem(rec, "schema");
+                    if (sch_j && cJSON_IsNumber(sch_j)) pkg.schema = static_cast<uint8_t>(sch_j->valueint);
+                    cJSON* src_j = cJSON_GetObjectItem(rec, "source");
+                    if (src_j) {
+                        lg::json::get_string(src_j, "nodeId", pkg.node_id, sizeof(pkg.node_id));
+                        lg::json::get_string(src_j, "family", pkg.family, sizeof(pkg.family));
+                        lg::json::get_string(src_j, "model", pkg.model, sizeof(pkg.model));
+                        lg::json::get_string(src_j, "firmwareVersion", pkg.firmware_version, sizeof(pkg.firmware_version));
+                    }
+                } else if (strcmp(rtype, "deviceConfig") == 0) {
+                    cJSON* data = cJSON_GetObjectItem(rec, "data");
+                    if (data) {
+                        DeviceConfig dummy_cur{};
+                        if (!parse_and_validate_device_config(data, dummy_cur, pkg.device_config, pkg.error, sizeof(pkg.error))) {
+                            cJSON_Delete(rec);
+                            return ESP_ERR_INVALID_ARG;
+                        }
+                        pkg.has_device_config = true;
+                    }
+                } else if (strcmp(rtype, "scene") == 0) {
+                    int idx = -1;
+                    if (lg::json::get_number(rec, "index", idx) && idx >= 0 && idx < lg::kMaxPresets) {
+                        cJSON* data = cJSON_GetObjectItem(rec, "data");
+                        if (data && parse_scene_record(data, pkg.scenes[idx], pkg.error, sizeof(pkg.error))) {
+                            pkg.has_scenes[idx] = true;
+                            pkg.scene_count++;
+                        } else {
+                            cJSON_Delete(rec);
+                            return ESP_ERR_INVALID_ARG;
+                        }
+                    }
+                } else if (strcmp(rtype, "sceneMotion") == 0) {
+                    int idx = -1;
+                    if (lg::json::get_number(rec, "index", idx) && idx >= 0 && idx < lg::kMaxPresets) {
+                        cJSON* data = cJSON_GetObjectItem(rec, "data");
+                        if (data && parse_scene_motion_record(data, pkg.motions[idx], pkg.error, sizeof(pkg.error))) {
+                            pkg.has_motions[idx] = true;
+                            pkg.motion_count++;
+                        } else {
+                            cJSON_Delete(rec);
+                            return ESP_ERR_INVALID_ARG;
+                        }
+                    }
+                } else if (strcmp(rtype, "timeline") == 0) {
+                    cJSON* data = cJSON_GetObjectItem(rec, "data");
+                    if (data && parse_timeline_record(data, pkg.timeline, pkg.error, sizeof(pkg.error))) {
+                        pkg.has_timeline = true;
+                    } else {
+                        cJSON_Delete(rec);
+                        return ESP_ERR_INVALID_ARG;
+                    }
+                } else if (strcmp(rtype, "calendar") == 0) {
+                    cJSON* data = cJSON_GetObjectItem(rec, "data");
+                    if (data && parse_calendar_record(data, pkg.calendar, pkg.error, sizeof(pkg.error))) {
+                        pkg.has_calendar = true;
+                    } else {
+                        cJSON_Delete(rec);
+                        return ESP_ERR_INVALID_ARG;
+                    }
+                } else if (strcmp(rtype, "cueList") == 0) {
+                    int idx = -1;
+                    if (lg::json::get_number(rec, "index", idx) && idx >= 0 && idx < lg::kMaxCueLists) {
+                        cJSON* data = cJSON_GetObjectItem(rec, "data");
+                        if (data && parse_cue_list_record(data, pkg.cue_lists[idx], pkg.error, sizeof(pkg.error))) {
+                            pkg.has_cue_lists[idx] = true;
+                            pkg.cue_list_count++;
+                        } else {
+                            cJSON_Delete(rec);
+                            return ESP_ERR_INVALID_ARG;
+                        }
+                    }
+                } else if (strcmp(rtype, "end") == 0) {
+                    lg::json::get_number(rec, "checksum", pkg.checksum);
+                }
+
+                cJSON_Delete(rec);
+            }
+            line_pos = 0;
+        } else {
+            if (line_pos >= kMaxRecordSize) {
+                snprintf(pkg.error, sizeof(pkg.error), "record_too_large");
+                return ESP_ERR_INVALID_SIZE;
+            }
+            line_buf[line_pos++] = ch;
+        }
+    }
+
+    // Handle legacy v3 if detected (§86)
+    if (is_legacy_v3) {
+        pkg.schema = 3;
+        cJSON* v3_root = cJSON_Parse(v3_payload.c_str());
+        if (!v3_root) {
+            snprintf(pkg.error, sizeof(pkg.error), "malformed_v3_json");
+            return ESP_ERR_INVALID_ARG;
+        }
+        cJSON* cfg_j = cJSON_GetObjectItem(v3_root, "config");
+        if (cfg_j) {
+            DeviceConfig dummy_cur{};
+            parse_and_validate_device_config(cfg_j, dummy_cur, pkg.device_config, pkg.error, sizeof(pkg.error));
+            pkg.has_device_config = true;
+        }
+        cJSON* presets_arr = cJSON_GetObjectItem(v3_root, "presets");
+        if (presets_arr && cJSON_IsArray(presets_arr)) {
+            cJSON* p;
+            cJSON_ArrayForEach(p, presets_arr) {
+                int idx = -1;
+                if (lg::json::get_number(p, "index", idx) && idx >= 0 && idx < lg::kMaxPresets) {
+                    parse_scene_record(p, pkg.scenes[idx], pkg.error, sizeof(pkg.error));
+                    pkg.has_scenes[idx] = true;
+                    pkg.scene_count++;
+                }
+            }
+        }
+        cJSON* motion_arr = cJSON_GetObjectItem(v3_root, "scene_motion");
+        if (motion_arr && cJSON_IsArray(motion_arr)) {
+            cJSON* m;
+            cJSON_ArrayForEach(m, motion_arr) {
+                int idx = -1;
+                if (lg::json::get_number(m, "index", idx) && idx >= 0 && idx < lg::kMaxPresets) {
+                    parse_scene_motion_record(m, pkg.motions[idx], pkg.error, sizeof(pkg.error));
+                    pkg.has_motions[idx] = true;
+                    pkg.motion_count++;
+                }
+            }
+        }
+        cJSON* cl_arr = cJSON_GetObjectItem(v3_root, "cue_lists");
+        if (cl_arr && cJSON_IsArray(cl_arr)) {
+            cJSON* cl_item;
+            cJSON_ArrayForEach(cl_item, cl_arr) {
+                int idx = -1;
+                if (lg::json::get_number(cl_item, "index", idx) && idx >= 0 && idx < lg::kMaxCueLists) {
+                    parse_cue_list_record(cl_item, pkg.cue_lists[idx], pkg.error, sizeof(pkg.error));
+                    pkg.has_cue_lists[idx] = true;
+                    pkg.cue_list_count++;
+                }
+            }
+        }
+        cJSON_Delete(v3_root);
+    }
+
+    // Product family check (§37)
+    if (strlen(pkg.family) > 0 && strcmp(pkg.family, "led-node") != 0) {
+        snprintf(pkg.error, sizeof(pkg.error), "backup_family_mismatch");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // Cross-reference validations (§36)
+    auto scene_exists_in_package_or_store = [&](uint8_t idx) -> bool {
+        if (idx >= lg::kMaxPresets) return false;
+        if (pkg.has_scenes[idx]) return true;
+        return store && store->scene_exists(idx);
+    };
+
+    auto cue_list_exists_in_package_or_store = [&](uint8_t idx) -> bool {
+        if (idx >= lg::kMaxCueLists) return false;
+        if (pkg.has_cue_lists[idx]) return true;
+        if (!store) return false;
+        CueList cl;
+        return store->load_cue_list(idx, cl) == ESP_OK && cl.count > 0;
+    };
+
+    // Timeline cross-ref
+    if (pkg.has_timeline && pkg.timeline.enabled) {
+        for (uint8_t t = 0; t < 16; ++t) {
+            const auto& tr = pkg.timeline.tracks[t];
+            if (tr.enabled) {
+                for (uint8_t s = 0; s < tr.num_steps && s < 16; ++s) {
+                    if (!scene_exists_in_package_or_store(tr.steps[s].preset_index)) {
+                        snprintf(pkg.error, sizeof(pkg.error), "timeline_references_missing_scene");
+                        return ESP_ERR_INVALID_ARG;
+                    }
+                }
+            }
+        }
+    }
+
+    // Calendar cross-ref
+    if (pkg.has_calendar) {
+        for (uint8_t e = 0; e < 8; ++e) {
+            const auto& ent = pkg.calendar.entries[e];
+            if (ent.enabled) {
+                if (ent.action == CalendarAction::Preset) {
+                    if (!scene_exists_in_package_or_store(ent.preset_index)) {
+                        snprintf(pkg.error, sizeof(pkg.error), "calendar_references_missing_scene");
+                        return ESP_ERR_INVALID_ARG;
+                    }
+                } else if (ent.action == CalendarAction::CueList) {
+                    if (!cue_list_exists_in_package_or_store(ent.cue_list_index)) {
+                        snprintf(pkg.error, sizeof(pkg.error), "calendar_references_missing_cue_list");
+                        return ESP_ERR_INVALID_ARG;
+                    }
+                }
+            }
+        }
+    }
+
+    // Cue list cross-ref
+    for (uint8_t i = 0; i < lg::kMaxCueLists; ++i) {
+        if (pkg.has_cue_lists[i]) {
+            for (uint8_t c = 0; c < pkg.cue_lists[i].count; ++c) {
+                if (!scene_exists_in_package_or_store(pkg.cue_lists[i].cues[c].scene_index)) {
+                    snprintf(pkg.error, sizeof(pkg.error), "cue_references_missing_scene");
+                    return ESP_ERR_INVALID_ARG;
+                }
+            }
+        }
+    }
+
+    return ESP_OK;
+}
+
+// ── Restore Preflight Validation (§34, §35) ──
+
+esp_err_t post_restore_validate(httpd_req_t* request) {
+    if (!api::authorize(request, api::ApiRole::Admin)) return ESP_OK;
+
+    FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+    if (!api_ptr->config()) {
+        return send_error(request, "500 Internal Server Error", "ConfigStore not available");
+    }
+
+    ParsedBackupPackage pkg{};
+    esp_err_t err = ingest_backup_package(request, pkg, api_ptr->config());
+    if (err != ESP_OK) {
+        cJSON* err_resp = cJSON_CreateObject();
+        cJSON_AddBoolToObject(err_resp, "valid", false);
+        cJSON_AddStringToObject(err_resp, "error", pkg.error);
+        return send_error_json(request, "400 Bad Request", err_resp);
+    }
+
+    api::AuditLog::instance().log(api::ApiRole::Admin, "restore_validate", "Restore package preflight validated");
+
+    cJSON* resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "valid", true);
+    cJSON_AddNumberToObject(resp, "schema", pkg.schema);
+
+    cJSON* src = cJSON_CreateObject();
+    cJSON_AddStringToObject(src, "nodeId", pkg.node_id);
+    cJSON_AddStringToObject(src, "firmwareVersion", pkg.firmware_version);
+    cJSON_AddStringToObject(src, "family", pkg.family);
+    cJSON_AddStringToObject(src, "model", pkg.model);
+    cJSON_AddItemToObject(resp, "source", src);
+
+    cJSON_AddNumberToObject(resp, "packageChecksum", pkg.checksum);
+
+    cJSON* plan = cJSON_CreateObject();
+    cJSON_AddBoolToObject(plan, "deviceConfig", pkg.has_device_config);
+    cJSON_AddNumberToObject(plan, "scenes", pkg.scene_count);
+    cJSON_AddNumberToObject(plan, "sceneMotions", pkg.motion_count);
+    cJSON_AddBoolToObject(plan, "timeline", pkg.has_timeline);
+    cJSON_AddBoolToObject(plan, "calendar", pkg.has_calendar);
+    cJSON_AddNumberToObject(plan, "cueLists", pkg.cue_list_count);
+    cJSON_AddItemToObject(resp, "plan", plan);
+
+    cJSON* pres = cJSON_CreateObject();
+    cJSON_AddBoolToObject(pres, "authentication", true);
+    cJSON_AddBoolToObject(pres, "networkCredentials", true);
+    cJSON_AddBoolToObject(pres, "nodeIdentity", true);
+    cJSON_AddBoolToObject(pres, "syncToken", true);
+    cJSON_AddItemToObject(resp, "preserved", pres);
+
+    cJSON* warns = cJSON_CreateArray();
+    cJSON_AddItemToObject(resp, "warnings", warns);
+
+    return send_json(request, resp);
+}
+
+// ── Transactional Restore with In-Memory Rollback Snapshot (§38-§45) ──
+
+struct RestoreRollbackSnapshot {
+    DeviceConfig old_cfg{};
+    bool has_scenes[lg::kMaxPresets] = {};
+    SceneConfig old_scenes[lg::kMaxPresets] = {};
+    bool has_motions[lg::kMaxPresets] = {};
+    SceneMotionConfig old_motions[lg::kMaxPresets] = {};
+    bool has_cue_lists[lg::kMaxCueLists] = {};
+    CueList old_cue_lists[lg::kMaxCueLists] = {};
+    Sequence old_timeline{};
+    CalendarSchedule old_calendar{};
+};
 
 esp_err_t post_restore(httpd_req_t* request) {
     if (!api::authorize(request, api::ApiRole::Admin)) return ESP_OK;
@@ -5395,322 +6500,11 @@ esp_err_t post_restore(httpd_req_t* request) {
         return send_error(request, "500 Internal Server Error", "ConfigStore not available");
     }
 
-    if (request->content_len <= 0 || request->content_len > 32768) {
-        return send_error(request, "400 Bad Request", "Payload too large or empty");
+    if (api_ptr->current_maintenance_mode() != MaintenanceMode::None) {
+        return send_error(request, "409 Conflict", "maintenance_job_active");
     }
 
-    char* buf = (char*)malloc(request->content_len + 1);
-    if (!buf) return send_error(request, "500 Internal Server Error", "Out of memory");
-
-    int received = 0;
-    while (received < request->content_len) {
-        int ret = httpd_req_recv(request, buf + received, request->content_len - received);
-        if (ret == HTTPD_SOCK_ERR_TIMEOUT) continue;
-        if (ret <= 0) {
-            free(buf);
-            return send_error(request, "500 Internal Server Error", "Failed to receive payload");
-        }
-        received += ret;
-    }
-    buf[received] = '\0';
-
-    cJSON* root = cJSON_Parse(buf);
-    free(buf);
-
-    if (!root) {
-        return send_error(request, "400 Bad Request", "Invalid JSON");
-    }
-
-    // Config
-    cJSON* cfg_json = cJSON_GetObjectItem(root, "config");
-    if (cfg_json) {
-        DeviceConfig cfg;
-        api_ptr->config()->load_config(cfg);
-        
-        lg::json::get_string(cfg_json, "deviceName", cfg.device_name, sizeof(cfg.device_name));
-        lg::json::get_number(cfg_json, "maxPowerMw", cfg.max_power_mw);
-        lg::json::get_number(cfg_json, "gammaX10", cfg.gamma_x10);
-        lg::json::get_number(cfg_json, "mqttEnabled", cfg.mqtt_enabled);
-        lg::json::get_string(cfg_json, "mqttBroker", cfg.mqtt_broker, sizeof(cfg.mqtt_broker));
-        lg::json::get_number(cfg_json, "mqttPort", cfg.mqtt_port);
-        lg::json::get_number(cfg_json, "syncEnabled", cfg.sync_enabled);
-        lg::json::get_number(cfg_json, "syncRole", cfg.sync_role);
-
-        cJSON* prot = cJSON_GetObjectItem(cfg_json, "protocol");
-        if (prot) {
-            lg::json::get_bool(prot, "artnetEnabled", cfg.protocol.artnet_enabled);
-            lg::json::get_bool(prot, "sacnEnabled", cfg.protocol.sacn_enabled);
-            lg::json::get_number(prot, "universeStart", cfg.protocol.universe_start);
-            lg::json::get_number(prot, "liveStreamLayer", cfg.protocol.live_stream_layer);
-        }
-
-        // Explicitly ignore legacy auth secrets during restore (Requirement 21)
-
-        cJSON* ch_arr = cJSON_GetObjectItem(cfg_json, "channels");
-        if (ch_arr && cJSON_IsArray(ch_arr)) {
-            int c_idx = 0;
-            cJSON* cj;
-            cJSON_ArrayForEach(cj, ch_arr) {
-                if (c_idx >= 16) break;
-                lg::json::get_string(cj, "name", cfg.channels[c_idx].name, sizeof(cfg.channels[c_idx].name));
-                lg::json::get_bool(cj, "enabled", cfg.channels[c_idx].enabled);
-                int atype = 0;
-                if (lg::json::get_number(cj, "addressableType", atype)) cfg.channels[c_idx].addressable_type = static_cast<AddressableType>(atype);
-                int pord = 0;
-                if (lg::json::get_number(cj, "pixelOrder", pord)) cfg.channels[c_idx].pixel_order = static_cast<PixelOrder>(pord);
-                lg::json::get_number(cj, "pixelCount", cfg.channels[c_idx].pixel_count);
-                lg::json::get_number(cj, "maxBrightness", cfg.channels[c_idx].max_brightness);
-                lg::json::get_bool(cj, "gammaCorrection", cfg.channels[c_idx].gamma_correction);
-                lg::json::get_number(cj, "maxMilliwatts", cfg.channels[c_idx].max_milliwatts);
-                lg::json::get_number(cj, "dmxUniverse", cfg.channels[c_idx].dmx_universe);
-                lg::json::get_number(cj, "dmxStartChannel", cfg.channels[c_idx].dmx_start_channel);
-                lg::json::get_number(cj, "dmxMode", cfg.channels[c_idx].dmx_mode);
-                c_idx++;
-            }
-        }
-        cJSON* grp_arr = cJSON_GetObjectItem(cfg_json, "groups");
-        if (grp_arr && cJSON_IsArray(grp_arr)) {
-            int g_idx = 0;
-            cJSON* gj;
-            cJSON_ArrayForEach(gj, grp_arr) {
-                if (g_idx >= 8) break;
-                char role_buf[32] = "";
-                lg::json::get_string(gj, "name", cfg.groups[g_idx].name, sizeof(cfg.groups[g_idx].name));
-                lg::json::get_number(gj, "channelMask", cfg.groups[g_idx].channel_mask);
-                lg::json::get_bool(gj, "enabled", cfg.groups[g_idx].enabled);
-                if (lg::json::get_string(gj, "role", role_buf, sizeof(role_buf))) {
-                    parse_zone_role(role_buf, cfg.groups[g_idx].role);
-                }
-                g_idx++;
-            }
-        } else {
-            cJSON* z_arr = cJSON_GetObjectItem(cfg_json, "zones");
-            if (z_arr && cJSON_IsArray(z_arr)) {
-                int z_idx = 0;
-                cJSON* zj;
-                cJSON_ArrayForEach(zj, z_arr) {
-                    if (z_idx >= 8) break;
-                    char role_buf[32] = "";
-                    lg::json::get_string(zj, "name", cfg.groups[z_idx].name, sizeof(cfg.groups[z_idx].name));
-                    if (lg::json::get_string(zj, "role", role_buf, sizeof(role_buf))) {
-                        parse_zone_role(role_buf, cfg.groups[z_idx].role);
-                    }
-                    z_idx++;
-                }
-            }
-        }
-        
-        api_ptr->config()->save_config(cfg);
-    }
-
-    // Presets
-    cJSON* presets_arr = cJSON_GetObjectItem(root, "presets");
-    if (presets_arr && cJSON_IsArray(presets_arr)) {
-        cJSON* p;
-        cJSON_ArrayForEach(p, presets_arr) {
-            cJSON* idx = cJSON_GetObjectItem(p, "index");
-            if (idx && idx->valueint >= 0 && idx->valueint < lg::kMaxPresets) {
-                SceneConfig sc;
-                lg::json::get_string(p, "name", sc.name, sizeof(sc.name));
-                lg::json::get_number(p, "globalBrightness", sc.global_brightness);
-                lg::json::get_number(p, "transitionMs", sc.transition_ms);
-
-                cJSON* c_arr = cJSON_GetObjectItem(p, "channels");
-                if (c_arr && cJSON_IsArray(c_arr)) {
-                    int c_idx = 0;
-                    cJSON* cj;
-                    cJSON_ArrayForEach(cj, c_arr) {
-                        if (c_idx >= 16) break;
-                        cJSON* l_arr = cJSON_GetObjectItem(cj, "layers");
-                        if (l_arr && cJSON_IsArray(l_arr)) {
-                            int l_idx = 0;
-                            cJSON* lj;
-                            cJSON_ArrayForEach(lj, l_arr) {
-                                if (l_idx >= 3) break;
-                                auto& layer = sc.channels[c_idx].layers[l_idx];
-                                lg::json::get_bool(lj, "enabled", layer.enabled);
-                                lg::json::get_number(lj, "effect", layer.effect);
-                                lg::json::get_number(lj, "speedMs", layer.speed_ms);
-                                lg::json::get_number(lj, "opacity", layer.opacity);
-                                int blend = 0;
-                                if (lg::json::get_number(lj, "blendMode", blend)) {
-                                    layer.blend_mode = static_cast<BlendMode>(blend);
-                                }
-                                lg::json::get_number(lj, "parameter", layer.fx_param);
-                                cJSON* pcol = cJSON_GetObjectItem(lj, "primaryColor");
-                                if (pcol) {
-                                    lg::json::get_number(pcol, "r", layer.primary_color.r);
-                                    lg::json::get_number(pcol, "g", layer.primary_color.g);
-                                    lg::json::get_number(pcol, "b", layer.primary_color.b);
-                                }
-                                cJSON* scol = cJSON_GetObjectItem(lj, "secondaryColor");
-                                if (scol) {
-                                    lg::json::get_number(scol, "r", layer.secondary_color.r);
-                                    lg::json::get_number(scol, "g", layer.secondary_color.g);
-                                    lg::json::get_number(scol, "b", layer.secondary_color.b);
-                                }
-                                l_idx++;
-                            }
-                        }
-                        c_idx++;
-                    }
-                } else {
-                    cJSON* z_arr = cJSON_GetObjectItem(p, "zones");
-                    if (z_arr && cJSON_IsArray(z_arr)) {
-                        int z_idx = 0;
-                        cJSON* zj;
-                        cJSON_ArrayForEach(zj, z_arr) {
-                            if (z_idx >= 8) break;
-                            cJSON* l_arr = cJSON_GetObjectItem(zj, "layers");
-                            if (l_arr && cJSON_IsArray(l_arr)) {
-                                int l_idx = 0;
-                                cJSON* lj;
-                                cJSON_ArrayForEach(lj, l_arr) {
-                                    if (l_idx >= 3) break;
-                                    auto& layer = sc.channels[z_idx].layers[l_idx];
-                                    lg::json::get_bool(lj, "enabled", layer.enabled);
-                                    lg::json::get_number(lj, "effect", layer.effect);
-                                    lg::json::get_number(lj, "speedMs", layer.speed_ms);
-                                    lg::json::get_number(lj, "opacity", layer.opacity);
-                                    int blend = 0;
-                                    if (lg::json::get_number(lj, "blendMode", blend)) {
-                                        layer.blend_mode = static_cast<BlendMode>(blend);
-                                    }
-                                    lg::json::get_number(lj, "parameter", layer.fx_param);
-                                    cJSON* pcol = cJSON_GetObjectItem(lj, "primaryColor");
-                                    if (pcol) {
-                                        lg::json::get_number(pcol, "r", layer.primary_color.r);
-                                        lg::json::get_number(pcol, "g", layer.primary_color.g);
-                                        lg::json::get_number(pcol, "b", layer.primary_color.b);
-                                    }
-                                    cJSON* scol = cJSON_GetObjectItem(lj, "secondaryColor");
-                                    if (scol) {
-                                        lg::json::get_number(scol, "r", layer.secondary_color.r);
-                                        lg::json::get_number(scol, "g", layer.secondary_color.g);
-                                        lg::json::get_number(scol, "b", layer.secondary_color.b);
-                                    }
-                                    l_idx++;
-                                }
-                            }
-                            z_idx++;
-                        }
-                    } else {
-                        // Fallback for v1 legacy backups
-                        lg::json::get_number(p, "effect", sc.channels[0].layers[0].effect);
-                        lg::json::get_number(p, "speedMs", sc.channels[0].layers[0].speed_ms);
-                    }
-                }
-                
-                api_ptr->config()->save_scene(idx->valueint, sc);
-            }
-        }
-    }
-
-    cJSON* motion_arr = cJSON_GetObjectItem(root, "scene_motion");
-    if (motion_arr && cJSON_IsArray(motion_arr)) {
-        cJSON* m;
-        cJSON_ArrayForEach(m, motion_arr) {
-            cJSON* idx = cJSON_GetObjectItem(m, "index");
-            if (idx && idx->valueint >= 0 && idx->valueint < lg::kMaxPresets) {
-                SceneMotionConfig sm{};
-                sm.schema_version = 1;
-                cJSON* cur_j = cJSON_GetObjectItem(m, "transitionCurve");
-                if (cur_j && cJSON_IsString(cur_j)) parse_transition_curve(cur_j->valuestring, sm.transition_curve);
-                cJSON* trs = cJSON_GetObjectItem(m, "tracks");
-                if (trs && cJSON_IsArray(trs)) {
-                    uint8_t t_idx = 0;
-                    cJSON* t_item;
-                    cJSON_ArrayForEach(t_item, trs) {
-                        if (t_idx >= kAutomationTracksPerScene) break;
-                        auto& tr = sm.tracks[t_idx];
-                        cJSON* target_j = cJSON_GetObjectItem(t_item, "target");
-                        if (target_j && cJSON_IsString(target_j)) parse_automation_target(target_j->valuestring, tr.target);
-                        cJSON* ch_j = cJSON_GetObjectItem(t_item, "channel");
-                        cJSON* z_j = cJSON_GetObjectItem(t_item, "zone");
-                        if (ch_j && cJSON_IsNumber(ch_j)) {
-                            tr.channel = std::min<uint8_t>(15, std::max<int>(0, ch_j->valueint));
-                        } else if (z_j && cJSON_IsNumber(z_j)) {
-                            tr.channel = std::min<uint8_t>(7, std::max<int>(0, z_j->valueint));
-                        }
-                        cJSON* l_j = cJSON_GetObjectItem(t_item, "layer");
-                        if (l_j && cJSON_IsNumber(l_j)) {
-                            tr.layer = std::min<uint8_t>(2, std::max<int>(0, l_j->valueint));
-                        }
-                        cJSON* c_j = cJSON_GetObjectItem(t_item, "curve");
-                        if (c_j && cJSON_IsString(c_j)) parse_automation_curve(c_j->valuestring, tr.curve);
-                        cJSON* loop_j = cJSON_GetObjectItem(t_item, "loop");
-                        if (loop_j && cJSON_IsBool(loop_j)) tr.loop = cJSON_IsTrue(loop_j);
-                        cJSON* per_j = cJSON_GetObjectItem(t_item, "periodMs");
-                        if (per_j && cJSON_IsNumber(per_j)) tr.period_ms = per_j->valueint;
-                        cJSON* pts = cJSON_GetObjectItem(t_item, "points");
-                        if (pts && cJSON_IsArray(pts)) {
-                            uint8_t p_idx = 0;
-                            cJSON* p_item;
-                            cJSON_ArrayForEach(p_item, pts) {
-                                if (p_idx >= kAutomationPointsPerTrack) break;
-                                cJSON* pos_j = cJSON_GetObjectItem(p_item, "position");
-                                cJSON* val_j = cJSON_GetObjectItem(p_item, "value");
-                                if (pos_j && val_j) {
-                                    tr.points[p_idx].position = pos_j->valueint;
-                                    tr.points[p_idx].value = val_j->valueint;
-                                    p_idx++;
-                                }
-                            }
-                            tr.point_count = p_idx;
-                        }
-                        t_idx++;
-                    }
-                    sm.track_count = t_idx;
-                }
-                api_ptr->config()->save_scene_motion(idx->valueint, sm);
-            }
-        }
-    }
-
-    cJSON* cue_lists_arr = cJSON_GetObjectItem(root, "cue_lists");
-    if (cue_lists_arr && cJSON_IsArray(cue_lists_arr)) {
-        cJSON* cl_item;
-        cJSON_ArrayForEach(cl_item, cue_lists_arr) {
-            cJSON* idx = cJSON_GetObjectItem(cl_item, "index");
-            if (idx && idx->valueint >= 0 && idx->valueint < lg::kMaxCueLists) {
-                CueList cl{};
-                cJSON* name_j = cJSON_GetObjectItem(cl_item, "name");
-                if (name_j && cJSON_IsString(name_j)) strncpy(cl.name, name_j->valuestring, sizeof(cl.name) - 1);
-                cJSON* mode_j = cJSON_GetObjectItem(cl_item, "mode");
-                if (mode_j && cJSON_IsString(mode_j)) parse_cue_run_mode(mode_j->valuestring, cl.mode);
-                cJSON* ea_j = cJSON_GetObjectItem(cl_item, "endAction");
-                if (ea_j && cJSON_IsNumber(ea_j) && ea_j->valueint >= 0 && ea_j->valueint <= 2) {
-                    cl.end_action = static_cast<CueEndAction>(ea_j->valueint);
-                } else if (ea_j && cJSON_IsString(ea_j)) {
-                    parse_cue_end_action(ea_j->valuestring, cl.end_action);
-                }
-                cJSON* cues = cJSON_GetObjectItem(cl_item, "cues");
-                if (cues && cJSON_IsArray(cues)) {
-                    uint8_t c_idx = 0;
-                    cJSON* c_item;
-                    cJSON_ArrayForEach(c_item, cues) {
-                        if (c_idx >= kMaxCuesPerList) break;
-                        cJSON* sc_j = cJSON_GetObjectItem(c_item, "sceneIndex");
-                        if (sc_j && cJSON_IsNumber(sc_j)) cl.cues[c_idx].scene_index = sc_j->valueint;
-                        cJSON* hold_j = cJSON_GetObjectItem(c_item, "holdMs");
-                        if (hold_j && cJSON_IsNumber(hold_j)) cl.cues[c_idx].hold_ms = hold_j->valueint;
-                        cJSON* fade_j = cJSON_GetObjectItem(c_item, "fadeMs");
-                        if (fade_j && cJSON_IsNumber(fade_j)) cl.cues[c_idx].fade_ms = fade_j->valueint;
-                        cJSON* cur_j = cJSON_GetObjectItem(c_item, "curve");
-                        if (cur_j && cJSON_IsString(cur_j)) parse_transition_curve(cur_j->valuestring, cl.cues[c_idx].curve);
-                        cJSON* lbl_j = cJSON_GetObjectItem(c_item, "label");
-                        if (lbl_j && cJSON_IsString(lbl_j)) strncpy(cl.cues[c_idx].label, lbl_j->valuestring, sizeof(cl.cues[c_idx].label) - 1);
-                        c_idx++;
-                    }
-                    cl.count = c_idx;
-                }
-                api_ptr->config()->save_cue_list(idx->valueint, cl);
-            }
-        }
-    }
-    
-    cJSON_Delete(root);
-
+    // Start Restore Job BEFORE mutation (§38)
     uint32_t cmd_id = api_ptr->command_journal().accept(CommandDomain::Restore);
     uint32_t job_id = 0;
     esp_err_t job_err = api_ptr->job_manager().start_job(JobType::Restore, &job_id);
@@ -5718,12 +6512,151 @@ esp_err_t post_restore(httpd_req_t* request) {
         api_ptr->command_journal().failed(cmd_id, job_err);
         return send_error(request, "409 Conflict", "job_already_running");
     }
-    api_ptr->job_manager().update_progress(job_id, JobState::Running, 50);
+    api_ptr->job_manager().update_progress(job_id, JobState::Preparing, 5);
+
+    // Ingest and validate package
+    ParsedBackupPackage pkg{};
+    esp_err_t parse_err = ingest_backup_package(request, pkg, api_ptr->config());
+    if (parse_err != ESP_OK) {
+        api_ptr->job_manager().fail_job(job_id, parse_err, pkg.error);
+        api_ptr->command_journal().failed(cmd_id, parse_err);
+        return send_error(request, "400 Bad Request", pkg.error);
+    }
+    api_ptr->job_manager().update_progress(job_id, JobState::Preparing, 15);
+
+    // Capture rollback snapshot before writing (§39)
+    std::unique_ptr<RestoreRollbackSnapshot> snapshot(new (std::nothrow) RestoreRollbackSnapshot());
+    if (!snapshot) {
+        api_ptr->job_manager().fail_job(job_id, ESP_ERR_NO_MEM, "out_of_memory_for_snapshot");
+        api_ptr->command_journal().failed(cmd_id, ESP_ERR_NO_MEM);
+        return send_error(request, "500 Internal Server Error", "out_of_memory");
+    }
+
+    api_ptr->config()->load_config(snapshot->old_cfg);
+    for (uint8_t i = 0; i < lg::kMaxPresets; ++i) {
+        if (api_ptr->config()->load_scene(i, snapshot->old_scenes[i]) == ESP_OK) snapshot->has_scenes[i] = true;
+        if (api_ptr->config()->load_scene_motion(i, snapshot->old_motions[i]) == ESP_OK) snapshot->has_motions[i] = true;
+    }
+    for (uint8_t i = 0; i < lg::kMaxCueLists; ++i) {
+        if (api_ptr->config()->load_cue_list(i, snapshot->old_cue_lists[i]) == ESP_OK) snapshot->has_cue_lists[i] = true;
+    }
+    api_ptr->config()->load_sequence(snapshot->old_timeline);
+    api_ptr->config()->load_calendar_schedule(snapshot->old_calendar);
+
+    // Set power-loss-safe restore marker in NVS (§41)
+    api_ptr->config()->set_restore_in_progress(true, pkg.checksum);
+
+    api_ptr->job_manager().update_progress(job_id, JobState::Running, 20);
+
+    auto rollback_all = [&]() {
+        ESP_LOGE("restore", "Rolling back previous state after restore failure!");
+        for (uint8_t i = 0; i < lg::kMaxPresets; ++i) {
+            if (snapshot->has_scenes[i]) api_ptr->config()->save_scene(i, snapshot->old_scenes[i]);
+            else api_ptr->config()->delete_scene(i);
+            if (snapshot->has_motions[i]) api_ptr->config()->save_scene_motion(i, snapshot->old_motions[i]);
+            else api_ptr->config()->delete_scene_motion(i);
+        }
+        for (uint8_t i = 0; i < lg::kMaxCueLists; ++i) {
+            if (snapshot->has_cue_lists[i]) api_ptr->config()->save_cue_list(i, snapshot->old_cue_lists[i]);
+            else api_ptr->config()->delete_cue_list(i);
+        }
+        api_ptr->config()->save_sequence(snapshot->old_timeline);
+        api_ptr->config()->save_calendar_schedule(snapshot->old_calendar);
+        api_ptr->config()->save_config(snapshot->old_cfg);
+        api_ptr->config()->set_restore_in_progress(false, 0);
+    };
+
+    // 1. Write and verify Scenes (20-55%)
+    for (uint8_t i = 0; i < lg::kMaxPresets; ++i) {
+        if (pkg.has_scenes[i]) {
+            if (api_ptr->config()->save_scene(i, pkg.scenes[i]) != ESP_OK) {
+                rollback_all();
+                api_ptr->job_manager().fail_job(job_id, ESP_FAIL, "save_scene_failed");
+                api_ptr->command_journal().failed(cmd_id, ESP_FAIL);
+                api::AuditLog::instance().log(api::ApiRole::Admin, "restore_failed", "Save scene failed, rolled back");
+                return send_error(request, "500 Internal Server Error", "save_scene_failed");
+            }
+            SceneConfig verify{};
+            if (api_ptr->config()->load_scene(i, verify) != ESP_OK) {
+                rollback_all();
+                api_ptr->job_manager().fail_job(job_id, ESP_FAIL, "verify_scene_failed");
+                api_ptr->command_journal().failed(cmd_id, ESP_FAIL);
+                return send_error(request, "500 Internal Server Error", "verify_scene_failed");
+            }
+        }
+    }
+    api_ptr->job_manager().update_progress(job_id, JobState::Running, 55);
+
+    // 2. Write and verify Scene Motion (55-65%)
+    for (uint8_t i = 0; i < lg::kMaxPresets; ++i) {
+        if (pkg.has_motions[i]) {
+            if (api_ptr->config()->save_scene_motion(i, pkg.motions[i]) != ESP_OK) {
+                rollback_all();
+                api_ptr->job_manager().fail_job(job_id, ESP_FAIL, "save_motion_failed");
+                api_ptr->command_journal().failed(cmd_id, ESP_FAIL);
+                return send_error(request, "500 Internal Server Error", "save_motion_failed");
+            }
+        }
+    }
+    api_ptr->job_manager().update_progress(job_id, JobState::Running, 65);
+
+    // 3. Write and verify Cue Lists (65-75%)
+    for (uint8_t i = 0; i < lg::kMaxCueLists; ++i) {
+        if (pkg.has_cue_lists[i]) {
+            if (api_ptr->config()->save_cue_list(i, pkg.cue_lists[i]) != ESP_OK) {
+                rollback_all();
+                api_ptr->job_manager().fail_job(job_id, ESP_FAIL, "save_cue_list_failed");
+                api_ptr->command_journal().failed(cmd_id, ESP_FAIL);
+                return send_error(request, "500 Internal Server Error", "save_cue_list_failed");
+            }
+        }
+    }
+    api_ptr->job_manager().update_progress(job_id, JobState::Running, 75);
+
+    // 4. Write and verify Timeline (80%)
+    if (pkg.has_timeline) {
+        if (api_ptr->config()->save_sequence(pkg.timeline) != ESP_OK) {
+            rollback_all();
+            api_ptr->job_manager().fail_job(job_id, ESP_FAIL, "save_timeline_failed");
+            api_ptr->command_journal().failed(cmd_id, ESP_FAIL);
+            return send_error(request, "500 Internal Server Error", "save_timeline_failed");
+        }
+    }
+    api_ptr->job_manager().update_progress(job_id, JobState::Running, 80);
+
+    // 5. Write and verify Calendar (85%)
+    if (pkg.has_calendar) {
+        if (api_ptr->config()->save_calendar_schedule(pkg.calendar) != ESP_OK) {
+            rollback_all();
+            api_ptr->job_manager().fail_job(job_id, ESP_FAIL, "save_calendar_failed");
+            api_ptr->command_journal().failed(cmd_id, ESP_FAIL);
+            return send_error(request, "500 Internal Server Error", "save_calendar_failed");
+        }
+    }
+    api_ptr->job_manager().update_progress(job_id, JobState::Running, 85);
+
+    // 6. Write and verify DeviceConfig (LAST) (90%)
+    if (pkg.has_device_config) {
+        // Preserve immutable/unrestored secrets from current node (§26, §27)
+        pkg.device_config.sync_token = snapshot->old_cfg.sync_token;
+        if (api_ptr->config()->save_config(pkg.device_config) != ESP_OK) {
+            rollback_all();
+            api_ptr->job_manager().fail_job(job_id, ESP_FAIL, "save_config_failed");
+            api_ptr->command_journal().failed(cmd_id, ESP_FAIL);
+            return send_error(request, "500 Internal Server Error", "save_config_failed");
+        }
+    }
+    api_ptr->job_manager().update_progress(job_id, JobState::Running, 95);
+
+    // Full write/readback verified! Clear power-loss restore marker (§41)
+    api_ptr->config()->set_restore_in_progress(false, 0);
+
+    api_ptr->job_manager().update_progress(job_id, JobState::Running, 99);
     api_ptr->job_manager().complete_job(job_id);
     api_ptr->command_journal().applied(cmd_id);
     api_ptr->notify_status_async();
 
-    api::AuditLog::instance().log(api::ApiRole::Admin, "RESTORE", "Configuration restored via API");
+    api::AuditLog::instance().log(api::ApiRole::Admin, "restore_complete", "Configuration and show content restored successfully");
 
     char resp[160];
     snprintf(resp, sizeof(resp),
@@ -5852,6 +6785,7 @@ esp_err_t FactoryApi::start(
         { .uri = "/api/v1/activate",          .method = HTTP_POST, .handler = post_activate,    .user_ctx = this },
         { .uri = "/api/v1/config",            .method = HTTP_GET,  .handler = get_device_config, .user_ctx = this },
         { .uri = "/api/v1/config",            .method = HTTP_PUT,  .handler = put_device_config, .user_ctx = this },
+        { .uri = "/api/v1/config/validate",   .method = HTTP_POST, .handler = post_config_validate, .user_ctx = this },
         { .uri = "/api/v1/network/config",    .method = HTTP_GET,  .handler = get_network_config, .user_ctx = this },
         { .uri = "/api/v1/network/config",    .method = HTTP_PUT,  .handler = put_network_config, .user_ctx = this },
         { .uri = "/api/v1/network/status",    .method = HTTP_GET,  .handler = get_network_status, .user_ctx = this },
@@ -5882,7 +6816,10 @@ esp_err_t FactoryApi::start(
         { .uri = "/api/v1/show-manifest",     .method = HTTP_GET,  .handler = get_show_manifest, .user_ctx = this },
         { .uri = "/api/v1/audit",             .method = HTTP_GET,  .handler = get_audit_log,       .user_ctx = this },
         { .uri = "/api/v1/ota",               .method = HTTP_POST, .handler = post_ota,           .user_ctx = this },
+        { .uri = "/api/v1/ota/status",        .method = HTTP_GET,  .handler = get_ota_status,       .user_ctx = this },
+        { .uri = "/api/v1/recovery/status",   .method = HTTP_GET,  .handler = get_recovery_status,  .user_ctx = this },
         { .uri = "/api/v1/backup",            .method = HTTP_GET,  .handler = get_backup,         .user_ctx = this },
+        { .uri = "/api/v1/restore/validate",  .method = HTTP_POST, .handler = post_restore_validate, .user_ctx = this },
         { .uri = "/api/v1/restore",           .method = HTTP_POST, .handler = post_restore,       .user_ctx = this },
     };
 

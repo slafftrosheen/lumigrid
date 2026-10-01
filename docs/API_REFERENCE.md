@@ -955,4 +955,278 @@ Response:
 }
 ```
 
+## Factory Testing & Diagnostics (LG-035)
+
+### Start Factory Test
+
+```http
+POST /api/v1/factory/start
+Content-Type: application/json
+Authorization: Bearer <operator-or-admin-token>
+```
+
+```json
+{
+  "suite": "burn_in",
+  "durationSeconds": 300,
+  "channels": [0, 1, 2, 3]
+}
+```
+
+### Abort Factory Test
+
+```http
+POST /api/v1/factory/stop
+Authorization: Bearer <operator-or-admin-token>
+```
+
+### Factory Status & Report
+
+```http
+GET /api/v1/factory/status
+GET /api/v1/factory/report
+```
+
+---
+
+## Recovery, Configuration, Backup/Restore & OTA (LG-036)
+
+### Recovery Status
+
+```http
+GET /api/v1/recovery/status
+Authorization: Bearer <operator-or-admin-token>
+```
+
+Response:
+```json
+{
+  "safeMode": false,
+  "configValid": true,
+  "commissioningState": "none",
+  "startupState": "ready",
+  "failingStage": "none",
+  "failingError": 0,
+  "recoveryNetworkActive": false,
+  "outputsForcedOff": false,
+  "otaState": "confirmed",
+  "restoreState": "idle"
+}
+```
+
+### Device Configuration
+
+#### Get Device Configuration
+```http
+GET /api/v1/config
+Authorization: Bearer <operator-or-admin-token>
+```
+
+Response includes authoritative checksum, single source-of-truth limits, and write-only sync token indicator:
+```json
+{
+  "schema": 3,
+  "checksum": 382738291,
+  "deviceName": "Lobby East",
+  "syncEnabled": true,
+  "syncRole": 0,
+  "syncTokenSet": true,
+  "limits": {
+    "maxPowerMw": 60000,
+    "maxPixelsPerChannel": 512,
+    "maxGroups": 8,
+    "maxChannels": 16,
+    "maxDmxUniverse": 63999
+  },
+  "channels": [ ... ],
+  "groups": [ ... ],
+  "protocol": { ... }
+}
+```
+
+#### Validate Candidate Configuration
+```http
+POST /api/v1/config/validate
+Content-Type: application/json
+Authorization: Bearer <admin-token>
+```
+
+```json
+{
+  "expectedChecksum": 382738291,
+  "deviceName": "Lobby East Updated",
+  ...
+}
+```
+
+Response (zero persistent writes):
+```json
+{
+  "valid": true,
+  "currentChecksum": 382738291,
+  "impact": {
+    "hotApply": true,
+    "outputRestart": false,
+    "dmxRestart": false,
+    "syncRestart": false,
+    "schedulerRestart": false,
+    "mqttRestart": false,
+    "rebootRequired": false
+  },
+  "warnings": []
+}
+```
+
+#### Update Device Configuration
+```http
+PUT /api/v1/config
+Content-Type: application/json
+Authorization: Bearer <admin-token>
+```
+
+Optimistic concurrency requires matching checksum:
+```json
+{
+  "expectedChecksum": 382738291,
+  ...
+}
+```
+
+If checksum does not match:
+```http
+409 Conflict
+```
+```json
+{
+  "error": "config_conflict",
+  "currentChecksum": 92837211
+}
+```
+
+Successful response:
+```json
+{
+  "accepted": true,
+  "saved": true,
+  "commandId": 91,
+  "checksum": 92837211,
+  "apply": "hot"
+}
+```
+
+### Backup & Recovery Package v4
+
+#### Export Backup Package
+```http
+GET /api/v1/backup
+Authorization: Bearer <admin-token>
+```
+
+Returns streaming newline-delimited JSON (`application/x-lumigrid-backup`) with `.lgbak` extension. Excludes all credentials, hashes, salts, Wi-Fi passwords, and sync tokens.
+
+```json
+{"type":"header","schema":4,"source":{"nodeId":"lg-84f703c29110","family":"led-node","model":"lg-led-v1","firmwareVersion":"1.0.0","hardwareRevision":"v1.0"},"policy":{"authIncluded":false,"networkSecretsIncluded":false,"syncSecretIncluded":false}}
+{"type":"deviceConfig","data":{...}}
+{"type":"scene","index":0,"data":{...}}
+{"type":"sceneMotion","index":0,"data":{...}}
+{"type":"timeline","data":{...}}
+{"type":"calendar","data":{...}}
+{"type":"cueList","index":0,"data":{...}}
+{"type":"end","records":17,"checksum":12345678}
+```
+
+#### Preflight Validate Restore Package
+```http
+POST /api/v1/restore/validate
+Content-Type: application/x-lumigrid-backup
+Authorization: Bearer <admin-token>
+```
+
+Response (zero writes):
+```json
+{
+  "valid": true,
+  "schema": 4,
+  "source": {
+    "nodeId": "lg-old-node",
+    "firmwareVersion": "1.0.0"
+  },
+  "packageChecksum": 18273645,
+  "plan": {
+    "deviceConfig": true,
+    "scenes": 12,
+    "sceneMotions": 7,
+    "timeline": true,
+    "calendar": true,
+    "cueLists": 4
+  },
+  "preserved": {
+    "authentication": true,
+    "networkCredentials": true,
+    "nodeIdentity": true,
+    "syncToken": true
+  },
+  "warnings": []
+}
+```
+
+#### Execute Restore Package
+```http
+POST /api/v1/restore
+Content-Type: application/x-lumigrid-backup
+Authorization: Bearer <admin-token>
+```
+
+Begins Restore Job, captures rollback snapshot, sets power-loss NVS marker `restore_in_progress = true`, performs verified writes with readbacks, clears marker upon full success, and reboots node.
+
+### Firmware OTA
+
+#### Upload Firmware Image
+```http
+POST /api/v1/ota
+Content-Type: application/octet-stream
+Authorization: Bearer <admin-token>
+```
+
+Validates content length <= OTA partition, writes stream, verifies ESP-IDF application descriptor (`lumigrid_led_node`), marks boot partition, and records pending verify state in NVS:
+```json
+{
+  "accepted": true,
+  "commandId": 17,
+  "jobId": 29,
+  "targetVersion": "1.1.0",
+  "projectName": "lumigrid_led_node",
+  "state": "pending_reboot"
+}
+```
+
+#### Query OTA Status
+```http
+GET /api/v1/ota/status
+Authorization: Bearer <operator-or-admin-token>
+```
+
+Response after successful boot verification:
+```json
+{
+  "state": "confirmed",
+  "runningVersion": "1.1.0",
+  "previousVersion": "1.0.0",
+  "targetVersion": "1.1.0",
+  "rolledBack": false
+}
+```
+
+Response after bootloader rollback:
+```json
+{
+  "state": "rolled_back",
+  "runningVersion": "1.0.0",
+  "targetVersion": "1.1.0",
+  "rolledBack": true,
+  "reason": "candidate_startup_failed"
+}
+```
+
+
 

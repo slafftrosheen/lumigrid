@@ -207,6 +207,38 @@ if cue_runner_header.exists():
     ]
     check_file_contains(cue_runner_header, unlocked_readers)
 
+# 14. LG-036: No CONFIG_LUMIGRID_ENABLE_DEV_CREDENTIALS in production build paths
+cmakelists = NODE_DIR / "CMakeLists.txt"
+if cmakelists.exists():
+    check_file_contains(cmakelists, [("CONFIG_LUMIGRID_ENABLE_DEV_CREDENTIALS", "Forbidden dev credentials flag in CMakeLists.txt")])
+
+pio_ini = NODE_DIR / "platformio.ini"
+if pio_ini.exists():
+    pio_text = pio_ini.read_text(encoding="utf-8")
+    # env:factory section must not contain CONFIG_LUMIGRID_ENABLE_DEV_CREDENTIALS
+    factory_match = re.search(r"\[env:factory\](.*?)(?=\[|\Z)", pio_text, re.DOTALL)
+    if factory_match and "CONFIG_LUMIGRID_ENABLE_DEV_CREDENTIALS" in factory_match.group(1):
+        errors.append("platformio.ini: [env:factory] contains forbidden CONFIG_LUMIGRID_ENABLE_DEV_CREDENTIALS")
+
+# 15. LG-036: Bootloader app rollback must be enabled in sdkconfig.defaults
+sdk_defs = NODE_DIR / "sdkconfig.defaults"
+if sdk_defs.exists():
+    sdk_text = sdk_defs.read_text(encoding="utf-8")
+    if "CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y" not in sdk_text:
+        errors.append("sdkconfig.defaults: CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y is missing")
+
+# 16. LG-036: Backup export must not contain syncToken or Wi-Fi passwords
+backup_files = [
+    NODE_DIR / "components" / "factory" / "FactoryApi.cpp",
+]
+for f in backup_files:
+    check_file_contains(f, [
+        ('cJSON_AddNumberToObject(cfg_json, "syncToken"', "Forbidden backup export of syncToken"),
+        ('cJSON_AddNumberToObject(root, "syncToken"', "Forbidden backup export of syncToken"),
+        ('cJSON_AddStringToObject(net_json, "password"', "Forbidden backup export of Wi-Fi password"),
+        ('"wifiPassword"', "Forbidden backup export of wifiPassword"),
+    ])
+
 if errors:
     print("\nFAILED: Discovered architectural invariant violations:")
     for err in errors:
@@ -215,3 +247,4 @@ if errors:
 else:
     print("[PASS] All certification architectural invariants verified successfully.")
     sys.exit(0)
+

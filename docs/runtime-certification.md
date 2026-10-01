@@ -1,7 +1,7 @@
 # LumiGrid Runtime Certification Status
 
-> **Target Base Commit**: `d21e5e56eea18854524e90c5c8cf243de8c4369d`
-> **Date**: September 2026
+> **Target Base Commit**: `ea586e39aca19df0d051e2534cf336c73316f582`
+> **Date**: October 2026
 > **Scope**: Certification Hardening, Lifecycle Integrity, Concurrency Safety, Runtime Snapshot Authority, and Verification Status.
 > **Certification Stage**: Pre-Hardware Verification (Architecture & Simulation Complete). Full certification is **NOT** claimed until physical hardware milestones are completed.
 
@@ -81,6 +81,18 @@
 | **Cues (LG-034)** | Deterministic cue transport via `/api/v1/show/control`: invalid-state moves return 400/409, never silent no-ops | `[PASS]` | Compile Verified, Unit Test |
 | **Cues (LG-034)** | NodeSync protocol v6: 76-byte packed frame with cue list checksum, transition progress, paused-from phase, and source scene | `[PASS]` | Compile Verified, Unit Test |
 | **Cues (LG-034)** | Follower cue content parity gate: missing list fails with `cue_list_missing`, divergent list fails closed with `SyncTransportError::CueListMismatch` | `[PASS]` | Compile Verified, Unit Test |
+| **Factory (LG-035)** | Software state machine & runner for automated bench validation (A1–A8, P1–P8, visual test patterns, burn-in) | `[PASS]` | Compile Verified, Unit Test |
+| **Factory (LG-035)** | Abort factory test cleanly transitions output ownership to blackout without ungraceful crash | `[PASS]` | Compile Verified, Unit Test |
+| **Security (LG-036)** | Elimination of universal recovery credentials (`lumigrid123` removed from production builds) | `[PASS]` | Static Invariant, CI |
+| **Security (LG-036)** | Destructive factory reset is physical-only (GPIO0 hold); zero HTTP factory reset endpoints | `[PASS]` | Architecture Invariant, Static CI |
+| **Recovery (LG-036)** | Explicit `RecoveryStatus` model (`GET /api/v1/recovery/status`) with fail-safe Safe Mode | `[PASS]` | Compile Verified, Unit Test |
+| **Config (LG-036)** | Authoritative CRC checksum contract on `DeviceConfig` with optimistic concurrency (`409 Conflict`) | `[PASS]` | Compile Verified, Unit Test |
+| **Config (LG-036)** | Strict fail-closed nested bounds validation (reject >16 channels, >8 groups, invalid enums) | `[PASS]` | Compile Verified, Unit Test |
+| **Config (LG-036)** | Runtime `ConfigApplyPlan` transaction: driver reconfig with blackout, service restart rollback | `[PASS]` | Compile Verified, Unit Test |
+| **Backup (LG-036)** | Streaming Recovery Package v4 (`.lgbak`) excluding credentials/salts/Wi-Fi/sync tokens | `[PASS]` | Compile Verified, Unit Test |
+| **Restore (LG-036)** | Preflight validation (`POST /restore/validate`) and transactional restore with NVS marker and rollback | `[PASS]` | Compile Verified, Unit Test |
+| **OTA (LG-036)** | Bootloader application rollback (`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y`) in production | `[PASS]` | Build Config, Invariant |
+| **OTA (LG-036)** | OTA descriptor validation, candidate self-test in `OtaBootVerifier`, and automatic rollback on fault | `[PASS]` | Compile Verified, Unit Test |
 
 ---
 

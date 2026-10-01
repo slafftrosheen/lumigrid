@@ -27,4 +27,5 @@ idf_component_register(
         network
         auth
         discovery
+        ota
 )

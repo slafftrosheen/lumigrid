@@ -76,8 +76,16 @@ The operator interface is organized into primary destinations, visually separati
    - **Authoritative Live Playhead:** Live playhead derived directly from `RuntimeSnapshot.transport.timeline` with smooth client-side interpolation.
    - **Follower Mode Protection:** Active followers display "Playback Controlled by Sync Leader" with transport controls disabled, while permitting document editing and saving.
 14. **Cue Transport on Embedded Dashboard (LG-034):** The device-hosted dashboard gains a Cue page (list selector, Run/Stop/Pause/Resume/Prev/Next/Restart, manual T-Bar when a manual-mode list runs) speaking the same canonical `/api/v1/show/control` transport, with live telemetry from the `transport.cue` status section and a fixed navigation rail exposing all operator pages.
+15. **Factory Validation & Burn-In Console (LG-035):** Dedicated operator surface for hardware test sequences. Renders test suite selector (addressable lanes, PWM channels, visual color wash, pixel chase, full burn-in), live progress and elapsed time, abort controls, and formatted test reports.
+16. **First-Install Commissioning Wizard (LG-036):** Guided 7-step onboarding flow after first Admin bootstrap (1. Node Identity, 2. Network Commissioning, 3. Output Channels, 4. Safety Limits, 5. Hardware Validation, 6. First Backup Download, 7. Ready).
+17. **System & Recovery Hub (LG-036):**
+    - **Safe Mode & Recovery Status:** Explicit banner when Safe Mode is active with root-cause diagnostics (invalid config, interrupted restore, critical fault).
+    - **Device Configuration:** Structured panel organized by impact (Identity, Output & Safety, Protocols, Synchronization, Services) with checksum conflict detection (`409 Conflict`), preview dialog showing exact runtime consequences before save, and single source-of-truth limits.
+    - **Two-Stage Restore:** Pre-flight upload validation (`POST /api/v1/restore/validate`) displaying source node provenance, domain plan, and preserved security settings before explicit user confirmation to restore and reboot.
+    - **OTA Management:** Single canonical uploader (`POST /api/v1/ota`), exact candidate version verification, cross-reboot OTA status reporting (`confirmed` / `rolled_back`), and canary failure abort for fleet deployments.
 
 ### Service
-- **Diagnostics & System:** Unified maintenance hub featuring live health telemetry, real-time node system logs, security/config audit trails, firmware OTA flashing, and backup/restore. Includes a dedicated section for Factory Output Testing (e.g., Burn-in, Lane Chase, Color Wash) time-bounded by the firmware.
-- **Configuration:** Persistence and system settings.
+- **Diagnostics:** Unified maintenance hub featuring live health telemetry, real-time node system logs, security/config audit trails, and hardware validation tests.
+- **System / Firmware:** Device configuration, backup/restore, OTA update, and recovery status.
+
 
