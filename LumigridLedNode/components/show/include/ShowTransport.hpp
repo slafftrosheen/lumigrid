@@ -49,6 +49,12 @@ struct CueTransportSnapshot {
     uint32_t paused_elapsed_ms = 0;
 
     uint32_t generation = 0;
+
+    // LG-034 §27/§28: NodeSync v6 frozen-fade + parity fields
+    uint32_t list_checksum = 0;
+    uint16_t transition_progress_q15 = 0;
+    uint8_t paused_from = 0;      // CueRunnerState the run was paused from
+    uint8_t source_scene = 0;     // scene of current cue (fade source)
 };
 
 struct ShowTransportSnapshot {
@@ -80,6 +86,12 @@ struct ShowTransportSnapshot {
     uint64_t timeline_elapsed_ms = 0;
     uint32_t timeline_current_beat = 0;
     bool timeline_content_stale = false;
+
+    // NodeSync v6 cue extensions (LG-034)
+    uint32_t cue_list_checksum = 0;
+    uint16_t cue_transition_progress_q15 = 0;
+    uint8_t cue_paused_from = 0;
+    uint8_t cue_source_scene = 0;
 
     uint8_t scene_index() const { return active_scene; }
     uint16_t timeline_bpm() const { return bpm; }

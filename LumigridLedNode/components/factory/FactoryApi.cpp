@@ -80,6 +80,43 @@ esp_err_t send_error(httpd_req_t* request,
     return send_json(request, body, status);
 }
 
+// LG-034: structured error body with extra fields (e.g. cueIndex, currentChecksum).
+esp_err_t send_error_json(httpd_req_t* request, const char* status, cJSON* body) {
+    esp_err_t res = send_json(request, body, status);
+    return res;
+}
+
+#include <cmath>
+
+// Strict UTF-8 byte length for API limits (names/labels).
+static size_t utf8_byte_len(const char* s) {
+    return s ? strlen(s) : 0;
+}
+
+// Rejects overlong sequences, surrogates and truncated multi-byte tails.
+static bool is_valid_utf8(const char* s) {
+    if (!s) return false;
+    const auto* p = reinterpret_cast<const unsigned char*>(s);
+    while (*p) {
+        if (*p < 0x80) { p++; continue; }
+        int need = 0;
+        uint32_t cp = 0;
+        if ((*p & 0xE0) == 0xC0) { need = 1; cp = *p & 0x1Fu; }
+        else if ((*p & 0xF0) == 0xE0) { need = 2; cp = *p & 0x0Fu; }
+        else if ((*p & 0xF8) == 0xF0) { need = 3; cp = *p & 0x07u; }
+        else return false;
+        p++;
+        while (need-- > 0) {
+            if ((*p & 0xC0) != 0x80) return false;
+            cp = (cp << 6) | (*p & 0x3Fu);
+            p++;
+        }
+        if (cp > 0x10FFFF) return false;
+        if (cp >= 0xD800 && cp <= 0xDFFF) return false;
+    }
+    return true;
+}
+
 inline bool channel_is_configured(const ChannelHardwareDescriptor& hw, const ChannelConfig& cfg) {
     return channel_is_configured(hw.index, cfg);
 }
@@ -1184,13 +1221,17 @@ struct SceneReferences {
     uint8_t scene_index = 0;
     bool active = false;
     bool fallback = false;
+    bool active_cue_transport = false;   // LG-034 §43: scene used by the RUNNING cue snapshot
+    uint8_t active_cue_list = 0;
+    uint8_t active_cue = 0;
     std::vector<uint8_t> cues;
     std::vector<uint8_t> timeline_tracks;
     std::vector<TimelineReference> timeline_steps;
     std::vector<uint8_t> schedules;
 
     bool in_use() const {
-        return active || fallback || !cues.empty() || !timeline_tracks.empty() || !timeline_steps.empty() || !schedules.empty();
+        return active || fallback || active_cue_transport || !cues.empty() ||
+               !timeline_tracks.empty() || !timeline_steps.empty() || !schedules.empty();
     }
 };
 
@@ -1212,7 +1253,7 @@ static SceneReferences evaluate_scene_references(FactoryApi* api_ptr, uint8_t sc
         }
     }
 
-    // 3. Cue Lists
+    // 3. Cue Lists (persisted)
     for (uint8_t i = 0; i < kMaxCueLists; ++i) {
         CueList cl;
         if (api_ptr->config()->load_cue_list(i, cl) == ESP_OK && cl.count > 0) {
@@ -1221,6 +1262,27 @@ static SceneReferences evaluate_scene_references(FactoryApi* api_ptr, uint8_t sc
                     refs.cues.push_back(i);
                     break;
                 }
+            }
+        }
+    }
+
+    // 3b. LG-034 §43: the RUNNING Cue snapshot protects its scenes even after
+    // the saved list was edited to no longer reference them.
+    if (api_ptr->cue_runner()) {
+        const auto cue_snap = api_ptr->cue_runner()->snapshot(
+            api_ptr->show_clock_now_ms());
+        if (cue_snap.running) {
+            if (cue_snap.current_scene == scene_index) {
+                refs.active_cue_transport = true;
+                refs.active_cue_list = cue_snap.list_index;
+                refs.active_cue = cue_snap.current_cue;
+            }
+            // The prepared next cue in Manual mode must also stay available.
+            if (!refs.active_cue_transport && cue_snap.mode == CueRunMode::Manual &&
+                cue_snap.next_scene == scene_index) {
+                refs.active_cue_transport = true;
+                refs.active_cue_list = cue_snap.list_index;
+                refs.active_cue = cue_snap.next_cue;
             }
         }
     }
@@ -1347,6 +1409,13 @@ esp_err_t delete_preset(httpd_req_t* request) {
             cJSON* item = cJSON_CreateObject();
             cJSON_AddStringToObject(item, "type", "active");
             cJSON_AddNumberToObject(item, "index", u_idx);
+            cJSON_AddItemToArray(ref_arr, item);
+        }
+        if (refs.active_cue_transport) {
+            cJSON* item = cJSON_CreateObject();
+            cJSON_AddStringToObject(item, "type", "activeCueTransport");
+            cJSON_AddNumberToObject(item, "cueList", refs.active_cue_list);
+            cJSON_AddNumberToObject(item, "cue", refs.active_cue);
             cJSON_AddItemToArray(ref_arr, item);
         }
         if (refs.fallback) {
@@ -2188,7 +2257,9 @@ esp_err_t get_cue_lists(httpd_req_t* request) {
             cJSON_AddStringToObject(obj, "name", cl.name);
             cJSON_AddStringToObject(obj, "mode", cue_run_mode_name(cl.mode));
             cJSON_AddNumberToObject(obj, "count", cl.count);
-            cJSON_AddNumberToObject(obj, "endAction", cl.end_action);
+            cJSON_AddNumberToObject(obj, "endAction", static_cast<int>(cl.end_action));
+            cJSON_AddStringToObject(obj, "endActionName", cue_end_action_name(cl.end_action));
+            cJSON_AddNumberToObject(obj, "checksum", cl.checksum);
             cJSON_AddItemToArray(arr, obj);
         }
     }
@@ -2224,11 +2295,14 @@ esp_err_t get_cue_list(httpd_req_t* request) {
     if (err != ESP_OK) return send_error(request, "404 Not Found", "cue_list_not_found");
 
     cJSON* obj = cJSON_CreateObject();
+    cJSON_AddNumberToObject(obj, "schema", 2);
     cJSON_AddNumberToObject(obj, "index", index);
+    cJSON_AddNumberToObject(obj, "checksum", cl.checksum);
     cJSON_AddStringToObject(obj, "name", cl.name);
     cJSON_AddStringToObject(obj, "mode", cue_run_mode_name(cl.mode));
     cJSON_AddNumberToObject(obj, "count", cl.count);
-    cJSON_AddNumberToObject(obj, "endAction", cl.end_action);
+    cJSON_AddNumberToObject(obj, "endAction", static_cast<int>(cl.end_action));
+    cJSON_AddStringToObject(obj, "endActionName", cue_end_action_name(cl.end_action));
 
     cJSON* cues = cJSON_CreateArray();
     for (uint8_t c = 0; c < cl.count && c < kMaxCuesPerList; ++c) {
@@ -2259,6 +2333,7 @@ esp_err_t put_cue_list(httpd_req_t* request) {
     cJSON* root = nullptr;
     if (read_json(request, &root) != ESP_OK) return send_error(request, "400 Bad Request", "invalid_json");
 
+    // ── List index: 0..7 (body or query) ──
     uint8_t index = 0;
     if (!json_u8(root, "index", 0, kMaxCueLists - 1, index)) {
         size_t qlen = httpd_req_get_url_query_len(request);
@@ -2277,44 +2352,126 @@ esp_err_t put_cue_list(httpd_req_t* request) {
         return send_error(request, "400 Bad Request", "invalid_index");
     }
 
+    // ── Name: mandatory, 1..31 UTF-8 bytes, no silent truncation (§35) ──
     CueList cl{};
     const cJSON* name_j = cJSON_GetObjectItemCaseSensitive(root, "name");
-    if (name_j && cJSON_IsString(name_j)) {
-        strncpy(cl.name, name_j->valuestring, sizeof(cl.name) - 1);
+    if (!name_j || !cJSON_IsString(name_j) || name_j->valuestring[0] == '\0') {
+        cJSON_Delete(root);
+        return send_error(request, "400 Bad Request", "invalid_name");
     }
+    if (!is_valid_utf8(name_j->valuestring) || utf8_byte_len(name_j->valuestring) > CueList::kMaxNameBytes) {
+        cJSON_Delete(root);
+        return send_error(request, "400 Bad Request", "name_too_long");
+    }
+    strncpy(cl.name, name_j->valuestring, sizeof(cl.name) - 1);
+
+    // ── Mode: strict enum (§32) ──
     const cJSON* mode_j = cJSON_GetObjectItemCaseSensitive(root, "mode");
-    if (mode_j && cJSON_IsString(mode_j)) {
-        parse_cue_run_mode(mode_j->valuestring, cl.mode);
+    if (!mode_j || !cJSON_IsString(mode_j) || !parse_cue_run_mode(mode_j->valuestring, cl.mode)) {
+        cJSON_Delete(root);
+        return send_error(request, "400 Bad Request", "invalid_run_mode");
     }
+
+    // ── End action: strict string, or numeric 0..2 compatibility (§3/§4) ──
     const cJSON* ea_j = cJSON_GetObjectItemCaseSensitive(root, "endAction");
-    if (ea_j && cJSON_IsNumber(ea_j)) cl.end_action = ea_j->valueint;
-
-    const cJSON* cues = cJSON_GetObjectItemCaseSensitive(root, "cues");
-    if (cues && cJSON_IsArray(cues)) {
-        uint8_t c_idx = 0;
-        const cJSON* c_item = nullptr;
-        cJSON_ArrayForEach(c_item, cues) {
-            if (c_idx >= kMaxCuesPerList) break;
-            auto& cue = cl.cues[c_idx];
-
-            const cJSON* sc_j = cJSON_GetObjectItemCaseSensitive(c_item, "sceneIndex");
-            if (sc_j && cJSON_IsNumber(sc_j)) cue.scene_index = sc_j->valueint;
-
-            const cJSON* hold_j = cJSON_GetObjectItemCaseSensitive(c_item, "holdMs");
-            if (hold_j && cJSON_IsNumber(hold_j)) cue.hold_ms = hold_j->valueint;
-
-            const cJSON* fade_j = cJSON_GetObjectItemCaseSensitive(c_item, "fadeMs");
-            if (fade_j && cJSON_IsNumber(fade_j)) cue.fade_ms = fade_j->valueint;
-
-            const cJSON* cur_j = cJSON_GetObjectItemCaseSensitive(c_item, "curve");
-            if (cur_j && cJSON_IsString(cur_j)) parse_transition_curve(cur_j->valuestring, cue.curve);
-
-            const cJSON* lbl_j = cJSON_GetObjectItemCaseSensitive(c_item, "label");
-            if (lbl_j && cJSON_IsString(lbl_j)) strncpy(cue.label, lbl_j->valuestring, sizeof(cue.label) - 1);
-
-            c_idx++;
+    if (ea_j && cJSON_IsString(ea_j)) {
+        if (!parse_cue_end_action(ea_j->valuestring, cl.end_action)) {
+            cJSON_Delete(root);
+            return send_error(request, "400 Bad Request", "invalid_end_action");
         }
-        cl.count = c_idx;
+    } else if (ea_j && cJSON_IsNumber(ea_j)) {
+        if (ea_j->valueint < 0 || ea_j->valueint > 2) {
+            cJSON_Delete(root);
+            return send_error(request, "400 Bad Request", "invalid_end_action");
+        }
+        cl.end_action = static_cast<CueEndAction>(ea_j->valueint);
+    } else {
+        cJSON_Delete(root);
+        return send_error(request, "400 Bad Request", "invalid_end_action");
+    }
+
+    // ── Cues: 1..16, no silent truncation (§33/§34) ──
+    const cJSON* cues = cJSON_GetObjectItemCaseSensitive(root, "cues");
+    if (!cues || !cJSON_IsArray(cues)) {
+        cJSON_Delete(root);
+        return send_error(request, "400 Bad Request", "invalid_cues");
+    }
+    const int cue_array_len = cJSON_GetArraySize(cues);
+    if (cue_array_len < 1 || cue_array_len > kMaxCuesPerList) {
+        cJSON_Delete(root);
+        return send_error(request, cue_array_len > kMaxCuesPerList ? "400 Bad Request" : "400 Bad Request",
+                          cue_array_len > kMaxCuesPerList ? "too_many_cues" : "empty_cue_list");
+    }
+
+    uint8_t c_idx = 0;
+    const cJSON* c_item = nullptr;
+    cJSON_ArrayForEach(c_item, cues) {
+        auto& cue = cl.cues[c_idx];
+
+        const cJSON* sc_j = cJSON_GetObjectItemCaseSensitive(c_item, "sceneIndex");
+        if (!sc_j || !cJSON_IsNumber(sc_j) || sc_j->valueint < 0 || sc_j->valueint > 31) {
+            cJSON_Delete(root);
+            return send_error(request, "400 Bad Request", "invalid_scene_index");
+        }
+        cue.scene_index = static_cast<uint8_t>(sc_j->valueint);
+
+        const cJSON* hold_j = cJSON_GetObjectItemCaseSensitive(c_item, "holdMs");
+        if (!hold_j || !cJSON_IsNumber(hold_j) || hold_j->valuedouble < 0 || hold_j->valuedouble > 3600000.0) {
+            cJSON_Delete(root);
+            return send_error(request, "400 Bad Request", "invalid_hold_ms");
+        }
+        cue.hold_ms = static_cast<uint32_t>(hold_j->valuedouble);
+
+        const cJSON* fade_j = cJSON_GetObjectItemCaseSensitive(c_item, "fadeMs");
+        if (!fade_j || !cJSON_IsNumber(fade_j) || fade_j->valuedouble < 0 || fade_j->valuedouble > 60000.0) {
+            cJSON_Delete(root);
+            return send_error(request, "400 Bad Request", "invalid_fade_ms");
+        }
+        cue.fade_ms = static_cast<uint16_t>(fade_j->valuedouble);
+
+        const cJSON* cur_j = cJSON_GetObjectItemCaseSensitive(c_item, "curve");
+        if (!cur_j || !cJSON_IsString(cur_j) || !parse_transition_curve(cur_j->valuestring, cue.curve)) {
+            cJSON_Delete(root);
+            return send_error(request, "400 Bad Request", "invalid_curve");
+        }
+
+        const cJSON* lbl_j = cJSON_GetObjectItemCaseSensitive(c_item, "label");
+        if (lbl_j && cJSON_IsString(lbl_j)) {
+            if (!is_valid_utf8(lbl_j->valuestring) || utf8_byte_len(lbl_j->valuestring) > CueEntry::kMaxLabelBytes) {
+                cJSON_Delete(root);
+                return send_error(request, "400 Bad Request", "label_too_long");
+            }
+            strncpy(cue.label, lbl_j->valuestring, sizeof(cue.label) - 1);
+        }
+        c_idx++;
+    }
+    cl.count = c_idx;
+
+    // ── Referenced Scenes must exist (§33) ──
+    for (uint8_t i = 0; i < cl.count; ++i) {
+        if (!api_ptr->config()->scene_exists(cl.cues[i].scene_index)) {
+            cJSON* err_body = cJSON_CreateObject();
+            cJSON_AddStringToObject(err_body, "error", "cue_scene_missing");
+            cJSON_AddNumberToObject(err_body, "cueIndex", i);
+            cJSON_AddNumberToObject(err_body, "sceneIndex", cl.cues[i].scene_index);
+            cJSON_Delete(root);
+            esp_err_t res = send_error_json(request, "400 Bad Request", err_body);
+            return res;
+        }
+    }
+
+    // ── Optimistic checksum conflict protection (§37) ──
+    const cJSON* expected_j = cJSON_GetObjectItemCaseSensitive(root, "expectedChecksum");
+    CueList current{};
+    const bool exists = (api_ptr->config()->load_cue_list(index, current) == ESP_OK && current.count > 0);
+    if (expected_j && cJSON_IsNumber(expected_j) && exists &&
+        static_cast<uint32_t>(expected_j->valuedouble) != current.checksum) {
+        cJSON* err_body = cJSON_CreateObject();
+        cJSON_AddStringToObject(err_body, "error", "cue_list_conflict");
+        cJSON_AddNumberToObject(err_body, "currentChecksum", current.checksum);
+        cJSON_Delete(root);
+        esp_err_t res = send_error_json(request, "409 Conflict", err_body);
+        return res;
     }
 
     cJSON_Delete(root);
@@ -2322,11 +2479,22 @@ esp_err_t put_cue_list(httpd_req_t* request) {
     esp_err_t err = api_ptr->config()->save_cue_list(index, cl);
     if (err != ESP_OK) return send_error(request, "500 Internal Server Error", "nvs_write_failed");
 
+    // Verify readback to obtain the authoritative stored checksum (§38)
+    CueList stored{};
+    uint32_t stored_checksum = cl.checksum;
+    if (api_ptr->config()->load_cue_list(index, stored) == ESP_OK) {
+        stored_checksum = stored.checksum;
+    }
+
+    // §39: saving a running list never mutates the active run; the checksum
+    // difference surfaces as contentStale in runtime telemetry.
     uint32_t cmd_id = api_ptr->command_journal().accept(CommandDomain::Cue);
     api_ptr->command_journal().applied(cmd_id);
 
-    char resp[96];
-    snprintf(resp, sizeof(resp), "{\"saved\":true,\"commandId\":%" PRIu32 "}", cmd_id);
+    char resp[128];
+    snprintf(resp, sizeof(resp),
+        "{\"saved\":true,\"checksum\":%" PRIu32 ",\"commandId\":%" PRIu32 "}",
+        stored_checksum, cmd_id);
     return send_json(request, resp, "200 OK");
 }
 
@@ -2348,6 +2516,43 @@ esp_err_t delete_cue_list(httpd_req_t* request) {
         }
     }
     if (index >= kMaxCueLists) return send_error(request, "400 Bad Request", "invalid_index");
+
+    // ── Reference protection (§41/§42/§43) ──
+    cJSON* references = cJSON_CreateArray();
+
+    // Active transport
+    if (api_ptr->cue_runner()) {
+        const auto snap = api_ptr->cue_runner()->snapshot(api_ptr->show_clock_now_ms());
+        if (snap.running && snap.list_index == index) {
+            cJSON* ref = cJSON_CreateObject();
+            cJSON_AddStringToObject(ref, "type", "activeTransport");
+            cJSON_AddItemToArray(references, ref);
+        }
+    }
+
+    // Calendar Schedule references
+    if (api_ptr->config()) {
+        CalendarSchedule sched{};
+        if (api_ptr->config()->load_calendar_schedule(sched) == ESP_OK) {
+            for (uint8_t i = 0; i < 8; ++i) {
+                const auto& entry = sched.entries[i];
+                if (entry.enabled && entry.action == CalendarAction::CueList && entry.cue_list_index == index) {
+                    cJSON* ref = cJSON_CreateObject();
+                    cJSON_AddStringToObject(ref, "type", "schedule");
+                    cJSON_AddNumberToObject(ref, "index", i);
+                    cJSON_AddItemToArray(references, ref);
+                }
+            }
+        }
+    }
+
+    if (cJSON_GetArraySize(references) > 0) {
+        cJSON* err_body = cJSON_CreateObject();
+        cJSON_AddStringToObject(err_body, "error", "cue_list_in_use");
+        cJSON_AddItemToObject(err_body, "references", references);
+        return send_error_json(request, "409 Conflict", err_body);
+    }
+    cJSON_Delete(references);
 
     esp_err_t err = api_ptr->config()->delete_cue_list(index);
     if (err != ESP_OK) return send_error(request, "500 Internal Server Error", "delete_failed");
@@ -2379,7 +2584,18 @@ esp_err_t post_show_control(httpd_req_t* request) {
 
     const char* mode_str = mode_j->valuestring;
     uint64_t now_ms = api_ptr->show_clock_now_ms();
-    uint32_t cmd_id = api_ptr->command_journal().accept(CommandDomain::Scene);
+
+    // LG-034 §15: journal domain must reflect the requested transport mode
+    // BEFORE dispatch. Scene/Timeline/Cue commands are no longer journaled as
+    // Scene commands.
+    CommandDomain command_domain = CommandDomain::Scene;
+    if (strcmp(mode_str, "timeline") == 0) command_domain = CommandDomain::Timeline;
+    else if (strcmp(mode_str, "cue") == 0) command_domain = CommandDomain::Cue;
+    else if (strcmp(mode_str, "scene") != 0) {
+        cJSON_Delete(root);
+        return send_error(request, "400 Bad Request", "unsupported_mode");
+    }
+    const uint32_t cmd_id = api_ptr->command_journal().accept(command_domain);
 
     if (strcmp(mode_str, "scene") == 0) {
         int scene_idx = 0;
@@ -2396,7 +2612,7 @@ esp_err_t post_show_control(httpd_req_t* request) {
         }
 
         if (api_ptr->cue_runner()) {
-            api_ptr->cue_runner()->stop(now_ms);
+            api_ptr->cue_runner()->stop(CueStopReason::Preempted, now_ms);
         }
         if (api_ptr->scheduler()) {
             api_ptr->scheduler()->stop_local_timeline();
@@ -2436,7 +2652,7 @@ esp_err_t post_show_control(httpd_req_t* request) {
 
         if (strcmp(action, "start") == 0 || strcmp(action, "restart") == 0) {
             if (api_ptr->cue_runner()) {
-                api_ptr->cue_runner()->stop(now_ms);
+                api_ptr->cue_runner()->stop(CueStopReason::Preempted, now_ms);
             }
             uint16_t bpm = 120;
             Sequence seq{};
@@ -2473,6 +2689,7 @@ esp_err_t post_show_control(httpd_req_t* request) {
             api_ptr->command_journal().failed(cmd_id, ESP_ERR_INVALID_ARG);
             return send_error(request, "400 Bad Request", "unknown_action");
         }
+        (void)now_ms;
 
         cJSON_Delete(root);
         api_ptr->command_journal().applied(cmd_id);
@@ -2496,6 +2713,8 @@ esp_err_t post_show_control(httpd_req_t* request) {
         }
         const char* action = act_j->valuestring;
 
+        // LG-034 §16: every transport op returns a deterministic status;
+        // invalid requests fail with 400/409 instead of silently no-oping.
         if (strcmp(action, "start") == 0) {
             if (api_ptr->scheduler()) {
                 api_ptr->scheduler()->stop_local_timeline();
@@ -2512,32 +2731,92 @@ esp_err_t post_show_control(httpd_req_t* request) {
                 cJSON_Delete(root);
                 return send_error(request, "400 Bad Request", "start_failed");
             }
-        } else if (strcmp(action, "stop") == 0) {
-            api_ptr->cue_runner()->stop(now_ms);
-        } else if (strcmp(action, "pause") == 0) {
-            api_ptr->cue_runner()->pause();
-        } else if (strcmp(action, "resume") == 0) {
-            api_ptr->cue_runner()->resume(now_ms);
-        } else if (strcmp(action, "next") == 0) {
-            api_ptr->cue_runner()->next(now_ms);
-        } else if (strcmp(action, "previous") == 0) {
-            api_ptr->cue_runner()->previous(now_ms);
-        } else if (strcmp(action, "jump") == 0) {
-            uint8_t cue_idx = 0;
+        } else if (strcmp(action, "restart") == 0) {
+            // LG-034 §13: canonical restart — newest saved list, fresh active
+            // snapshot, new generation, no end-action transient, no blackout.
+            uint8_t list_idx = 0;
+            uint8_t start_cue = 0;
+            const cJSON* li = cJSON_GetObjectItemCaseSensitive(root, "cueListIndex");
+            if (li && cJSON_IsNumber(li)) list_idx = static_cast<uint8_t>(li->valueint);
             const cJSON* ci = cJSON_GetObjectItemCaseSensitive(root, "cueIndex");
-            if (ci && cJSON_IsNumber(ci)) cue_idx = static_cast<uint8_t>(ci->valueint);
-            api_ptr->cue_runner()->jump(cue_idx, now_ms);
-        } else if (strcmp(action, "crossfade") == 0) {
-            uint16_t fade_q15 = 0;
-            const cJSON* f_j = cJSON_GetObjectItemCaseSensitive(root, "crossfade");
-            if (f_j && cJSON_IsNumber(f_j)) {
-                if (f_j->valuedouble <= 1.0) {
-                    fade_q15 = static_cast<uint16_t>(f_j->valuedouble * 32768.0);
-                } else {
-                    fade_q15 = static_cast<uint16_t>(std::min<int>(32768, f_j->valueint));
-                }
+            if (ci && cJSON_IsNumber(ci)) start_cue = static_cast<uint8_t>(ci->valueint);
+            esp_err_t err = api_ptr->cue_runner()->restart(list_idx, start_cue, now_ms);
+            if (err != ESP_OK) {
+                api_ptr->command_journal().failed(cmd_id, err);
+                cJSON_Delete(root);
+                return send_error(request, "400 Bad Request", "restart_failed");
             }
-            api_ptr->cue_runner()->set_manual_fade(fade_q15);
+        } else if (strcmp(action, "stop") == 0) {
+            // §2: operator stop holds current output; never executes end action.
+            api_ptr->cue_runner()->stop(CueStopReason::Operator, now_ms);
+        } else if (strcmp(action, "pause") == 0) {
+            esp_err_t err = api_ptr->cue_runner()->pause(now_ms);
+            if (err != ESP_OK) {
+                api_ptr->command_journal().failed(cmd_id, err);
+                cJSON_Delete(root);
+                return send_error(request, "409 Conflict", "pause_invalid_state");
+            }
+        } else if (strcmp(action, "resume") == 0) {
+            esp_err_t err = api_ptr->cue_runner()->resume(now_ms);
+            if (err != ESP_OK) {
+                api_ptr->command_journal().failed(cmd_id, err);
+                cJSON_Delete(root);
+                return send_error(request, "409 Conflict", "resume_invalid_state");
+            }
+        } else if (strcmp(action, "next") == 0) {
+            esp_err_t err = api_ptr->cue_runner()->next(now_ms);
+            if (err != ESP_OK) {
+                api_ptr->command_journal().failed(cmd_id, err);
+                cJSON_Delete(root);
+                return send_error(request, "409 Conflict", "next_invalid_state");
+            }
+        } else if (strcmp(action, "previous") == 0) {
+            esp_err_t err = api_ptr->cue_runner()->previous(now_ms);
+            if (err != ESP_OK) {
+                api_ptr->command_journal().failed(cmd_id, err);
+                cJSON_Delete(root);
+                return send_error(request, "409 Conflict", "previous_invalid_state");
+            }
+        } else if (strcmp(action, "jump") == 0) {
+            const cJSON* ci = cJSON_GetObjectItemCaseSensitive(root, "cueIndex");
+            if (!ci || !cJSON_IsNumber(ci) || ci->valueint < 0 || ci->valueint > 255) {
+                api_ptr->command_journal().failed(cmd_id, ESP_ERR_INVALID_ARG);
+                cJSON_Delete(root);
+                return send_error(request, "400 Bad Request", "invalid_cue_index");
+            }
+            esp_err_t err = api_ptr->cue_runner()->jump(static_cast<uint8_t>(ci->valueint), now_ms);
+            if (err == ESP_ERR_INVALID_ARG) {
+                api_ptr->command_journal().failed(cmd_id, err);
+                cJSON_Delete(root);
+                return send_error(request, "400 Bad Request", "invalid_cue_index");
+            }
+            if (err != ESP_OK) {
+                api_ptr->command_journal().failed(cmd_id, err);
+                cJSON_Delete(root);
+                return send_error(request, "409 Conflict", "jump_invalid_state");
+            }
+        } else if (strcmp(action, "crossfade") == 0) {
+            // §17: strictly validate 0.0..1.0; reject strings, missing values,
+            // and out-of-range numbers (never wrap negative into uint16_t).
+            const cJSON* f_j = cJSON_GetObjectItemCaseSensitive(root, "crossfade");
+            if (!f_j || !cJSON_IsNumber(f_j) || std::isnan(f_j->valuedouble) || std::isinf(f_j->valuedouble)) {
+                api_ptr->command_journal().failed(cmd_id, ESP_ERR_INVALID_ARG);
+                cJSON_Delete(root);
+                return send_error(request, "400 Bad Request", "invalid_crossfade");
+            }
+            const double fade_val = f_j->valuedouble;
+            if (fade_val < 0.0 || fade_val > 1.0) {
+                api_ptr->command_journal().failed(cmd_id, ESP_ERR_INVALID_ARG);
+                cJSON_Delete(root);
+                return send_error(request, "400 Bad Request", "invalid_crossfade");
+            }
+            const uint16_t fade_q15 = static_cast<uint16_t>(std::lround(fade_val * 32768.0));
+            esp_err_t err = api_ptr->cue_runner()->set_manual_fade(fade_q15);
+            if (err != ESP_OK) {
+                api_ptr->command_journal().failed(cmd_id, err);
+                cJSON_Delete(root);
+                return send_error(request, "409 Conflict", "crossfade_requires_manual");
+            }
         } else {
             cJSON_Delete(root);
             api_ptr->command_journal().failed(cmd_id, ESP_ERR_INVALID_ARG);
@@ -2546,9 +2825,9 @@ esp_err_t post_show_control(httpd_req_t* request) {
 
         uint32_t transport_gen = 0;
         if (api_ptr->show_transport()) {
-            if (api_ptr->cue_runner()->is_running()) {
+            const auto cr_snap = api_ptr->cue_runner()->sync_snapshot(now_ms);
+            if (cr_snap.active) {
                 CueTransportSnapshot cs{};
-                auto cr_snap = api_ptr->cue_runner()->sync_snapshot(now_ms);
                 cs.active = cr_snap.active;
                 cs.list_index = cr_snap.list_index;
                 cs.state = static_cast<uint8_t>(cr_snap.state);
@@ -2612,16 +2891,28 @@ esp_err_t get_show_status(httpd_req_t* request) {
 
     cJSON* cue_obj = cJSON_CreateObject();
     if (api_ptr->cue_runner()) {
-        const auto* cr = api_ptr->cue_runner();
-        cJSON_AddBoolToObject(cue_obj, "running", cr->is_running());
-        cJSON_AddStringToObject(cue_obj, "state", cr->state_name());
-        cJSON_AddNumberToObject(cue_obj, "listIndex", cr->active_list_index());
-        cJSON_AddNumberToObject(cue_obj, "cueIndex", cr->current_cue_index());
-        cJSON_AddNumberToObject(cue_obj, "nextCueIndex", cr->next_cue_index());
-        cJSON_AddNumberToObject(cue_obj, "elapsedMs", cr->cue_elapsed_ms(now_ms));
-        cJSON_AddNumberToObject(cue_obj, "remainingMs", cr->cue_remaining_ms(now_ms));
-        cJSON_AddNumberToObject(cue_obj, "manualFade", cr->manual_fade_q15());
-        cJSON_AddNumberToObject(cue_obj, "generation", cr->transport_generation());
+        // LG-034 §22/§23: canonical cue telemetry from the CueRunner runtime
+        // authority (one locked snapshot, no ShowTransportCoordinator copy).
+        const auto snap = api_ptr->cue_runner()->snapshot(now_ms);
+        cJSON_AddBoolToObject(cue_obj, "running", snap.running);
+        cJSON_AddStringToObject(cue_obj, "state", cue_runner_state_name(snap.state));
+        cJSON_AddStringToObject(cue_obj, "pausedFrom",
+                                snap.state == CueRunnerState::Paused ? cue_runner_state_name(snap.paused_from) : "stopped");
+        cJSON_AddNumberToObject(cue_obj, "listIndex", snap.list_index);
+        cJSON_AddStringToObject(cue_obj, "mode", cue_run_mode_name(snap.mode));
+        cJSON_AddNumberToObject(cue_obj, "cueIndex", snap.current_cue);
+        cJSON_AddNumberToObject(cue_obj, "nextCueIndex", snap.next_cue);
+        cJSON_AddNumberToObject(cue_obj, "currentSceneIndex", snap.current_scene);
+        cJSON_AddNumberToObject(cue_obj, "nextSceneIndex", snap.next_scene);
+        cJSON_AddNumberToObject(cue_obj, "elapsedMs", snap.elapsed_ms);
+        cJSON_AddNumberToObject(cue_obj, "remainingMs", snap.remaining_ms);
+        cJSON_AddNumberToObject(cue_obj, "manualFade", snap.manual_fade_q15);
+        cJSON_AddNumberToObject(cue_obj, "transitionProgress", snap.transition_progress_q15);
+        cJSON_AddNumberToObject(cue_obj, "generation", snap.generation);
+        cJSON_AddNumberToObject(cue_obj, "activeChecksum", snap.active_checksum);
+        cJSON_AddNumberToObject(cue_obj, "savedChecksum", snap.saved_checksum);
+        cJSON_AddBoolToObject(cue_obj, "contentStale", snap.content_stale);
+        cJSON_AddBoolToObject(cue_obj, "remoteDriven", snap.remote_driven);
     } else {
         cJSON_AddBoolToObject(cue_obj, "running", false);
         cJSON_AddStringToObject(cue_obj, "state", "stopped");
@@ -2668,6 +2959,8 @@ esp_err_t post_cue_control(httpd_req_t* request) {
 
     const char* action = act_j->valuestring;
     uint64_t now_ms = api_ptr->show_clock_now_ms();
+
+    // LG-034 §15: deprecated compat endpoint still journals the correct domain.
     uint32_t cmd_id = api_ptr->command_journal().accept(CommandDomain::Cue);
 
     if (strcmp(action, "start") == 0) {
@@ -2687,31 +2980,63 @@ esp_err_t post_cue_control(httpd_req_t* request) {
             return send_error(request, "400 Bad Request", "start_failed");
         }
     } else if (strcmp(action, "stop") == 0) {
-        api_ptr->cue_runner()->stop(now_ms);
+        api_ptr->cue_runner()->stop(CueStopReason::Operator, now_ms);
     } else if (strcmp(action, "pause") == 0) {
-        api_ptr->cue_runner()->pause();
+        esp_err_t err = api_ptr->cue_runner()->pause(now_ms);
+        if (err != ESP_OK) {
+            api_ptr->command_journal().failed(cmd_id, err);
+            cJSON_Delete(root);
+            return send_error(request, "409 Conflict", "pause_invalid_state");
+        }
     } else if (strcmp(action, "resume") == 0) {
-        api_ptr->cue_runner()->resume(now_ms);
+        esp_err_t err = api_ptr->cue_runner()->resume(now_ms);
+        if (err != ESP_OK) {
+            api_ptr->command_journal().failed(cmd_id, err);
+            cJSON_Delete(root);
+            return send_error(request, "409 Conflict", "resume_invalid_state");
+        }
     } else if (strcmp(action, "next") == 0) {
-        api_ptr->cue_runner()->next(now_ms);
+        esp_err_t err = api_ptr->cue_runner()->next(now_ms);
+        if (err != ESP_OK) {
+            api_ptr->command_journal().failed(cmd_id, err);
+            cJSON_Delete(root);
+            return send_error(request, "409 Conflict", "next_invalid_state");
+        }
     } else if (strcmp(action, "previous") == 0) {
-        api_ptr->cue_runner()->previous(now_ms);
+        esp_err_t err = api_ptr->cue_runner()->previous(now_ms);
+        if (err != ESP_OK) {
+            api_ptr->command_journal().failed(cmd_id, err);
+            cJSON_Delete(root);
+            return send_error(request, "409 Conflict", "previous_invalid_state");
+        }
     } else if (strcmp(action, "jump") == 0) {
         uint8_t cue_idx = 0;
         const cJSON* ci = cJSON_GetObjectItemCaseSensitive(root, "cueIndex");
         if (ci && cJSON_IsNumber(ci)) cue_idx = ci->valueint;
-        api_ptr->cue_runner()->jump(cue_idx, now_ms);
-    } else if (strcmp(action, "crossfade") == 0) {
-        uint16_t fade_q15 = 0;
-        const cJSON* f_j = cJSON_GetObjectItemCaseSensitive(root, "crossfade");
-        if (f_j && cJSON_IsNumber(f_j)) {
-            if (f_j->valuedouble <= 1.0) {
-                fade_q15 = static_cast<uint16_t>(f_j->valuedouble * 32768.0);
-            } else {
-                fade_q15 = static_cast<uint16_t>(std::min<int>(32768, f_j->valueint));
-            }
+        esp_err_t err = api_ptr->cue_runner()->jump(cue_idx, now_ms);
+        if (err != ESP_OK) {
+            api_ptr->command_journal().failed(cmd_id, err);
+            cJSON_Delete(root);
+            return send_error(request, err == ESP_ERR_INVALID_ARG ? "400 Bad Request" : "409 Conflict",
+                              err == ESP_ERR_INVALID_ARG ? "invalid_cue_index" : "jump_invalid_state");
         }
-        api_ptr->cue_runner()->set_manual_fade(fade_q15);
+    } else if (strcmp(action, "crossfade") == 0) {
+        // §17: strict 0..1 on the canonical path; legacy numeric tolerance is
+        // intentionally NOT provided here beyond the same strict bounds.
+        const cJSON* f_j = cJSON_GetObjectItemCaseSensitive(root, "crossfade");
+        if (!f_j || !cJSON_IsNumber(f_j) || std::isnan(f_j->valuedouble) || std::isinf(f_j->valuedouble) ||
+            f_j->valuedouble < 0.0 || f_j->valuedouble > 1.0) {
+            api_ptr->command_journal().failed(cmd_id, ESP_ERR_INVALID_ARG);
+            cJSON_Delete(root);
+            return send_error(request, "400 Bad Request", "invalid_crossfade");
+        }
+        const uint16_t fade_q15 = static_cast<uint16_t>(std::lround(f_j->valuedouble * 32768.0));
+        esp_err_t err = api_ptr->cue_runner()->set_manual_fade(fade_q15);
+        if (err != ESP_OK) {
+            api_ptr->command_journal().failed(cmd_id, err);
+            cJSON_Delete(root);
+            return send_error(request, "409 Conflict", "crossfade_requires_manual");
+        }
     } else {
         cJSON_Delete(root);
         api_ptr->command_journal().failed(cmd_id, ESP_ERR_INVALID_ARG);
@@ -2719,9 +3044,9 @@ esp_err_t post_cue_control(httpd_req_t* request) {
     }
 
     if (api_ptr->show_transport()) {
-        if (api_ptr->cue_runner()->is_running()) {
+        const auto cr_snap = api_ptr->cue_runner()->sync_snapshot(now_ms);
+        if (cr_snap.active) {
             CueTransportSnapshot cs{};
-            auto cr_snap = api_ptr->cue_runner()->sync_snapshot(now_ms);
             cs.active = cr_snap.active;
             cs.list_index = cr_snap.list_index;
             cs.state = static_cast<uint8_t>(cr_snap.state);
@@ -2731,6 +3056,11 @@ esp_err_t post_cue_control(httpd_req_t* request) {
             cs.cue_anchor_ms = cr_snap.cue_anchor_ms;
             cs.paused_elapsed_ms = cr_snap.paused_elapsed_ms;
             cs.generation = cr_snap.generation;
+            // LG-034 v6 fields (carried on the sync snapshot)
+            cs.list_checksum = cr_snap.list_checksum;
+            cs.transition_progress_q15 = cr_snap.transition_progress_q15;
+            cs.paused_from = static_cast<uint8_t>(cr_snap.paused_from);
+            cs.source_scene = cr_snap.source_scene;
             api_ptr->show_transport()->set_cue(cs);
         } else {
             api_ptr->show_transport()->set_mode(ShowTransportMode::Scene);
@@ -2754,21 +3084,26 @@ esp_err_t get_cue_status(httpd_req_t* request) {
         return send_json(request, "{\"running\":false}", "200 OK");
     }
 
-    const auto* cr = api_ptr->cue_runner();
-    uint64_t now_ms = api_ptr->show_clock_now_ms();
-    char body[384];
+    const uint64_t now_ms = api_ptr->show_clock_now_ms();
+    const auto snap = api_ptr->cue_runner()->snapshot(now_ms);
+    char body[512];
     snprintf(body, sizeof(body),
-        "{\"running\":%s,\"state\":\"%s\",\"listIndex\":%u,\"cueIndex\":%u,\"nextCueIndex\":%u,\"mode\":\"%s\",\"elapsedMs\":%" PRIu32 ",\"remainingMs\":%" PRIu32 ",\"manualFade\":%u,\"generation\":%" PRIu32 "}",
-        cr->is_running() ? "true" : "false",
-        cr->state_name(),
-        cr->active_list_index(),
-        cr->current_cue_index(),
-        cr->next_cue_index(),
-        cue_run_mode_name(cr->current_list().mode),
-        cr->cue_elapsed_ms(now_ms),
-        cr->cue_remaining_ms(now_ms),
-        cr->manual_fade_q15(),
-        cr->transport_generation());
+        "{\"running\":%s,\"state\":\"%s\",\"pausedFrom\":\"%s\",\"listIndex\":%u,\"mode\":\"%s\",\"cueIndex\":%u,\"nextCueIndex\":%u,\"elapsedMs\":%" PRIu32 ",\"remainingMs\":%" PRIu32 ",\"manualFade\":%u,\"generation\":%" PRIu32 ",\"activeChecksum\":%" PRIu32 ",\"savedChecksum\":%" PRIu32 ",\"contentStale\":%s,\"remoteDriven\":%s}",
+        snap.running ? "true" : "false",
+        cue_runner_state_name(snap.state),
+        cue_runner_state_name(snap.paused_from),
+        snap.list_index,
+        cue_run_mode_name(snap.mode),
+        snap.current_cue,
+        snap.next_cue,
+        snap.elapsed_ms,
+        snap.remaining_ms,
+        snap.manual_fade_q15,
+        snap.generation,
+        snap.active_checksum,
+        snap.saved_checksum,
+        snap.content_stale ? "true" : "false",
+        snap.remote_driven ? "true" : "false");
 
     return send_json(request, body, "200 OK");
 }
@@ -2805,9 +3140,9 @@ esp_err_t post_activate(httpd_req_t* request) {
 
     uint64_t now_ms = api_ptr->show_clock_now_ms();
 
-    // Stop Cue if running
+    // Stop Cue if running (Scene activation preempts without end action)
     if (api_ptr->cue_runner()) {
-        api_ptr->cue_runner()->stop(now_ms);
+        api_ptr->cue_runner()->stop(CueStopReason::Preempted, now_ms);
     }
     // Suppress local Timeline
     if (api_ptr->scheduler()) {
@@ -4377,16 +4712,9 @@ esp_err_t get_sync_status(httpd_req_t* request) {
     cJSON_AddNumberToObject(response, "transportGeneration", status.transport_generation);
     cJSON_AddBoolToObject(response, "transportApplyOk", status.transport_apply_ok);
 
-    const char* err_str = "none";
-    switch (status.transport_error) {
-        case 1: err_str = "scene_missing"; break;
-        case 2: err_str = "cue_list_missing"; break;
-        case 3: err_str = "cue_index_invalid"; break;
-        case 4: err_str = "runtime_unavailable"; break;
-        case 5: err_str = "unsupported_transport"; break;
-        default: err_str = "none"; break;
-    }
-    cJSON_AddStringToObject(response, "transportError", err_str);
+    // LG-034: use the single authoritative error-name mapping so newer codes
+    // (timeline_mismatch=7, cue_list_mismatch=9) surface instead of "none".
+    cJSON_AddStringToObject(response, "transportError", sync_transport_error_str(status.transport_error));
 
     if (status.remote_bpm == 0) {
         cJSON_AddNullToObject(response, "remoteBpm");
@@ -4787,7 +5115,8 @@ esp_err_t get_backup(httpd_req_t* request) {
             cJSON_AddNumberToObject(cl_obj, "index", i);
             cJSON_AddStringToObject(cl_obj, "name", cl.name);
             cJSON_AddStringToObject(cl_obj, "mode", cue_run_mode_name(cl.mode));
-            cJSON_AddNumberToObject(cl_obj, "endAction", cl.end_action);
+            cJSON_AddNumberToObject(cl_obj, "endAction", static_cast<int>(cl.end_action));
+            cJSON_AddNumberToObject(cl_obj, "checksum", cl.checksum);
             cJSON* cues = cJSON_CreateArray();
             for (uint8_t c = 0; c < cl.count && c < kMaxCuesPerList; ++c) {
                 cJSON* cobj = cJSON_CreateObject();
@@ -5106,7 +5435,11 @@ esp_err_t post_restore(httpd_req_t* request) {
                 cJSON* mode_j = cJSON_GetObjectItem(cl_item, "mode");
                 if (mode_j && cJSON_IsString(mode_j)) parse_cue_run_mode(mode_j->valuestring, cl.mode);
                 cJSON* ea_j = cJSON_GetObjectItem(cl_item, "endAction");
-                if (ea_j && cJSON_IsNumber(ea_j)) cl.end_action = ea_j->valueint;
+                if (ea_j && cJSON_IsNumber(ea_j) && ea_j->valueint >= 0 && ea_j->valueint <= 2) {
+                    cl.end_action = static_cast<CueEndAction>(ea_j->valueint);
+                } else if (ea_j && cJSON_IsString(ea_j)) {
+                    parse_cue_end_action(ea_j->valuestring, cl.end_action);
+                }
                 cJSON* cues = cJSON_GetObjectItem(cl_item, "cues");
                 if (cues && cJSON_IsArray(cues)) {
                     uint8_t c_idx = 0;

@@ -507,7 +507,16 @@
 
         <!-- Navigation Rail -->
         <nav id="nav-rail" class="nav-rail" aria-label="Main Navigation" style="justify-content: flex-start; gap: 0.5rem;">
-            <!-- Generated dynamically by initNavRail() -->
+            <button data-page="dashboard" onclick="lg.nav('dashboard', this)">Dashboard</button>
+            <button data-page="visualizer" onclick="lg.nav('visualizer', this)">Visualizer</button>
+            <button data-page="scenes" onclick="lg.nav('scenes', this)">Scenes</button>
+            <button data-page="zones" onclick="lg.nav('zones', this)">Zones</button>
+            <button data-page="patcher" onclick="lg.nav('patcher', this)">Patcher</button>
+            <button data-page="dmx" onclick="lg.nav('dmx', this)">DMX</button>
+            <button data-page="timeline" onclick="lg.nav('timeline', this)">Timeline</button>
+            <button data-page="schedules" onclick="lg.nav('schedules', this)">Schedules</button>
+            <button data-page="cues" onclick="lg.nav('cues', this)">Cues</button>
+            <button data-page="diagnostics" onclick="lg.nav('diagnostics', this)">Diagnostics</button>
         </nav>
 
         <!-- ══════════════════════════════════════════════════════
@@ -794,6 +803,43 @@
         <!-- ══════════════════════════════════════════════════════
              PAGE: DIAGNOSTICS & SYSTEM
              ══════════════════════════════════════════════════════ -->
+        <!-- ══════════════════════════════════════════════════════
+             PAGE: CUE TRANSPORT (LG-034 §86)
+             ══════════════════════════════════════════════════════ -->
+        <section id="page-cues" class="product-page">
+            <div class="page-heading">
+                <div><p class="eyebrow">Cue Studio Transport</p><h3>Cue Playback</h3></div>
+            </div>
+            <article class="product-card">
+                <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:1rem;">
+                    <div style="display:flex; align-items:center; gap:0.75rem;">
+                        <label class="help" for="cue-list-select">Cue List</label>
+                        <select id="cue-list-select" style="background:var(--surface-2); color:var(--text); border:1px solid var(--border); border-radius:0.5rem; padding:0.5rem 0.75rem;"></select>
+                    </div>
+                    <div style="display:flex; gap:0.5rem; flex-wrap:wrap;">
+                        <button class="button-primary" onclick="lg.cueStart()">Run</button>
+                        <button class="button-secondary" onclick="lg.cueControl('stop')">Stop</button>
+                        <button class="button-secondary" onclick="lg.cueControl('pause')">Pause</button>
+                        <button class="button-secondary" onclick="lg.cueControl('resume')">Resume</button>
+                        <button class="button-secondary" onclick="lg.cueControl('previous')">◀ Prev</button>
+                        <button class="button-secondary" onclick="lg.cueControl('next')">Next ▶</button>
+                        <button class="button-secondary" onclick="lg.cueRestart()">Restart</button>
+                    </div>
+                </div>
+                <div id="cue-state" class="help" style="margin-top:0.75rem;">Cue transport idle — select a list and press Run.</div>
+                <div class="power-meter" style="margin-top:0.5rem;"><div id="cue-progress-bar" class="power-fill" style="width:0%;"></div></div>
+                <div id="cue-remote-note" class="help" style="margin-top:0.5rem; display:none;"></div>
+            </article>
+            <article class="product-card" id="cue-fade-card" style="margin-top:1.25rem; display:none;">
+                <h4>Manual Crossfade (T-Bar)</h4>
+                <p class="help">Available while a manual-mode cue list is running. 0% = previous scene, 100% = current scene.</p>
+                <div class="range-row" style="margin-top:0.5rem;">
+                    <input id="cue-fade" type="range" min="0" max="1000" value="0" oninput="lg.cueFadePreview(this.value)" onchange="lg.cueFadeCommit(this.value)">
+                    <output id="cue-fade-out">0%</output>
+                </div>
+            </article>
+        </section>
+
         <section id="page-diagnostics" class="product-page">
             <div class="page-heading">
                 <div><p class="eyebrow">Maintenance & Hardware</p><h3>Diagnostics & System</h3></div>
@@ -936,6 +982,7 @@ window.lg = (() => {
         targetZones: [true, false, false, false, false, false, false, false],
         activeTab: 'dashboard',
         visualizerMode: 'lanes', // 'lanes' | 'zones'
+        cueLists: [],
         dmxData: new Uint8Array(512),
         // Live stream buffer (8 lanes × 144 pixels × 3 RGB = 3456 bytes)
         liveBuffer: new Uint8Array(8 * 144 * 3),
@@ -1312,6 +1359,8 @@ window.lg = (() => {
         const config = await api('/api/v1/config').catch(() => ({}));
         const health = await api('/api/v1/health').catch(() => ({}));
         const schedules = await api('/api/v1/schedules').catch(() => []);
+        const cueLists = await api('/api/v1/cue-lists').catch(() => []);
+        state.cueLists = Array.isArray(cueLists) ? cueLists : [];
 
         state.effects = Array.isArray(effects) && effects.length ? effects : fallbackEffects;
         state.presets = (Array.isArray(presets) ? presets : []).map(p => {
@@ -1357,6 +1406,8 @@ window.lg = (() => {
         renderDmxGrid();
         renderTimeline();
         renderSchedules();
+        renderCuePage();
+        renderCueTelemetry();
     }
 
     function updateTelemetryUI() {
@@ -1392,6 +1443,7 @@ window.lg = (() => {
         const isTransitioning = st?.scene?.transitioning ?? st?.transitioning;
         const transEl = byId('dash-trans-text');
         if (transEl) transEl.textContent = isTransitioning ? 'Blending' : 'Steady';
+        renderCueTelemetry();
     }
 
     // ── Navigation ──
@@ -1408,8 +1460,127 @@ window.lg = (() => {
             fitVisualizer();
         } else if (page === 'dmx') {
             renderDmxGrid();
+        } else if (page === 'cues') {
+            renderCuePage();
+            renderCueTelemetry();
         } else if (page === 'diagnostics') {
             loadCommissioning();
+        }
+    }
+
+    // ── Cue Transport (LG-034 §86) ──
+    function cueSelectedList() {
+        const sel = byId('cue-list-select');
+        if (!sel || !Array.isArray(state.cueLists) || state.cueLists.length === 0) return null;
+        return state.cueLists.find(l => String(l.index) === sel.value) || null;
+    }
+
+    function renderCuePage() {
+        const sel = byId('cue-list-select');
+        if (!sel) return;
+        const lists = Array.isArray(state.cueLists) ? state.cueLists : [];
+        const prev = sel.value;
+        sel.innerHTML = lists.map(l =>
+            `<option value="${l.index}">${esc(l.name || ('Cue List ' + (l.index + 1)))} (${l.count} cues)</option>`
+        ).join('') || '<option value="">No saved Cue Lists — create one in Cue Studio</option>';
+        if (prev && lists.some(l => String(l.index) === prev)) sel.value = prev;
+    }
+
+    function renderCueTelemetry() {
+        const cue = state.status?.transport?.cue;
+        const stateEl = byId('cue-state');
+        if (!stateEl) return;
+        const bar = byId('cue-progress-bar');
+        const fadeCard = byId('cue-fade-card');
+        const noteEl = byId('cue-remote-note');
+
+        if (!cue || !cue.running) {
+            stateEl.textContent = 'Cue transport idle — select a list and press Run.';
+            if (bar) bar.style.width = '0%';
+            if (fadeCard) fadeCard.style.display = 'none';
+            if (noteEl) noteEl.style.display = 'none';
+            return;
+        }
+
+        const bits = ['State: ' + (cue.state || 'stopped'),
+            'Cue: ' + ((cue.cueIndex ?? 0) + 1),
+            'Mode: ' + (cue.mode || 'auto'),
+            'Fade: ' + Math.round(((cue.manualFade ?? 0) / 32768) * 100) + '%'];
+        if (cue.nextCueIndex !== undefined) bits.splice(2, 0, 'Next: ' + (cue.nextCueIndex + 1));
+        if (cue.pausedFrom && cue.pausedFrom !== 'stopped') bits.push('Paused from ' + cue.pausedFrom);
+        if (cue.contentStale) bits.push('⚠ Saved list changed — Restart to run the saved version');
+        if (cue.remoteDriven) bits.push('Driven by sync leader');
+        stateEl.textContent = bits.join(' · ');
+
+        const total = (cue.elapsedMs ?? 0) + (cue.remainingMs ?? 0);
+        if (bar) {
+            const pct = total > 0 ? Math.min(100, Math.round(((cue.elapsedMs ?? 0) / total) * 100)) : 0;
+            bar.style.width = pct + '%';
+            bar.className = 'power-fill' + (cue.state === 'paused' ? ' warning' : '');
+        }
+
+        const isManual = (cue.mode || '') === 'manual';
+        if (fadeCard) {
+            fadeCard.style.display = isManual ? 'block' : 'none';
+            if (isManual) {
+                const slider = byId('cue-fade');
+                const out = byId('cue-fade-out');
+                const q15 = cue.manualFade ?? 0;
+                if (slider && document.activeElement !== slider) slider.value = Math.round((q15 / 32768) * 1000);
+                if (out && document.activeElement !== slider) out.textContent = Math.round((q15 / 32768) * 100) + '%';
+            }
+        }
+        if (noteEl) {
+            noteEl.style.display = cue.remoteDriven ? 'block' : 'none';
+            if (cue.remoteDriven) noteEl.textContent = 'This node follows the sync leader — transport commands are best-effort.';
+        }
+    }
+
+    async function cueControl(action, extra) {
+        try {
+            await api('/api/v1/show/control', 'POST', Object.assign({ mode: 'cue', action }, extra || {}));
+            toast('Cue ' + action + ' accepted.');
+            await refresh();
+        } catch (e) {
+            const friendly = {
+                pause_invalid_state: 'Cannot pause — cue transport is not running.',
+                resume_invalid_state: 'Cannot resume — transport is not paused.',
+                next_invalid_state: 'Cannot advance — no next cue.',
+                previous_invalid_state: 'Cannot go back — no previous cue.',
+                jump_invalid_state: 'Cannot jump — transport not running or cue index out of range.',
+                crossfade_requires_manual: 'Crossfade requires a running manual-mode cue list.',
+                unsupported_mode: 'Transport busy — stop the active scene or timeline first.'
+            }[e.message] || e.message;
+            toast(friendly, true);
+        }
+    }
+
+    function cueStart() {
+        const list = cueSelectedList();
+        if (!list) return toast('Select a saved Cue List first.', true);
+        cueControl('start', { cueListIndex: list.index });
+    }
+
+    async function cueRestart() {
+        const list = cueSelectedList();
+        if (!list) return toast('Select a saved Cue List first.', true);
+        try {
+            await api('/api/v1/show/control', 'POST', { mode: 'cue', action: 'restart', cueListIndex: list.index, cueIndex: 0 });
+            toast('Cue list restarted from the saved version.');
+            await refresh();
+        } catch (e) { toast(e.message, true); }
+    }
+
+    function cueFadePreview(val) {
+        const out = byId('cue-fade-out');
+        if (out) out.textContent = Math.round((val / 1000) * 100) + '%';
+    }
+
+    async function cueFadeCommit(val) {
+        try {
+            await api('/api/v1/show/control', 'POST', { mode: 'cue', action: 'crossfade', crossfade: val / 1000 });
+        } catch (e) {
+            toast(e.message === 'crossfade_requires_manual' ? 'Crossfade requires a running manual-mode cue list.' : e.message, true);
         }
     }
 
@@ -2401,6 +2572,7 @@ window.lg = (() => {
         saveHardwarePatch, renderPatcher, hoverDmxCell, toggleVisualizerMode, fitVisualizer, redrawVisualizer,
         setBpm, setTimelineEnabled, saveTimeline, selectTimelineStep, assignTimelinePreset, setTimelineStepLength, addTimelineStep, removeTimelineStep,
         saveSchedules,
+        cueStart, cueControl, cueRestart, cueFadePreview, cueFadeCommit,
         loadCommissioning, switchDiagTab, loadLogs, loadAudit, runTestSequence, uploadOta, downloadBackup, uploadRestore
     };
 })();

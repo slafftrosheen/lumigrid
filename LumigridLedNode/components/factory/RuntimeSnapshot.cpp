@@ -217,16 +217,40 @@ RuntimeSnapshot collect_runtime_snapshot(FactoryApi* api, uint32_t stream_seq) {
         snap.transport.timeline.saved_checksum = st.timeline_saved_checksum;
         snap.transport.timeline.content_stale = st.timeline_content_stale;
 
-        snap.transport.cue.running = st.cue.active;
-        if (st.cue.active) {
+        // LG-034 §23: CueRunner is the runtime authority for cue execution.
+        // Read its live state via one locked snapshot instead of the possibly
+        // stale ShowTransportCoordinator copy. Purely observational (§24).
+        if (api->cue_runner()) {
+            const auto cue = api->cue_runner()->snapshot(now);
+            snap.transport.cue.running = cue.running;
+            snprintf(snap.transport.cue.state, sizeof(snap.transport.cue.state), "%s",
+                     cue_runner_state_name(cue.state));
+            snprintf(snap.transport.cue.paused_from, sizeof(snap.transport.cue.paused_from), "%s",
+                     cue.state == CueRunnerState::Paused ? cue_runner_state_name(cue.paused_from) : "stopped");
+            snprintf(snap.transport.cue.mode, sizeof(snap.transport.cue.mode), "%s",
+                     cue_run_mode_name(cue.mode));
+            snap.transport.cue.list_index = cue.list_index;
+            snap.transport.cue.cue_index = cue.current_cue;
+            snap.transport.cue.next_cue_index = cue.next_cue;
+            snap.transport.cue.current_scene_index = cue.current_scene;
+            snap.transport.cue.next_scene_index = cue.next_scene;
+            snap.transport.cue.elapsed_ms = cue.elapsed_ms;
+            snap.transport.cue.remaining_ms = cue.remaining_ms;
+            snap.transport.cue.manual_fade = cue.manual_fade_q15;
+            snap.transport.cue.transition_progress = cue.transition_progress_q15;
+            snap.transport.cue.generation = cue.generation;
+            snap.transport.cue.active_checksum = cue.active_checksum;
+            snap.transport.cue.saved_checksum = cue.saved_checksum;
+            snap.transport.cue.content_stale = cue.content_stale;
+            snap.transport.cue.remote_driven = cue.remote_driven;
+        } else if (st.cue.active) {
+            snap.transport.cue.running = true;
             snprintf(snap.transport.cue.state, sizeof(snap.transport.cue.state), "%s",
                      cue_state_to_str(st.cue.state));
             snap.transport.cue.list_index = st.cue.list_index;
             snap.transport.cue.cue_index = st.cue.current_cue;
             snap.transport.cue.next_cue_index = st.cue.next_cue;
             snap.transport.cue.manual_fade = st.cue.manual_fade_q15;
-        } else {
-            snprintf(snap.transport.cue.state, sizeof(snap.transport.cue.state), "stopped");
         }
     } else {
         snprintf(snap.transport.mode, sizeof(snap.transport.mode), "scene");
@@ -446,11 +470,24 @@ bool serialize_runtime_snapshot(const RuntimeSnapshot& snap, FixedJsonWriter& wr
         snap.transport.cue.running ? "true" : "false"
     );
     if (snap.transport.cue.running) {
+        // LG-034 §22: full cue runtime telemetry (phase, timing, checksums,
+        // scene indices, remote-driven flag).
         writer.append_printf(
-            ",\"state\":\"%s\",\"listIndex\":%u,\"cueIndex\":%u,\"nextCueIndex\":%u,\"manualFade\":%u",
-            snap.transport.cue.state, snap.transport.cue.list_index,
+            ",\"state\":\"%s\",\"pausedFrom\":\"%s\",\"listIndex\":%u,\"mode\":\"%s\","
+            "\"cueIndex\":%u,\"nextCueIndex\":%u,\"currentSceneIndex\":%u,\"nextSceneIndex\":%u,"
+            "\"elapsedMs\":%" PRIu32 ",\"remainingMs\":%" PRIu32 ","
+            "\"manualFade\":%u,\"transitionProgress\":%u,\"generation\":%" PRIu32 ","
+            "\"activeChecksum\":%" PRIu32 ",\"savedChecksum\":%" PRIu32 ",\"contentStale\":%s,\"remoteDriven\":%s",
+            snap.transport.cue.state, snap.transport.cue.paused_from,
+            snap.transport.cue.list_index, snap.transport.cue.mode,
             snap.transport.cue.cue_index, snap.transport.cue.next_cue_index,
-            snap.transport.cue.manual_fade
+            snap.transport.cue.current_scene_index, snap.transport.cue.next_scene_index,
+            snap.transport.cue.elapsed_ms, snap.transport.cue.remaining_ms,
+            snap.transport.cue.manual_fade, snap.transport.cue.transition_progress,
+            snap.transport.cue.generation,
+            snap.transport.cue.active_checksum, snap.transport.cue.saved_checksum,
+            snap.transport.cue.content_stale ? "true" : "false",
+            snap.transport.cue.remote_driven ? "true" : "false"
         );
     }
     writer.append("}},");

@@ -83,8 +83,9 @@ void Scheduler::apply_sync_transport(SyncTransportMode mode, uint16_t bpm, uint3
 
     // Phase 0.3: Stop local CueRunner when switching to remote transport if it was local-driven
     if (mode != SyncTransportMode::Standalone && cue_runner_) {
-        if (mode != SyncTransportMode::Cue && cue_runner_->is_running() && !cue_runner_->is_remote_sync_active()) {
-            cue_runner_->stop(clock_.now_ms());
+        if (mode != SyncTransportMode::Cue && cue_runner_->snapshot(clock_.now_ms()).running &&
+            !cue_runner_->snapshot(clock_.now_ms()).remote_driven) {
+            cue_runner_->stop(CueStopReason::Preempted, clock_.now_ms());
         }
     }
 }
@@ -184,8 +185,8 @@ void Scheduler::apply_remote_timeline(
     sync_transport_.updated_ms = now_ms;
     portEXIT_CRITICAL(&sync_transport_mutex_);
 
-    if (cue_runner_ && cue_runner_->is_running()) {
-        cue_runner_->stop(now_ms);
+    if (cue_runner_ && cue_runner_->snapshot(now_ms).running) {
+        cue_runner_->stop(CueStopReason::Preempted, now_ms);
     }
 }
 
@@ -210,49 +211,59 @@ ShowTransportSnapshot Scheduler::transport_snapshot(uint64_t clock_ms) const {
 
     // Phase 4.1: Deterministic Show transport precedence:
     // Cue active -> Cue; else Timeline active -> Timeline; else Scene
-    if (cue_runner_ && cue_runner_->is_running()) {
-        snap.mode = ShowTransportMode::Cue;
-        snap.cue_list = cue_runner_->active_list_index();
-        snap.cue_index = cue_runner_->current_cue_index();
-        snap.cue_next = cue_runner_->next_cue_index();
-        snap.cue_state = cue_runner_->state();
-        snap.cue_generation = cue_runner_->transport_generation();
-        snap.cue_elapsed_ms = cue_runner_->cue_elapsed_ms(clock_ms);
-        snap.manual_fade_q15 = cue_runner_->manual_fade_q15();
-        snap.bpm = persisted_sequence_.bpm > 0 ? persisted_sequence_.bpm : 120;
-        snap.active_scene = engine_.active_scene_index();
+    if (cue_runner_) {
+        // LG-034 §9: single locked snapshot; no unlocked per-field reads.
+        const auto cue = cue_runner_->snapshot(clock_ms);
+        if (cue.running) {
+            snap.mode = ShowTransportMode::Cue;
+            snap.cue_list = cue.list_index;
+            snap.cue_index = cue.current_cue;
+            snap.cue_next = cue.next_cue;
+            snap.cue_state = cue.state;
+            snap.cue_generation = cue.generation;
+            snap.cue_elapsed_ms = cue.elapsed_ms;
+            snap.manual_fade_q15 = cue.manual_fade_q15;
+            snap.bpm = persisted_sequence_.bpm > 0 ? persisted_sequence_.bpm : 120;
+            snap.active_scene = engine_.active_scene_index();
 
-        snap.cue.active = true;
-        snap.cue.list_index = snap.cue_list;
-        snap.cue.state = static_cast<uint8_t>(snap.cue_state);
-        snap.cue.current_cue = snap.cue_index;
-        snap.cue.next_cue = snap.cue_next;
-        snap.cue.generation = snap.cue_generation;
-        snap.cue.paused_elapsed_ms = snap.cue_elapsed_ms;
-        snap.cue.manual_fade_q15 = snap.manual_fade_q15;
-    } else if (is_timeline_active &&
+            snap.cue.active = true;
+            snap.cue.list_index = snap.cue_list;
+            snap.cue.state = static_cast<uint8_t>(snap.cue_state);
+            snap.cue.current_cue = snap.cue_index;
+            snap.cue.next_cue = snap.cue_next;
+            snap.cue.generation = snap.cue_generation;
+            snap.cue.paused_elapsed_ms = snap.cue_elapsed_ms;
+            snap.cue.manual_fade_q15 = snap.manual_fade_q15;
+
+            // LG-034 v6: parity + frozen-fade fields (§27)
+            snap.cue.list_checksum = cue.active_checksum;
+            snap.cue.transition_progress_q15 = cue.transition_progress_q15;
+            snap.cue.paused_from = static_cast<uint8_t>(cue.paused_from);
+            snap.cue.source_scene = cue.current_scene;
+        } else if (is_timeline_active &&
                (remote.mode == SyncTransportMode::Standalone || remote.mode == SyncTransportMode::Timeline)) {
-        snap.mode = ShowTransportMode::Timeline;
-        snap.bpm = effective_bpm;
-        snap.active_scene = engine_.active_scene_index();
-        snap.cue_state = CueRunnerState::Stopped;
+            snap.mode = ShowTransportMode::Timeline;
+            snap.bpm = effective_bpm;
+            snap.active_scene = engine_.active_scene_index();
+            snap.cue_state = CueRunnerState::Stopped;
 
-        snap.transport_generation = current_generation;
-        snap.timeline_anchor_ms = anchor;
-        snap.timeline_active_checksum = active_cs;
-        snap.timeline_saved_checksum = saved_cs;
+            snap.transport_generation = current_generation;
+            snap.timeline_anchor_ms = anchor;
+            snap.timeline_active_checksum = active_cs;
+            snap.timeline_saved_checksum = saved_cs;
 
-        const uint64_t elapsed = clock_ms >= anchor ? clock_ms - anchor : 0;
-        snap.timeline_elapsed_ms = elapsed;
-        const uint32_t ms_per_beat = 60000 / (snap.bpm > 0 ? snap.bpm : 120);
-        snap.timeline_current_beat = ms_per_beat > 0 ? static_cast<uint32_t>(elapsed / ms_per_beat) : 0;
-        snap.timeline_content_stale = (active_cs != saved_cs && active_cs != 0);
-    } else {
-        snap.mode = ShowTransportMode::Scene;
-        snap.active_scene = engine_.active_scene_index();
-        snap.bpm = persisted_sequence_.bpm > 0 ? persisted_sequence_.bpm : 120;
-        snap.cue_state = CueRunnerState::Stopped;
-        snap.timeline_saved_checksum = saved_cs;
+            const uint64_t elapsed = clock_ms >= anchor ? clock_ms - anchor : 0;
+            snap.timeline_elapsed_ms = elapsed;
+            const uint32_t ms_per_beat = 60000 / (snap.bpm > 0 ? snap.bpm : 120);
+            snap.timeline_current_beat = ms_per_beat > 0 ? static_cast<uint32_t>(elapsed / ms_per_beat) : 0;
+            snap.timeline_content_stale = (active_cs != saved_cs && active_cs != 0);
+        } else {
+            snap.mode = ShowTransportMode::Scene;
+            snap.active_scene = engine_.active_scene_index();
+            snap.bpm = persisted_sequence_.bpm > 0 ? persisted_sequence_.bpm : 120;
+            snap.cue_state = CueRunnerState::Stopped;
+            snap.timeline_saved_checksum = saved_cs;
+        }
     }
     return snap;
 }
@@ -329,7 +340,7 @@ void Scheduler::task() {
         evaluate_calendar(calendar_, clock_ms);
 
         // Phase 10: Local precedence: if CueRunner is running, do not evaluate Timeline this tick
-        if (cue_runner_ && cue_runner_->is_running()) {
+        if (cue_runner_ && cue_runner_->snapshot(clock_ms).running) {
             engine_.release_control(ControlSource::Scheduler);
             continue;
         }

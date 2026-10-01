@@ -86,7 +86,7 @@ Firmware
 - Reference-aware safe scene deletion guarding against active timeline and cue list dependencies.
 - Atomic scene + motion persistence ensuring live output is unchanged after save until intentional activation.
 
-### 5. Timeline Studio (LG-033 Active)
+### 5. Timeline Studio (LG-033 Complete)
 
 - Decouple timeline document persistence from playback transport: saving timeline content never mutates running playback.
 - Immutable active sequence snapshot on RUN with monotonic transport generation and start anchor clock.
@@ -184,7 +184,7 @@ Execute the documented matrix: boot, networking, API, WebSocket, pixel output, P
 - **Reference-Aware Deletion:** Preflight checks for scene dependencies in Timeline sequences and Cue Lists, blocking destructive deletions when references exist.
 - **Validation:** Strict UTF-8 23-byte scene name enforcement, bounds clamping, and clipboard copy/paste with cross-channel normalization.
 
-### 16. Timeline Studio v2 — Anchored Transport, Safe Playback & Visual Sequencing (LG-033 Active)
+### 16. Timeline Studio v2 — Anchored Transport, Safe Playback & Visual Sequencing (LG-033 Complete)
 
 - **Decoupled Persistence & Playback:** `PUT /api/v1/sequence` persists validated timeline documents to NVS without starting, stopping, or altering running playback. Playback is controlled exclusively via `POST /api/v1/show/control` with `mode: "timeline"` (`start`, `restart`, `stop`).
 - **Immutable Active Snapshot:** Starting a timeline snapshots the latest saved sequence into `active_sequence_`. Subsequent saves while running do not alter active playback, cleanly reporting stale content status.
@@ -193,6 +193,20 @@ Execute the documented matrix: boot, networking, API, WebSocket, pixel output, P
 - **NodeSync Protocol v5:** Transmits 68-byte packed UDP frames carrying `transport_generation`, `timeline_anchor_ms`, and `timeline_checksum`. Followers validate local timeline checksum against the leader and fail closed on mismatch. Late followers calculate exact phase from the leader's anchor.
 - **Visual Block Sequencer:** Replaces rigid equal-width step tables with variable-width blocks proportional to beat duration (1..64 beats). Supports block addition, dragging, resizing, duplication, deletion, copy/paste across channels, and independent track loop visualization.
 - **Fail-Closed API Validation:** Strict schema 2 validation, 16 physical tracks permanently mapped to A1–A8 and P1–P8, 0..16 steps per track, missing scene reference validation (400), and checksum conflict protection (409).
+
+### 17. Cue Studio v2 & Cue Runtime Hardening (LG-034 Complete)
+
+- **Deadlock-Free Snapshot Runtime:** Rewrote `CueRunner` around a single-lock `snapshot(now_ms)` copy — the only sanctioned read path for all consumers (Scheduler transport snapshots, Factory API, RuntimeSnapshot collector). The original design could deadlock calling `stop()` from inside `update()` on natural completion; stops are now emitted via lock-aware internal helpers and reported through the `Event` callback with a typed stop reason.
+- **Typed Stop Reasons:** `operator` (console Stop), `preempted` (scene activation/timeline start), `natural_completion` (final cue finished), `sync_lost` (leader packets timed out). Only natural completion can trigger the configured end action (hold last / blackout / restore fallback scene).
+- **Pause/Fade Freeze:** Pausing captures elapsed/remaining **before** the state change, freezes the in-flight fade via `SceneManager::freeze_transition()`, and resuming continues the frozen visual transition over the remaining time — never a restart or visual snap. Applied to auto holds and manual crossfades alike.
+- **Immutable Active Snapshots:** RUN snapshots the latest saved list into an immutable active copy with its own checksum and monotonic generation. Saving while running only flips `contentStale` telemetry; `restart` re-snapshots the saved version without executing an end action.
+- **Strict Validation & Checksum Conflicts:** Schema 2 documents with UTF-8 byte caps (name 31, label 23), 1..16 cues, bounded timing (hold ≤ 1 h, fade ≤ 60 s), strict enums/curves, and missing-scene rejection (`400 cue_scene_missing`). Saves with stale `expectedChecksum` fail with `409 cue_list_conflict` + `currentChecksum`.
+- **Dependency-Safe Deletion:** `DELETE /api/v1/cue-list` returns `409 cue_list_in_use` with exact references (active transport, calendar schedules) instead of silently orphaning a running show.
+- **Canonical Transport:** All cue transport moves go through `POST /api/v1/show/control` (`start`, `restart`, `stop`, `pause`, `resume`, `next`, `previous`, `jump`, `crossfade`); every invalid-state move returns deterministic 400/409 (`pause_invalid_state`, `crossfade_requires_manual`, ...). `POST /api/v1/cue/control` remains as a deprecated alias.
+- **NodeSync v6 (76 bytes):** Adds `cue_list_checksum`, `cue_transition_progress_q15`, `cue_paused_from`, and `cue_source_scene` to the packed UDP frame. Followers gate remote cue application on list parity (`cue_list_mismatch`) and reconstruct the paused fade from leader progress.
+- **Cue Telemetry in RuntimeSnapshot:** §22 show status and the Schema 3 snapshot now carry full cue transport truth: pausedFrom, mode, current/next scene indices, elapsed/remaining, manual fade, transition progress, generation, active/saved checksums, contentStale, remoteDriven.
+- **Cue Studio v2 (Operator Console):** Schema-2 editor library (typed document helpers, clipboard, throttled Q15 T-Bar sender, editor store with checksum-conflict workflow), Save vs Save & Run/Restart separation, save/run divergence banner with one-click "Run saved version" (restart), end-action selector, conflict dialog, dependency-aware delete dialog, and unsaved-changes navigation guard. Embedded dashboard gains a Cue transport page (list select, Run/Stop/Pause/Resume/Prev/Next/Restart, manual T-Bar, live telemetry).
+- **Editor Validation Parity:** The Svelte editor library enforces the same byte and timing caps as the firmware so clients cannot author documents the node would reject.
 
 ## Explicit non-goals for this phase
 

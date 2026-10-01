@@ -80,11 +80,23 @@ struct ManualSnapshot {
 
 struct TransportCueSnapshot {
     bool running = false;
-    char state[16] = {0}; // "stopped", "holding", "fading", "paused"
+    char state[16] = {0}; // "stopped", "holding", "fading", "paused", "manual"
+    char paused_from[16] = {0}; // source phase while paused ("stopped" = n/a)
     uint16_t list_index = 0;
     uint16_t cue_index = 0;
     uint16_t next_cue_index = 0;
+    uint16_t current_scene_index = 0;
+    uint16_t next_scene_index = 0;
+    uint32_t elapsed_ms = 0;
+    uint32_t remaining_ms = 0;
     uint16_t manual_fade = 0;
+    uint16_t transition_progress = 0;
+    uint32_t generation = 0;
+    uint32_t active_checksum = 0;
+    uint32_t saved_checksum = 0;
+    bool content_stale = false;
+    bool remote_driven = false;
+    char mode[16] = {0}; // Cue run mode: "loop", "single_shot", ...
 };
 
 struct TransportTimelineSnapshot {

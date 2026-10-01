@@ -38,7 +38,12 @@ The operator interface is organized into primary destinations, visually separati
 4. **Channels:** Physical output (A1–A8 addressable and P1–P8 PWM) status, live control, and group assignment with Admin-only configuration persistence.
 5. **Scenes:** Scene Studio (motion, transitions, effect parameters). Follower nodes disable direct activation.
 6. **Timeline:** 16-channel visual step sequencer. Follower nodes disable local playback.
-7. **Cues:** Cue Studio (timed playlist show builder). Follower nodes disable local transport controls.
+7. **Cues:** Cue Studio v2 (LG-034, timed playlist show builder over Scene presets):
+   - **Editor & Library:** Schema-2 Cue List documents (name ≤ 31 UTF-8 bytes, ≤ 16 cues with per-cue label ≤ 23 bytes, hold/fade/curve) with free-slot library cards, duplication, JSON import/export, and a storyboard timeline with cue inspector (end action only for single-cue lists).
+   - **Save vs. Run Separation:** "Save" persists the draft with optimistic checksum concurrency; "Save & Run" / "Save & Restart" persist then start/restart transport. Creating a list never auto-saves or auto-runs.
+   - **Conflict & Stale Workflow:** `409 cue_list_conflict` surfaces a keep-draft/reload dialog; while a running show diverges from the saved list, a stale-content banner offers one-click "Run saved version" (restart).
+   - **Live Transport:** Run/Stop/Pause/Resume/Prev/Next/Jump and the manual T-Bar (throttled to 10 Hz with pointer-drag local override and trailing flush) via `/api/v1/show/control`; a runtime monitor renders hold/fade phase, paused-from state, checksums, and stop-reason-aware state from `RuntimeSnapshot.transport.cue`.
+   - **Dependency-Safe Deletion:** Deleting a Cue List referenced by the active transport or a schedule surfaces the exact references instead of failing silently. Follower nodes disable local transport controls while preserving editing.
 8. **Schedules:** Day/time calendar automation.
 9. **Fleet Devices & Network Commissioning (LG-028):** Multi-node device registry and integrated Network Commissioning Card (`NetworkConfigCard`):
    - **Connection State Pill:** Real-time visibility into `Connected`, `Connecting`, `Recovery AP`, or `Offline`.
@@ -70,6 +75,7 @@ The operator interface is organized into primary destinations, visually separati
    - **Live Stale-Content Notification:** Clearly displays when saved changes differ from currently running playback snapshot, offering a single-click "Restart with Saved Version".
    - **Authoritative Live Playhead:** Live playhead derived directly from `RuntimeSnapshot.transport.timeline` with smooth client-side interpolation.
    - **Follower Mode Protection:** Active followers display "Playback Controlled by Sync Leader" with transport controls disabled, while permitting document editing and saving.
+14. **Cue Transport on Embedded Dashboard (LG-034):** The device-hosted dashboard gains a Cue page (list selector, Run/Stop/Pause/Resume/Prev/Next/Restart, manual T-Bar when a manual-mode list runs) speaking the same canonical `/api/v1/show/control` transport, with live telemetry from the `transport.cue` status section and a fixed navigation rail exposing all operator pages.
 
 ### Service
 - **Diagnostics & System:** Unified maintenance hub featuring live health telemetry, real-time node system logs, security/config audit trails, firmware OTA flashing, and backup/restore. Includes a dedicated section for Factory Output Testing (e.g., Burn-in, Lane Chase, Color Wash) time-bounded by the firmware.

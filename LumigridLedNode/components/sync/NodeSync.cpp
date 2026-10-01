@@ -358,6 +358,12 @@ NodeRole NodeSync::master_loop(int socket, bool auto_mode) {
             packet.timeline_anchor_ms = transport.timeline_anchor_ms;
             packet.timeline_checksum = transport.timeline_active_checksum;
 
+            // Protocol v6 extensions (LG-034 §28): cue parity + frozen fade
+            packet.cue_list_checksum = transport.cue_list_checksum;
+            packet.cue_transition_progress_q15 = transport.cue_transition_progress_q15;
+            packet.cue_paused_from = transport.cue_paused_from;
+            packet.cue_source_scene = transport.cue_source_scene;
+
             sendto(socket, &packet, sizeof(packet), 0,
                    reinterpret_cast<const sockaddr*>(&destination), sizeof(destination));
 
@@ -558,6 +564,12 @@ bool NodeSync::handle_heartbeat(
     remote_snap.transport_generation = packet.transport_generation;
     remote_snap.timeline_anchor_ms = packet.timeline_anchor_ms;
     remote_snap.timeline_active_checksum = packet.timeline_checksum;
+
+    // Protocol v6 extensions (LG-034 §28)
+    remote_snap.cue_list_checksum = packet.cue_list_checksum;
+    remote_snap.cue_transition_progress_q15 = packet.cue_transition_progress_q15;
+    remote_snap.cue_paused_from = packet.cue_paused_from;
+    remote_snap.cue_source_scene = packet.cue_source_scene;
 
     // Backward-compat cue struct
     remote_snap.cue.active = (packet.cue_state != 0);

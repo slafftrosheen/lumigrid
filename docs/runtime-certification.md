@@ -69,6 +69,18 @@
 | **Timeline (LG-033)** | NodeSync protocol v5 transmitting 68-byte packed packets with generation, anchor, and checksum | `[PASS]` | Compile Verified, Unit Test |
 | **Timeline (LG-033)** | Follower timeline checksum validation with fail-closed rejection on mismatch (`SyncTransportError::TimelineMismatch`) | `[PASS]` | Compile Verified, Unit Test |
 | **Timeline (LG-033)** | Pure TimelineEvaluator helpers guaranteeing identical beat and step progression between firmware and dashboard | `[PASS]` | Compile Verified, Unit Test |
+| **Cues (LG-034)** | Single-lock `CueRunner::snapshot(now)` is the only sanctioned reader; zero unlocked public state accessors | `[PASS]` | Compile Verified, Static CI, Unit Test |
+| **Cues (LG-034)** | Deadlock-free stop path: `stop()` never blocks on the runner mutex while `update()` executes; stop reason reported via event callback | `[PASS]` | Compile Verified, Unit Test |
+| **Cues (LG-034)** | Typed stop reasons (`operator`, `preempted`, `natural_completion`, `sync_lost`); end action executes only on natural completion | `[PASS]` | Compile Verified, Unit Test |
+| **Cues (LG-034)** | Pause freezes elapsed/remaining anchors and the in-flight fade (`SceneManager::freeze_transition`); resume continues the frozen transition without visual restart | `[PASS]` | Compile Verified, Unit Test |
+| **Cues (LG-034)** | Immutable active Cue List snapshot on RUN: saving while running never mutates active playback; divergence reported as `contentStale` | `[PASS]` | Compile Verified, Unit Test |
+| **Cues (LG-034)** | `restart` adopts the newest saved list with a fresh generation and never executes an end action | `[PASS]` | Compile Verified, Unit Test |
+| **Cues (LG-034)** | Strict schema-2 validation: UTF-8 byte caps (name 31 / label 23), 1..16 cues, bounded timing, missing scene rejected with 400 `cue_scene_missing` | `[PASS]` | Compile Verified, Unit Test |
+| **Cues (LG-034)** | Optimistic concurrency: stale `expectedChecksum` fails with 409 `cue_list_conflict` + `currentChecksum` | `[PASS]` | Compile Verified, Unit Test |
+| **Cues (LG-034)** | Dependency-safe deletion: 409 `cue_list_in_use` with exact references while active as transport or referenced by schedules | `[PASS]` | Compile Verified, Unit Test |
+| **Cues (LG-034)** | Deterministic cue transport via `/api/v1/show/control`: invalid-state moves return 400/409, never silent no-ops | `[PASS]` | Compile Verified, Unit Test |
+| **Cues (LG-034)** | NodeSync protocol v6: 76-byte packed frame with cue list checksum, transition progress, paused-from phase, and source scene | `[PASS]` | Compile Verified, Unit Test |
+| **Cues (LG-034)** | Follower cue content parity gate: missing list fails with `cue_list_missing`, divergent list fails closed with `SyncTransportError::CueListMismatch` | `[PASS]` | Compile Verified, Unit Test |
 
 ---
 
@@ -127,6 +139,14 @@
 - **Anchored Deterministic Timing**: Playback starts deterministically at Beat 0 from an explicit anchor timestamp (`timeline_anchor_ms`). Elapsed time is calculated as `current_clock_ms >= anchor_ms ? current_clock_ms - anchor_ms : 0`, and total beats as `elapsed_ms / ms_per_beat`.
 - **NodeSync Protocol v5**: Packets extend to 68 bytes, transmitting `transport_generation`, `timeline_anchor_ms`, and `timeline_checksum`. Followers compare local timeline checksum against the leader's active checksum, failing closed (`SyncTransportError::TimelineMismatch`) on mismatch.
 - **Late-Joining Follower Synchrony**: Late followers compute `elapsed = disciplinedClock - leaderAnchor` to seamlessly synchronize to the active playback phase without restarting from Beat 0.
+
+### 2.9 Cue Studio v2 & Cue Runtime Hardening (LG-034)
+- **Single-Lock Snapshot Runtime**: `CueRunner::snapshot(now_ms)` is the exclusive read contract (Scheduler transport snapshots, Factory API, and the RuntimeSnapshot collector all consume it). Former unlocked accessors (`is_running()`, `state()`, `current_list()`, index getters) were removed; a static-invariant check (scripts/check_invariants.py) blocks their reintroduction. The legacy deadlock — calling `stop()` from inside `update()` on natural completion — is structurally eliminated via lock-aware internal helpers.
+- **Stop Semantics**: Every stop carries a typed reason. Operator stops and preemptions hold the current output; only natural completion of the final cue executes the configured end action (`hold_last`, `blackout`, `restore_fallback`).
+- **Pause/Fade Freeze**: Pausing captures hold/fade anchors before the state change and freezes the in-flight transition via `SceneManager::freeze_transition()`; resuming continues the frozen morph over the remaining time. Pause→resume never restarts or snaps the visual.
+- **Save/Run Separation**: RUN snapshots the latest saved list into an immutable active copy with its own checksum and monotonic generation. Saves while running flip `contentStale` only. `restart` re-snapshots with a fresh generation and no end-action transient. Backup/restore writes content only; running cue state is never restored.
+- **Content Protection**: Strict schema-2 validation (UTF-8 byte caps, bounded timing, strict enums, scene-existence checks) plus `409 cue_list_conflict` optimistic concurrency and `409 cue_list_in_use` dependency-safe deletion.
+- **NodeSync v6**: 76-byte packed frames add `cue_list_checksum`, `cue_transition_progress_q15`, `cue_paused_from`, and `cue_source_scene`. Followers fail closed on cue content divergence (`SyncTransportError::CueListMismatch`) and reconstruct paused fades from leader progress. Protocol version verification status is firmware-level (compile + unit tests); see Section 4 for the hardware bench scope.
 
 ---
 

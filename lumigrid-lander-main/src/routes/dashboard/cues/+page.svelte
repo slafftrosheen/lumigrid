@@ -1,67 +1,160 @@
 <script lang="ts">
+  /**
+   * Cue Studio v2 (LG-034).
+   *
+   * Transport goes exclusively through /api/v1/show/control (startCueList,
+   * stopCue, …). Telemetry comes from the focused nodeStore RuntimeSnapshot.
+   * /api/v1/cue-list remains the document persistence API.
+   */
   import { onMount } from 'svelte';
+  import { beforeNavigate, goto } from '$app/navigation';
+  import { get } from 'svelte/store';
   import OperatorDialog from '$lib/components/dashboard/OperatorDialog.svelte';
+  import CueListCard from '$lib/components/cues/CueListCard.svelte';
+  import CueCard from '$lib/components/cues/CueCard.svelte';
+  import CueInspector from '$lib/components/cues/CueInspector.svelte';
+  import CueTimelineRibbon from '$lib/components/cues/CueTimelineRibbon.svelte';
+  import CueRuntimeMonitor from '$lib/components/cues/CueRuntimeMonitor.svelte';
+  import ManualCueTBar from '$lib/components/cues/ManualCueTBar.svelte';
+  import CueConflictDialog from '$lib/components/cues/CueConflictDialog.svelte';
+  import { cueEditorStore, isDirty } from '$lib/cues/editorStore';
+  import {
+    MAX_CUES_PER_LIST,
+    MAX_CUE_LISTS,
+    createDefaultCueList,
+    cueListNominalDurationMs,
+    validateCueList,
+    hasBlockingIssues,
+    exportCueList,
+    importCueList,
+    downloadJson,
+    type CueListDocument,
+    type CueRunMode,
+    type CueEndAction,
+    type ImportResult,
+  } from '$lib/cues/document';
+  import { moveCue, copyCue, pasteAfter } from '$lib/cues/clipboard';
+  import { interpolateElapsed } from '$lib/cues/timing';
   import {
     getCueLists,
     getCueList,
     saveCueList,
     deleteCueList,
-    controlCue,
-    getCueStatus,
-    createDefaultCue,
-    createDefaultCueList,
-    type CueList,
+    toDocument,
+    CueListConflictError,
     type CueListSummary,
-    type CueEntry,
-    type CueRunMode,
-    type CueStatus,
   } from '$lib/api/cues';
+  import {
+    startCueList,
+    stopCue,
+    pauseCue,
+    resumeCue,
+    nextCue,
+    previousCue,
+    jumpCue,
+    restartCueList,
+    setCueCrossfade,
+  } from '$lib/api/showTransport';
   import { getPresets, type ScenePreset } from '$lib/api/node';
-  import { TRANSITION_CURVES, type TransitionCurve } from '$lib/runtime/curves';
-  import { getSelectedNodeIp } from '$lib/auth/storage';
   import { nodeStore, commandTracker } from '$lib/state/nodeStore';
+  import { getSelectedNodeIp } from '$lib/auth/storage';
 
-  let nodeIp = $state('');
-  let cueLists = $state<CueListSummary[]>([]);
-  let currentList = $state<CueList | null>(null);
-  let selectedListIdx = $state<number>(0);
-  let presets = $state<ScenePreset[]>([]);
   let loading = $state(true);
   let saving = $state(false);
+  let deleting = $state(false);
   let error = $state('');
   let toast = $state('');
-  let deleteListDialogOpen = $state(false);
-  let deletingList = $state(false);
+  let cueLists = $state<CueListSummary[]>([]);
+  let presets = $state<ScenePreset[]>([]);
+
+  // Dialog state
+  let deleteDialogOpen = $state(false);
+  let newSlotChooserOpen = $state(false);
+  let navGuardOpen = $state(false);
+  let pendingNav = $state<(() => void) | null>(null);
+  let importInput: HTMLInputElement | null = $state(null);
+
+  const editor = cueEditorStore;
+
+  // Subscribe to editor store
+  let editorSnapshot = $state<{
+    nodeId: string | null;
+    listIndex: number | null;
+    persisted: CueListDocument | null;
+    working: CueListDocument | null;
+    selectedCue: number | null;
+    saving: boolean;
+    conflict: { currentChecksum: number } | null;
+    error: string | null;
+  } | null>(null);
+
+  editor.subscribe((value) => {
+    editorSnapshot = value;
+  });
+
+  let working = $derived(editorSnapshot?.working ?? null);
+  let dirty = $derived(editorSnapshot ? isDirty(editorSnapshot) : false);
+  let selectedCue = $derived(editorSnapshot?.selectedCue ?? null);
+
+  // Focused node subscription (§63) — reactive to node switches like Scenes/Timeline.
+  let nodeIp = $state('');
+  let focusedIp = $derived($nodeStore.route ?? '');
+  let connection = $derived($nodeStore.connection);
+  let connectionOk = $derived(connection === 'online' || connection === 'degraded');
 
   const snapSync = $derived($nodeStore.snapshot?.sync);
   const isFollower = $derived(
     snapSync?.activeRole === 'worker' &&
-    Boolean(snapSync.masterAddress) &&
-    (snapSync.lastPacketAgeMs === null || snapSync.lastPacketAgeMs === undefined || snapSync.lastPacketAgeMs < 10000)
+      Boolean(snapSync.masterAddress) &&
+      (snapSync.lastPacketAgeMs === null || snapSync.lastPacketAgeMs === undefined || snapSync.lastPacketAgeMs < 10000)
   );
   const syncMasterAddress = $derived(snapSync?.masterAddress || 'Leader');
 
-  // Live telemetry from nodeStore snapshot
-  let snapTransport = $derived($nodeStore.snapshot?.transport);
-  let liveCue = $derived(snapTransport?.cue ?? $nodeStore.status?.cue);
-
-  let isRunning = $derived(liveCue?.running ?? false);
-  let cueState = $derived(liveCue?.state ?? 'idle');
+  // ── Runtime telemetry (authoritative, §21/§58) ──
+  let transport = $derived($nodeStore.snapshot?.transport);
+  let liveCue = $derived(transport?.cue ?? null);
+  let running = $derived(liveCue?.running ?? false);
+  let runState = $derived(liveCue?.state ?? 'stopped');
+  let pausedFrom = $derived(liveCue?.pausedFrom ?? 'stopped');
+  let runtimeListIndex = $derived(liveCue?.listIndex ?? null);
+  let runtimeMode = $derived((liveCue?.mode ?? null) as CueRunMode | null);
   let currentCueIdx = $derived(liveCue?.cueIndex ?? 0);
   let nextCueIdx = $derived(liveCue?.nextCueIndex ?? 0);
-  let elapsedMs = $derived(liveCue?.elapsedMs ?? 0);
-  let remainingMs = $derived(liveCue?.remainingMs ?? 0);
-  let manualFadeValue = $state<number>(0);
-  let totalMs = $derived(elapsedMs + remainingMs);
-  let progressPct = $derived(totalMs > 0 ? Math.min(100, Math.round((elapsedMs / totalMs) * 100)) : 0);
+  let contentStale = $derived(liveCue?.contentStale ?? false);
+  let remoteDriven = $derived(liveCue?.remoteDriven ?? false);
+  let manualFadeQ15 = $derived(liveCue?.manualFade ?? 0);
 
-  const RUN_MODES: { id: CueRunMode; label: string }[] = [
-    { id: 'single_shot', label: 'Single Shot' },
-    { id: 'loop', label: 'Loop' },
-    { id: 'ping_pong', label: 'Ping Pong' },
-    { id: 'random', label: 'Random' },
-    { id: 'manual', label: 'Manual Crossfade' },
-  ];
+  // Interpolated display timing (§58)
+  let lastSnapAt = $derived($nodeStore.lastSnapshotAt);
+  let displayTiming = $derived.by(() => {
+    const raw = {
+      elapsedMs: liveCue?.elapsedMs ?? 0,
+      remainingMs: liveCue?.remainingMs ?? 0,
+    };
+    const age = lastSnapAt > 0 ? Date.now() - lastSnapAt : 0;
+    return interpolateElapsed(raw.elapsedMs, raw.remainingMs, runState, age, connectionOk) ?? raw;
+  });
+  let phaseTotalMs = $derived(displayTiming.elapsedMs + displayTiming.remainingMs);
+
+  // T-Bar visibility: Manual mode only (§18)
+  let manualModeActive = $derived(
+    running && runtimeMode === 'manual'
+  );
+
+  let workingIsManual = $derived(working?.mode === 'manual');
+  let timingVisible = $derived(!workingIsManual);
+
+  let usedIndices = $derived(cueLists.map((l) => l.index));
+  let freeSlots = $derived(
+    Array.from({ length: MAX_CUE_LISTS }, (_, i) => i).filter((i) => !usedIndices.includes(i))
+  );
+
+  let blockingIssues = $derived(
+    working ? validateCueList(working, (idx) => presets.some((p) => p.index === idx)) : null
+  );
+  let canSave = $derived(
+    Boolean(working && nodeIp && !saving && blockingIssues && !hasBlockingIssues(blockingIssues))
+  );
 
   function toastMsg(msg: string) {
     toast = msg;
@@ -70,7 +163,9 @@
     }, 3000);
   }
 
-  async function loadData() {
+  // ── Data loading ──
+
+  async function loadData(keepSelection = true) {
     if (!nodeIp) {
       loading = false;
       return;
@@ -79,202 +174,433 @@
     error = '';
     try {
       const [lists, pres] = await Promise.all([
-        getCueLists(nodeIp).catch(() => []),
-        getPresets(nodeIp).catch(() => []),
+        getCueLists(nodeIp).catch(() => [] as CueListSummary[]),
+        getPresets(nodeIp).catch(() => [] as ScenePreset[]),
       ]);
       cueLists = lists;
       presets = pres;
 
-      if (cueLists.length > 0) {
-        await selectList(cueLists[0].index);
-      } else {
-        currentList = createDefaultCueList(0);
-        selectedListIdx = 0;
+      const wanted = keepSelection ? editorSnapshot?.listIndex : null;
+      const target =
+        wanted !== null && lists.some((l) => l.index === wanted)
+          ? wanted
+          : lists.length > 0
+            ? lists[0].index
+            : null;
+
+      if (target !== null) {
+        await selectList(target);
+      } else if (!working) {
+        // Show an empty draft instead of auto-saving a default list (§45).
+        editor.openDraft(createDefaultCueList(freeSlots[0] ?? 0, 'New Cue List', presets[0]?.index ?? 0));
       }
-    } catch (e: any) {
-      error = e?.message || 'Failed to load cue lists';
+    } catch (e: unknown) {
+      error = e instanceof Error ? e.message : String(e);
     } finally {
       loading = false;
     }
   }
 
   async function selectList(index: number) {
-    selectedListIdx = index;
+    if (!nodeIp) return;
+    if (editorSnapshot && isDirty(editorSnapshot)) {
+      pendingNav = () => void doSelectList(index);
+      navGuardOpen = true;
+      return;
+    }
+    await doSelectList(index);
+  }
+
+  async function doSelectList(index: number) {
     if (!nodeIp) return;
     try {
-      currentList = await getCueList(nodeIp, index);
+      const doc = toDocument(await getCueList(nodeIp, index));
+      editor.load(doc);
     } catch {
-      currentList = createDefaultCueList(index);
+      editor.openDraft(createDefaultCueList(index, `Cue List ${index + 1}`, presets[0]?.index ?? 0));
     }
+  }
+
+  // ── Draft mutations ──
+
+  function mutate(mutator: (doc: CueListDocument) => CueListDocument) {
+    editor.updateWorking(mutator);
   }
 
   function addCue() {
-    if (!currentList || currentList.cues.length >= 16) {
+    if (!working) return;
+    if (working.cues.length >= MAX_CUES_PER_LIST) {
       toastMsg('Maximum 16 cues reached');
       return;
     }
-    const nextPreset = presets.length > 0 ? presets[currentList.cues.length % presets.length].index : 0;
-    currentList.cues = [
-      ...currentList.cues,
-      createDefaultCue(nextPreset),
-    ];
+    const scene = presets[selectedCue ?? 0]?.index ?? presets[0]?.index ?? 0;
+    mutate((doc) => {
+      const cues = [...doc.cues];
+      cues.splice((selectedCue ?? cues.length - 1) + 1, 0, {
+        sceneIndex: scene,
+        holdMs: 3000,
+        fadeMs: 1000,
+        curve: 'easeInOut',
+        label: '',
+      });
+      return { ...doc, cues };
+    });
+    editor.selectCue(Math.min((selectedCue ?? working.cues.length - 1) + 1, MAX_CUES_PER_LIST - 1));
   }
 
-  function removeCue(idx: number) {
-    if (!currentList || currentList.cues.length <= 1) {
+  function duplicateSelectedCue() {
+    if (!working || selectedCue === null) return;
+    if (working.cues.length >= MAX_CUES_PER_LIST) {
+      toastMsg('Maximum 16 cues reached');
+      return;
+    }
+    mutate((doc) => {
+      const cues = [...doc.cues];
+      cues.splice(selectedCue + 1, 0, { ...cues[selectedCue] });
+      return { ...doc, cues };
+    });
+    editor.selectCue(selectedCue + 1);
+  }
+
+  function deleteSelectedCue() {
+    if (!working || selectedCue === null) return;
+    if (working.cues.length <= 1) {
       toastMsg('Cue list must contain at least 1 cue');
       return;
     }
-    currentList.cues = currentList.cues.filter((_, i) => i !== idx);
+    mutate((doc) => ({ ...doc, cues: doc.cues.filter((_, i) => i !== selectedCue) }));
+    editor.selectCue(null);
   }
 
-  function moveCue(idx: number, direction: 'up' | 'down') {
-    if (!currentList) return;
-    const targetIdx = direction === 'up' ? idx - 1 : idx + 1;
-    if (targetIdx < 0 || targetIdx >= currentList.cues.length) return;
-    const items = [...currentList.cues];
-    const temp = items[idx];
-    items[idx] = items[targetIdx];
-    items[targetIdx] = temp;
-    currentList.cues = items;
-  }
-
-  async function saveCurrentList() {
-    if (!nodeIp || !currentList) return;
-    saving = true;
-    try {
-      const res = await saveCueList(nodeIp, currentList.index, currentList);
-      if (res.commandId) {
-        commandTracker.register({
-          id: res.commandId,
-          domain: 'cue',
-          nodeIp,
-        });
-      }
-      toastMsg(`Saved cue list: ${currentList.name}`);
-      const lists = await getCueLists(nodeIp);
-      cueLists = lists;
-    } catch (e: any) {
-      toastMsg(`Save error: ${e?.message || e}`);
-    } finally {
-      saving = false;
+  function moveSelectedCue(direction: 'up' | 'down') {
+    if (!working || selectedCue === null) return;
+    const target = direction === 'up' ? selectedCue - 1 : selectedCue + 1;
+    const moved = moveCue(working.cues, selectedCue, target);
+    if (moved) {
+      mutate((doc) => ({ ...doc, cues: moved }));
+      editor.selectCue(target);
     }
   }
 
-  async function createNewList() {
-    if (cueLists.length >= 8) {
-      toastMsg('Maximum 8 cue lists allowed');
+  function copySelectedCue() {
+    if (!working || selectedCue === null) return;
+    copyCue(working.cues[selectedCue]);
+    toastMsg('Cue copied');
+  }
+
+  function pasteAfterSelected() {
+    if (!working || selectedCue === null) return;
+    const pasted = pasteAfter(working.cues, selectedCue, MAX_CUES_PER_LIST);
+    if (!pasted) {
+      toastMsg(working.cues.length >= MAX_CUES_PER_LIST ? 'Maximum 16 cues reached' : 'Clipboard empty');
       return;
     }
-    const usedIndices = new Set(cueLists.map(l => l.index));
-    let freeIdx = 0;
-    for (let i = 0; i < 8; i++) {
-      if (!usedIndices.has(i)) {
-        freeIdx = i;
-        break;
-      }
-    }
-    currentList = createDefaultCueList(freeIdx, `Show ${freeIdx + 1}`);
-    selectedListIdx = freeIdx;
-    await saveCurrentList();
+    mutate((doc) => ({ ...doc, cues: pasted }));
+    editor.selectCue(selectedCue + 1);
   }
 
-  function deleteCurrentList() {
-    if (!nodeIp || !currentList) return;
-    deleteListDialogOpen = true;
-  }
+  // ── Save / run workflow (§39/§40) ──
 
-  async function confirmDeleteCurrentList() {
-    if (!nodeIp || !currentList || deletingList) return;
-    deletingList = true;
+  async function persistDraft(): Promise<boolean> {
+    if (!working || !nodeIp) return false;
+    editor.setSaving(true);
     try {
-      await deleteCueList(nodeIp, currentList.index);
-      toastMsg('Cue list deleted');
-      cueLists = await getCueLists(nodeIp);
-      if (cueLists.length > 0) {
-        await selectList(cueLists[0].index);
-      } else {
-        currentList = createDefaultCueList(0);
-        selectedListIdx = 0;
-      }
-      deleteListDialogOpen = false;
-    } catch (e: any) {
-      toastMsg(`Delete failed: ${e?.message || e}`);
-    } finally {
-      deletingList = false;
-    }
-  }
-
-  async function sendTransport(action: 'start' | 'stop' | 'pause' | 'resume' | 'next' | 'previous') {
-    if (!nodeIp || !currentList) return;
-    try {
-      const res = await controlCue(nodeIp, {
-        action,
-        cueListIndex: currentList.index,
-      });
+      const expected = editorSnapshot?.persisted?.checksum ?? null;
+      const res = await saveCueList(nodeIp, working, expected);
       if (res.commandId) {
-        commandTracker.register({
-          id: res.commandId,
-          domain: 'cue',
-          nodeIp,
-        });
+        commandTracker.register({ id: res.commandId, domain: 'cue', nodeIp });
       }
-      toastMsg(`Transport: ${action}`);
-    } catch (e: any) {
-      toastMsg(`Transport error: ${e?.message || e}`);
+      // §38: only clear dirty after receiving the authoritative checksum.
+      editor.commitSave({ ...working, checksum: res.checksum ?? working.checksum });
+      cueLists = await getCueLists(nodeIp).catch(() => cueLists);
+      return true;
+    } catch (e: unknown) {
+      if (e instanceof CueListConflictError) {
+        editor.setConflict(e.currentChecksum);
+      } else {
+        editor.setError(e instanceof Error ? e.message : String(e));
+        toastMsg(`Save failed: ${e instanceof Error ? e.message : e}`);
+      }
+      return false;
+    } finally {
+      editor.setSaving(false);
     }
   }
 
-  async function jumpToCue(cueIdx: number) {
-    if (!nodeIp) return;
+  async function saveDraft() {
+    await persistDraft();
+  }
+
+  /** Primary action for dirty lists (§40): SAVE & RUN / SAVE & RESTART. */
+  async function saveAndRun() {
+    if (!await persistDraft()) return;
+    await runShow();
+  }
+
+  async function runShow() {
+    if (!nodeIp || !working) return;
     try {
-      await controlCue(nodeIp, {
-        action: 'jump',
-        cueIndex: cueIdx,
-      });
-      toastMsg(`Jumped to cue #${cueIdx + 1}`);
-    } catch (e: any) {
-      toastMsg(`Jump error: ${e?.message || e}`);
+      const res = await startCueList(nodeIp, working.index, 0);
+      if (res.commandId) {
+        commandTracker.register({ id: res.commandId, domain: 'cue', nodeIp });
+      }
+      toastMsg(`Running “${working.name}”`);
+    } catch (e: unknown) {
+      toastMsg(`Run failed: ${e instanceof Error ? e.message : e}`);
     }
   }
 
-  async function onManualFadeInput(e: Event) {
-    if (!nodeIp) return;
-    const target = e.target as HTMLInputElement;
-    const val = parseFloat(target.value);
-    manualFadeValue = val;
+  /** RUN SAVED VERSION (§40 secondary): never persists the browser draft. */
+  async function runSavedVersion() {
+    if (!nodeIp || !working) return;
     try {
-      await controlCue(nodeIp, {
-        action: 'crossfade',
-        crossfade: val,
-      });
-    } catch {}
+      const res = await startCueList(nodeIp, working.index, 0);
+      if (res.commandId) {
+        commandTracker.register({ id: res.commandId, domain: 'cue', nodeIp });
+      }
+      toastMsg('Running saved version');
+    } catch (e: unknown) {
+      toastMsg(`Run failed: ${e instanceof Error ? e.message : e}`);
+    }
   }
+
+  /** RESTART with the newest saved version (§13/§K). */
+  async function restartShow() {
+    if (!nodeIp) return;
+    const listIdx = runtimeListIndex ?? working?.index ?? 0;
+    try {
+      const res = await restartCueList(nodeIp, listIdx, 0);
+      if (res.commandId) {
+        commandTracker.register({ id: res.commandId, domain: 'cue', nodeIp });
+      }
+      toastMsg('Restarted with saved version');
+    } catch (e: unknown) {
+      toastMsg(`Restart failed: ${e instanceof Error ? e.message : e}`);
+    }
+  }
+
+  // ── Transport (canonical /show/control only) ──
+
+  async function transportAction(fn: (ip: string) => Promise<unknown>, label: string) {
+    if (!nodeIp || isFollower) return;
+    try {
+      await fn(nodeIp);
+      toastMsg(label);
+    } catch (e: unknown) {
+      // Transport failures surface; follower/authority errors are real errors (§16).
+      toastMsg(`${label} failed: ${e instanceof Error ? e.message : e}`);
+    }
+  }
+
+  async function sendCrossfade(unit: number) {
+    if (!nodeIp) return;
+    const res = await setCueCrossfade(nodeIp, unit);
+    if (res.commandId) {
+      commandTracker.register({ id: res.commandId, domain: 'cue', nodeIp });
+    }
+  }
+
+  async function jumpToSelected() {
+    if (!nodeIp || selectedCue === null) return;
+    await transportAction((ip) => jumpCue(ip, selectedCue), `Jumped to cue ${selectedCue + 1}`);
+  }
+
+  // ── New / duplicate / delete / import / export ──
+
+  function openNewSlotChooser() {
+    if (freeSlots.length === 0) {
+      toastMsg(`All ${MAX_CUE_LISTS} cue list slots are in use`);
+      return;
+    }
+    newSlotChooserOpen = true;
+  }
+
+  function createInSlot(index: number) {
+    newSlotChooserOpen = false;
+    // Browser draft only — no node write until explicit save (§45).
+    editor.openDraft(createDefaultCueList(index, `Cue List ${index + 1}`, presets[0]?.index ?? 0));
+  }
+
+  function duplicateCurrentList() {
+    if (!working || !editorSnapshot) return;
+    const dup = (
+      editorSnapshot.persisted ?? working
+    );
+    const used = new Set(usedIndices);
+    if (used.size >= MAX_CUE_LISTS) {
+      toastMsg(`All ${MAX_CUE_LISTS} slots are in use`);
+      return;
+    }
+    let free = 0;
+    while (used.has(free)) free++;
+    const draft = {
+      ...dup,
+      schema: 2 as const,
+      index: free,
+      checksum: null,
+      name:
+        `${dup.name || `Cue List ${dup.index + 1}`} copy`.slice(0, 31),
+      cues: dup.cues.map((c) => ({ ...c })),
+    };
+    editor.openDraft(draft);
+    toastMsg('Duplicate created — save to persist');
+  }
+
+  function requestDeleteList() {
+    if (!working) return;
+    deleteDialogOpen = true;
+  }
+
+  async function confirmDeleteList() {
+    if (!nodeIp || !working || deleting) return;
+    deleting = true;
+    try {
+      await deleteCueList(nodeIp, working.index);
+      toastMsg('Cue list deleted');
+      deleteDialogOpen = false;
+      cueLists = await getCueLists(nodeIp).catch(() => cueLists);
+      if (cueLists.length > 0) {
+        await doSelectList(cueLists[0].index);
+      } else {
+        editor.openDraft(createDefaultCueList(0, 'New Cue List', presets[0]?.index ?? 0));
+      }
+    } catch (e: unknown) {
+      // 409 cue_list_in_use surfaces references from the node (§41).
+      const message = e instanceof Error ? e.message : String(e);
+      if (message.includes('cue_list_in_use')) {
+        toastMsg('Cannot delete: list is running or referenced by a schedule');
+      } else {
+        toastMsg(`Delete failed: ${message}`);
+      }
+    } finally {
+      deleting = false;
+    }
+  }
+
+  function onExport() {
+    if (!working) return;
+    downloadJson(
+      `${(working.name || 'cue-list').replace(/[^a-z0-9_-]+/gi, '_')}.json`,
+      exportCueList(working)
+    );
+  }
+
+  function onImportClick() {
+    importInput?.click();
+  }
+
+  async function onImportFile(event: Event) {
+    const input = event.target as HTMLInputElement;
+    const file = input.files?.[0];
+    input.value = '';
+    if (!file) return;
+    try {
+      const json: unknown = JSON.parse(await file.text());
+      const result: ImportResult = importCueList(json, freeSlots[0] ?? 0);
+      if (result.ok === false) {
+        toastMsg(`Import failed: ${result.error}`);
+        return;
+      }
+      editor.openDraft(result.doc);
+      toastMsg('Imported as unsaved draft');
+    } catch {
+      toastMsg('Import failed: invalid JSON');
+    }
+  }
+
+  // ── Unsaved navigation guard (§62) ──
+
+  beforeNavigate((navigation) => {
+    const snapshot = get(cueEditorStore);
+    if (snapshot && isDirty(snapshot)) {
+      navigation.cancel();
+      const target = navigation.to?.url?.pathname ?? '/dashboard/cues';
+      pendingNav = () => void goto(target);
+      navGuardOpen = true;
+    }
+  });
+
+  async function navigateAfterDiscard(path: string) {
+    await goto(path);
+  }
+
+  function navStay() {
+    navGuardOpen = false;
+    pendingNav = null;
+  }
+
+  function navDiscard() {
+    navGuardOpen = false;
+    const nav = pendingNav;
+    pendingNav = null;
+    if (editorSnapshot?.persisted) {
+      editor.load(editorSnapshot.persisted);
+    } else {
+      editor.reset();
+    }
+    nav?.();
+  }
+
+  void navigateAfterDiscard;
+
+  // ── Derived labels ──
+
+  function sceneLabel(index: number | undefined | null): string {
+    if (index === undefined || index === null) return '—';
+    return presets.find((p) => p.index === index)?.name ?? `Scene #${index + 1}`;
+  }
+
+  let currentCueLabel = $derived(sceneLabel(liveCue?.currentSceneIndex));
+  let nextCueLabel = $derived(sceneLabel(liveCue?.nextSceneIndex));
+  let runningListName = $derived(
+    cueLists.find((l) => l.index === runtimeListIndex)?.name ?? `Cue List ${(runtimeListIndex ?? 0) + 1}`
+  );
+
+  let ribbonCues = $derived(
+    (working?.cues ?? []).map((c) => ({ fadeMs: c.fadeMs, holdMs: c.holdMs }))
+  );
 
   onMount(() => {
     nodeIp = getSelectedNodeIp();
+    editor.bindNode(nodeIp || 'none');
     loadData();
+  });
+
+  // React to focused node changes (§63): reload when the dashboard switches node.
+  $effect(() => {
+    if (focusedIp && nodeIp && focusedIp !== nodeIp) {
+      nodeIp = focusedIp;
+      editor.bindNode(focusedIp);
+      loadData(false);
+    }
   });
 </script>
 
 <svelte:head><title>Cue Studio — LumiGrid</title></svelte:head>
 
+<input
+  bind:this={importInput}
+  type="file"
+  accept="application/json,.json"
+  style="display: none"
+  onchange={onImportFile}
+/>
+
 <div class="cues-container">
   <div class="header-row">
     <div>
       <h1 class="page-title">Cue Studio</h1>
-      <p class="page-subtitle">Build timed shows, transitions and repeatable playback across your saved scenes.</p>
+      <p class="page-subtitle">Storyboard timed shows over your saved scenes — millisecond-accurate playback.</p>
     </div>
-
     {#if toast}
-      <div class="toast-pill">{toast}</div>
+      <div class="toast-pill" role="status">{toast}</div>
     {/if}
   </div>
 
   {#if !nodeIp}
     <div class="empty-state">
       <div class="empty-icon">⚠️</div>
-      <p>No device selected. Please select a LumiGrid node on the fleet overview to manage cue lists.</p>
+      <p>No device selected. Select a LumiGrid node on the fleet overview to manage cue lists.</p>
     </div>
   {:else if loading}
     <div class="loading-state">
@@ -286,251 +612,288 @@
       <div class="sync-follower-banner" role="alert">
         <span class="banner-icon">ℹ</span>
         <div class="banner-content">
-          <strong>Playback Controlled by Sync Leader ({syncMasterAddress})</strong>
-          <p>This node is an active follower in a synchronized cluster. Local cue transport and manual crossfade on this follower node are suppressed to preserve cluster frame lock. To run cue lists across the group, use Sync Studio.</p>
+          <strong>Playback controlled by Sync Leader ({syncMasterAddress})</strong>
+          <p>You may edit and save Cue Lists here, but transport control belongs to the leader. Use Sync Studio to run shows across the cluster.</p>
         </div>
         <a href="/dashboard/sync" class="banner-action-btn">Open Sync Studio →</a>
       </div>
     {/if}
 
     <!-- LIVE SHOW MONITOR -->
-    <div class="cue-surface monitor-card">
-      <div class="monitor-header">
-        <div class="status-indicator">
-          <span class="status-dot" class:running={isRunning} class:holding={cueState === 'holding'} class:fading={cueState === 'fading'}></span>
-          <span class="status-label">{cueState.toUpperCase()}</span>
-          {#if isRunning}
-            <span class="active-list-badge">List #{(liveCue?.listIndex ?? 0) + 1}</span>
+    <CueRuntimeMonitor
+      listName={runningListName}
+      {running}
+      state={runState}
+      {pausedFrom}
+      currentCueIndex={currentCueIdx}
+      cueCount={liveCue ? Math.max(liveCue.cueIndex + 1, cueLists.find((l) => l.index === runtimeListIndex)?.count ?? 0) : 0}
+      currentLabel={currentCueLabel}
+      nextLabel={nextCueLabel}
+      fading={runState === 'fading'}
+      elapsedMs={displayTiming.elapsedMs}
+      remainingMs={displayTiming.remainingMs}
+      {phaseTotalMs}
+      {contentStale}
+      {remoteDriven}
+      {isFollower}
+      manualMode={manualModeActive}
+      onstart={() => transportAction((ip) => startCueList(ip, working?.index ?? runtimeListIndex ?? 0), 'Show started')}
+      onpause={() => transportAction(pauseCue, 'Paused')}
+      onresume={() => transportAction(resumeCue, 'Resumed')}
+      onstop={() => transportAction(stopCue, 'Stopped')}
+      onnext={() => transportAction(nextCue, 'Next cue')}
+      onprevious={() => transportAction(previousCue, 'Previous cue')}
+      onrestart={restartShow}
+    />
+
+    {#if manualModeActive}
+      <div class="cue-surface tbar-surface">
+        <ManualCueTBar
+          {manualFadeQ15}
+          currentLabel={currentCueLabel}
+          nextLabel={nextCueLabel}
+          currentIndex={currentCueIdx}
+          nextIndex={nextCueIdx}
+          disabled={isFollower}
+          oncrossfade={sendCrossfade}
+          onerror={(msg) => toastMsg(msg)}
+        />
+      </div>
+    {/if}
+
+    <div class="studio-grid">
+      <!-- LIBRARY -->
+      <aside class="cue-surface library">
+        <div class="library-header">
+          <h2>Cue Lists <span class="count">{cueLists.length}/{MAX_CUE_LISTS}</span></h2>
+        </div>
+
+        <div class="library-list">
+          {#each cueLists as cl (cl.index)}
+            <CueListCard
+              index={cl.index}
+              name={cl.name}
+              mode={cl.mode}
+              count={cl.count}
+              checksum={cl.checksum ?? null}
+              cueMs={[]}
+              selected={editorSnapshot?.listIndex === cl.index}
+              running={running && runtimeListIndex === cl.index}
+              contentStale={running && runtimeListIndex === cl.index && contentStale}
+              onselect={() => selectList(cl.index)}
+            />
+          {/each}
+          {#if cueLists.length === 0}
+            <p class="library-empty">No saved cue lists yet.</p>
           {/if}
         </div>
 
-        <div class="cue-indices">
-          <span class="cue-idx current">CUE #{currentCueIdx + 1}</span>
-          <span class="cue-arrow">➔</span>
-          <span class="cue-idx next">NEXT #{nextCueIdx + 1}</span>
+        <div class="library-actions">
+          <button class="cbtn cbtn-primary" onclick={openNewSlotChooser}>+ New Cue List</button>
+          <button class="cbtn" onclick={duplicateCurrentList} disabled={!working}>Duplicate</button>
+          <button class="cbtn" onclick={onExport} disabled={!working}>Export</button>
+          <button class="cbtn" onclick={onImportClick}>Import</button>
         </div>
-      </div>
+      </aside>
 
-      <!-- Live Progress Bar -->
-      <div class="progress-container">
-        <div class="progress-bar" style="width: {progressPct}%"></div>
-        <div class="progress-text">
-          <span>{(elapsedMs / 1000).toFixed(1)}s</span>
-          <span class="progress-state">{cueState}</span>
-          <span>{(remainingMs / 1000).toFixed(1)}s left</span>
-        </div>
-      </div>
-
-      <!-- Transport Controls -->
-      <div class="transport-row">
-        <div class="transport-buttons">
-          <button class="btn-transport" disabled={isFollower} onclick={() => sendTransport('start')} title={isFollower ? `Playback controlled by Sync Leader (${syncMasterAddress})` : "Start Show"}>
-            ▶ START
-          </button>
-          <button class="btn-transport" disabled={isFollower} onclick={() => sendTransport('pause')} title={isFollower ? `Playback controlled by Sync Leader (${syncMasterAddress})` : "Pause Show"}>
-            ⏸ PAUSE
-          </button>
-          <button class="btn-transport" disabled={isFollower} onclick={() => sendTransport('resume')} title={isFollower ? `Playback controlled by Sync Leader (${syncMasterAddress})` : "Resume Show"}>
-            ⏯ RESUME
-          </button>
-          <button class="btn-transport" disabled={isFollower} onclick={() => sendTransport('stop')} title={isFollower ? `Playback controlled by Sync Leader (${syncMasterAddress})` : "Stop Show"}>
-            ⏹ STOP
-          </button>
-          <div class="btn-divider"></div>
-          <button class="btn-transport" disabled={isFollower} onclick={() => sendTransport('previous')} title={isFollower ? `Playback controlled by Sync Leader (${syncMasterAddress})` : "Previous Cue"}>
-            ⏮ PREV
-          </button>
-          <button class="btn-transport" disabled={isFollower} onclick={() => sendTransport('next')} title={isFollower ? `Playback controlled by Sync Leader (${syncMasterAddress})` : "Next Cue"}>
-            ⏭ NEXT
-          </button>
-        </div>
-
-        <!-- Manual Crossfade T-Bar -->
-        <div class="fader-box">
-          <label for="manual-fader" class="fader-label">Manual Crossfade (T-Bar)</label>
-          <input
-            id="manual-fader"
-            type="range"
-            min="0"
-            max="1"
-            step="0.01"
-            value={manualFadeValue}
-            disabled={isFollower}
-            oninput={onManualFadeInput}
-            class="tbar-slider"
-          />
-          <div class="fader-scale">
-            <span>A</span>
-            <span>{Math.round(manualFadeValue * 100)}%</span>
-            <span>B</span>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- CUE LIST MANAGEMENT -->
-    <div class="studio-grid">
-      <!-- Sidebar / List selector -->
-      <div class="cue-surface lists-sidebar">
-        <div class="sidebar-header">
-          <h2>Cue Lists ({cueLists.length}/8)</h2>
-          <button class="btn-icon" onclick={createNewList} title="New cue list" aria-label="New cue list">+</button>
-        </div>
-
-        <div class="lists-nav">
-          {#each cueLists as cl}
-            <button
-              class="list-nav-item"
-              class:selected={cl.index === selectedListIdx}
-              aria-pressed={cl.index === selectedListIdx}
-              onclick={() => selectList(cl.index)}
-            >
-              <div class="list-nav-info">
-                <span class="list-nav-name">{cl.name || `List ${cl.index + 1}`}</span>
-                <span class="list-nav-meta">{cl.mode} • {cl.count} cues</span>
-              </div>
-              <span class="list-nav-arrow">›</span>
-            </button>
-          {/each}
-        </div>
-      </div>
-
-      <!-- Main Cue List Editor -->
-      {#if currentList}
-        <div class="cue-surface editor-main">
-          <div class="editor-header">
-            <div class="editor-title-group">
-              <input
-                type="text"
-                bind:value={currentList.name}
-                class="title-input"
-                placeholder="Show Name"
-              />
-              <select bind:value={currentList.mode} class="select-mode">
-                {#each RUN_MODES as rm}
-                  <option value={rm.id}>{rm.label}</option>
-                {/each}
-              </select>
-              <select
-                bind:value={currentList.endAction}
-                class="select-mode select-end-action"
-                title="What happens when the cue list reaches its last cue"
-              >
-                <option value={0}>End: Hold last scene</option>
-                <option value={1}>End: Blackout</option>
-                <option value={2}>End: Restore previous scene</option>
-              </select>
+      <!-- EDITOR -->
+      <section class="cue-surface editor">
+        {#if working}
+          <div class="editor-head">
+            <input
+              class="title-input"
+              type="text"
+              value={working.name}
+              maxlength={64}
+              placeholder="Show name"
+              aria-label="Cue list name"
+              oninput={(e) => mutate((doc) => ({ ...doc, name: (e.target as HTMLInputElement).value }))}
+            />
+            <div class="editor-badges">
+              {#if dirty}
+                <span class="badge badge-dirty">UNSAVED</span>
+              {/if}
+              {#if running && runtimeListIndex === working.index && contentStale}
+                <span class="badge badge-stale">RUNNING PREVIOUS VERSION</span>
+              {/if}
             </div>
+          </div>
 
-            <div class="editor-actions">
-              <button class="btn-danger" onclick={deleteCurrentList}>Delete</button>
-              <button class="btn-save" disabled={saving} onclick={saveCurrentList}>
-                {saving ? 'Saving...' : 'Save Show'}
+          <div class="editor-toolbar">
+            <button class="cbtn cbtn-primary" disabled={!canSave} onclick={saveDraft}>
+              {saving ? 'Saving…' : 'Save'}
+            </button>
+            {#if dirty}
+              <button class="cbtn btn-run" disabled={!canSave || isFollower} onclick={saveAndRun}>
+                {running && runtimeListIndex === working.index ? 'SAVE & RESTART' : 'SAVE & RUN'}
               </button>
+              <button class="cbtn" disabled={isFollower} onclick={runSavedVersion} title="Run the node's saved version without saving this draft">
+                RUN SAVED VERSION
+              </button>
+            {:else}
+              <button class="cbtn btn-run" disabled={isFollower} onclick={runShow}>▶ RUN</button>
+            {/if}
+            <div class="toolbar-spacer"></div>
+            <button class="cbtn btn-danger" onclick={requestDeleteList}>Delete</button>
+          </div>
+
+          <CueTimelineRibbon cues={ribbonCues} currentCue={running && runtimeListIndex === working.index ? currentCueIdx : null} />
+
+          <div class="storyboard-scroll">
+            <div class="storyboard">
+              {#each working.cues as cue, idx (idx)}
+                <div class="story-cue">
+                  <CueCard
+                    index={idx}
+                    sceneIndex={cue.sceneIndex}
+                    sceneName={sceneLabel(cue.sceneIndex)}
+                    label={cue.label}
+                    holdMs={cue.holdMs}
+                    fadeMs={cue.fadeMs}
+                    curve={cue.curve}
+                    selected={selectedCue === idx}
+                    isCurrent={running && runtimeListIndex === working.index && currentCueIdx === idx}
+                    showTiming={timingVisible}
+                    scenes={presets.map((p) => ({ index: p.index, name: p.name, thumbnail: null }))}
+                    onselect={() => editor.selectCue(idx)}
+                    onupdate={(patch) => mutate((doc) => ({
+                      ...doc,
+                      cues: doc.cues.map((c, i) => (i === idx ? { ...c, ...patch } : c)),
+                    }))}
+                    onmove={(dir) => {
+                      editor.selectCue(idx);
+                      const target = dir === 'up' ? idx - 1 : idx + 1;
+                      const moved = moveCue(working.cues, idx, target);
+                      if (moved) mutate((doc) => ({ ...doc, cues: moved }));
+                    }}
+                    onduplicate={() => { editor.selectCue(idx); duplicateSelectedCue(); }}
+                    oncopy={() => { editor.selectCue(idx); copySelectedCue(); }}
+                    onpasteafter={() => { editor.selectCue(idx); pasteAfterSelected(); }}
+                    ondelete={() => { editor.selectCue(idx); deleteSelectedCue(); }}
+                    onjumpto={running && !isFollower ? () => transportAction((ip) => jumpCue(ip, idx), `Jumped to cue ${idx + 1}`) : undefined}
+                    canMoveUp={idx > 0}
+                    canMoveDown={idx < working.cues.length - 1}
+                  />
+                  {#if idx < working.cues.length - 1}
+                    <div class="story-arrow" aria-hidden="true">↓</div>
+                  {/if}
+                </div>
+              {/each}
+            </div>
+
+            <div class="storyboard-side">
+              <div class="cue-surface side-panel">
+                <h3>Inspector</h3>
+                <CueInspector
+                  mode={working.mode}
+                  endAction={working.endAction}
+                  cueCount={working.cues.length}
+                  nominalMs={cueListNominalDurationMs(working)}
+                  onmodechange={(m) => mutate((doc) => ({ ...doc, mode: m }))}
+                  onendactionchange={(a) => mutate((doc) => ({ ...doc, endAction: a }))}
+                />
+              </div>
+
+              <div class="cue-surface side-panel">
+                <h3>Cue</h3>
+                <div class="cue-actions-column">
+                  <button class="cbtn" onclick={addCue} disabled={working.cues.length >= MAX_CUES_PER_LIST}>
+                    + Add Cue ({working.cues.length}/{MAX_CUES_PER_LIST})
+                  </button>
+                  <button class="cbtn" onclick={duplicateSelectedCue} disabled={selectedCue === null}>Duplicate Cue</button>
+                  <button class="cbtn" onclick={deleteSelectedCue} disabled={selectedCue === null}>Delete Cue</button>
+                  {#if running && selectedCue !== null && !isFollower}
+                    <button class="cbtn btn-run" onclick={jumpToSelected}>[JUMP TO CUE]</button>
+                  {/if}
+                  <p class="hint">Select a cue card, then use these actions. Jump is always explicit — clicking a card never jumps.</p>
+                </div>
+                {#if blockingIssues && blockingIssues.missingScenes.length > 0}
+                  <div class="issue-box" role="alert">
+                    <strong>Missing scenes</strong>
+                    {#each blockingIssues.missingScenes as issue (issue.cueIndex)}
+                      <div>Cue {issue.cueIndex + 1} · Scene {issue.sceneIndex + 1} missing</div>
+                    {/each}
+                    <p class="hint">Assign existing scenes before saving.</p>
+                  </div>
+                {/if}
+              </div>
             </div>
           </div>
-
-          <!-- Cues Table -->
-          <div class="cues-table-wrapper">
-            <table class="cues-table">
-              <thead>
-                <tr>
-                  <th style="width: 40px">#</th>
-                  <th>Label</th>
-                  <th>Scene</th>
-                  <th>Hold Time</th>
-                  <th>Fade Time</th>
-                  <th>Curve</th>
-                  <th style="width: 120px">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {#each currentList.cues as cue, idx}
-                  <tr class="cue-row" class:active-row={isRunning && currentCueIdx === idx}>
-                    <td class="cue-num" data-label="Cue">
-                      <button class="jump-btn" disabled={isFollower} onclick={() => jumpToCue(idx)} title={isFollower ? `Playback controlled by Sync Leader (${syncMasterAddress})` : "Jump directly to this cue"}>
-                        {idx + 1}
-                      </button>
-                    </td>
-                    <td data-label="Label">
-                      <input type="text" bind:value={cue.label} class="table-input" />
-                    </td>
-                    <td data-label="Scene">
-                      <select bind:value={cue.sceneIndex} class="table-select">
-                        {#each presets as p}
-                          <option value={p.index}>{p.name} (#{p.index + 1})</option>
-                        {/each}
-                        {#if presets.length === 0}
-                          <option value={cue.sceneIndex}>Scene #{cue.sceneIndex + 1}</option>
-                        {/if}
-                      </select>
-                    </td>
-                    <td data-label="Hold">
-                      <div class="time-input-group">
-                        <input
-                          type="number"
-                          min="0"
-                          max="600000"
-                          step="100"
-                          bind:value={cue.holdMs}
-                          class="table-number"
-                        />
-                        <span class="unit">ms</span>
-                      </div>
-                    </td>
-                    <td data-label="Fade">
-                      <div class="time-input-group">
-                        <input
-                          type="number"
-                          min="0"
-                          max="30000"
-                          step="50"
-                          bind:value={cue.fadeMs}
-                          class="table-number"
-                        />
-                        <span class="unit">ms</span>
-                      </div>
-                    </td>
-                    <td data-label="Curve">
-                      <select bind:value={cue.curve} class="table-select">
-                        {#each TRANSITION_CURVES as c}
-                          <option value={c}>{c}</option>
-                        {/each}
-                      </select>
-                    </td>
-                    <td class="cue-actions" data-label="Actions">
-                      <button class="icon-btn" onclick={() => moveCue(idx, 'up')} disabled={idx === 0} title="Move cue up" aria-label="Move cue up">▲</button>
-                      <button class="icon-btn" onclick={() => moveCue(idx, 'down')} disabled={idx === currentList.cues.length - 1} title="Move cue down" aria-label="Move cue down">▼</button>
-                      <button class="icon-btn remove" onclick={() => removeCue(idx)} title="Remove cue" aria-label="Remove cue">✕</button>
-                    </td>
-                  </tr>
-                {/each}
-              </tbody>
-            </table>
+        {:else}
+          <div class="empty-state">
+            <p>Select or create a Cue List to start authoring.</p>
           </div>
-
-          <div class="editor-footer">
-            <button class="btn-add-cue" onclick={addCue} disabled={currentList.cues.length >= 16}>
-              + Add Cue ({currentList.cues.length}/16)
-            </button>
-          </div>
-        </div>
-      {/if}
+        {/if}
+      </section>
     </div>
   {/if}
 </div>
 
 <OperatorDialog
-  open={deleteListDialogOpen}
+  open={deleteDialogOpen}
   title="Delete cue list?"
-  description={currentList
-    ? `Delete “${currentList.name}” and its ${currentList.cues.length} cue${currentList.cues.length === 1 ? '' : 's'} from the selected node.`
+  description={working
+    ? `Delete “${working.name}” and its ${working.cues.length} cue${working.cues.length === 1 ? '' : 's'} from the selected node.`
     : ''}
   confirmLabel="Delete Cue List"
   tone="danger"
-  busy={deletingList}
-  onconfirm={confirmDeleteCurrentList}
-  oncancel={() => (deleteListDialogOpen = false)}
+  busy={deleting}
+  onconfirm={confirmDeleteList}
+  oncancel={() => (deleteDialogOpen = false)}
+/>
+
+<OperatorDialog
+  open={newSlotChooserOpen}
+  title="New Cue List"
+  description="Choose a free slot. The list is created as a browser draft — nothing is saved to the node until you save."
+  confirmLabel="Close"
+  tone="neutral"
+  onconfirm={() => {
+    newSlotChooserOpen = false;
+  }}
+  oncancel={() => (newSlotChooserOpen = false)}
+>
+  <div class="slot-chooser" role="listbox" aria-label="Available slots">
+    {#if freeSlots.length === 0}
+      <p class="hint">All slots are in use. Delete a list to free a slot.</p>
+    {:else}
+      {#each freeSlots as slot (slot)}
+        <button class="slot-chip" role="option" aria-selected="false" onclick={() => createInSlot(slot)}>
+          {String(slot + 1).padStart(2, '0')}
+        </button>
+      {/each}
+    {/if}
+  </div>
+</OperatorDialog>
+
+<OperatorDialog
+  open={navGuardOpen}
+  title="Unsaved Cue List changes"
+  description="Your draft has changes that are not saved to the node. Stay to keep editing, or discard them."
+  confirmLabel="Discard"
+  cancelLabel="Stay"
+  tone="danger"
+  onconfirm={navDiscard}
+  oncancel={navStay}
+/>
+
+<CueConflictDialog
+  open={editorSnapshot?.conflict !== null && editorSnapshot?.conflict !== undefined}
+  currentChecksum={editorSnapshot?.conflict?.currentChecksum ?? null}
+  busy={saving}
+  onreload={async () => {
+    editor.clearConflict();
+    if (nodeIp && working) {
+      try {
+        const doc = toDocument(await getCueList(nodeIp, working.index));
+        editor.reloadNodeVersion(doc);
+        toastMsg('Loaded node version');
+      } catch {
+        toastMsg('Failed to reload node version');
+      }
+    }
+  }}
+  onkeep={() => editor.keepDraft()}
 />
 
 <style>
@@ -543,7 +906,6 @@
     gap: 1.25rem;
     color: var(--dash-text);
   }
-
   .header-row {
     display: flex;
     justify-content: space-between;
@@ -551,20 +913,17 @@
     gap: 1rem;
     flex-wrap: wrap;
   }
-
   .page-title {
     font-size: 1.8rem;
     font-weight: 700;
-    color: #ffffff;
+    color: #fff;
     margin: 0;
   }
-
   .page-subtitle {
     font-size: 0.9rem;
     color: rgba(255, 255, 255, 0.5);
     margin: 4px 0 0 0;
   }
-
   .toast-pill {
     background: rgba(var(--dash-accent-rgb), 0.15);
     border: 1px solid rgba(var(--dash-accent-rgb), 0.4);
@@ -573,9 +932,7 @@
     border-radius: 20px;
     font-size: 0.85rem;
     font-family: monospace;
-    animation: fadeIn 0.2s ease;
   }
-
   .cue-surface {
     background: var(--dash-surface);
     backdrop-filter: blur(18px);
@@ -585,546 +942,208 @@
     padding: 1.25rem;
     box-shadow: var(--dash-shadow);
   }
-
-  /* Monitor Card */
-  .monitor-card {
-    position: sticky;
-    top: 0;
-    z-index: 18;
-    background: linear-gradient(180deg, rgba(29,29,31,.92) 0%, rgba(15,15,17,.95) 100%);
-    backdrop-filter: blur(22px);
-    -webkit-backdrop-filter: blur(22px);
-    border: 1px solid var(--dash-border);
-    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+  .tbar-surface {
     display: flex;
-    flex-direction: column;
-    gap: 16px;
+    justify-content: center;
   }
-
-  .monitor-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-  }
-
-  .status-indicator {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-  }
-
-  .status-dot {
-    width: 10px;
-    height: 10px;
-    border-radius: 50%;
-    background: #636366;
-    display: inline-block;
-  }
-
-  .status-dot.running {
-    background: var(--dash-ok);
-    box-shadow: 0 0 10px var(--dash-ok);
-  }
-
-  .status-dot.holding {
-    background: var(--dash-accent-hover);
-    box-shadow: 0 0 10px var(--dash-accent-hover);
-  }
-
-  .status-dot.fading {
-    background: var(--dash-accent);
-    box-shadow: 0 0 10px var(--dash-accent);
-  }
-
-  .status-label {
-    font-family: monospace;
-    font-size: 0.95rem;
-    font-weight: 700;
-    color: #fff;
-    letter-spacing: 0.05em;
-  }
-
-  .active-list-badge {
-    font-family: monospace;
-    font-size: 0.75rem;
-    color: var(--dash-accent);
-    background: rgba(var(--dash-accent-rgb), 0.1);
-    border: 1px solid rgba(var(--dash-accent-rgb), 0.3);
-    padding: 2px 6px;
-    border-radius: 4px;
-  }
-
-  .cue-indices {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    font-family: monospace;
-    font-weight: 700;
-  }
-
-  .cue-idx.current {
-    color: var(--dash-accent);
-    font-size: 1.1rem;
-  }
-
-  .cue-arrow {
-    color: rgba(255, 255, 255, 0.3);
-  }
-
-  .cue-idx.next {
-    color: rgba(255, 255, 255, 0.6);
-    font-size: 0.95rem;
-  }
-
-  .progress-container {
-    height: 22px;
-    background: rgba(0, 0, 0, 0.4);
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    border-radius: 6px;
-    position: relative;
-    overflow: hidden;
-  }
-
-  .progress-bar {
-    height: 100%;
-    background: linear-gradient(90deg, var(--dash-accent) 0%, var(--dash-accent-hover) 100%);
-    transition: width 0.1s linear;
-  }
-
-  .progress-text {
-    position: absolute;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 0 10px;
-    font-family: monospace;
-    font-size: 0.75rem;
-    color: #fff;
-    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
-  }
-
-  .progress-state {
-    font-weight: 600;
-    text-transform: uppercase;
-  }
-
-  .transport-row {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 20px;
-    flex-wrap: wrap;
-  }
-
-  .transport-buttons {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-
-  .btn-transport {
-    min-height: 36px;
-    background: rgba(255, 255, 255, 0.05);
-    border: 1px solid rgba(255, 255, 255, 0.15);
-    color: #fff;
-    padding: 8px 14px;
-    border-radius: 6px;
-    font-size: 0.85rem;
-    font-weight: 600;
-    cursor: pointer;
-    transition: all 0.15s ease;
-  }
-
-  .btn-transport:hover {
-    background: rgba(var(--dash-accent-rgb), 0.15);
-    border-color: var(--dash-accent);
-    color: var(--dash-accent);
-  }
-
-  .btn-divider {
-    width: 1px;
-    height: 20px;
-    background: rgba(255, 255, 255, 0.15);
-    margin: 0 4px;
-  }
-
-  .fader-box {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    min-width: 220px;
-  }
-
-  .fader-label {
-    font-size: 0.75rem;
-    text-transform: uppercase;
-    color: rgba(255, 255, 255, 0.5);
-    letter-spacing: 0.04em;
-  }
-
-  .tbar-slider {
-    accent-color: var(--dash-accent);
-    cursor: pointer;
-  }
-
-  .fader-scale {
-    display: flex;
-    justify-content: space-between;
-    font-family: monospace;
-    font-size: 0.7rem;
-    color: rgba(255, 255, 255, 0.4);
-  }
-
-  /* Studio Grid */
   .studio-grid {
     display: grid;
-    grid-template-columns: minmax(220px, 270px) minmax(0, 1fr);
+    grid-template-columns: minmax(230px, 280px) minmax(0, 1fr);
     gap: 1.25rem;
     align-items: start;
   }
-
-  .lists-sidebar {
-    position: sticky;
-    top: 148px;
+  .library {
     display: flex;
     flex-direction: column;
     gap: 12px;
+    position: sticky;
+    top: 148px;
   }
-
-  .sidebar-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-  }
-
-  .sidebar-header h2 {
+  .library-header h2 {
     font-size: 1rem;
     font-weight: 600;
     margin: 0;
-  }
-
-  .btn-icon {
-    background: rgba(var(--dash-accent-rgb), 0.1);
-    border: 1px solid rgba(var(--dash-accent-rgb), 0.3);
-    color: var(--dash-accent);
-    width: 26px;
-    height: 26px;
-    border-radius: 4px;
     display: flex;
-    align-items: center;
-    justify-content: center;
-    cursor: pointer;
-    font-weight: bold;
-    line-height: 1;
+    justify-content: space-between;
   }
-
-  .lists-nav {
+  .count {
+    color: rgba(255, 255, 255, 0.4);
+    font-family: monospace;
+    font-size: 0.85rem;
+  }
+  .library-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .library-empty {
+    color: rgba(255, 255, 255, 0.4);
+    font-size: 0.85rem;
+  }
+  .library-actions {
     display: flex;
     flex-direction: column;
     gap: 6px;
+    margin-top: 4px;
   }
-
-  .list-nav-item {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    background: rgba(255, 255, 255, 0.03);
-    border: 1px solid rgba(255, 255, 255, 0.06);
-    border-radius: 6px;
-    padding: 10px 12px;
-    color: #fff;
-    cursor: pointer;
-    text-align: left;
-    transition: all 0.15s ease;
-  }
-
-  .list-nav-item:hover {
-    background: rgba(255, 255, 255, 0.07);
-  }
-
-  .list-nav-item.selected {
-    background: linear-gradient(90deg, rgba(var(--dash-accent-rgb),.18), rgba(var(--dash-accent-rgb),.07));
-    border-color: rgba(var(--dash-accent-rgb), 0.34);
-    box-shadow: inset 3px 0 0 var(--dash-accent);
-  }
-
-  .list-nav-info {
+  .editor {
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: 14px;
   }
-
-  .list-nav-name {
-    font-size: 0.9rem;
-    font-weight: 600;
-  }
-
-  .list-nav-meta {
-    font-size: 0.75rem;
-    color: rgba(255, 255, 255, 0.4);
-    font-family: monospace;
-  }
-
-  .list-nav-arrow {
-    color: rgba(255, 255, 255, 0.2);
-    font-size: 1.2rem;
-  }
-
-  /* Editor Main */
-  .editor-main {
-    display: flex;
-    flex-direction: column;
-    gap: 16px;
-  }
-
-  .editor-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 16px;
-    flex-wrap: wrap;
-  }
-
-  .editor-title-group {
+  .editor-head {
     display: flex;
     align-items: center;
     gap: 12px;
+    flex-wrap: wrap;
   }
-
   .title-input {
+    flex: 1;
+    min-width: 200px;
     background: rgba(255, 255, 255, 0.055);
     border: 1px solid rgba(255, 255, 255, 0.15);
-    border-radius: 6px;
+    border-radius: 8px;
     color: #fff;
-    font-size: 1.1rem;
-    font-weight: 600;
-    padding: 8px 12px;
-  }
-
-  .title-input:focus-visible {
-    border-color: var(--dash-accent);
-    box-shadow: 0 0 0 3px rgba(var(--dash-accent-rgb),.12);
-  }
-
-  .select-mode {
-    background: rgba(255, 255, 255, 0.055);
-    border: 1px solid rgba(255, 255, 255, 0.15);
-    border-radius: 6px;
-    color: #fff;
-    padding: 8px 12px;
-    font-size: 0.9rem;
-  }
-
-  .select-mode:focus-visible {
-    border-color: var(--dash-accent);
-    box-shadow: 0 0 0 3px rgba(var(--dash-accent-rgb),.12);
-  }
-
-  .select-end-action {
-    border-color: rgba(255, 159, 10, 0.3);
-    color: rgba(255, 255, 255, 0.75);
-    font-size: 0.82rem;
-  }
-
-  .select-end-action:focus-visible {
-    border-color: #ff9f0a;
-    box-shadow: 0 0 0 3px rgba(255, 159, 10, 0.15);
-  }
-
-  .editor-actions {
-    display: flex;
-    gap: 10px;
-  }
-
-  .btn-save {
-    background: var(--dash-accent);
-    color: #fff;
-    border: none;
+    font-size: 1.15rem;
     font-weight: 700;
-    padding: 8px 18px;
-    border-radius: 6px;
-    cursor: pointer;
-    transition: opacity 0.15s ease;
+    padding: 8px 12px;
   }
-
-  .btn-save:hover:not(:disabled) {
-    background: var(--dash-accent-hover);
-    transform: translateY(-1px);
-    box-shadow: 0 8px 20px rgba(var(--dash-accent-rgb), .24);
-  }
-  .btn-save:disabled { opacity: .45; cursor: not-allowed; }
-
-  .btn-danger {
-    background: rgba(255, 69, 58, 0.1);
-    border: 1px solid rgba(255, 69, 58, 0.4);
-    color: var(--dash-danger);
-    padding: 8px 14px;
-    border-radius: 6px;
-    cursor: pointer;
-  }
-
-  /* Cues Table */
-  .cues-table-wrapper {
-    overflow-x: auto;
-  }
-
-  .cues-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 0.85rem;
-  }
-
-  .cues-table th {
-    text-align: left;
-    padding: 8px 10px;
-    color: rgba(255, 255, 255, 0.5);
-    font-size: 0.75rem;
-    text-transform: uppercase;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-  }
-
-  .cues-table td {
-    padding: 8px 10px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-  }
-
-  .cue-row.active-row {
-    background: rgba(var(--dash-accent-rgb), 0.08);
-  }
-
-  .cue-num {
-    font-family: monospace;
-  }
-
-  .jump-btn {
-    background: transparent;
-    border: 1px solid rgba(255, 255, 255, 0.15);
-    color: #fff;
-    border-radius: 4px;
-    width: 26px;
-    height: 24px;
-    cursor: pointer;
-    font-family: monospace;
-    font-size: 0.8rem;
-  }
-
-  .jump-btn:hover {
-    border-color: var(--dash-accent);
-    color: var(--dash-accent);
-  }
-
-  .table-input, .table-select {
-    background: rgba(255, 255, 255, 0.05);
-    border: 1px solid rgba(255, 255, 255, 0.15);
-    border-radius: 4px;
-    color: #fff;
-    padding: 6px 8px;
-    font-size: 0.85rem;
-    width: 100%;
-    box-sizing: border-box;
-  }
-
-  .table-input:focus-visible, .table-select:focus-visible {
-    border-color: var(--dash-accent);
-    box-shadow: 0 0 0 3px rgba(var(--dash-accent-rgb),.10);
-  }
-
-  .time-input-group:focus-within {
-    border-color: var(--dash-accent);
-    box-shadow: 0 0 0 3px rgba(var(--dash-accent-rgb),.10);
-  }
-
-  .time-input-group {
+  .editor-badges {
     display: flex;
+    gap: 6px;
+  }
+  .badge {
+    font-size: 0.62rem;
+    font-weight: 800;
+    letter-spacing: 0.06em;
+    padding: 3px 8px;
+    border-radius: 4px;
+    white-space: nowrap;
+  }
+  .badge-dirty {
+    color: #ffd60a;
+    background: rgba(255, 214, 10, 0.1);
+    border: 1px solid rgba(255, 214, 10, 0.35);
+  }
+  .badge-stale {
+    color: #ffd60a;
+    background: rgba(255, 214, 10, 0.1);
+    border: 1px solid rgba(255, 214, 10, 0.35);
+  }
+  .editor-toolbar {
+    display: flex;
+    gap: 8px;
     align-items: center;
+    flex-wrap: wrap;
+  }
+  .toolbar-spacer {
+    flex: 1;
+  }
+  .cbtn {
     background: rgba(255, 255, 255, 0.05);
     border: 1px solid rgba(255, 255, 255, 0.15);
-    border-radius: 4px;
-    padding: 0 6px;
-  }
-
-  .table-number {
-    background: transparent;
-    border: none;
     color: #fff;
-    padding: 6px 0;
-    width: 70px;
-  }
-
-  .unit {
-    font-size: 0.7rem;
-    color: rgba(255, 255, 255, 0.4);
-    font-family: monospace;
-  }
-
-  .cue-actions {
-    display: flex;
-    gap: 4px;
-  }
-
-  .icon-btn {
-    background: rgba(255, 255, 255, 0.05);
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    color: #fff;
-    width: 26px;
-    height: 24px;
-    border-radius: 4px;
-    cursor: pointer;
-    line-height: 1;
-  }
-
-  .icon-btn:hover:not(:disabled) {
-    border-color: var(--dash-accent);
-    color: var(--dash-accent);
-  }
-
-  .icon-btn.remove:hover {
-    border-color: var(--dash-danger);
-    color: var(--dash-danger);
-  }
-
-  .icon-btn:disabled {
-    opacity: 0.3;
-    cursor: not-allowed;
-  }
-
-  .editor-footer {
-    display: flex;
-    justify-content: flex-start;
-  }
-
-  .btn-add-cue {
-    background: rgba(255, 255, 255, 0.05);
-    border: 1px dashed rgba(255, 255, 255, 0.2);
-    color: var(--dash-accent);
-    padding: 8px 16px;
+    padding: 7px 14px;
     border-radius: 6px;
-    cursor: pointer;
-    font-size: 0.85rem;
+    font-size: 0.84rem;
     font-weight: 600;
+    cursor: pointer;
     transition: all 0.15s ease;
   }
-
-  .btn-add-cue:hover:not(:disabled) {
-    background: rgba(var(--dash-accent-rgb), 0.1);
+  .cbtn:hover:not(:disabled) {
     border-color: var(--dash-accent);
+    color: var(--dash-accent);
   }
-
-  .empty-state, .loading-state {
+  .cbtn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+  .cbtn-primary {
+    background: rgba(var(--dash-accent-rgb), 0.16);
+    border-color: rgba(var(--dash-accent-rgb), 0.4);
+    color: var(--dash-accent);
+  }
+  .storyboard-scroll {
+    overflow-x: auto;
+  }
+  .storyboard {
+    display: flex;
+    flex-direction: column;
+    min-width: min(560px, 100%);
+  }
+  .story-cue {
+    display: flex;
+    flex-direction: column;
+  }
+  .story-arrow {
+    text-align: center;
+    color: rgba(255, 255, 255, 0.25);
+    padding: 2px 0;
+    font-size: 0.9rem;
+  }
+  .storyboard-side {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    margin-top: 4px;
+  }
+  .side-panel h3 {
+    margin: 0 0 8px 0;
+    font-size: 0.85rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: rgba(255, 255, 255, 0.55);
+  }
+  .cue-actions-column {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    align-items: stretch;
+  }
+  .hint {
+    margin: 4px 0 0 0;
+    font-size: 0.72rem;
+    color: rgba(255, 255, 255, 0.4);
+  }
+  .issue-box {
+    margin-top: 10px;
+    background: rgba(255, 69, 58, 0.08);
+    border: 1px solid rgba(255, 69, 58, 0.35);
+    border-radius: 8px;
+    padding: 8px 10px;
+    font-size: 0.78rem;
+    color: #ffb4a9;
+  }
+  .slot-chooser {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    padding: 6px 0;
+  }
+  .slot-chip {
+    width: 46px;
+    height: 38px;
+    border-radius: 8px;
+    border: 1px solid rgba(var(--dash-accent-rgb), 0.4);
+    background: rgba(var(--dash-accent-rgb), 0.08);
+    color: var(--dash-accent);
+    font-family: monospace;
+    font-weight: 700;
+    cursor: pointer;
+  }
+  .slot-chip:hover {
+    background: rgba(var(--dash-accent-rgb), 0.22);
+  }
+  .empty-state,
+  .loading-state {
     text-align: center;
     padding: 60px 20px;
     color: rgba(255, 255, 255, 0.5);
   }
-
   .empty-icon {
     font-size: 2.5rem;
     margin-bottom: 12px;
   }
-
   .spinner {
     width: 32px;
     height: 32px;
@@ -1134,124 +1153,11 @@
     animation: spin 0.8s linear infinite;
     margin: 0 auto 12px auto;
   }
-
   @keyframes spin {
-    to { transform: rotate(360deg); }
+    to {
+      transform: rotate(360deg);
+    }
   }
-
-  @keyframes fadeIn {
-    from { opacity: 0; }
-    to { opacity: 1; }
-  }
-
-  @media (max-width: 980px) {
-    .monitor-card { position: static; }
-    .studio-grid { grid-template-columns: 1fr; }
-    .lists-sidebar { position: static; }
-    .lists-sidebar { gap: .65rem; }
-    .lists-nav {
-      flex-direction: row;
-      overflow-x: auto;
-      padding-bottom: .2rem;
-      scroll-snap-type: x proximity;
-    }
-    .list-nav-item {
-      flex: 0 0 min(240px, 76vw);
-      scroll-snap-align: start;
-    }
-    .transport-row { align-items: stretch; }
-    .transport-buttons {
-      overflow-x: auto;
-      padding-bottom: .15rem;
-      flex: 1 1 100%;
-    }
-    .btn-transport { white-space: nowrap; }
-    .fader-box { flex: 1 1 260px; }
-  }
-
-  @media (max-width: 768px) {
-    .page-title { font-size: 1.45rem; }
-    .monitor-card { padding: 1rem; }
-    .monitor-header {
-      align-items: flex-start;
-      gap: .75rem;
-      flex-direction: column;
-    }
-    .cue-indices { width: 100%; justify-content: space-between; }
-    .progress-text { font-size: .68rem; }
-    .editor-header { align-items: stretch; }
-    .editor-title-group {
-      width: 100%;
-      align-items: stretch;
-      flex-direction: column;
-    }
-    .title-input, .select-mode { width: 100%; }
-    .editor-actions { width: 100%; }
-    .editor-actions button { flex: 1; min-height: 42px; }
-    .cues-table-wrapper { overflow: visible; }
-    .cues-table,
-    .cues-table tbody,
-    .cues-table tr,
-    .cues-table td {
-      display: block;
-      width: 100%;
-    }
-    .cues-table thead { display: none; }
-    .cues-table {
-      min-width: 0;
-      border-collapse: separate;
-      border-spacing: 0 10px;
-    }
-    .cues-table tr {
-      padding: .75rem;
-      border: 1px solid rgba(255,255,255,.075);
-      border-radius: 14px;
-      background: linear-gradient(180deg, rgba(255,255,255,.035), rgba(255,255,255,.018));
-    }
-    .cues-table tr.active-row {
-      border-color: rgba(var(--dash-accent-rgb),.28);
-      background: linear-gradient(135deg, rgba(var(--dash-accent-rgb),.11), rgba(255,255,255,.018));
-    }
-    .cues-table td {
-      display: grid;
-      grid-template-columns: 72px minmax(0, 1fr);
-      align-items: center;
-      gap: .6rem;
-      padding: .42rem .15rem;
-      border-bottom: 1px solid rgba(255,255,255,.04);
-    }
-    .cues-table td:last-child { border-bottom: 0; }
-    .cues-table td::before {
-      content: attr(data-label);
-      color: #737378;
-      font-size: .61rem;
-      font-weight: 800;
-      letter-spacing: .06em;
-      text-transform: uppercase;
-    }
-    .cue-actions {
-      display: grid;
-      grid-template-columns: 72px repeat(3, 38px);
-      justify-content: start;
-      gap: .45rem;
-    }
-    .cue-actions::before {
-      content: attr(data-label);
-      align-self: center;
-      color: #737378;
-      font-size: .61rem;
-      font-weight: 800;
-      letter-spacing: .06em;
-      text-transform: uppercase;
-    }
-    .cue-actions .icon-btn {
-      width: 38px;
-      height: 36px;
-    }
-    .table-number { width: 100%; }
-    .toast-pill { width: 100%; text-align: center; }
-  }
-
   .sync-follower-banner {
     display: flex;
     align-items: center;
@@ -1261,7 +1167,6 @@
     border: 1px solid rgba(59, 130, 246, 0.35);
     border-radius: 8px;
     padding: 0.85rem 1.25rem;
-    margin-bottom: 1.25rem;
     color: #e2e8f0;
   }
   .banner-icon {
@@ -1289,10 +1194,16 @@
     text-decoration: none;
     font-size: 0.82rem;
     font-weight: 600;
-    transition: all 0.15s ease;
   }
-  .banner-action-btn:hover {
-    background: rgba(59, 130, 246, 0.45);
-    color: #ffffff;
+  @media (max-width: 980px) {
+    .studio-grid {
+      grid-template-columns: 1fr;
+    }
+    .library {
+      position: static;
+    }
+    .storyboard-side {
+      grid-template-columns: 1fr;
+    }
   }
 </style>

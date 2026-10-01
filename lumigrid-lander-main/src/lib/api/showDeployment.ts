@@ -1,6 +1,6 @@
 import { getPreset, savePreset, deletePreset, deleteSceneMotion } from './scenes';
 import { getSceneMotion, saveSceneMotion } from './sceneMotion';
-import { getCueList, saveCueList, deleteCueList } from './cues';
+import { getCueList, saveCueList, deleteCueList, toDocument } from './cues';
 import { getSequence, saveSequence } from './timeline';
 import { getCalendarSchedule, saveCalendarSchedule } from './node';
 import { getShowManifest, compareShowManifest, type ShowManifest } from './sync';
@@ -236,7 +236,10 @@ async function deploySingleTarget(
           currentAsset: `Cue List ${cueMeta.index}${cueMeta.name ? ` (${cueMeta.name})` : ''}`,
         });
         const cueList = await getCueList(sourceIp, cueMeta.index);
-        await saveCueList(targetIp, cueMeta.index, cueList);
+        // LG-034 §69: controlled deployment writes the source document without
+        // a stale expectedChecksum requirement; the target's authoritative
+        // checksum is returned and verified via the manifest step.
+        await saveCueList(targetIp, toDocument({ ...cueList, index: cueMeta.index }));
         assetsWrittenCount++;
       }
 

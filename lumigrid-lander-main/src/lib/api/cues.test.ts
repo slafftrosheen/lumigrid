@@ -1,15 +1,15 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
-  createDefaultCue,
-  createDefaultCueList,
   getCueLists,
   getCueList,
   saveCueList,
   deleteCueList,
   controlCue,
   getCueStatus,
+  toDocument,
   type CueList,
 } from './cues';
+import { createDefaultCue, createDefaultCueList } from '../cues/document';
 
 describe('cues API and data structures', () => {
   beforeEach(() => {
@@ -22,15 +22,13 @@ describe('cues API and data structures', () => {
     expect(cue.holdMs).toBe(3000);
     expect(cue.fadeMs).toBe(1000);
     expect(cue.curve).toBe('easeInOut');
-    expect(cue.label).toBe('Cue 3');
 
     const list = createDefaultCueList(1, 'Show A');
     expect(list.index).toBe(1);
     expect(list.name).toBe('Show A');
-    expect(list.mode).toBe('loop');
-    expect(list.cues).toHaveLength(2);
+    expect(list.mode).toBe('single_shot');
+    expect(list.cues).toHaveLength(1);
     expect(list.cues[0].sceneIndex).toBe(0);
-    expect(list.cues[1].sceneIndex).toBe(1);
   });
 
   it('fetches cue lists correctly', async () => {
@@ -90,8 +88,7 @@ describe('cues API and data structures', () => {
       })
     );
 
-    const list = createDefaultCueList(0);
-    const res = await saveCueList('192.168.1.50', 0, list);
+    const res = await saveCueList('192.168.1.50', createDefaultCueList(0, 'Cue List 1'));
     expect(res.saved).toBe(true);
     expect(res.commandId).toBe(104);
 

@@ -104,6 +104,10 @@ Errors use this shape:
 | `PUT` | `/api/v1/schedules` | Replace all calendar automation cues. |
 | `POST` | `/api/v1/show/control` | Control unified Show Transport (Scene, Timeline, Cue) with leader authority. |
 | `GET` | `/api/v1/show/status` | Read unified Show Transport runtime status and mode. |
+| `GET` | `/api/v1/cue-lists` | List saved Cue Lists (index, name, mode, count, end action, checksum) (LG-034). |
+| `GET` | `/api/v1/cue-list` | Read one Cue List document (schema 2, includes checksum and per-cue timing) via `?index=N`. |
+| `PUT` | `/api/v1/cue-list` | Strictly validate and save a Cue List (schema 2, optimistic checksum concurrency). |
+| `DELETE` | `/api/v1/cue-list` | Delete a Cue List via `?index=N`; blocked with 409 while referenced by the active transport or schedules. |
 | `DELETE` | `/api/v1/scene-motion` | Delete motion tracks for a scene preset (via `?index=N`). |
 | `GET` | `/api/v1/sync` | Read sync role, clock health, transport, master address, and discovered followers. |
 | `GET` | `/api/v1/fleet/nodes` | Read discovered fleet nodes table and self identity via mDNS. |
@@ -326,7 +330,7 @@ Or for Cue List:
   "cueIndex": 0
 }
 ```
-Supported Cue actions: `start`, `stop`, `pause`, `resume`, `next`, `previous`, `jump`, `crossfade`.
+Supported Cue actions: `start`, `restart`, `stop`, `pause`, `resume`, `next`, `previous`, `jump`, `crossfade`. Every action is deterministic: invalid-state transitions (e.g. pausing a stopped transport, advancing past the final cue) fail with `400`/`409` instead of silently no-oping. Stops are classified with a stop reason (`operator`, `preempted`, `natural_completion`, `sync_lost`); only `natural_completion` executes the configured end action.
 
 `GET /api/v1/show/status` returns unified transport coordinator status:
 ```json
@@ -338,12 +342,22 @@ Supported Cue actions: `start`, `stop`, `pause`, `resume`, `next`, `previous`, `
   "cue": {
     "running": true,
     "state": "fading",
+    "pausedFrom": "stopped",
     "listIndex": 0,
+    "mode": "auto",
     "cueIndex": 3,
     "nextCueIndex": 4,
+    "currentSceneIndex": 7,
+    "nextSceneIndex": 12,
     "elapsedMs": 450,
     "remainingMs": 1550,
-    "manualFade": 0
+    "manualFade": 0,
+    "transitionProgress": 12345,
+    "generation": 42,
+    "activeChecksum": 9182771,
+    "savedChecksum": 9182771,
+    "contentStale": false,
+    "remoteDriven": false
   }
 }
 ```
@@ -359,10 +373,58 @@ Active followers (`activeRole === 'worker'` tracking a reachable leader) reject 
 ```
 Show content editing (`PUT /api/v1/presets`, `PUT /api/v1/sequence`, `PUT /api/v1/cue-list`) remains permitted.
 
-### Sync Health, Topology, and NodeSync Protocol v4
+### Cue Lists (LG-034 — Cue Studio v2)
+
+Cue Lists are the playlist/show layer above Scene presets. Persistence and transport are strictly separated: saving a Cue List never mutates the running show.
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/api/v1/cue-lists` | List saved Cue Lists (`index`, `name`, `mode`, `count`, `endAction`, `endActionName`, `checksum`). |
+| `GET` | `/api/v1/cue-list?index=N` | Read one Cue List document (schema 2) including per-cue `sceneIndex`, `holdMs`, `fadeMs`, `curve`, and `label`. |
+| `PUT` | `/api/v1/cue-list` | Strictly validate and save a Cue List document (schema 2). |
+| `DELETE` | `/api/v1/cue-list?index=N` | Delete a Cue List; blocked with 409 while referenced. |
+
+#### Document model (schema 2)
+
+```json
+{
+  "schema": 2,
+  "index": 0,
+  "checksum": 9182771,
+  "name": "Opening Walk-in",
+  "mode": "auto",
+  "endAction": "hold_last",
+  "cues": [
+    { "sceneIndex": 3, "holdMs": 8000, "fadeMs": 1500, "curve": "ease_in_out", "label": "House up" }
+  ]
+}
+```
+
+- `name`: 1..31 UTF-8 bytes; cue `label`: 0..23 UTF-8 bytes; `cues`: 1..16 entries per list; up to 8 lists.
+- `mode`: `auto` (hold/fade timed advance) or `manual` (operator T-Bar crossfade).
+- `endAction` (`hold_last` | `blackout` | `restore_fallback`): executed **only** on natural completion of the final cue. Operator stops, preemptions (scene/timeline activation), and sync loss never trigger the end action.
+- Strict validation rejects out-of-range timing (`holdMs` 0..3600000, `fadeMs` 0..60000), unknown curves/modes, overlong UTF-8 content, and missing scene references (`400 cue_scene_missing` with `cueIndex`/`sceneIndex`).
+
+#### Save/run separation & optimistic concurrency
+
+- `PUT /api/v1/cue-list` never starts, stops, or alters running playback. RUN snapshots the latest saved list into an immutable active copy with its own checksum and transport generation.
+- Pass `expectedChecksum` to guard against concurrent edits; a mismatch returns `409 cue_list_conflict` with `currentChecksum` (keep-draft/reload is the client's decision).
+- While the active snapshot diverges from the saved list, telemetry reports `contentStale: true`; `POST /api/v1/show/control` with `action: "restart"` re-snapshots the saved version without executing an end action.
+
+#### Deletion protection
+
+`DELETE /api/v1/cue-list` returns `409 cue_list_in_use` with a `references[]` array while the list is the active cue transport (`{"type":"activeTransport"}`) or referenced by a calendar schedule (`{"type":"schedule","index":N}`).
+
+#### Cue transport telemetry
+
+`GET /api/v1/show/status` `cue` (and `transport.cue` in `GET /api/v1/status`) reports: `running`, `state`, `pausedFrom`, `listIndex`, `mode`, `cueIndex`, `nextCueIndex`, `currentSceneIndex`, `nextSceneIndex`, `elapsedMs`, `remainingMs`, `manualFade` (Q15), `transitionProgress` (Q15), `generation`, `activeChecksum`, `savedChecksum`, `contentStale`, and `remoteDriven`. Pausing freezes hold/fade anchors and the in-flight fade; resuming continues the frozen transition over the remaining time with no visual restart.
+
+> The legacy endpoints `POST /api/v1/cue/control` and `GET /api/v1/cue/status` remain as deprecated aliases with identical semantics; clients should migrate to `/api/v1/show/control` and `/api/v1/show/status`.
+
+### Sync Health, Topology, and NodeSync Protocol v6
 
 `GET /api/v1/sync` returns:
-- `protocolVersion`: `4` (NodeSync v4 with packed 60-byte payload).
+- `protocolVersion`: `6` (NodeSync v6 with packed 76-byte payload).
 - `configuredRole`: `auto`, `master`, or `worker`.
 - `activeRole`: Currently resolved role (`auto`, `master`, or `worker`).
 - `running`: Boolean indicating if NodeSync UDP background task is active.
@@ -374,10 +436,10 @@ Show content editing (`PUT /api/v1/presets`, `PUT /api/v1/sequence`, `PUT /api/v
 - `transport`: Active playback transport mode (`standalone`, `scene`, `timeline`, `cue`).
 - `transportGeneration`: Monotonic generation counter of the leader's transport commands.
 - `transportApplyOk`: Boolean indicating if follower successfully applied remote transport state.
-- `transportError`: Error string if follower failed to apply remote transport.
+- `transportError`: Error string if follower failed to apply remote transport (`none`, `scene_missing`, `cue_list_missing`, `cue_index_invalid`, `runtime_unavailable`, `unsupported_transport`, `timeline_mismatch`, `timeline_invalid`, `cue_list_mismatch`).
 - `remoteBpm`: Remote BPM broadcast from leader during timeline transport (or null).
 - `remoteTimelineEnabled`: Boolean indicating if leader's timeline sequence is active.
-- `cue`: Active cue playback telemetry (`listIndex`, `state`, `cueIndex`, `nextCueIndex`, `manualFade`).
+- `cue`: Active cue playback telemetry (`listIndex`, `state`, `cueIndex`, `nextCueIndex`, `generation`, `elapsedMs`, `manualFadeQ15`).
 - `peerCount`, `packetsReceived`, `packetsMissed`, `clockOffsetMs`, `clockJitterUs`.
 - `peers[]`: List of acknowledged peers with address, ageMs, and latencyMs.
 
@@ -414,7 +476,7 @@ Show content editing (`PUT /api/v1/presets`, `PUT /api/v1/sequence`, `PUT /api/v
   - Stale presets are deleted with `DELETE /api/v1/presets?index=N`.
   - Stale motion tracks are deleted with `DELETE /api/v1/scene-motion?index=N`.
   - Stale cue lists are deleted with `DELETE /api/v1/cue-list?index=N`.
-- **Synchronized Cue Playback**: Under Show Transport v2 and NodeSync v4, live Cue playback is fully synchronized over UDP across the cluster. The Leader runs the authoritative cue list timing and crossfades, broadcasting cue indices, hold/fade states, and manual crossfade progress to all follower nodes at 10 Hz. Followers suppress local conflicting playback and render matching frames locked to the cluster clock.
+- **Synchronized Cue Playback**: Under Show Transport v2 and NodeSync v6, live Cue playback is fully synchronized over UDP across the cluster. The Leader runs the authoritative cue list timing and crossfades, broadcasting cue indices, hold/fade states, paused-from phase, transition progress, and manual crossfade progress to all follower nodes at 10 Hz. Followers suppress local conflicting playback, render matching frames locked to the cluster clock, and fail closed with `cue_list_mismatch` when their local Cue List checksum diverges from the leader's.
 
 ### Diagnostics and Logs
 
@@ -685,7 +747,24 @@ Canonical RuntimeSnapshot v3
       "contentStale": false
     },
     "cue": {
-      "running": false
+      "running": false,
+      "state": "stopped",
+      "pausedFrom": "stopped",
+      "listIndex": 0,
+      "mode": "auto",
+      "cueIndex": 0,
+      "nextCueIndex": 1,
+      "currentSceneIndex": 0,
+      "nextSceneIndex": 1,
+      "elapsedMs": 0,
+      "remainingMs": 0,
+      "manualFade": 0,
+      "transitionProgress": 0,
+      "generation": 0,
+      "activeChecksum": 0,
+      "savedChecksum": 0,
+      "contentStale": false,
+      "remoteDriven": false
     }
   },
 

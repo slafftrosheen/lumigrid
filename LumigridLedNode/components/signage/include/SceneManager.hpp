@@ -22,6 +22,16 @@ public:
     bool prepare_manual_transition(uint8_t target_index);
     void set_manual_transition_progress(uint16_t progress_q15);
     bool is_manual_transition() const { return manual_transition_; }
+
+    // ── LG-034: transition freeze (Cue pause) ──
+    // Freezes an active automatic transition: physical output stops progressing
+    // while CueRunner reports Paused. Source/target and current progress are
+    // retained; the transition becomes manually-progressed.
+    bool freeze_transition();
+    // Resumes a frozen transition toward its existing target over remaining_ms
+    // from current_ms. Does NOT restart from the original source.
+    bool resume_frozen_transition(uint32_t remaining_ms, uint32_t current_ms);
+    bool is_transition_frozen() const { return transition_frozen_; }
     void activate_scene_direct(const SceneConfig& scene, uint32_t current_ms, bool immediate = false);
     void feed_watchdog(uint32_t current_ms);
 
@@ -76,6 +86,7 @@ private:
     TransitionCurve transition_curve_ = TransitionCurve::EaseInOut;
     bool transitioning_ = false;
     bool manual_transition_ = false;
+    bool transition_frozen_ = false;
     uint8_t manual_target_index_ = 0;
 
     uint32_t last_command_ms_ = 0;

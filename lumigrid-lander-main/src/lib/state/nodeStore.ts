@@ -89,6 +89,7 @@ export interface NodeLiveStatus {
   cue?: {
     running: boolean;
     state?: string;
+    pausedFrom?: string;
     listIndex?: number;
     cueIndex?: number;
     nextCueIndex?: number;
@@ -193,9 +194,11 @@ function projectLegacyStatus(snap: RuntimeSnapshotV3 | null): NodeLiveStatus | n
     cue: snap.transport.cue ? {
       running: snap.transport.cue.running,
       state: snap.transport.cue.state,
+      pausedFrom: snap.transport.cue.pausedFrom,
       listIndex: snap.transport.cue.listIndex,
       cueIndex: snap.transport.cue.cueIndex,
       nextCueIndex: snap.transport.cue.nextCueIndex,
+      mode: snap.transport.cue.mode,
       manualFade: snap.transport.cue.manualFade,
     } : null,
     channels: snap.channels ? snap.channels.map(c => ({ ...c })) : [],

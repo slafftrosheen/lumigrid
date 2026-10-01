@@ -122,8 +122,50 @@ void SceneManager::set_manual_transition_progress(uint16_t progress_q15) {
         active_index_ = manual_target_index_;
         transitioning_ = false;
         manual_transition_ = false;
+        transition_frozen_ = false;
         (void)config_.save_active_state(active_index_);
     }
+}
+
+bool SceneManager::freeze_transition() {
+    // LG-034: only an active automatic transition can be frozen. Manual (T-Bar)
+    // transitions are already externally progressed; freezing is a no-op that
+    // reports success because the visual state is already operator-controlled.
+    if (!transitioning_ || transition_frozen_) {
+        return transitioning_ || transition_frozen_;
+    }
+    if (manual_transition_) {
+        transition_frozen_ = true;
+        return true;
+    }
+    // Retain source (current_scene_) and target as-is. Switch this transition to
+    // manual progress driven by resume_frozen_transition(); physical output stops
+    // advancing because process_frame() samples at the frozen progress value.
+    transition_frozen_ = true;
+    manual_transition_ = true;
+    return true;
+}
+
+bool SceneManager::resume_frozen_transition(uint32_t remaining_ms, uint32_t current_ms) {
+    if (!transition_frozen_ || !transitioning_) return false;
+    transition_frozen_ = false;
+    if (manual_transition_) {
+        // Resume the automatic portion from the frozen visual position: convert
+        // the retained progress into a timed transition over remaining_ms.
+        // sample_scene_morph() keeps the already-blended visual as the source.
+        SceneConfig sampled{};
+        sample_scene_morph(sampled, current_scene_, target_scene_, transition_progress_q15_);
+        current_scene_ = sampled;
+        current_motion_ = target_motion_;
+        manual_transition_ = false;
+        transition_start_ms_ = current_ms;
+        transition_duration_ms_ = std::max<uint32_t>(1, remaining_ms);
+        transition_progress_q15_ = 0;
+        return true;
+    }
+    transition_start_ms_ = current_ms;
+    transition_duration_ms_ = std::max<uint32_t>(1, remaining_ms);
+    return true;
 }
 
 void SceneManager::activate_scene_direct(const SceneConfig& scene, uint32_t current_ms, bool immediate) {

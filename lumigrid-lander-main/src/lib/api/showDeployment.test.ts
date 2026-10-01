@@ -80,7 +80,7 @@ describe('showDeployment service', () => {
       endAction: 0,
       cues: [],
     });
-    vi.spyOn(cuesApi, 'saveCueList').mockResolvedValue({ saved: true });
+    vi.spyOn(cuesApi, 'saveCueList').mockResolvedValue({ saved: true, checksum: 99 });
     vi.spyOn(cuesApi, 'deleteCueList').mockResolvedValue({ deleted: true });
 
     vi.spyOn(timelineApi, 'getSequence').mockResolvedValue({
@@ -132,7 +132,7 @@ describe('showDeployment service', () => {
 
     // Cue list
     expect(cuesApi.getCueList).toHaveBeenCalledWith(sourceIp, 0);
-    expect(cuesApi.saveCueList).toHaveBeenCalledWith(targetIp1, 0, expect.anything());
+    expect(cuesApi.saveCueList).toHaveBeenCalledWith(targetIp1, expect.objectContaining({ index: 0 }));
 
     // Schedules should NOT have been called (default false)
     expect(nodeApi.getCalendarSchedule).not.toHaveBeenCalled();

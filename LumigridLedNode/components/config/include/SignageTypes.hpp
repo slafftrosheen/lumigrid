@@ -508,6 +508,49 @@ struct CalendarSchedule {
 constexpr uint8_t kMaxCueLists = 8;
 constexpr uint8_t kMaxCuesPerList = 16;
 
+// LG-034: explicit end-action semantics (replaces magic 0/1/2 values).
+// Only applied on natural Single Shot completion.
+enum class CueEndAction : uint8_t {
+    HoldLast        = 0,
+    Blackout        = 1,
+    RestoreFallback = 2,
+};
+
+inline const char* cue_end_action_name(CueEndAction action) {
+    switch (action) {
+        case CueEndAction::Blackout:        return "blackout";
+        case CueEndAction::RestoreFallback: return "restore_fallback";
+        case CueEndAction::HoldLast:
+        default:                            return "hold_last";
+    }
+}
+
+inline bool parse_cue_end_action(const char* name, CueEndAction& out) {
+    if (!name) return false;
+    if (strcmp(name, "hold_last") == 0)        return (out = CueEndAction::HoldLast, true);
+    if (strcmp(name, "blackout") == 0)         return (out = CueEndAction::Blackout, true);
+    if (strcmp(name, "restore_fallback") == 0) return (out = CueEndAction::RestoreFallback, true);
+    return false;
+}
+
+// LG-034: why a Cue Runner stopped. Governs whether the configured end action runs.
+enum class CueStopReason : uint8_t {
+    Operator          = 0, // operator STOP: hold current output, no end action
+    Preempted         = 1, // Scene/Timeline took ownership: no end action
+    NaturalCompletion = 2, // Single Shot reached its actual end: end action applies
+    SyncLost          = 3, // remote Cue transport released: no end action
+};
+
+inline const char* cue_stop_reason_name(CueStopReason reason) {
+    switch (reason) {
+        case CueStopReason::Preempted:         return "preempted";
+        case CueStopReason::NaturalCompletion: return "natural_completion";
+        case CueStopReason::SyncLost:          return "sync_lost";
+        case CueStopReason::Operator:
+        default:                               return "operator";
+    }
+}
+
 enum class CueRunMode : uint8_t {
     SingleShot = 0,
     Loop       = 1,
@@ -538,6 +581,8 @@ inline bool parse_cue_run_mode(const char* name, CueRunMode& out) {
 }
 
 struct CueEntry {
+    static constexpr uint8_t kMaxLabelBytes = 23; // label is char[24] incl. NUL
+
     uint8_t scene_index = 0;
     uint32_t hold_ms = 3000;
     uint16_t fade_ms = 1000;
@@ -546,10 +591,13 @@ struct CueEntry {
 };
 
 struct CueList {
+    static constexpr uint8_t kMaxNameBytes = 31;   // name is char[32] incl. NUL
+    static constexpr uint8_t kMaxLabelBytes = 23;  // label is char[24] incl. NUL
+
     char name[32] = "";
     CueRunMode mode = CueRunMode::Loop;
     uint8_t count = 0;
-    uint8_t end_action = 0; // 0 = hold last, 1 = blackout, 2 = restore fallback
+    CueEndAction end_action = CueEndAction::HoldLast;
     CueEntry cues[kMaxCuesPerList]{};
     uint32_t checksum = 0;
 
@@ -557,7 +605,7 @@ struct CueList {
         name[0] = '\0';
         mode = CueRunMode::Loop;
         count = 0;
-        end_action = 0;
+        end_action = CueEndAction::HoldLast;
         checksum = 0;
         auto* p = reinterpret_cast<uint8_t*>(cues);
         for (size_t i = 0; i < sizeof(cues); ++i) p[i] = 0;

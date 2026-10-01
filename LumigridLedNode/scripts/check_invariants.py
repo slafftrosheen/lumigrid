@@ -9,6 +9,7 @@ or lifecycle regressions are discovered in the codebase:
 3. Process-global 'static bool services_started'.
 4. Production-accessible hardcoded default passwords ("lumigrid123" outside dev flags).
 5. Unsynchronized direct output mutations outside controlled transactions/factory exceptions.
+6. LG-034: legacy cue endpoints used outside the compat API module.
 """
 
 import sys
@@ -174,6 +175,37 @@ if FRONTEND_SRC.exists():
             if f.name == "nodeStore.ts":
                 continue
             check_file_contains(f, [("new WebSocket(", "Forbidden multiple new WebSocket owner outside nodeStore.ts")])
+
+# 12. LG-034: Legacy cue transport endpoints only in the designated compat module.
+#     Normal dashboard routes must use /api/v1/show/control via showTransport.ts.
+if FRONTEND_SRC.exists():
+    legacy_cue_endpoints = [
+        ("/api/v1/cue/control", "Forbidden legacy /api/v1/cue/control outside cues compat API module"),
+        ("/api/v1/cue/status", "Forbidden legacy /api/v1/cue/status outside cues compat API module"),
+    ]
+    for f in FRONTEND_SRC.rglob("*.*"):
+        if f.suffix not in [".ts", ".svelte", ".js"]:
+            continue
+        if ".test." in f.name:
+            continue
+        # The compat API module is src/lib/api/cues.ts (documented surface).
+        if f.as_posix().endswith("lib/api/cues.ts"):
+            continue
+        check_file_contains(f, legacy_cue_endpoints)
+
+# 13. LG-034: CueRunner must not re-expose unlocked mutable-state readers.
+#     Telemetry flows exclusively through the by-value snapshot().
+cue_runner_header = NODE_DIR / "components" / "show" / "include" / "CueRunner.hpp"
+if cue_runner_header.exists():
+    unlocked_readers = [
+        ("const CueList& current_list()", "Forbidden unlocked CueList& reference escape from CueRunner"),
+        ("bool is_running() const", "Forbidden unlocked is_running() reader (use snapshot().running)"),
+        ("CueRunnerState state() const { return state_; }", "Forbidden unlocked state() reader (use snapshot().state)"),
+        ("uint8_t active_list_index() const", "Forbidden unlocked active_list_index() reader (use snapshot().list_index)"),
+        ("uint8_t current_cue_index() const", "Forbidden unlocked current_cue_index() reader (use snapshot().current_cue)"),
+        ("uint8_t next_cue_index() const", "Forbidden unlocked next_cue_index() reader (use snapshot().next_cue)"),
+    ]
+    check_file_contains(cue_runner_header, unlocked_readers)
 
 if errors:
     print("\nFAILED: Discovered architectural invariant violations:")

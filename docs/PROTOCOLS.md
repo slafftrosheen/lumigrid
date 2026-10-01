@@ -18,17 +18,17 @@ LumiGrid strictly separates control mutation from state propagation:
 - **WebSocket (`ws://<ip>/ws`):** Strictly read-only event telemetry and state broadcast stream. Transmits periodic node telemetry (`status`, `health`, per-channel arbitration owners, show transport state, and manual lease state).
 - **Manual State Non-Modeling:** Manual control state must **never** be modeled as a command channel or mutated over WebSocket. WebSockets only reflect the authoritative runtime state currently resolved on the hardware node. Clients must never infer control lease ownership from WebSocket broadcast messages; leases are established exclusively through synchronous HTTP responses and reconciled against read-only telemetry.
 
-## Sync Protocol (UDP port 6455) — NodeSync Protocol v5
+## Sync Protocol (UDP port 6455) — NodeSync Protocol v6
 
 The LumiGrid sync protocol ensures frame-accurate, coordinated show playback across multiple nodes using UDP broadcasts on port 6455.
 - **Leader Election:** Nodes in `auto` role elect a leader using priority and MAC address tie-breakers. Explicit `master` and `worker` roles bypass election. Cluster topology truth is evaluated by verifying exactly one active master node (`activeRole === 'master'`).
-- **Packet Structure (68 Bytes Packed):**
-  - Header: Magic (`0x4C475359`), `version = 5`, `type` (1=Heartbeat, 2=Ack), `sequence`, `flags`, `reserved`, `global_clock_ms`, `sent_monotonic_ms`, `sender_mac`, `token`.
+- **Packet Structure (76 Bytes Packed):**
+  - Header: Magic (`0x4C475359`), `version = 6`, `type` (1=Heartbeat, 2=Ack), `sequence`, `flags`, `reserved`, `global_clock_ms`, `sent_monotonic_ms`, `sender_mac`, `token`.
   - Show Transport Payload:
     - `transport`: `0 = Standalone`, `1 = Scene`, `2 = Timeline`, `3 = Cue`.
     - Scene mode: `active_scene`.
     - Timeline mode: `bpm`, `transport_generation`, `timeline_anchor_ms`, `timeline_checksum`.
-    - Cue mode: `cue_list`, `cue_index`, `cue_next`, `cue_state`, `cue_generation`, `cue_elapsed_ms`, `manual_fade_q15`.
+    - Cue mode: `cue_list`, `cue_index`, `cue_next`, `cue_state`, `cue_generation`, `cue_elapsed_ms`, `manual_fade_q15`, `cue_list_checksum`, `cue_transition_progress_q15`, `cue_paused_from`, `cue_source_scene`.
 - **Clock Discipline:** Followers discipline local microsecond clocks against leader timestamps, maintaining bounded clock offset (< 5 ms) and tracking round-trip latency (RTT).
 - **Scene Synchronization:** When transport mode is `Scene`, followers acquire `ControlSource::ScenePlayback` on mask `0xFFFF` and display the synchronized scene preset.
 - **Timeline Synchronization (v5 Anchored Transport):**
@@ -37,9 +37,14 @@ The LumiGrid sync protocol ensures frame-accurate, coordinated show playback acr
   - When a new generation begins, followers snapshot their local sequence, apply the leader's anchor, and begin running from Beat 0.
   - Repeated sync packets with the same generation do **not** restart playback.
   - Late-joining followers calculate elapsed time as `current_clock_ms >= anchor_ms ? current_clock_ms - anchor_ms : 0` and immediately phase-lock to the running show.
+- **Cue Synchronization (v6 Content Parity):**
+  - When transport mode is `Cue`, the leader broadcasts its active Cue List checksum (`cue_list_checksum`) alongside the cue snapshot.
+  - Followers compare the leader checksum against their local persisted list. Missing content fails with `cue_list_missing`; divergent content **fails closed** (`transportError = "cue_list_mismatch"`), refusing to execute divergent content.
+  - Followers reconstruct the current visual phase (including paused fades) from the leader's transition progress and paused-from phase, so a follower that joins mid-fade — or mid-pause — locks to the exact leader visual without a snap.
 - **Synchronized Cue Playback:** When transport mode is `Cue`, the leader is authoritative for cue sequencing, crossfade progression, hold durations, random cue choice, and manual crossfade progress. Followers apply incoming cue snapshots into their local `CueRunner` and render frame-locked crossfades without running independent timers.
 - **Follower Suppression & Guard:** Followers enforce read-only playback (`409 sync_follower_read_only` on `/api/v1/activate`, `/api/v1/cue-control`, and `/api/v1/show/control`) and release competing local owners when remote transport is active.
 - **Playback Parity vs. Schedule Parity:** Cluster synchronization readiness requires `playbackHash` match (Scenes, Motions, Timeline, Cue Lists). `scheduleHash` (calendar events) is evaluated independently and does not block group playback.
+- **Version Fallback:** None — packets whose `version` differs from the local `kProtocolSync` are silently dropped at the receive gate, and mixed-size frames fail the length check. A cluster must therefore run a homogeneous protocol version; protocol divergence is detectable beforehand via the manifest `protocol` field and `GET /api/v1/capabilities`.
 
 ## DMX Input
 

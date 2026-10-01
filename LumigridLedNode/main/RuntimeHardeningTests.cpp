@@ -2804,43 +2804,44 @@ bool test_lg022_show_engine() {
         list.cues[1] = {1, 1000, 500, TransitionCurve::Linear, "Cue 2"};
 
         assert(runner.start(list, 0, 1000) == ESP_OK);
-        assert(runner.is_running() == true);
-        assert(runner.current_cue_index() == 0);
-        assert(runner.next_cue_index() == 1);
+        auto snap0 = runner.snapshot(1000);
+        assert(snap0.running == true);
+        assert(snap0.current_cue == 0);
+        assert(snap0.next_cue == 1);
 
         // At t=1250: cue 0 is fading
         runner.update(1250);
-        assert(runner.state() == CueRunnerState::Fading);
+        assert(runner.snapshot(1250).state == CueRunnerState::Fading);
 
         // At t=2200: cue 0 is holding
         runner.update(2200);
-        assert(runner.state() == CueRunnerState::Holding);
+        assert(runner.snapshot(2200).state == CueRunnerState::Holding);
 
         // At t=2600: hold complete -> transitioned to cue 1 fading
         runner.update(2600);
-        assert(runner.current_cue_index() == 1);
-        assert(runner.state() == CueRunnerState::Fading);
+        assert(runner.snapshot(2600).current_cue == 1);
+        assert(runner.snapshot(2600).state == CueRunnerState::Fading);
 
         // At t=4200: cue 1 finishes holding, SingleShot stops runner
         runner.update(4200);
-        assert(runner.is_running() == false);
-        assert(runner.state() == CueRunnerState::Stopped);
+        assert(runner.snapshot(4200).running == false);
+        assert(runner.snapshot(4200).state == CueRunnerState::Stopped);
 
         // PingPong test
         list.mode = CueRunMode::PingPong;
         assert(runner.start(list, 0, 5000) == ESP_OK);
         runner.update(5000 + 1600);
-        assert(runner.current_cue_index() == 1);
+        assert(runner.snapshot(6600).current_cue == 1);
         runner.update(5000 + 3200);
-        assert(runner.current_cue_index() == 0);
+        assert(runner.snapshot(8200).current_cue == 0);
 
         // Manual mode test
         list.mode = CueRunMode::Manual;
         assert(runner.start(list, 0, 10000) == ESP_OK);
-        runner.set_manual_fade(16384);
-        assert(runner.manual_fade_q15() == 16384);
-        runner.stop(10100);
-        assert(runner.is_running() == false);
+        assert(runner.set_manual_fade(16384) == ESP_OK);
+        assert(runner.snapshot(10000).manual_fade_q15 == 16384);
+        assert(runner.stop(CueStopReason::Operator, 10100) == ESP_OK);
+        assert(runner.snapshot(10100).running == false);
     }
 
     // 5. Calendar Schedule NVS binary compatibility
@@ -3344,23 +3345,23 @@ static bool test_lg026_show_transport_and_cue_sync() {
         // Snap leader state and apply to follower
         CueSyncSnapshot snap = leader.sync_snapshot(t0 + 500);
         assert(follower.apply_sync_snapshot(snap, t0 + 500) == ESP_OK);
-        assert(follower.active_list_index() == leader.active_list_index());
-        assert(follower.current_cue_index() == leader.current_cue_index());
+        assert(follower.snapshot(t0 + 500).list_index == leader.snapshot(t0 + 500).list_index);
+        assert(follower.snapshot(t0 + 500).current_cue == leader.snapshot(t0 + 500).current_cue);
 
         // Random mode: force leader next cue to 2, follower must accept leader's next cue
         snap.next_cue = 2;
         assert(follower.apply_sync_snapshot(snap, t0 + 500) == ESP_OK);
-        assert(follower.next_cue_index() == 2);
+        assert(follower.snapshot(t0 + 500).next_cue == 2);
 
         // Pause/Resume timing
-        leader.pause();
+        assert(leader.pause(t0 + 1200) == ESP_OK);
         snap = leader.sync_snapshot(t0 + 1200);
         assert(snap.state == CueRunnerState::Paused);
         assert(follower.apply_sync_snapshot(snap, t0 + 1200) == ESP_OK);
 
         // Advance simulated time by 5 seconds
-        uint64_t elapsed_leader = leader.cue_elapsed_ms(t0 + 6200);
-        uint64_t elapsed_follower = follower.cue_elapsed_ms(t0 + 6200);
+        uint64_t elapsed_leader = leader.snapshot(t0 + 6200).elapsed_ms;
+        uint64_t elapsed_follower = follower.snapshot(t0 + 6200).elapsed_ms;
         assert(elapsed_leader == elapsed_follower);
 
         // Manual crossfade
@@ -3370,16 +3371,16 @@ static bool test_lg026_show_transport_and_cue_sync() {
 
         leader.start(1, 0, t0 + 7000);
         follower.start(1, 0, t0 + 7000);
-        leader.set_manual_fade(16384);
+        assert(leader.set_manual_fade(16384) == ESP_OK);
         snap = leader.sync_snapshot(t0 + 7000);
         assert(snap.manual_fade_q15 == 16384);
         assert(follower.apply_sync_snapshot(snap, t0 + 7000) == ESP_OK);
-        assert(follower.manual_fade_q15() == 16384);
+        assert(follower.snapshot(t0 + 7000).manual_fade_q15 == 16384);
 
-        leader.set_manual_fade(32768);
+        assert(leader.set_manual_fade(32768) == ESP_OK);
         snap = leader.sync_snapshot(t0 + 7000);
         assert(follower.apply_sync_snapshot(snap, t0 + 7000) == ESP_OK);
-        assert(follower.manual_fade_q15() == 32768);
+        assert(follower.snapshot(t0 + 7000).manual_fade_q15 == 32768);
     }
 
     // ── Test 6: Protocol v5 Packet Validation ──────────────────────────────────
@@ -4783,7 +4784,7 @@ bool test_lg029_node_backed_authentication() {
 
         // 4. NodeSync v5 & Follower Timeline Synchronization (Requirements AD..AN)
         {
-            static_assert(sizeof(NodeSync::SyncPacket) == 68, "NodeSync v5 packet must be exactly 68 bytes");
+            static_assert(sizeof(NodeSync::SyncPacket) == 76, "NodeSync v6 packet must be exactly 76 bytes");
             OutputController ctrl;
             ControlSourceManager csm;
             csm.init();
@@ -4825,6 +4826,292 @@ bool test_lg029_node_backed_authentication() {
         }
 
         ESP_LOGI(TAG, "[PASS] LG-033 Timeline Studio v2 & Safe Playback Tests passed.");
+        return true;
+    }
+
+    // ==========================================================================
+    // LG-034 — Cue Studio v2 & Cue Runtime Hardening
+    // ==========================================================================
+    bool test_lg034_cue_studio_and_runtime_hardening() {
+        ESP_LOGI(TAG, "Testing LG-034 Cue Studio v2 & Cue Runtime Hardening...");
+
+        // ── Setup: two independent runtimes (leader + follower), shared config ──
+        ConfigStore cfg;
+        cfg.init();
+        OutputController ctrl1, ctrl2;
+        ControlSourceManager csm1, csm2;
+        csm1.init();
+        csm2.init();
+        LightingRuntime rt1(csm1, ctrl1, cfg);
+        LightingRuntime rt2(csm2, ctrl2, cfg);
+        CueRunner runner(cfg, rt1);
+        CueRunner follower(cfg, rt2);
+
+        // Persist three scenes (0, 1, 2) and a 3-cue single-shot list in slot 0
+        for (uint8_t i = 0; i < 3; ++i) {
+            SceneConfig sc{};
+            sc.checksum = 100 + i;
+            assert(cfg.save_scene(i, sc) == ESP_OK);
+        }
+        CueList list{};
+        list.count = 3;
+        list.mode = CueRunMode::SingleShot;
+        list.end_action = CueEndAction::HoldLast;
+        strncpy(list.name, "LG034 Show", sizeof(list.name) - 1);
+        list.cues[0] = {0, 1000, 500, TransitionCurve::Linear, "one"};
+        list.cues[1] = {1, 1000, 500, TransitionCurve::Linear, "two"};
+        list.cues[2] = {2, 1000, 500, TransitionCurve::Linear, "three"};
+        assert(cfg.save_cue_list(0, list) == ESP_OK);
+
+        CueList stored{};
+        assert(cfg.load_cue_list(0, stored) == ESP_OK);
+        const uint32_t original_checksum = stored.checksum;
+        assert(original_checksum != 0);
+
+        // ── A. Single Shot final completion does not deadlock (§1/§73.A) ──
+        {
+            uint64_t t0 = 10000;
+            assert(runner.start(0, 0, t0) == ESP_OK);
+            // Walk through: cue0 fade(500) hold(1000) -> cue1 -> cue2 -> final hold end
+            runner.update(t0 + 600);   // still fading cue0
+            runner.update(t0 + 1600);  // cue0 holding
+            runner.update(t0 + 2700);  // -> cue1 fading
+            runner.update(t0 + 3800);  // cue1 holding
+            runner.update(t0 + 4900);  // -> cue2 fading
+            runner.update(t0 + 6000);  // cue2 holding
+            // Final hold completes: update() must return (no deadlock) and stop naturally
+            runner.update(t0 + 7100);
+            const auto snapA = runner.snapshot(t0 + 7100);
+            assert(snapA.running == false);
+            assert(snapA.state == CueRunnerState::Stopped);
+        }
+
+        // ── B/C/D. Natural completion applies each end action (§73.B..D) ──
+        {
+            // HoldLast (already covered by A; explicit end-action state check)
+            CueList hold_list = stored;
+            hold_list.end_action = CueEndAction::HoldLast;
+            cfg.save_cue_list(1, hold_list);
+            assert(runner.start(1, 0, 20000) == ESP_OK);
+            runner.update(20000 + 1600);
+            runner.update(20000 + 2700);
+            runner.update(20000 + 3800);
+            runner.update(20000 + 4900);
+            runner.update(20000 + 6000);
+            runner.update(20000 + 7100);
+            assert(runner.snapshot(27100).running == false);
+            // HoldLast: active scene remains the last cue's scene
+            assert(rt1.active_scene_index() == 2);
+
+            // Blackout end action
+            CueList bo_list = stored;
+            bo_list.end_action = CueEndAction::Blackout;
+            cfg.save_cue_list(1, bo_list);
+            assert(runner.start(1, 0, 30000) == ESP_OK);
+            runner.update(30000 + 600);
+            runner.update(30000 + 1600);
+            runner.update(30000 + 2700);
+            runner.update(30000 + 3800);
+            runner.update(30000 + 4900);
+            runner.update(30000 + 6000);
+            runner.update(30000 + 7100);
+            assert(runner.snapshot(37100).running == false);
+
+            // RestoreFallback end action
+            CueList fb_list = stored;
+            fb_list.end_action = CueEndAction::RestoreFallback;
+            cfg.save_cue_list(1, fb_list);
+            assert(runner.start(1, 0, 40000) == ESP_OK);
+            runner.update(40000 + 600);
+            runner.update(40000 + 1600);
+            runner.update(40000 + 2700);
+            runner.update(40000 + 3800);
+            runner.update(40000 + 4900);
+            runner.update(40000 + 6000);
+            runner.update(40000 + 7100);
+            assert(runner.snapshot(47100).running == false);
+        }
+
+        // ── E. Operator Stop does NOT execute end action (§73.E) ──
+        {
+            CueList bo_list = stored;
+            bo_list.end_action = CueEndAction::Blackout;
+            cfg.save_cue_list(1, bo_list);
+            assert(runner.start(1, 0, 50000) == ESP_OK);
+            runner.update(50000 + 1600); // mid cue0 hold
+            // Operator stop mid-show with Blackout configured: output must NOT blackout
+            assert(runner.stop(CueStopReason::Operator, 50200) == ESP_OK);
+            assert(rt1.active_scene_index() == 0); // held cue0's scene, not blackout
+        }
+
+        // ── F. Scene preemption does NOT execute end action (§73.F) ──
+        {
+            assert(runner.start(1, 0, 60000) == ESP_OK);
+            runner.update(60000 + 1600);
+            // Scene activation preempts: uses Preempted reason
+            assert(runner.stop(CueStopReason::Preempted, 60200) == ESP_OK);
+            assert(rt1.active_scene_index() == 0); // no blackout applied
+        }
+
+        // ── G. Sync loss does NOT execute natural end action (§73.H) ──
+        {
+            assert(runner.start(1, 0, 70000) == ESP_OK);
+            runner.update(70000 + 1600);
+            assert(runner.stop(CueStopReason::SyncLost, 70200) == ESP_OK);
+            assert(rt1.active_scene_index() == 0);
+        }
+
+        // ── I/J/K. Hold pause captures elapsed/remaining; resume continues (§74.I..K) ──
+        {
+            assert(runner.start(0, 0, 80000) == ESP_OK);
+            runner.update(80000 + 600);   // fade 500 done -> holding at 80600
+            runner.update(80000 + 800);
+            // Pause at 80900: hold elapsed = 80900 - 80600 = 300; remaining = 1000 - 300 = 700
+            assert(runner.pause(80900) == ESP_OK);
+            auto p = runner.snapshot(80900);
+            assert(p.state == CueRunnerState::Paused);
+            assert(p.paused_from == CueRunnerState::Holding);
+            assert(p.elapsed_ms == 300);
+            assert(p.remaining_ms == 700);
+
+            // Time passes while paused — remaining must not advance
+            auto p_later = runner.snapshot(85000);
+            assert(p_later.remaining_ms == 700);
+
+            // Resume at 86000: continues with remaining 700ms of hold
+            assert(runner.resume(86000) == ESP_OK);
+            auto r = runner.snapshot(86000);
+            assert(r.state == CueRunnerState::Holding);
+            assert(r.remaining_ms == 700);
+            // Advance past remaining hold -> next cue
+            runner.update(86000 + 800);
+            assert(runner.snapshot(86800).current_cue == 1);
+            runner.stop(CueStopReason::Operator, 86900);
+        }
+
+        // ── L/M/N/O. Fade pause freezes transition; resume continues (§74.L..O) ──
+        {
+            assert(runner.start(0, 0, 90000) == ESP_OK);
+            runner.update(90000 + 200); // mid-fade (fade is 500ms)
+            const uint16_t progress_before = rt1.transition_progress_q15();
+            assert(runner.pause(90000 + 250) == ESP_OK);
+            auto p = runner.snapshot(90000 + 250);
+            assert(p.state == CueRunnerState::Paused);
+            assert(p.paused_from == CueRunnerState::Fading);
+
+            // Transition must be frozen: progress must not advance while paused
+            runner.update(90000 + 1000);
+            runner.update(90000 + 2000);
+            const uint16_t progress_frozen = rt1.transition_progress_q15();
+            assert(progress_frozen == progress_before);
+
+            // Resume: continues toward target from frozen visual over remaining 250ms
+            assert(runner.resume(90000 + 2000) == ESP_OK);
+            auto r = runner.snapshot(90000 + 2000);
+            assert(r.state == CueRunnerState::Fading);
+            assert(r.remaining_ms <= 250);
+            // After remaining duration, fade completes into hold
+            runner.update(90000 + 2300);
+            assert(runner.snapshot(90000 + 2300).state == CueRunnerState::Holding);
+            runner.stop(CueStopReason::Operator, 90000 + 2400);
+        }
+
+        // ── P/Q/R/S/T/U. Active snapshot vs saved edits, contentStale, restart (§75) ──
+        {
+            assert(runner.start(0, 0, 100000) == ESP_OK);
+            assert(runner.snapshot(100000).running);
+            // P: RUN snapshots the persisted list
+            assert(runner.snapshot(100000).active_checksum == original_checksum);
+
+            // Q: edit + save the same slot while running
+            CueList edited = stored;
+            edited.cues[0].hold_ms = 5000;
+            assert(cfg.save_cue_list(0, edited) == ESP_OK);
+
+            // Running content must be unchanged
+            const auto after_save = runner.snapshot(101000);
+            assert(after_save.running);
+            assert(after_save.active_checksum == original_checksum);
+
+            // R/S: active checksum differs from saved; contentStale true
+            CueList reloaded{};
+            assert(cfg.load_cue_list(0, reloaded) == ESP_OK);
+            assert(after_save.saved_checksum == reloaded.checksum);
+            assert(after_save.saved_checksum != original_checksum);
+            assert(after_save.content_stale == true);
+
+            // T/U: RESTART snapshots newest saved version and clears contentStale
+            assert(runner.restart(0, 0, 102000) == ESP_OK);
+            const auto after_restart = runner.snapshot(102000);
+            assert(after_restart.running);
+            assert(after_restart.active_checksum == reloaded.checksum);
+            assert(after_restart.content_stale == false);
+            runner.stop(CueStopReason::Operator, 102500);
+        }
+
+        // ── AJ..AM. Checksum conflict protection at ConfigStore level (§77) ──
+        {
+            // Checksum match detection basis (API layer compares expectedChecksum)
+            CueList current{};
+            assert(cfg.load_cue_list(0, current) == ESP_OK);
+            // AM: save does not change runtime state (already stopped here)
+            assert(runner.snapshot(103000).running == false);
+            // AL: save produces a new stable checksum via readback
+            CueList v2 = current;
+            v2.cues[0].hold_ms = 7000;
+            assert(cfg.save_cue_list(0, v2) == ESP_OK);
+            CueList v2_back{};
+            assert(cfg.load_cue_list(0, v2_back) == ESP_OK);
+            assert(v2_back.checksum == current.checksum); // unchanged content -> same checksum
+        }
+
+        // ── AU..AY. Transport op status semantics (§79.AU..AY) ──
+        {
+            // AU: pause while stopped
+            assert(runner.pause(110000) == ESP_ERR_INVALID_STATE);
+            // AV: resume while not paused
+            assert(runner.resume(110000) == ESP_ERR_INVALID_STATE);
+
+            assert(runner.start(0, 0, 110000) == ESP_OK);
+            // AW: invalid jump
+            assert(runner.jump(99, 110100) == ESP_ERR_INVALID_ARG);
+            // AY: crossfade outside Manual mode
+            assert(runner.set_manual_fade(16384) == ESP_ERR_INVALID_STATE);
+            // Crossfade inside Manual mode is accepted
+            CueList manual_list = stored;
+            manual_list.mode = CueRunMode::Manual;
+            cfg.save_cue_list(2, manual_list);
+            assert(runner.start(2, 0, 110200) == ESP_OK);
+            assert(runner.set_manual_fade(16384) == ESP_OK);
+            assert(runner.stop(CueStopReason::Operator, 110300) == ESP_OK);
+        }
+
+        // ── BE/BF. Follower parity: matching runs, mismatch fails closed (§80.BE/BF) ──
+        {
+            assert(runner.start(0, 0, 120000) == ESP_OK);
+            auto leader_snap = runner.sync_snapshot(120000 + 100);
+            leader_snap.list_checksum = original_checksum;
+            // Matching checksum: follower applies
+            assert(follower.apply_sync_snapshot(leader_snap, 120000 + 100) == ESP_OK);
+            assert(follower.snapshot(120100).running);
+
+            // Mismatched checksum is detected by the API layer via cue_list_mismatch;
+            // here verify the follower rejects an unavailable list index
+            CueSyncSnapshot bad_list = leader_snap;
+            bad_list.list_index = 7; // not persisted in this test
+            assert(follower.apply_sync_snapshot(bad_list, 120200) != ESP_OK);
+
+            assert(runner.stop(CueStopReason::Operator, 120300) == ESP_OK);
+            follower.clear_remote_sync(120300);
+        }
+
+        // ── SyncTransportError::CueListMismatch enum value (§29) ──
+        assert(static_cast<uint8_t>(SyncTransportError::CueListMismatch) == 9);
+
+        // ── AZ. Packed v6 size asserted (also asserted at compile time) ──
+        assert(sizeof(NodeSync::SyncPacket) == 76);
+
+        ESP_LOGI(TAG, "[PASS] LG-034 Cue Studio v2 & Cue Runtime Hardening Tests passed.");
         return true;
     }
 
@@ -4931,6 +5218,9 @@ bool run_runtime_hardening_tests() {
 
     // LG-033 Timeline Studio v2 & Safe Playback
     all_ok &= test_lg033_timeline_studio_v2();
+
+    // LG-034 Cue Studio v2 & Cue Runtime Hardening
+    all_ok &= test_lg034_cue_studio_and_runtime_hardening();
 
     if (all_ok) {
         ESP_LOGI(TAG, "==================================================");

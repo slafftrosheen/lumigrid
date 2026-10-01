@@ -630,9 +630,26 @@ esp_err_t LumigridRuntime::start() {
         return scheduler_.transport_snapshot(now_ms);
     });
 
+    // LG-034 §25: CueRunner-driven status broadcasts. Meaningful runtime
+    // transitions request a coalesced status push (notify_status_async is
+    // internally deduplicated); the 5 Hz stream cap is enforced by the
+    // broadcast pipeline, not here. Snapshot collection stays observational.
+    cue_runner_.set_event_callback([this](CueRunner::Event event) {
+        switch (event) {
+            case CueRunner::Event::CueChanged:
+            case CueRunner::Event::PhaseChanged:
+            case CueRunner::Event::Paused:
+            case CueRunner::Event::Resumed:
+            case CueRunner::Event::ManualCueCompleted:
+            case CueRunner::Event::Stopped:
+                api_.notify_status_async();
+                break;
+        }
+    });
+
     node_sync_.set_remote_transport_callback([this](const ShowTransportSnapshot& remote_snap, uint8_t& out_error) -> bool {
         if (remote_snap.mode == ShowTransportMode::Scene) {
-            if (cue_runner_.is_running()) cue_runner_.stop(clock_.now_ms());
+            if (cue_runner_.snapshot(0).running) cue_runner_.stop(CueStopReason::Preempted, clock_.now_ms());
             scheduler_.apply_remote_show_mode(Scheduler::RemoteShowMode::Scene, remote_snap.bpm, clock_.now_ms());
             if (!config_.scene_exists(remote_snap.active_scene)) {
                 out_error = static_cast<uint8_t>(SyncTransportError::SceneMissing);
@@ -655,7 +672,7 @@ esp_err_t LumigridRuntime::start() {
                 out_error = static_cast<uint8_t>(SyncTransportError::TimelineMismatch);
                 return false;
             }
-            if (cue_runner_.is_running()) cue_runner_.stop(clock_.now_ms());
+            if (cue_runner_.snapshot(0).running) cue_runner_.stop(CueStopReason::Preempted, clock_.now_ms());
             scheduler_.apply_remote_timeline(
                 remote_snap.transport_generation,
                 remote_snap.timeline_anchor_ms,
@@ -670,9 +687,24 @@ esp_err_t LumigridRuntime::start() {
                 out_error = static_cast<uint8_t>(SyncTransportError::CueListMissing);
                 return false;
             }
+
+            // LG-034 §29: content parity gate. A follower must never run a
+            // different Cue List under synchronized transport.
+            CueList local_list{};
+            if (config_.load_cue_list(remote_snap.cue.list_index, local_list) != ESP_OK || local_list.count == 0) {
+                out_error = static_cast<uint8_t>(SyncTransportError::CueListMissing);
+                return false;
+            }
+            if (remote_snap.cue_list_checksum != 0 &&
+                remote_snap.cue_list_checksum != local_list.checksum) {
+                out_error = static_cast<uint8_t>(SyncTransportError::CueListMismatch);
+                return false;
+            }
+
             CueSyncSnapshot cue_snap{};
             cue_snap.active = remote_snap.cue.active;
             cue_snap.state = static_cast<CueRunnerState>(remote_snap.cue.state);
+            cue_snap.paused_from = static_cast<CueRunnerState>(remote_snap.cue_paused_from);
             cue_snap.list_index = remote_snap.cue.list_index;
             cue_snap.current_cue = remote_snap.cue.current_cue;
             cue_snap.next_cue = remote_snap.cue.next_cue;
@@ -680,6 +712,9 @@ esp_err_t LumigridRuntime::start() {
             cue_snap.paused_elapsed_ms = remote_snap.cue.paused_elapsed_ms;
             cue_snap.manual_fade_q15 = remote_snap.cue.manual_fade_q15;
             cue_snap.generation = remote_snap.cue.generation;
+            cue_snap.list_checksum = remote_snap.cue_list_checksum;
+            cue_snap.transition_progress_q15 = remote_snap.cue_transition_progress_q15;
+            cue_snap.source_scene = remote_snap.cue_source_scene;
 
             esp_err_t cue_err = cue_runner_.apply_sync_snapshot(cue_snap, clock_.now_ms());
             if (cue_err != ESP_OK) {

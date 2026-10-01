@@ -91,6 +91,26 @@ export async function startCueList(
   });
 }
 
+/**
+ * Restarts the Cue List from the newest saved version (LG-034 §13): new active
+ * snapshot, new transport generation, no end-action transient, no blackout.
+ */
+export async function restartCueList(
+  ip: string,
+  cueListIndex: number,
+  cueIndex = 0
+): Promise<ShowControlResponse> {
+  return apiJson<ShowControlResponse>(ip, '/api/v1/show/control', {
+    method: 'POST',
+    body: JSON.stringify({
+      mode: 'cue',
+      action: 'restart',
+      cueListIndex,
+      cueIndex,
+    }),
+  });
+}
+
 /** Stops Cue transport, returning coordinator to Scene mode. */
 export async function stopCue(ip: string): Promise<ShowControlResponse> {
   return apiJson<ShowControlResponse>(ip, '/api/v1/show/control', {

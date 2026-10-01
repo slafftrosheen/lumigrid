@@ -56,13 +56,27 @@ export interface TransportTimelineRuntime {
 
 export interface TransportCueRuntime {
   running: boolean;
-  state?: 'stopped' | 'holding' | 'fading' | 'paused' | string;
+  state?: 'stopped' | 'holding' | 'fading' | 'paused' | 'manual' | string;
+  /** Source phase while paused ("stopped" = not paused). LG-034 §22. */
+  pausedFrom?: 'stopped' | 'holding' | 'fading' | string;
   listIndex?: number;
+  /** Cue run mode of the active list ("loop", "single_shot", ...). */
+  mode?: string;
   cueIndex?: number;
   nextCueIndex?: number;
+  currentSceneIndex?: number;
+  nextSceneIndex?: number;
   manualFade?: number;
+  /** Automatic transition progress Q15 (0..32768). */
+  transitionProgress?: number;
   elapsedMs?: number;
   remainingMs?: number;
+  /** Cue transport generation. */
+  generation?: number;
+  activeChecksum?: number;
+  savedChecksum?: number;
+  contentStale?: boolean;
+  remoteDriven?: boolean;
 }
 
 export interface TransportRuntimeState {

@@ -111,6 +111,23 @@ public:
         xSemaphoreGive(mutex_);
     }
 
+    // ── LG-034: transition freeze (Cue pause) ──
+    bool freeze_transition() {
+        if (!mutex_ || lifecycle_state_.load(std::memory_order_acquire) != LifecycleState::Running) return false;
+        xSemaphoreTake(mutex_, portMAX_DELAY);
+        const bool res = scene_manager_.freeze_transition();
+        xSemaphoreGive(mutex_);
+        return res;
+    }
+
+    bool resume_frozen_transition(uint32_t remaining_ms, uint32_t current_ms) {
+        if (!mutex_ || lifecycle_state_.load(std::memory_order_acquire) != LifecycleState::Running) return false;
+        xSemaphoreTake(mutex_, portMAX_DELAY);
+        const bool res = scene_manager_.resume_frozen_transition(remaining_ms, current_ms);
+        xSemaphoreGive(mutex_);
+        return res;
+    }
+
     void activate_scene_direct(const SceneConfig& scene, bool immediate = false);
 
     /// Atomically submit a full live DMX frame from DmxRouter (returns false if rejected or unavailable)

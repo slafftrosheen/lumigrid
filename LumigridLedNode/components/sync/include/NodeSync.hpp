@@ -28,9 +28,10 @@ enum class SyncTransportError : uint8_t {
     TimelineMissing = 6,
     TimelineMismatch = 7,
     TimelineInvalid = 8,
+    CueListMismatch = 9, // LG-034 §29: follower cue content differs from leader
 };
 
-inline const char* sync_transport_error_str(uint8_t err) {
+inline    const char* sync_transport_error_str(uint8_t err) {
     switch (static_cast<SyncTransportError>(err)) {
         case SyncTransportError::None: return "none";
         case SyncTransportError::SceneMissing: return "scene_missing";
@@ -41,6 +42,7 @@ inline const char* sync_transport_error_str(uint8_t err) {
         case SyncTransportError::TimelineMissing: return "timeline_missing";
         case SyncTransportError::TimelineMismatch: return "timeline_mismatch";
         case SyncTransportError::TimelineInvalid: return "timeline_invalid";
+        case SyncTransportError::CueListMismatch: return "cue_list_mismatch";
         default: return "none";
     }
 }
@@ -147,9 +149,15 @@ public:
         uint32_t transport_generation;
         uint64_t timeline_anchor_ms;
         uint32_t timeline_checksum;
+
+        // Protocol v6 extensions (LG-034 §28, 12 bytes): frozen-fade + parity
+        uint32_t cue_list_checksum;
+        uint16_t cue_transition_progress_q15;
+        uint8_t  cue_paused_from;
+        uint8_t  cue_source_scene;
     };
 
-    static_assert(sizeof(SyncPacket) == 68, "SyncPacket must be 68 bytes");
+    static_assert(sizeof(SyncPacket) == 76, "SyncPacket v6 must be exactly 76 bytes");
 
 private:
 
@@ -217,7 +225,7 @@ private:
     static constexpr uint32_t kSyncIntervalMs = 100; // 10 Hz
     static constexpr uint32_t kSyncManualIntervalMs = 50; // 20 Hz during manual crossfade
     static constexpr uint32_t kMagic = 0x4C475359; // "LGSY"
-    static constexpr uint8_t kPacketVersion = 5;
+    static constexpr uint8_t kPacketVersion = 6;
     static constexpr uint32_t kPeerTimeoutMs = 3000;
     static constexpr uint32_t kAutoElectionBaseMs = 800;
 };
