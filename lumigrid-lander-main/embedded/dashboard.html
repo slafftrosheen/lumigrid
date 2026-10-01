@@ -852,7 +852,9 @@
                         <p class="help" style="margin-bottom:0.75rem;">Run hardware test routines on physical LED strips.</p>
                         <button class="button-secondary" style="width:100%; margin-bottom:0.5rem" onclick="lg.runTestSequence('lane')">Test Strip Lanes (White Chase)</button>
                         <button class="button-secondary" style="width:100%; margin-bottom:0.5rem" onclick="lg.runTestSequence('color')">Test Color Wash (Rainbow)</button>
-                        <button class="button-primary" style="width:100%; border: 1px solid var(--danger); color: var(--danger); background: rgba(239,68,68,0.1);" onclick="lg.runTestSequence('burn_in')">Burn-in Test (Full Power)</button>
+                        <button class="button-secondary" style="width:100%; margin-bottom:0.5rem" onclick="lg.runTestSequence('stress')">Stress Cycle (60s Diagnostic)</button>
+                        <button class="button-primary" style="width:100%; border: 1px solid var(--danger); color: var(--danger); background: rgba(239,68,68,0.1); margin-bottom:0.5rem;" onclick="lg.runTestSequence('burn_in')">Start Burn-In Job (Controlled Load)</button>
+                        <button class="button-secondary" style="width:100%;" onclick="lg.stopBurnIn()">Stop Burn-In / Abort</button>
                     </article>
 
                     <article class="product-card">
@@ -2472,14 +2474,29 @@ window.lg = (() => {
             if (type === 'lane') {
                 await api('/api/v1/factory/effect', 'POST', { effect: 'pixel_chase', durationMs: 5000 });
                 toast('Running lane chase test sequence...');
+            } else if (type === 'stress') {
+                await api('/api/v1/factory/effect', 'POST', { effect: 'stress_cycle', durationMs: 60000 });
+                toast('Running 60s diagnostic stress cycle...');
             } else if (type === 'burn_in') {
-                await api('/api/v1/factory/effect', 'POST', { effect: 'solid', durationMs: 3600000 });
-                toast('Running full power burn-in test...');
+                await api('/api/v1/factory/burn-in/start', 'POST', { durationMinutes: 60, brightness: 64 });
+                toast('Burn-in endurance job started (60m @ 64 brightness)...');
             } else {
                 await api('/api/v1/factory/effect', 'POST', { effect: 'rainbow', durationMs: 5000 });
                 toast('Running color wash test sequence...');
             }
         } catch (e) { toast(e.message, true); }
+    }
+
+    async function stopBurnIn() {
+        try {
+            await api('/api/v1/factory/burn-in/stop', 'POST', {});
+            toast('Burn-in job stopped.');
+        } catch (e) {
+            try {
+                await api('/api/v1/factory/abort', 'POST', {});
+                toast('Factory output aborted.');
+            } catch (err) { toast(err.message, true); }
+        }
     }
 
     async function uploadOta() {
@@ -2573,7 +2590,7 @@ window.lg = (() => {
         setBpm, setTimelineEnabled, saveTimeline, selectTimelineStep, assignTimelinePreset, setTimelineStepLength, addTimelineStep, removeTimelineStep,
         saveSchedules,
         cueStart, cueControl, cueRestart, cueFadePreview, cueFadeCommit,
-        loadCommissioning, switchDiagTab, loadLogs, loadAudit, runTestSequence, uploadOta, downloadBackup, uploadRestore
+        loadCommissioning, switchDiagTab, loadLogs, loadAudit, runTestSequence, stopBurnIn, uploadOta, downloadBackup, uploadRestore
     };
 })();
 </script>

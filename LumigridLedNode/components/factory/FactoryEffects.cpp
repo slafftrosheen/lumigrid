@@ -62,7 +62,7 @@ const char* effect_name(FactoryEffect effect) {
         case FactoryEffect::PwmWalk: return "pwm_walk";
         case FactoryEffect::PwmFade: return "pwm_fade";
         case FactoryEffect::CombinedPulse: return "combined_pulse";
-        case FactoryEffect::BurnIn: return "burn_in";
+        case FactoryEffect::StressCycle: return "stress_cycle";
         case FactoryEffect::Manual: return "manual";
     }
     return "unknown";

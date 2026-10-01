@@ -1,7 +1,7 @@
-// components/factory/FactoryRunner.cpp
 #include "FactoryRunner.hpp"
 #include "FactoryApp.hpp"
 #include "ChannelHardware.hpp"
+#include "JobManager.hpp"
 
 #include "esp_err.h"
 #include "esp_check.h"
@@ -12,6 +12,7 @@
 #include "freertos/task.h"
 
 #include <algorithm>
+#include <cstring>
 
 namespace lg {
 namespace {
@@ -35,11 +36,19 @@ uint32_t now_ms() {
     return static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
 }
 
-uint8_t clamp_brightness(uint8_t brightness) {
-    return std::min<uint8_t>(brightness, 96);
+// LG-035 §9: Explicit factory output safety limits.
+// Normal diagnostics capped at 96/255. Burn-in defaults to 64/255 and is capped at 96/255.
+uint8_t clamp_brightness(uint8_t brightness, bool is_burn_in = false) {
+    uint8_t cap = is_burn_in ? FactoryRunner::kBurnInAbsoluteMaxBrightness : FactoryRunner::kNormalDiagnosticMaxBrightness;
+    return std::min<uint8_t>(brightness, cap);
 }
 
-uint32_t clamp_duration(uint32_t duration_ms) {
+uint32_t clamp_duration(uint32_t duration_ms, bool is_burn_in = false) {
+    if (is_burn_in) {
+        constexpr uint32_t kMaxBurnInDurationMs = 24 * 60 * 60 * 1000;
+        if (duration_ms == 0) return 60 * 60 * 1000;
+        return std::min(duration_ms, kMaxBurnInDurationMs);
+    }
     if (duration_ms == 0) {
         return LG_FACTORY_MAX_TEST_MS;
     }
@@ -118,6 +127,10 @@ esp_err_t FactoryRunner::start() {
     status_.auto_loop = false;
     status_.outputs_enabled = false;
     status_.test_active = false;
+    status_.command_rejections = 0;
+    status_.commit_failures = 0;
+    status_.active_channel = 0xFF;
+    status_.session = FactoryTestSession{};
 
     const BaseType_t created = xTaskCreatePinnedToCore(
         task_entry,
@@ -181,6 +194,29 @@ void FactoryRunner::stop() {
     lifecycle_state_.store(LifecycleState::Stopped, std::memory_order_release);
 }
 
+bool FactoryRunner::abort() {
+    if (burn_in_active_) {
+        if (burn_in_job_mgr_ && burn_in_job_id_ != 0) {
+            burn_in_job_mgr_->cancel_job(burn_in_job_id_);
+        }
+        burn_in_active_ = false;
+    }
+    if (status_mutex_ != nullptr &&
+        xSemaphoreTake(status_mutex_, pdMS_TO_TICKS(50)) == pdTRUE) {
+        if (status_.session.state == FactoryTestState::Running ||
+            status_.session.state == FactoryTestState::WaitingForOperator ||
+            status_.session.state == FactoryTestState::Preparing) {
+            status_.session.state = FactoryTestState::Aborted;
+            status_.session.finished_ms = now_ms();
+        }
+        xSemaphoreGive(status_mutex_);
+    }
+
+    FactoryCommand cmd;
+    cmd.type = FactoryCommandType::Abort;
+    return enqueue(cmd);
+}
+
 bool FactoryRunner::enqueue(const FactoryCommand& command) {
     if (queue_ == nullptr) return false;
     if (xQueueSend(queue_, &command, 0) == pdPASS) return true;
@@ -198,6 +234,7 @@ bool FactoryRunner::test_channel(uint8_t channel, const char* mode, uint32_t dur
     cmd.type = FactoryCommandType::ChannelTest;
     cmd.lane_or_channel = channel;
     cmd.duration_ms = (duration_ms == 0) ? 3000 : duration_ms;
+    cmd.brightness = clamp_brightness(LG_FACTORY_DEFAULT_BRIGHTNESS, false);
     return enqueue(cmd);
 }
 
@@ -209,6 +246,119 @@ FactoryStatus FactoryRunner::status() const {
         xSemaphoreGive(status_mutex_);
     }
     return copy;
+}
+
+bool FactoryRunner::start_test_session(
+    FactoryTestKind kind,
+    uint8_t channel,
+    uint32_t duration_ms,
+    uint8_t brightness,
+    uint32_t* out_session_id
+) {
+    if (lifecycle_state_.load(std::memory_order_acquire) != LifecycleState::Running) {
+        return false;
+    }
+
+    if (kind == FactoryTestKind::AddressableChannel && channel > 7) {
+        return false;
+    }
+    if (kind == FactoryTestKind::PwmChannel && (channel < 8 || channel > 15)) {
+        return false;
+    }
+
+    const uint32_t sid = next_session_id_++;
+    if (out_session_id) {
+        *out_session_id = sid;
+    }
+
+    FactoryCommand cmd;
+    cmd.type = FactoryCommandType::StartSession;
+    cmd.session_id = sid;
+    cmd.session_kind = kind;
+    cmd.lane_or_channel = channel;
+    cmd.duration_ms = duration_ms;
+    cmd.brightness = brightness;
+    return enqueue(cmd);
+}
+
+bool FactoryRunner::confirm_test_session(
+    uint32_t session_id,
+    bool passed,
+    const char* notes
+) {
+    FactoryCommand cmd;
+    cmd.type = FactoryCommandType::ConfirmSession;
+    cmd.session_id = session_id;
+    cmd.session_passed = passed;
+    if (notes) {
+        strncpy(cmd.session_notes, notes, sizeof(cmd.session_notes) - 1);
+        cmd.session_notes[sizeof(cmd.session_notes) - 1] = '\0';
+    }
+    return enqueue(cmd);
+}
+
+bool FactoryRunner::abort_test_session(uint32_t /*session_id*/) {
+    return abort();
+}
+
+FactoryValidationReport FactoryRunner::validation_report() const {
+    FactoryValidationReport report{};
+    if (status_mutex_ != nullptr &&
+        xSemaphoreTake(status_mutex_, pdMS_TO_TICKS(20)) == pdTRUE) {
+        report = validation_report_;
+        xSemaphoreGive(status_mutex_);
+    }
+    return report;
+}
+
+void FactoryRunner::reset_validation_report() {
+    if (status_mutex_ != nullptr &&
+        xSemaphoreTake(status_mutex_, pdMS_TO_TICKS(50)) == pdTRUE) {
+        validation_report_ = FactoryValidationReport{};
+        xSemaphoreGive(status_mutex_);
+    }
+}
+
+bool FactoryRunner::start_burn_in_job(
+    JobManager* job_mgr,
+    uint32_t duration_minutes,
+    uint8_t brightness,
+    uint32_t* out_job_id
+) {
+    if (job_mgr == nullptr) return false;
+    if (burn_in_active_) return false;
+
+    uint32_t job_id = 0;
+    esp_err_t err = job_mgr->start_job(JobType::BurnIn, &job_id);
+    if (err != ESP_OK) return false;
+
+    if (out_job_id) *out_job_id = job_id;
+
+    burn_in_job_mgr_ = job_mgr;
+    burn_in_job_id_ = job_id;
+    burn_in_started_ms_ = now_ms();
+    burn_in_duration_ms_ = (duration_minutes == 0 ? 60 : duration_minutes) * 60 * 1000;
+    burn_in_brightness_ = clamp_brightness(brightness, true);
+    burn_in_active_ = true;
+
+    uint32_t session_id = 0;
+    return start_test_session(
+        FactoryTestKind::BurnIn,
+        0xFF,
+        burn_in_duration_ms_,
+        burn_in_brightness_,
+        &session_id
+    );
+}
+
+bool FactoryRunner::stop_burn_in_job() {
+    if (!burn_in_active_) return false;
+    if (burn_in_job_mgr_ && burn_in_job_id_ != 0) {
+        burn_in_job_mgr_->cancel_job(burn_in_job_id_);
+    }
+    burn_in_active_ = false;
+    abort();
+    return true;
 }
 
 void FactoryRunner::task_entry(void* argument) {
@@ -223,6 +373,7 @@ void FactoryRunner::blackout() {
     status_.outputs_enabled = false;
     status_.test_active = false;
     status_.effect_duration_ms = 0;
+    status_.active_channel = 0xFF;
     xSemaphoreGive(status_mutex_);
     if (status_callback_) status_callback_();
 }
@@ -235,8 +386,8 @@ void FactoryRunner::start_effect(FactoryEffect effect,
     xSemaphoreTake(status_mutex_, portMAX_DELAY);
     status_.active_effect = effect;
     status_.effect_started_ms = started_ms;
-    status_.effect_duration_ms = clamp_duration(duration_ms);
-    status_.brightness = clamp_brightness(brightness);
+    status_.effect_duration_ms = clamp_duration(duration_ms, effect == FactoryEffect::StressCycle);
+    status_.brightness = clamp_brightness(brightness, effect == FactoryEffect::StressCycle);
     status_.outputs_enabled = true;
     status_.test_active = effect != FactoryEffect::SafeBlackout;
     xSemaphoreGive(status_mutex_);
@@ -336,6 +487,7 @@ void FactoryRunner::apply_command(const FactoryCommand& command,
             status_.effect_started_ms = current_ms;
             status_.effect_duration_ms = clamp_duration(command.duration_ms);
             status_.brightness = clamp_brightness(command.brightness);
+            status_.active_channel = command.lane_or_channel;
             status_.outputs_enabled = true;
             status_.test_active = true;
             xSemaphoreGive(status_mutex_);
@@ -344,6 +496,94 @@ void FactoryRunner::apply_command(const FactoryCommand& command,
         case FactoryCommandType::StreamFrame:
             set_stream_frame(command.stream, command.brightness, command.duration_ms);
             return;
+        case FactoryCommandType::StartSession: {
+            direct_test_active_ = false;
+            xSemaphoreTake(status_mutex_, portMAX_DELAY);
+            stream_active_ = false;
+            status_.auto_loop = false;
+
+            const bool is_burn_in = (command.session_kind == FactoryTestKind::BurnIn);
+            const uint32_t clamped_dur = clamp_duration(command.duration_ms, is_burn_in);
+            const uint8_t clamped_b = clamp_brightness(command.brightness, is_burn_in);
+
+            status_.session.session_id = command.session_id;
+            status_.session.kind = command.session_kind;
+            status_.session.state = FactoryTestState::Running;
+            status_.session.channel = command.lane_or_channel;
+            status_.session.started_ms = current_ms;
+            status_.session.finished_ms = 0;
+            status_.session.command_id = command.command_id;
+            status_.session.operator_confirmation_required = true;
+            status_.session.error_code = 0;
+            status_.session.notes[0] = '\0';
+
+            status_.active_channel = command.lane_or_channel;
+            status_.effect_started_ms = current_ms;
+            status_.effect_duration_ms = clamped_dur;
+            status_.brightness = clamped_b;
+            status_.outputs_enabled = true;
+            status_.test_active = true;
+
+            if (command.session_kind == FactoryTestKind::AddressableChannel ||
+                command.session_kind == FactoryTestKind::PwmChannel) {
+                direct_test_.type = FactoryCommandType::ChannelTest;
+                direct_test_.lane_or_channel = command.lane_or_channel;
+                direct_test_.duration_ms = clamped_dur;
+                direct_test_.brightness = clamped_b;
+                direct_test_active_ = true;
+                status_.active_effect = FactoryEffect::SafeBlackout;
+            } else if (command.session_kind == FactoryTestKind::CombinedOutputs) {
+                status_.active_effect = FactoryEffect::CombinedPulse;
+            } else if (command.session_kind == FactoryTestKind::SafetyGate) {
+                status_.active_effect = FactoryEffect::WhiteWalk;
+            } else if (command.session_kind == FactoryTestKind::BurnIn) {
+                status_.active_effect = FactoryEffect::StressCycle;
+            }
+
+            source_manager_.acquire(ControlSource::Factory);
+            xSemaphoreGive(status_mutex_);
+
+            if (pending_command_id_ != 0 && journal_) {
+                journal_->applied(pending_command_id_);
+                pending_command_id_ = 0;
+            }
+            if (status_callback_) status_callback_();
+            return;
+        }
+        case FactoryCommandType::ConfirmSession: {
+            xSemaphoreTake(status_mutex_, portMAX_DELAY);
+            if (status_.session.session_id == command.session_id) {
+                status_.session.finished_ms = current_ms;
+                status_.session.state = command.session_passed ? FactoryTestState::Passed : FactoryTestState::Failed;
+                strncpy(status_.session.notes, command.session_notes, sizeof(status_.session.notes) - 1);
+                status_.session.notes[sizeof(status_.session.notes) - 1] = '\0';
+
+                // Record into validation report
+                const uint8_t ch = status_.session.channel;
+                if (status_.session.kind == FactoryTestKind::AddressableChannel && ch < 8) {
+                    validation_report_.addressable[ch] = { .tested = true, .passed = command.session_passed, .timestamp_ms = current_ms };
+                } else if (status_.session.kind == FactoryTestKind::PwmChannel && ch >= 8 && ch < 16) {
+                    validation_report_.pwm[ch - 8] = { .tested = true, .passed = command.session_passed, .timestamp_ms = current_ms };
+                } else if (status_.session.kind == FactoryTestKind::CombinedOutputs) {
+                    validation_report_.combined = { .tested = true, .passed = command.session_passed, .timestamp_ms = current_ms };
+                } else if (status_.session.kind == FactoryTestKind::SafetyGate) {
+                    validation_report_.safety_gate = { .tested = true, .passed = command.session_passed, .timestamp_ms = current_ms };
+                } else if (status_.session.kind == FactoryTestKind::BurnIn) {
+                    validation_report_.burn_in = { .tested = true, .passed = command.session_passed, .timestamp_ms = current_ms };
+                    validation_report_.burn_in_duration_s = (current_ms - status_.session.started_ms) / 1000;
+                }
+            }
+            xSemaphoreGive(status_mutex_);
+
+            blackout();
+
+            if (pending_command_id_ != 0 && journal_) {
+                journal_->applied(pending_command_id_);
+                pending_command_id_ = 0;
+            }
+            if (status_callback_) status_callback_();
+            return;
+        }
     }
 }
 
@@ -367,6 +607,14 @@ void FactoryRunner::task() {
             apply_command(command, current_ms);
             loop_started_ms = current_ms;
         }
+
+        // Periodic Burn-In Job progress update
+        if (burn_in_active_ && burn_in_job_mgr_ && (current_ms % 1000 < kFramePeriodMs)) {
+            const uint32_t elapsed = current_ms - burn_in_started_ms_;
+            const uint8_t prog = burn_in_duration_ms_ > 0 ? std::min<uint8_t>(100, (elapsed * 100ULL) / burn_in_duration_ms_) : 0;
+            burn_in_job_mgr_->update_progress(burn_in_job_id_, JobState::Running, prog);
+        }
+
         bool is_streaming = false;
         StreamFramePayload local_stream{};
         uint32_t local_stream_last_ms = 0;
@@ -399,6 +647,9 @@ void FactoryRunner::task() {
                     journal_->failed(pending_command_id_, commit_err);
                     pending_command_id_ = 0;
                 }
+                xSemaphoreTake(status_mutex_, portMAX_DELAY);
+                ++status_.commit_failures;
+                xSemaphoreGive(status_mutex_);
                 blackout();
                 vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(kFramePeriodMs));
                 continue;
@@ -461,6 +712,14 @@ void FactoryRunner::task() {
                     journal_->failed(pending_command_id_, commit_err);
                     pending_command_id_ = 0;
                 }
+                xSemaphoreTake(status_mutex_, portMAX_DELAY);
+                ++status_.commit_failures;
+                if (status_.session.state == FactoryTestState::Running) {
+                    status_.session.state = FactoryTestState::Failed;
+                    status_.session.error_code = commit_err;
+                    status_.session.finished_ms = current_ms;
+                }
+                xSemaphoreGive(status_mutex_);
                 blackout();
                 vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(kFramePeriodMs));
                 continue;
@@ -471,6 +730,17 @@ void FactoryRunner::task() {
             }
             if (elapsed >= current.effect_duration_ms) {
                 direct_test_active_ = false;
+                xSemaphoreTake(status_mutex_, portMAX_DELAY);
+                if (status_.session.state == FactoryTestState::Running) {
+                    // Software must NOT claim physical hardware passed without operator confirmation!
+                    if (status_.session.operator_confirmation_required) {
+                        status_.session.state = FactoryTestState::WaitingForOperator;
+                    } else {
+                        status_.session.state = FactoryTestState::Passed;
+                    }
+                    status_.session.finished_ms = current_ms;
+                }
+                xSemaphoreGive(status_mutex_);
                 blackout();
             }
             vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(kFramePeriodMs));
@@ -497,6 +767,28 @@ void FactoryRunner::task() {
                 continue;
             }
         } else if (current.test_active && current_ms - current.effect_started_ms >= current.effect_duration_ms) {
+            xSemaphoreTake(status_mutex_, portMAX_DELAY);
+            if (status_.session.state == FactoryTestState::Running) {
+                if (status_.session.operator_confirmation_required) {
+                    status_.session.state = FactoryTestState::WaitingForOperator;
+                } else {
+                    status_.session.state = FactoryTestState::Passed;
+                }
+                status_.session.finished_ms = current_ms;
+            }
+            xSemaphoreGive(status_mutex_);
+
+            if (burn_in_active_) {
+                if (burn_in_job_mgr_) {
+                    burn_in_job_mgr_->complete_job(burn_in_job_id_);
+                }
+                burn_in_active_ = false;
+                xSemaphoreTake(status_mutex_, portMAX_DELAY);
+                validation_report_.burn_in = { .tested = true, .passed = true, .timestamp_ms = current_ms };
+                validation_report_.burn_in_duration_s = (current_ms - burn_in_started_ms_) / 1000;
+                xSemaphoreGive(status_mutex_);
+            }
+
             blackout();
             vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(kFramePeriodMs));
             continue;
@@ -512,6 +804,25 @@ void FactoryRunner::task() {
                     journal_->failed(pending_command_id_, commit_err);
                     pending_command_id_ = 0;
                 }
+                xSemaphoreTake(status_mutex_, portMAX_DELAY);
+                ++status_.commit_failures;
+                if (status_.session.state == FactoryTestState::Running) {
+                    status_.session.state = FactoryTestState::Failed;
+                    status_.session.error_code = commit_err;
+                    status_.session.finished_ms = current_ms;
+                    if (status_.session.kind == FactoryTestKind::BurnIn) {
+                        ++validation_report_.burn_in_errors;
+                    }
+                }
+                xSemaphoreGive(status_mutex_);
+
+                if (burn_in_active_) {
+                    if (burn_in_job_mgr_) {
+                        burn_in_job_mgr_->fail_job(burn_in_job_id_, commit_err, "Commit error");
+                    }
+                    burn_in_active_ = false;
+                }
+
                 blackout();
                 vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(kFramePeriodMs));
                 continue;
@@ -529,3 +840,4 @@ void FactoryRunner::task() {
 }
 
 } // namespace lg
+

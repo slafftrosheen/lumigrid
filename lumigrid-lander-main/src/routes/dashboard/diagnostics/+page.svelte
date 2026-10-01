@@ -2,6 +2,8 @@
   import { onMount, onDestroy } from 'svelte';
   import { getHealth, getLogs, getAuditLog } from '$lib/api/node';
   import type { HealthSnapshot, AuditEvent } from '$lib/api/node';
+  import { evaluateActionableIssues } from '$lib/api/diagnostics';
+  import type { ActionableIssue } from '$lib/api/diagnostics';
   import { getSelectedNodeIp } from '$lib/auth/storage';
   import { nodeStore } from '$lib/state/nodeStore';
 
@@ -155,6 +157,7 @@
   const displayPowerMw = $derived(liveOutput?.powerMw ?? health?.output.current_power_mw ?? 0);
   const displayRssi = $derived(liveNetwork?.rssi ?? health?.network.wifi_rssi ?? 0);
   const displayEstop = $derived(liveOutput?.estopActive ?? health?.output.estop_latched ?? false);
+  const actionableIssues = $derived<ActionableIssue[]>(health ? evaluateActionableIssues(health) : []);
 
   function statusColor(ok: boolean): string {
     return ok ? '#30d158' : '#ff453a';
@@ -288,6 +291,45 @@
 
     <!-- TAB 1: HEALTH -->
     {#if activeTab === 'health' && health}
+      <!-- Actionable Issue Summary -->
+      {#if actionableIssues.length === 0}
+        <div class="actionable-summary-clean">
+          <div class="clean-icon">✓</div>
+          <div class="clean-text">
+            <strong>All Diagnostics Nominal</strong>
+            <span>Configuration integrity verified, safety gates active, network and synchronization within limits.</span>
+          </div>
+        </div>
+      {:else}
+        <div class="actionable-summary-card">
+          <div class="actionable-header">
+            <div class="actionable-title-wrap">
+              <span class="actionable-icon">⚠️</span>
+              <h3>Actionable Issue Summary</h3>
+              <span class="actionable-count-badge">{actionableIssues.length} {actionableIssues.length === 1 ? 'issue' : 'issues'}</span>
+            </div>
+            <span class="actionable-subtitle">Prioritized diagnostics requiring operator attention</span>
+          </div>
+          <div class="actionable-list">
+            {#each actionableIssues as issue}
+              <div class="actionable-item {issue.severity}">
+                <div class="item-header">
+                  <span class="severity-pill {issue.severity}">{issue.severity.toUpperCase()}</span>
+                  <span class="category-pill">{issue.category.toUpperCase()}</span>
+                  <span class="issue-title">{issue.title}</span>
+                </div>
+                <p class="issue-desc">{issue.description}</p>
+                {#if issue.remedy}
+                  <div class="issue-remedy">
+                    <span class="remedy-tag">Remedy:</span> {issue.remedy}
+                  </div>
+                {/if}
+              </div>
+            {/each}
+          </div>
+        </div>
+      {/if}
+
       <!-- Confidence Overview Banner -->
       <div class="confidence-card">
         <div class="confidence-header">
@@ -1108,5 +1150,170 @@
     .events-toolbar { align-items: stretch; }
     .level-filters { overflow-x: auto; }
   }
+
+  /* Actionable Issue Summary Styles */
+  .actionable-summary-clean {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 1rem 1.25rem;
+    border-radius: 12px;
+    background: linear-gradient(135deg, rgba(48, 209, 88, 0.12), rgba(48, 209, 88, 0.04));
+    border: 1px solid rgba(48, 209, 88, 0.3);
+    margin-bottom: 1.25rem;
+  }
+  .clean-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    background: rgba(48, 209, 88, 0.2);
+    color: #30d158;
+    font-weight: 700;
+    font-size: 1.1rem;
+  }
+  .clean-text {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+  }
+  .clean-text strong {
+    color: #30d158;
+    font-size: 0.95rem;
+  }
+  .clean-text span {
+    color: #a1a1a6;
+    font-size: 0.82rem;
+  }
+
+  .actionable-summary-card {
+    background: linear-gradient(180deg, rgba(30, 20, 20, 0.75), rgba(20, 18, 20, 0.75));
+    border: 1px solid rgba(255, 69, 58, 0.35);
+    border-radius: 14px;
+    padding: 1.25rem;
+    margin-bottom: 1.25rem;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+  }
+  .actionable-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    padding-bottom: 0.85rem;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    margin-bottom: 1rem;
+  }
+  .actionable-title-wrap {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+  }
+  .actionable-title-wrap h3 {
+    margin: 0;
+    font-size: 1.05rem;
+    font-weight: 700;
+    color: #f5f5f7;
+  }
+  .actionable-count-badge {
+    background: rgba(255, 69, 58, 0.2);
+    border: 1px solid rgba(255, 69, 58, 0.4);
+    color: #ff453a;
+    font-size: 0.75rem;
+    font-weight: 700;
+    padding: 0.2rem 0.55rem;
+    border-radius: 10px;
+  }
+  .actionable-subtitle {
+    font-size: 0.8rem;
+    color: #86868b;
+  }
+  .actionable-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.85rem;
+  }
+  .actionable-item {
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-left-width: 4px;
+    border-radius: 8px;
+    padding: 0.85rem 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+  }
+  .actionable-item.critical {
+    border-left-color: #ff453a;
+    background: rgba(255, 69, 58, 0.06);
+  }
+  .actionable-item.warning {
+    border-left-color: #ff9f0a;
+    background: rgba(255, 159, 10, 0.06);
+  }
+  .actionable-item.info {
+    border-left-color: var(--dash-led);
+    background: rgba(255, 255, 255, 0.04);
+  }
+  .item-header {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+  }
+  .severity-pill {
+    font-size: 0.68rem;
+    font-weight: 800;
+    letter-spacing: 0.05em;
+    padding: 0.15rem 0.45rem;
+    border-radius: 4px;
+  }
+  .severity-pill.critical {
+    background: rgba(255, 69, 58, 0.25);
+    color: #ff453a;
+  }
+  .severity-pill.warning {
+    background: rgba(255, 159, 10, 0.25);
+    color: #ff9f0a;
+  }
+  .severity-pill.info {
+    background: rgba(255, 255, 255, 0.12);
+    color: var(--dash-led);
+  }
+  .category-pill {
+    font-size: 0.68rem;
+    font-weight: 700;
+    padding: 0.15rem 0.45rem;
+    border-radius: 4px;
+    background: rgba(255, 255, 255, 0.08);
+    color: #a1a1a6;
+  }
+  .issue-title {
+    font-weight: 600;
+    font-size: 0.88rem;
+    color: #f5f5f7;
+  }
+  .issue-desc {
+    margin: 0;
+    font-size: 0.82rem;
+    color: #c7c7cc;
+    line-height: 1.4;
+  }
+  .issue-remedy {
+    font-size: 0.8rem;
+    color: #e5e5ea;
+    background: rgba(0, 0, 0, 0.25);
+    padding: 0.4rem 0.6rem;
+    border-radius: 6px;
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    margin-top: 0.2rem;
+  }
+  .remedy-tag {
+    color: #ff9f0a;
+    font-weight: 700;
+  }
+
 
 </style>

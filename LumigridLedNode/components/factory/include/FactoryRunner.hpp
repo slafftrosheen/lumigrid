@@ -42,12 +42,14 @@ public:
         return lifecycle_state_.load(std::memory_order_acquire);
     }
 
+    static constexpr uint8_t kNormalDiagnosticMaxBrightness = 96;
+    static constexpr uint8_t kBurnInDefaultBrightness = 64;
+    static constexpr uint8_t kBurnInAbsoluteMaxBrightness = 96;
+    static constexpr uint8_t kMaxDiagnosticBrightness = kNormalDiagnosticMaxBrightness;
+    static constexpr uint8_t kMaxBurnInBrightness = kBurnInAbsoluteMaxBrightness;
+
     bool enqueue(const FactoryCommand& command);
-    bool abort() {
-        FactoryCommand cmd;
-        cmd.type = FactoryCommandType::Abort;
-        return enqueue(cmd);
-    }
+    bool abort();
     bool select_effect(FactoryEffect effect, uint8_t brightness = 32, uint32_t duration_ms = 10000) {
         FactoryCommand cmd;
         cmd.type = FactoryCommandType::SelectEffect;
@@ -65,6 +67,39 @@ public:
     bool test_channel(uint8_t channel, const char* mode = "identify", uint32_t duration_ms = 3000);
     void set_stream_frame(const StreamFramePayload& payload, uint8_t brightness, uint32_t duration_ms);
     FactoryStatus status() const;
+
+    // Factory Validation Session API (LG-035 §5)
+    bool start_test_session(
+        FactoryTestKind kind,
+        uint8_t channel = 0xFF,
+        uint32_t duration_ms = 5000,
+        uint8_t brightness = 32,
+        uint32_t* out_session_id = nullptr
+    );
+
+    bool confirm_test_session(
+        uint32_t session_id,
+        bool passed,
+        const char* notes = nullptr
+    );
+
+    bool abort_test_session(uint32_t session_id = 0);
+
+    FactoryTestSession session() const {
+        return status().session;
+    }
+
+    FactoryValidationReport validation_report() const;
+    void reset_validation_report();
+
+    // Burn-In Endurance Job API (LG-035 §4)
+    bool start_burn_in_job(
+        class JobManager* job_mgr,
+        uint32_t duration_minutes = 60,
+        uint8_t brightness = kBurnInDefaultBrightness,
+        uint32_t* out_job_id = nullptr
+    );
+    bool stop_burn_in_job();
 
     ControlSourceManager& control_sources() { return source_manager_; }
     // Deprecated alias for backwards compatibility
@@ -103,6 +138,17 @@ private:
     FactoryCommand stream_frame_{};
     bool stream_active_ = false;
     uint32_t stream_last_ms_ = 0;
+
+    std::atomic<uint32_t> next_session_id_{1};
+    FactoryValidationReport validation_report_{};
+
+    // Burn-In Job tracking
+    class JobManager* burn_in_job_mgr_ = nullptr;
+    uint32_t burn_in_job_id_ = 0;
+    uint32_t burn_in_started_ms_ = 0;
+    uint32_t burn_in_duration_ms_ = 0;
+    uint8_t burn_in_brightness_ = kBurnInDefaultBrightness;
+    bool burn_in_active_ = false;
 
     StatusCallback status_callback_{};
     std::atomic<LifecycleState> lifecycle_state_{LifecycleState::Constructed};

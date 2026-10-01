@@ -233,8 +233,8 @@ bool parse_effect(const char* value, FactoryEffect& effect) {
         effect = FactoryEffect::PwmFade;
     } else if (strcmp(value, "combined_pulse") == 0) {
         effect = FactoryEffect::CombinedPulse;
-    } else if (strcmp(value, "burn_in") == 0) {
-        effect = FactoryEffect::BurnIn;
+    } else if (strcmp(value, "stress_cycle") == 0 || strcmp(value, "burn_in") == 0) {
+        effect = FactoryEffect::StressCycle;
     } else if (strcmp(value, "blackout") == 0) {
         effect = FactoryEffect::SafeBlackout;
     } else {
@@ -283,21 +283,61 @@ void format_ipv4(uint32_t address, char* output, size_t output_size) {
 }
 
 void build_status_json(const FactoryStatus& status, char* response, size_t max_len) {
+    const uint32_t current_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
+    uint32_t elapsed_ms = 0;
+    uint32_t remaining_ms = 0;
+    const char* state_str = "idle";
+
+    if (status.test_active) {
+        elapsed_ms = (current_ms >= status.effect_started_ms) ? (current_ms - status.effect_started_ms) : 0;
+        remaining_ms = (status.effect_duration_ms > elapsed_ms) ? (status.effect_duration_ms - elapsed_ms) : 0;
+        state_str = status.auto_loop ? "looping" : "running";
+    } else if (status.session.state == FactoryTestState::WaitingForOperator) {
+        state_str = "waiting_for_operator";
+    }
+
+    char session_buf[256];
+    if (status.session.session_id != 0) {
+        snprintf(
+            session_buf,
+            sizeof(session_buf),
+            "{\"id\":%" PRIu32 ",\"kind\":\"%s\",\"state\":\"%s\",\"channel\":%d,\"startedMs\":%" PRIu64 ",\"finishedMs\":%" PRIu64 ",\"operatorConfirmationRequired\":%s,\"errorCode\":%" PRId32 "}",
+            status.session.session_id,
+            test_kind_name(status.session.kind),
+            test_state_name(status.session.state),
+            status.session.channel == 0xFF ? -1 : static_cast<int>(status.session.channel),
+            status.session.started_ms,
+            status.session.finished_ms,
+            status.session.operator_confirmation_required ? "true" : "false",
+            status.session.error_code
+        );
+    } else {
+        snprintf(session_buf, sizeof(session_buf), "null");
+    }
+
     snprintf(
         response,
         max_len,
-        "{\"effect\":\"%s\",\"effectStartedMs\":%" PRIu32 
-        ",\"durationMs\":%" PRIu32 
+        "{\"state\":\"%s\",\"effect\":\"%s\",\"startedMs\":%" PRIu32 ",\"effectStartedMs\":%" PRIu32
+        ",\"durationMs\":%" PRIu32 ",\"elapsedMs\":%" PRIu32 ",\"remainingMs\":%" PRIu32
         ",\"brightness\":%u,\"autoLoop\":%s,\"outputsEnabled\":%s"
-        ",\"testActive\":%s,\"commandRejections\":%" PRIu32 "}",
+        ",\"testActive\":%s,\"commandRejections\":%" PRIu32 ",\"commitFailures\":%" PRIu32
+        ",\"activeChannel\":%d,\"session\":%s}",
+        state_str,
         effect_name(status.active_effect),
         status.effect_started_ms,
+        status.effect_started_ms,
         status.effect_duration_ms,
+        elapsed_ms,
+        remaining_ms,
         status.brightness,
         status.auto_loop ? "true" : "false",
         status.outputs_enabled ? "true" : "false",
         status.test_active ? "true" : "false",
-        status.command_rejections
+        status.command_rejections,
+        status.commit_failures,
+        status.active_channel == 0xFF ? -1 : static_cast<int>(status.active_channel),
+        session_buf
     );
 }
 
@@ -307,7 +347,7 @@ esp_err_t get_status(httpd_req_t* request) {
     FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
     const FactoryStatus status = api_ptr->runner().status();
 
-    char response[384];
+    char response[768];
     build_status_json(status, response, sizeof(response));
 
     return send_json(request, response);
@@ -468,13 +508,8 @@ esp_err_t post_abort(httpd_req_t* request) {
 
     FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
     uint32_t cmd_id = api_ptr->command_journal().accept(CommandDomain::Factory);
-    if (!api_ptr->runner().enqueue({
-            .command_id = cmd_id,
-            .type = FactoryCommandType::Abort
-        })) {
-        api_ptr->command_journal().failed(cmd_id, ESP_ERR_INVALID_STATE);
-        return send_error(request, "409 Conflict", "command_queue_full");
-    }
+    api_ptr->runner().abort();
+    api_ptr->command_journal().applied(cmd_id);
 
     char resp[96];
     snprintf(resp, sizeof(resp), "{\"accepted\":true,\"commandId\":%" PRIu32 ",\"action\":\"blackout\"}", cmd_id);
@@ -513,6 +548,215 @@ esp_err_t post_auto_loop(httpd_req_t* request) {
     char resp[64];
     snprintf(resp, sizeof(resp), "{\"accepted\":true,\"commandId\":%" PRIu32 "}", cmd_id);
     return send_json(request, resp, "202 Accepted");
+}
+
+esp_err_t post_factory_test_start(httpd_req_t* request) {
+    if (!api::authorize(request, api::ApiRole::Installer)) return ESP_OK;
+
+    cJSON* root = nullptr;
+    if (read_json(request, &root) != ESP_OK) {
+        return send_error(request, "400 Bad Request", "invalid_json");
+    }
+
+    const cJSON* kind_item = cJSON_GetObjectItemCaseSensitive(root, "kind");
+    if (!cJSON_IsString(kind_item) || kind_item->valuestring == nullptr) {
+        cJSON_Delete(root);
+        return send_error(request, "400 Bad Request", "missing_or_invalid_kind");
+    }
+
+    FactoryTestKind kind;
+    if (!parse_test_kind(kind_item->valuestring, kind)) {
+        cJSON_Delete(root);
+        return send_error(request, "400 Bad Request", "unknown_test_kind");
+    }
+
+    uint8_t channel = 0xFF;
+    if (cJSON_HasObjectItem(root, "channel")) {
+        const cJSON* ch_item = cJSON_GetObjectItemCaseSensitive(root, "channel");
+        if (cJSON_IsNumber(ch_item)) {
+            channel = static_cast<uint8_t>(ch_item->valueint);
+        }
+    }
+
+    uint32_t duration_ms = 5000;
+    if (cJSON_HasObjectItem(root, "durationMs")) {
+        json_u32(root, "durationMs", 100, 86400000, duration_ms);
+    }
+
+    uint8_t brightness = 32;
+    if (cJSON_HasObjectItem(root, "brightness")) {
+        json_u8(root, "brightness", 1, 96, brightness);
+    }
+
+    cJSON_Delete(root);
+
+    FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+    uint32_t session_id = 0;
+    if (!api_ptr->runner().start_test_session(kind, channel, duration_ms, brightness, &session_id)) {
+        return send_error(request, "409 Conflict", "failed_to_start_session");
+    }
+
+    char resp[128];
+    snprintf(resp, sizeof(resp),
+             "{\"accepted\":true,\"sessionId\":%" PRIu32 ",\"kind\":\"%s\",\"channel\":%d}",
+             session_id, test_kind_name(kind), channel == 0xFF ? -1 : static_cast<int>(channel));
+    return send_json(request, resp, "202 Accepted");
+}
+
+esp_err_t post_factory_test_confirm(httpd_req_t* request) {
+    if (!api::authorize(request, api::ApiRole::Installer)) return ESP_OK;
+
+    cJSON* root = nullptr;
+    if (read_json(request, &root) != ESP_OK) {
+        return send_error(request, "400 Bad Request", "invalid_json");
+    }
+
+    uint32_t session_id = 0;
+    if (!json_u32(root, "sessionId", 1, UINT32_MAX, session_id)) {
+        cJSON_Delete(root);
+        return send_error(request, "400 Bad Request", "missing_or_invalid_session_id");
+    }
+
+    const cJSON* passed_item = cJSON_GetObjectItemCaseSensitive(root, "passed");
+    if (!cJSON_IsBool(passed_item)) {
+        cJSON_Delete(root);
+        return send_error(request, "400 Bad Request", "missing_or_invalid_passed");
+    }
+    const bool passed = cJSON_IsTrue(passed_item);
+
+    const cJSON* notes_item = cJSON_GetObjectItemCaseSensitive(root, "notes");
+    const char* notes = (cJSON_IsString(notes_item) && notes_item->valuestring) ? notes_item->valuestring : nullptr;
+
+    FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+    if (!api_ptr->runner().confirm_test_session(session_id, passed, notes)) {
+        cJSON_Delete(root);
+        return send_error(request, "409 Conflict", "failed_to_confirm_session");
+    }
+
+    cJSON_Delete(root);
+
+    char resp[96];
+    snprintf(resp, sizeof(resp), "{\"confirmed\":true,\"sessionId\":%" PRIu32 ",\"passed\":%s}",
+             session_id, passed ? "true" : "false");
+    return send_json(request, resp);
+}
+
+esp_err_t post_factory_test_abort(httpd_req_t* request) {
+    if (!api::authorize(request, api::ApiRole::Installer)) return ESP_OK;
+
+    FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+    api_ptr->runner().abort_test_session();
+
+    char resp[48];
+    snprintf(resp, sizeof(resp), "{\"aborted\":true}");
+    return send_json(request, resp);
+}
+
+esp_err_t get_factory_test_report(httpd_req_t* request) {
+    if (!api::authorize(request, api::ApiRole::Operator)) return ESP_OK;
+
+    FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+    const FactoryValidationReport report = api_ptr->runner().validation_report();
+
+    cJSON* root = cJSON_CreateObject();
+    cJSON* addr_arr = cJSON_CreateArray();
+    for (int i = 0; i < 8; ++i) {
+        cJSON* ch_obj = cJSON_CreateObject();
+        cJSON_AddNumberToObject(ch_obj, "channel", i);
+        cJSON_AddBoolToObject(ch_obj, "tested", report.addressable[i].tested);
+        cJSON_AddBoolToObject(ch_obj, "passed", report.addressable[i].passed);
+        cJSON_AddNumberToObject(ch_obj, "timestampMs", report.addressable[i].timestamp_ms);
+        cJSON_AddItemToArray(addr_arr, ch_obj);
+    }
+    cJSON_AddItemToObject(root, "addressable", addr_arr);
+
+    cJSON* pwm_arr = cJSON_CreateArray();
+    for (int i = 0; i < 8; ++i) {
+        cJSON* ch_obj = cJSON_CreateObject();
+        cJSON_AddNumberToObject(ch_obj, "channel", i + 8);
+        cJSON_AddBoolToObject(ch_obj, "tested", report.pwm[i].tested);
+        cJSON_AddBoolToObject(ch_obj, "passed", report.pwm[i].passed);
+        cJSON_AddNumberToObject(ch_obj, "timestampMs", report.pwm[i].timestamp_ms);
+        cJSON_AddItemToArray(pwm_arr, ch_obj);
+    }
+    cJSON_AddItemToObject(root, "pwm", pwm_arr);
+
+    cJSON* comb = cJSON_CreateObject();
+    cJSON_AddBoolToObject(comb, "tested", report.combined.tested);
+    cJSON_AddBoolToObject(comb, "passed", report.combined.passed);
+    cJSON_AddNumberToObject(comb, "timestampMs", report.combined.timestamp_ms);
+    cJSON_AddItemToObject(root, "combined", comb);
+
+    cJSON* safety = cJSON_CreateObject();
+    cJSON_AddBoolToObject(safety, "tested", report.safety_gate.tested);
+    cJSON_AddBoolToObject(safety, "passed", report.safety_gate.passed);
+    cJSON_AddNumberToObject(safety, "timestampMs", report.safety_gate.timestamp_ms);
+    cJSON_AddItemToObject(root, "safetyGate", safety);
+
+    cJSON* burn = cJSON_CreateObject();
+    cJSON_AddBoolToObject(burn, "tested", report.burn_in.tested);
+    cJSON_AddBoolToObject(burn, "passed", report.burn_in.passed);
+    cJSON_AddNumberToObject(burn, "timestampMs", report.burn_in.timestamp_ms);
+    cJSON_AddNumberToObject(burn, "durationS", report.burn_in_duration_s);
+    cJSON_AddNumberToObject(burn, "errors", report.burn_in_errors);
+    cJSON_AddItemToObject(root, "burnIn", burn);
+
+    char* rendered = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+
+    if (!rendered) {
+        return send_error(request, "500 Internal Server Error", "oom");
+    }
+
+    esp_err_t res = send_json(request, rendered);
+    free(rendered);
+    return res;
+}
+
+esp_err_t post_factory_burn_in_start(httpd_req_t* request) {
+    if (!api::authorize(request, api::ApiRole::Installer)) return ESP_OK;
+
+    cJSON* root = nullptr;
+    if (read_json(request, &root) != ESP_OK) {
+        return send_error(request, "400 Bad Request", "invalid_json");
+    }
+
+    uint32_t duration_minutes = 60;
+    if (cJSON_HasObjectItem(root, "durationMinutes")) {
+        json_u32(root, "durationMinutes", 1, 1440, duration_minutes);
+    }
+
+    uint8_t brightness = FactoryRunner::kBurnInDefaultBrightness;
+    if (cJSON_HasObjectItem(root, "brightness")) {
+        json_u8(root, "brightness", 1, FactoryRunner::kBurnInAbsoluteMaxBrightness, brightness);
+    }
+
+    cJSON_Delete(root);
+
+    FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+    uint32_t job_id = 0;
+    if (!api_ptr->runner().start_burn_in_job(&api_ptr->job_manager(), duration_minutes, brightness, &job_id)) {
+        return send_error(request, "409 Conflict", "failed_to_start_burn_in");
+    }
+
+    char resp[128];
+    snprintf(resp, sizeof(resp),
+             "{\"accepted\":true,\"jobId\":%" PRIu32 ",\"type\":\"burn_in\",\"durationMinutes\":%" PRIu32 ",\"brightness\":%u}",
+             job_id, duration_minutes, brightness);
+    return send_json(request, resp, "202 Accepted");
+}
+
+esp_err_t post_factory_burn_in_stop(httpd_req_t* request) {
+    if (!api::authorize(request, api::ApiRole::Installer)) return ESP_OK;
+
+    FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+    if (!api_ptr->runner().stop_burn_in_job()) {
+        return send_error(request, "409 Conflict", "no_active_burn_in_job");
+    }
+
+    char resp[48];
+    snprintf(resp, sizeof(resp), "{\"stopped\":true}");
+    return send_json(request, resp);
 }
 
 esp_err_t ws_handler(httpd_req_t* request) {
@@ -5556,12 +5800,18 @@ esp_err_t FactoryApi::start(
 #pragma GCC diagnostic ignored "-Wmissing-field-initializers"
     const httpd_uri_t factory_routes[] = {
         // ── Factory test endpoints ──
-        { .uri = "/api/v1/factory/status",    .method = HTTP_GET,  .handler = get_status,     .user_ctx = this },
-        { .uri = "/api/v1/factory/effect",    .method = HTTP_POST, .handler = post_effect,    .user_ctx = this },
-        { .uri = "/api/v1/factory/lane",      .method = HTTP_POST, .handler = post_lane,      .user_ctx = this },
-        { .uri = "/api/v1/factory/pwm",       .method = HTTP_POST, .handler = post_pwm,       .user_ctx = this },
-        { .uri = "/api/v1/factory/abort",     .method = HTTP_POST, .handler = post_abort,     .user_ctx = this },
-        { .uri = "/api/v1/factory/auto-loop", .method = HTTP_POST, .handler = post_auto_loop, .user_ctx = this },
+        { .uri = "/api/v1/factory/status",         .method = HTTP_GET,  .handler = get_status,                 .user_ctx = this },
+        { .uri = "/api/v1/factory/effect",         .method = HTTP_POST, .handler = post_effect,                .user_ctx = this },
+        { .uri = "/api/v1/factory/lane",           .method = HTTP_POST, .handler = post_lane,                  .user_ctx = this },
+        { .uri = "/api/v1/factory/pwm",            .method = HTTP_POST, .handler = post_pwm,                   .user_ctx = this },
+        { .uri = "/api/v1/factory/abort",          .method = HTTP_POST, .handler = post_abort,                 .user_ctx = this },
+        { .uri = "/api/v1/factory/auto-loop",      .method = HTTP_POST, .handler = post_auto_loop,             .user_ctx = this },
+        { .uri = "/api/v1/factory/test/start",     .method = HTTP_POST, .handler = post_factory_test_start,    .user_ctx = this },
+        { .uri = "/api/v1/factory/test/confirm",   .method = HTTP_POST, .handler = post_factory_test_confirm,  .user_ctx = this },
+        { .uri = "/api/v1/factory/test/abort",     .method = HTTP_POST, .handler = post_factory_test_abort,    .user_ctx = this },
+        { .uri = "/api/v1/factory/test/report",    .method = HTTP_GET,  .handler = get_factory_test_report,    .user_ctx = this },
+        { .uri = "/api/v1/factory/burn-in/start",  .method = HTTP_POST, .handler = post_factory_burn_in_start,  .user_ctx = this },
+        { .uri = "/api/v1/factory/burn-in/stop",   .method = HTTP_POST, .handler = post_factory_burn_in_stop,   .user_ctx = this },
     };
 
     const httpd_uri_t signage_routes[] = {

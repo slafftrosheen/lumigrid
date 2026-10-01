@@ -5115,6 +5115,100 @@ bool test_lg029_node_backed_authentication() {
         return true;
     }
 
+    bool test_lg035_diagnostics_and_factory_validation() {
+        ESP_LOGI(TAG, "Testing LG-035 Diagnostics, Factory Validation & Burn-In Hardening...");
+
+        // 1. FactoryRunner Test Session State Machine & Operator Confirmation Invariant
+        {
+            ControlSourceManager sm;
+            OutputController ctrl;
+            FactoryRunner runner(sm, ctrl);
+
+            assert(runner.start() == ESP_OK);
+            assert(runner.session().state == FactoryTestState::Idle);
+
+            // A. Start Addressable Channel 2 validation test
+            uint32_t sid = 0;
+            assert(runner.start_test_session(FactoryTestKind::AddressableChannel, 2, 60000, 32, &sid));
+            assert(sid > 0);
+            vTaskDelay(pdMS_TO_TICKS(30));
+            assert(runner.session().state == FactoryTestState::Running);
+            assert(runner.session().kind == FactoryTestKind::AddressableChannel);
+            assert(runner.session().channel == 2);
+            assert(runner.session().operator_confirmation_required == true);
+            assert(sm.current_owner() == ControlSource::Factory);
+
+            // B. Abort test session releases ownership without claiming pass
+            runner.abort_test_session(sid);
+            vTaskDelay(pdMS_TO_TICKS(30));
+            assert(runner.session().state == FactoryTestState::Aborted);
+            assert(sm.current_owner() == ControlSource::Idle);
+            assert(runner.status().outputs_enabled == false);
+
+            // C. Critical rule (§tyry4t): Software must NOT claim physical hardware passed
+            // unless there is actual feedback or an operator explicitly confirms it.
+            uint32_t sid2 = 0;
+            assert(runner.start_test_session(FactoryTestKind::PwmChannel, 3, 50, 48, &sid2));
+            assert(sid2 > 0);
+            vTaskDelay(pdMS_TO_TICKS(30));
+            assert(runner.session().state == FactoryTestState::Running);
+
+            // Let the test duration expire (50 ms)
+            vTaskDelay(pdMS_TO_TICKS(100));
+            // State must transition to WaitingForOperator, NOT Passed!
+            assert(runner.session().state == FactoryTestState::WaitingForOperator);
+            assert(runner.session().operator_confirmation_required == true);
+
+            // Operator explicitly confirms physical pass
+            bool confirmed = runner.confirm_test_session(sid2, true);
+            assert(confirmed == true);
+            vTaskDelay(pdMS_TO_TICKS(30));
+            assert(runner.session().state == FactoryTestState::Passed);
+            assert(runner.validation_report().pwm[3].tested == true);
+            assert(runner.validation_report().pwm[3].passed == true);
+
+            // Operator explicitly confirms physical failure
+            uint32_t sid3 = 0;
+            assert(runner.start_test_session(FactoryTestKind::AddressableChannel, 1, 50, 48, &sid3));
+            vTaskDelay(pdMS_TO_TICKS(100));
+            assert(runner.session().state == FactoryTestState::WaitingForOperator);
+            assert(runner.confirm_test_session(sid3, false) == true);
+            vTaskDelay(pdMS_TO_TICKS(30));
+            assert(runner.session().state == FactoryTestState::Failed);
+            assert(runner.validation_report().addressable[1].tested == true);
+            assert(runner.validation_report().addressable[1].passed == false);
+
+            // 2. Controlled Power & Brightness Limits
+            // Diagnostic brightness is capped at 96 / 255
+            runner.select_effect(FactoryEffect::WhiteWalk, 255, 1000);
+            vTaskDelay(pdMS_TO_TICKS(30));
+            assert(runner.status().brightness <= FactoryRunner::kMaxDiagnosticBrightness);
+
+            // Burn-in default brightness is 64 / 255, absolute cap 96 / 255
+            JobManager jm;
+            uint32_t jid = 0;
+            assert(runner.start_burn_in_job(&jm, 60, 255, &jid)); // requests 255
+            assert(jid > 0);
+            vTaskDelay(pdMS_TO_TICKS(30));
+            assert(runner.status().brightness <= FactoryRunner::kMaxBurnInBrightness);
+            assert(runner.session().kind == FactoryTestKind::BurnIn);
+            assert(runner.session().state == FactoryTestState::Running);
+
+            // Stop burn-in job
+            runner.stop_burn_in_job();
+            vTaskDelay(pdMS_TO_TICKS(30));
+            assert(runner.session().state == FactoryTestState::Aborted);
+
+            // 3. Transient arbitration restoration on stop
+            runner.stop();
+            assert(runner.status().outputs_enabled == false);
+            assert(sm.current_owner() == ControlSource::Idle);
+        }
+
+        ESP_LOGI(TAG, "[PASS] LG-035 Diagnostics, Factory Validation & Burn-In Tests passed.");
+        return true;
+    }
+
 } // namespace
 
 bool run_runtime_hardening_tests() {
@@ -5221,6 +5315,9 @@ bool run_runtime_hardening_tests() {
 
     // LG-034 Cue Studio v2 & Cue Runtime Hardening
     all_ok &= test_lg034_cue_studio_and_runtime_hardening();
+
+    // LG-035 Diagnostics, Factory Validation & Burn-In Workflow
+    all_ok &= test_lg035_diagnostics_and_factory_validation();
 
     if (all_ok) {
         ESP_LOGI(TAG, "==================================================");
