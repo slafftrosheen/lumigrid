@@ -313,7 +313,7 @@
         config.groups[g].enabled = mask !== 0;
       }
 
-      await saveDeviceConfig(nodeIp, config);
+      await saveDeviceConfig(nodeIp, config, config.checksum);
       toastMsg(`Channel ${selectedChannel.port} saved`);
       closeConfigModal();
       await loadData(nodeIp, loadGen);
@@ -382,7 +382,7 @@
         enabled: groupForm.enabled && newMask > 0,
       };
 
-      await saveDeviceConfig(nodeIp, config);
+      await saveDeviceConfig(nodeIp, config, config.checksum);
       toastMsg(`Group "${config.groups[editingGroupIdx].name}" saved`);
       closeGroupModal();
       await loadData(nodeIp, loadGen);

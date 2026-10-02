@@ -26,6 +26,9 @@
     getNodeLiveState,
     getNodeLiveSnapshot,
   } from '$lib/state/nodeStore';
+  import { getRecoveryStatus, type RecoveryStatus } from '$lib/api/recovery';
+  import type { NodeIdentity } from '$lib/api/node';
+  import CommissioningWizard from '$lib/components/system/CommissioningWizard.svelte';
 
   // Active node & fleet
   let nodeIp   = $state('');
@@ -39,6 +42,37 @@
   let authed         = $derived(currentSession !== null);
   let userRole       = $derived(currentSession?.role ?? 'unknown');
   let isAdmin        = $derived(userRole === 'admin');
+
+  // Recovery & Commissioning (LG-036.1)
+  let recoveryStatus = $state<RecoveryStatus | null>(null);
+  let showFirstInstallWizard = $state(false);
+
+  let isRecoveryMode = $derived(
+    recoveryStatus?.safeMode === true ||
+    liveState.health?.startup?.state === 'recovery' ||
+    liveState.health?.output?.state === 'recovery'
+  );
+
+  const wizardIdentity = $derived<NodeIdentity>({
+    id: liveState.nodeId || 'unknown',
+    name: 'LumiGrid Node',
+    family: 'led-node',
+    model: 'LumiGrid LED Node',
+    hardwareRevision: 'v1.0',
+    firmwareVersion: '1.0.0',
+  });
+
+  async function pollRecovery(ip: string) {
+    if (!ip) {
+      recoveryStatus = null;
+      return;
+    }
+    try {
+      recoveryStatus = await getRecoveryStatus(ip);
+    } catch {
+      // Node offline or unreachable
+    }
+  }
 
   // Node auth status & login/bootstrap form state
   let authStatus       = $state<AuthStatusResponse | null>(null);
@@ -111,6 +145,7 @@
         expiresAt: Date.now() + res.expiresIn * 1000,
       });
       bootstrapKeyInput = '';
+      showFirstInstallWizard = true;
     } catch (err) {
       authError = err instanceof Error ? err.message : String(err);
     } finally {
@@ -250,6 +285,7 @@
     nodeIp = ip;
     selectLiveNode(ip);
     checkNodeAuth(ip);
+    pollRecovery(ip);
   }
 
   onMount(() => {
@@ -259,6 +295,7 @@
     if (nodeIp) {
       checkNodeAuth(nodeIp);
       connect(nodeIp);
+      pollRecovery(nodeIp);
     }
 
     const unsubAuth = nodeAuthStore.subscribe(() => {
@@ -276,7 +313,12 @@
     const onRegistryChanged = () => refreshNodeList();
     window.addEventListener(NODE_REGISTRY_CHANGED_EVENT, onRegistryChanged);
 
+    const recInterval = setInterval(() => {
+      if (nodeIp) pollRecovery(nodeIp);
+    }, 10000);
+
     return () => {
+      clearInterval(recInterval);
       unsubAuth();
       unsubLive();
       window.removeEventListener(NODE_REGISTRY_CHANGED_EVENT, onRegistryChanged);
@@ -306,7 +348,7 @@
     { group: 'System',   href: '/dashboard/uptime',       icon: '▣',  label: 'Uptime' },
     { group: 'System',   href: '/dashboard/diagnostics',  icon: '⚕',  label: 'Diagnostics' },
     { group: 'System',   href: '/dashboard/factory',      icon: '⚙',  label: 'Factory', adminOnly: true },
-    { group: 'System',   href: '/dashboard/firmware',     icon: '⟳',  label: 'Firmware', adminOnly: true },
+    { group: 'System',   href: '/dashboard/firmware',     icon: '⟳',  label: 'System & Recovery', adminOnly: true },
   ];
 
   const mobilePrimaryHrefs = new Set([
@@ -689,6 +731,17 @@
   {/if}
 
   <main class="dash-main">
+    {#if isRecoveryMode}
+      <div class="global-recovery-banner" role="alert" id="global-recovery-banner">
+        <span class="global-recovery-icon">⚠</span>
+        <div class="global-recovery-body">
+          <strong>RECOVERY MODE</strong>
+          <span>Outputs are disabled.</span>
+        </div>
+        <a href="/dashboard/firmware" class="global-recovery-link">Open System & Recovery</a>
+      </div>
+    {/if}
+
     {#if routeRequiresAdmin && !isAdmin}
       <section class="access-gate" aria-labelledby="access-gate-title">
         <div class="access-gate-icon" aria-hidden="true">◇</div>
@@ -1619,7 +1672,67 @@
     }
   }
 
+  .global-recovery-banner {
+    background: #3a1010;
+    border: 1px solid #ff453a;
+    border-radius: 8px;
+    padding: 12px 18px;
+    margin-bottom: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    color: #fff;
+  }
+
+  .global-recovery-icon {
+    font-size: 1.4rem;
+    color: #ff453a;
+  }
+
+  .global-recovery-body {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex: 1;
+  }
+
+  .global-recovery-body strong {
+    color: #ff453a;
+    letter-spacing: 0.05em;
+  }
+
+  .global-recovery-body span {
+    color: #ffb0b0;
+    font-size: 0.9rem;
+  }
+
+  .global-recovery-link {
+    background: #ff453a;
+    color: #fff;
+    border-radius: 6px;
+    padding: 6px 14px;
+    font-size: 0.82rem;
+    font-weight: 600;
+    text-decoration: none;
+    white-space: nowrap;
+  }
+
+  .global-recovery-link:hover {
+    background: #e0382f;
+  }
+
   @media (max-width: 430px) {
     .mobile-more-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   }
 </style>
+
+{#if showFirstInstallWizard && nodeIp}
+  <CommissioningWizard
+    {nodeIp}
+    nodeId={liveState.nodeId || 'unknown'}
+    identity={wizardIdentity}
+    onClose={() => { showFirstInstallWizard = false; }}
+    onComplete={() => { showFirstInstallWizard = false; }}
+  />
+{/if}

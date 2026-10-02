@@ -4,7 +4,7 @@ import * as storageModule from './storage';
 import * as transportModule from '../api/transport';
 import { apiJson } from '../api/node';
 import { saveNetworkConfig } from '../api/config';
-import { postOta } from '../api/firmware';
+import { uploadFirmware } from '../api/firmware';
 
 class MockStorage implements Storage {
   private store: Record<string, string> = {};
@@ -275,7 +275,7 @@ describe('node-authoritative auth & session invariants', () => {
     });
 
     const dummyFirmware = new Blob(['fake binary firmware']);
-    await postOta('192.168.1.10', dummyFirmware);
+    await uploadFirmware('192.168.1.10', dummyFirmware);
 
     expect(xhrHeaders['Authorization']).toBe('Bearer ota-sess-token-99');
     expect(xhrHeaders['X-Auth-Token']).toBeUndefined();

@@ -2,10 +2,16 @@
  * Staged Fleet OTA Deployment orchestrator.
  * Workflow:
  *   Firmware package -> preflight -> canary -> verify -> concurrency-limited fleet deployment
+ *
+ * Implements LG-036.1 contracts:
+ * - Uses uploadFirmware canonical endpoint (POST /api/v1/ota)
+ * - Identifies nodes strictly by immutable NodeRecord.id
+ * - Canary rollback immediately halts entire deployment
+ * - Confirmed targetVersion check (rollback is NEVER success)
  */
 
 import { getHealth, getCapabilities } from './node';
-import { postOta, type OtaCommandResult } from './firmware';
+import { uploadFirmware, getOtaStatus, isOtaSuccess, isOtaRolledBack } from './firmware';
 
 export interface DeploymentPlan {
   id: string;
@@ -142,7 +148,7 @@ export async function executeStagedDeployment(
   notify('canary', [canaryId], canaryId);
 
   try {
-    await postOta(canaryIp, binary);
+    await uploadFirmware(canaryIp, binary);
   } catch (e) {
     failed.push(canaryId);
     notify('failed', [], canaryId, `Canary OTA upload failed on ${canaryId}: ${e}`);
@@ -151,10 +157,11 @@ export async function executeStagedDeployment(
 
   // Verify canary node after reboot
   notify('verifying', [canaryId], canaryId);
-  const canaryVerified = await pollVerification(canaryIp, plan.targetVersion, verifyDelayMs, verifyTimeoutMs);
+  const canaryVerified = await pollVerification(canaryIp, plan.targetVersion, verifyDelayMs, verifyTimeoutMs, canaryId);
   if (!canaryVerified) {
     failed.push(canaryId);
-    notify('failed', [], canaryId, `Canary validation failed on ${canaryId}`);
+    notify('failed', [], canaryId, `Canary validation failed on ${canaryId} (rolled back or verification timed out)`);
+    // STOP deployment — no remaining nodes update!
     return { success: false, completed, failed };
   }
   completed.push(canaryId);
@@ -172,8 +179,8 @@ export async function executeStagedDeployment(
       const batchResults = await Promise.allSettled(
         batch.map(async (nodeId) => {
           const ip = nodeAddressMap.get(nodeId)!;
-          await postOta(ip, binary);
-          const ok = await pollVerification(ip, plan.targetVersion, verifyDelayMs, verifyTimeoutMs);
+          await uploadFirmware(ip, binary);
+          const ok = await pollVerification(ip, plan.targetVersion, verifyDelayMs, verifyTimeoutMs, nodeId);
           if (!ok) throw new Error(`Verification failed on ${nodeId}`);
           return nodeId;
         })
@@ -200,14 +207,32 @@ async function pollVerification(
   ip: string,
   targetVersion: string,
   delayMs: number,
-  timeoutMs: number
+  timeoutMs: number,
+  expectedNodeId?: string
 ): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, delayMs));
     try {
-      const caps = await getCapabilities(ip);
-      if (caps && (!targetVersion || caps.node.firmware === targetVersion)) {
+      const caps = await getCapabilities(ip).catch(() => null);
+      if (expectedNodeId && caps?.node?.id && caps.node.id !== expectedNodeId) {
+        continue;
+      }
+
+      // Check OTA status directly
+      const status = await getOtaStatus(ip).catch(() => null);
+      if (status) {
+        if (isOtaRolledBack(status)) {
+          // Automatic rollback detected — this is a failure!
+          return false;
+        }
+        if (isOtaSuccess(status) || (status.state === 'confirmed' && (!targetVersion || status.runningVersion === targetVersion))) {
+          const health = await getHealth(ip);
+          if (!health.output.fault) {
+            return true;
+          }
+        }
+      } else if (caps && (!targetVersion || caps.node.firmware === targetVersion)) {
         const health = await getHealth(ip);
         if (!health.output.fault) {
           return true;

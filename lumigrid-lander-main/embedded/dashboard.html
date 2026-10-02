@@ -867,10 +867,11 @@
 
                     <article class="product-card">
                         <h4>Backup & Recovery</h4>
-                        <p class="help" style="margin-bottom:0.75rem;">Export or restore device configurations and scenes.</p>
-                        <button class="button-secondary" style="width:100%; margin-bottom:0.75rem" onclick="lg.downloadBackup()">Export Config JSON</button>
-                        <input type="file" id="restore-file" accept=".json" style="margin-bottom:0.75rem;">
-                        <button class="button-primary" style="width:100%" onclick="lg.uploadRestore()">Restore From JSON</button>
+                        <p class="help" style="margin-bottom:0.75rem;">Export or restore device configurations and scenes via streaming package (.lgbak).</p>
+                        <button class="button-secondary" style="width:100%; margin-bottom:0.75rem" onclick="lg.downloadBackup()">Export Backup (.lgbak)</button>
+                        <input type="file" id="restore-file" accept=".lgbak,.json" style="margin-bottom:0.75rem;">
+                        <button class="button-primary" style="width:100%" onclick="lg.uploadRestore()">Validate & Restore</button>
+                        <div id="restore-status" class="help" style="margin-top:0.5rem;"></div>
                     </article>
                 </div>
 
@@ -2525,26 +2526,71 @@ window.lg = (() => {
     async function downloadBackup() {
         try {
             const res = await fetch('/api/v1/backup', { headers: { Authorization: 'Bearer ' + state.token } });
-            if (!res.ok) throw new Error('Backup download failed');
+            if (!res.ok) throw new Error('Backup download failed (' + res.statusText + ')');
             const blob = await res.blob();
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
-            a.href = url; a.download = 'lumigrid_config.json';
+            a.href = url; a.download = 'lumigrid_backup.lgbak';
             a.click(); URL.revokeObjectURL(url);
-            toast('Configuration backup downloaded.');
+            toast('Streaming backup (.lgbak) downloaded.');
         } catch (e) { toast(e.message, true); }
     }
 
     async function uploadRestore() {
         const fileInput = byId('restore-file');
         const file = fileInput?.files[0];
-        if (!file) return toast('Select a .json file first.', true);
+        if (!file) return toast('Select a .lgbak backup file first.', true);
+
+        const statusEl = byId('restore-status');
+        if (statusEl) statusEl.textContent = 'Validating backup package preflight...';
+
         try {
-            const txt = await file.text();
-            await api('/api/v1/restore', 'POST', JSON.parse(txt));
-            toast('Restore successful. Rebooting node...');
-            setTimeout(() => location.reload(), 4000);
-        } catch (e) { toast(e.message, true); }
+            // Stage 1: Preflight validation
+            const validateRes = await fetch('/api/v1/restore/validate', {
+                method: 'POST',
+                headers: {
+                    Authorization: 'Bearer ' + state.token,
+                    'Content-Type': 'application/x-lumigrid-backup'
+                },
+                body: file
+            });
+            if (!validateRes.ok) {
+                const errData = await validateRes.json().catch(() => ({}));
+                throw new Error(errData.error || `Preflight validation failed (${validateRes.statusText})`);
+            }
+            const preflight = await validateRes.json();
+            if (!preflight.valid) {
+                throw new Error(preflight.error || 'Restore package is not valid');
+            }
+
+            const sceneCount = preflight.plan?.scenes ?? 0;
+            const cueCount = preflight.plan?.cueLists ?? 0;
+            const hasCfg = preflight.plan?.deviceConfig ? 'Yes' : 'No';
+            if (statusEl) {
+                statusEl.textContent = `Preflight OK: Device Config: ${hasCfg}, Scenes: ${sceneCount}, Cue Lists: ${cueCount}. Applying restore...`;
+            }
+
+            // Stage 2: Commit restore
+            const restoreRes = await fetch('/api/v1/restore', {
+                method: 'POST',
+                headers: {
+                    Authorization: 'Bearer ' + state.token,
+                    'Content-Type': 'application/x-lumigrid-backup'
+                },
+                body: file
+            });
+            if (!restoreRes.ok) {
+                const errData = await restoreRes.json().catch(() => ({}));
+                throw new Error(errData.error || `Restore failed (${restoreRes.statusText})`);
+            }
+
+            if (statusEl) statusEl.textContent = 'Restore applied successfully! Node restarting...';
+            toast('Restore applied. Node restarting...');
+            setTimeout(() => location.reload(), 6000);
+        } catch (e) {
+            if (statusEl) statusEl.textContent = 'Error: ' + e.message;
+            toast(e.message, true);
+        }
     }
 
     function updateText(id, txt) {

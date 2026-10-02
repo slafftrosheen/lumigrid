@@ -446,9 +446,9 @@
           ...currentCfg,
           syncEnabled: nodePlan.syncEnabled,
           syncRole: nodePlan.syncRole,
-          syncToken: nodePlan.syncToken,
+          pendingSyncToken: nodePlan.syncToken,
           groupLabel: nodePlan.groupLabel,
-        });
+        }, currentCfg.checksum);
       }
 
       configSuccess = `Sync group applied successfully to ${Object.keys(plan).length} nodes!`;

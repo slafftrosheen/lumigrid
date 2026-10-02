@@ -1,4 +1,4 @@
-import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
+import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { runPreflightCheck, executeStagedDeployment, type DeploymentPlan } from './deployment';
 import * as nodeApi from './node';
 import * as firmwareApi from './firmware';
@@ -10,7 +10,7 @@ describe('Staged Fleet Deployment', () => {
 
   const mockHealthyCapabilities = {
     schema: 1,
-    node: { family: 'led-node', model: 'lg-led-v1', firmware: '0.8.0', hardwareRevision: 'A' },
+    node: { id: 'lg-01', family: 'led-node', model: 'lg-led-v1', firmware: '0.8.0', hardwareRevision: 'A' },
     limits: { pixelLanes: 8, pwmChannels: 8, zones: 8, layersPerZone: 3, presets: 32, timelineSteps: 16 },
     features: { addressable: true, pwm: true, artnet: true, sacn: true, sync: true, mqtt: true, factory: true, ota: true, signedOta: true, backup: true },
     protocols: { httpApi: 1, websocket: 2, sync: 1 },
@@ -61,7 +61,7 @@ describe('Staged Fleet Deployment', () => {
       output: { ...mockHealthyHealth.output, fault: true },
     } as any);
 
-    const postOtaSpy = vi.spyOn(firmwareApi, 'postOta');
+    const uploadSpy = vi.spyOn(firmwareApi, 'uploadFirmware');
 
     const plan: DeploymentPlan = {
       id: 'dep-1',
@@ -80,17 +80,33 @@ describe('Staged Fleet Deployment', () => {
     const result = await executeStagedDeployment(plan, nodeMap, new Blob(['bin']));
     expect(result.success).toBe(false);
     expect(plan.state).toBe('failed');
-    expect(postOtaSpy).not.toHaveBeenCalled();
+    expect(uploadSpy).not.toHaveBeenCalled();
   });
 
   it('executeStagedDeployment runs canary gate then remaining batch concurrency', async () => {
-    vi.spyOn(nodeApi, 'getCapabilities').mockResolvedValue(mockHealthyCapabilities as any);
+    vi.spyOn(nodeApi, 'getCapabilities').mockImplementation(async (ip) => {
+      let id = 'lg-canary';
+      if (ip.endsWith('.102')) id = 'lg-02';
+      if (ip.endsWith('.103')) id = 'lg-03';
+      return {
+        ...mockHealthyCapabilities,
+        node: { ...mockHealthyCapabilities.node, id },
+      } as any;
+    });
     vi.spyOn(nodeApi, 'getHealth').mockResolvedValue(mockHealthyHealth as any);
-    const postOtaSpy = vi.spyOn(firmwareApi, 'postOta').mockResolvedValue({
-      status: 'success',
+    const uploadSpy = vi.spyOn(firmwareApi, 'uploadFirmware').mockResolvedValue({
       accepted: true,
       commandId: 10,
       jobId: 1,
+      targetVersion: '0.8.0',
+      projectName: 'lumigrid',
+      state: 'pending_reboot',
+    });
+    vi.spyOn(firmwareApi, 'getOtaStatus').mockResolvedValue({
+      state: 'confirmed',
+      runningVersion: '0.8.0',
+      targetVersion: '0.8.0',
+      rolledBack: false,
     });
 
     const progressStates: string[] = [];
@@ -120,11 +136,63 @@ describe('Staged Fleet Deployment', () => {
 
     expect(result.success).toBe(true);
     expect(result.completed).toEqual(['lg-canary', 'lg-02', 'lg-03']);
-    expect(postOtaSpy).toHaveBeenCalledTimes(3);
+    expect(uploadSpy).toHaveBeenCalledTimes(3);
     expect(progressStates).toContain('preflight');
     expect(progressStates).toContain('canary');
     expect(progressStates).toContain('verifying');
     expect(progressStates).toContain('deploying');
     expect(progressStates).toContain('completed');
+  });
+
+  it('canary rollback halts rollout immediately without updating remaining nodes', async () => {
+    vi.spyOn(nodeApi, 'getCapabilities').mockResolvedValue(mockHealthyCapabilities as any);
+    vi.spyOn(nodeApi, 'getHealth').mockResolvedValue(mockHealthyHealth as any);
+    const uploadSpy = vi.spyOn(firmwareApi, 'uploadFirmware').mockResolvedValue({
+      accepted: true,
+      commandId: 10,
+      jobId: 1,
+      targetVersion: '0.8.0',
+      projectName: 'lumigrid',
+      state: 'pending_reboot',
+    });
+    // Canary rolls back
+    vi.spyOn(firmwareApi, 'getOtaStatus').mockResolvedValue({
+      state: 'rolled_back',
+      runningVersion: '0.7.0',
+      targetVersion: '0.8.0',
+      previousVersion: '0.7.0',
+      rolledBack: true,
+      reason: 'verification_failed',
+    });
+
+    const plan: DeploymentPlan = {
+      id: 'dep-rollback',
+      targetVersion: '0.8.0',
+      nodeIds: ['lg-canary', 'lg-02', 'lg-03'],
+      canaryCount: 1,
+      concurrency: 2,
+      state: 'preflight',
+    };
+
+    const nodeMap = new Map([
+      ['lg-canary', '192.168.1.100'],
+      ['lg-02', '192.168.1.102'],
+      ['lg-03', '192.168.1.103'],
+    ]);
+
+    const result = await executeStagedDeployment(
+      plan,
+      nodeMap,
+      new Blob(['bin']),
+      undefined,
+      { verifyDelayMs: 10, verifyTimeoutMs: 200 }
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.failed).toContain('lg-canary');
+    // Crucial requirement 46: Canary rollback halts deployment, remaining nodes never touched
+    expect(uploadSpy).toHaveBeenCalledTimes(1);
+    expect(result.completed).toEqual([]);
+    expect(plan.state).toBe('failed');
   });
 });

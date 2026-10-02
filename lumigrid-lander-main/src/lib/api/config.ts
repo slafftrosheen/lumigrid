@@ -1,5 +1,17 @@
 import { apiJson } from './transport';
 
+// ── Hardware limits (firmware-authoritative, never hard-code in UI) ─────────
+
+export interface DeviceConfigLimits {
+  maxPowerMw: number;
+  maxPixelsPerChannel: number;
+  maxGroups: number;
+  maxChannels: number;
+  maxDmxUniverse: number;
+}
+
+// ── Sub-config types ──────────────────────────────────────────────────────────
+
 export interface DeviceProtocolConfig {
   artnetEnabled: boolean;
   sacnEnabled: boolean;
@@ -9,7 +21,6 @@ export interface DeviceProtocolConfig {
   streamTimeoutMs?: number;
   zoneStartChannel?: number;
 }
-
 
 export interface DeviceZoneConfig {
   name: string;
@@ -79,12 +90,71 @@ export interface ChannelGroup {
   index?: number;
 }
 
-/** Internal normalized model used across UI stores and forms. */
+// ── Impact of a config apply (from firmware, not inferred in UI) ──────────────
+
+export interface ConfigApplyImpact {
+  hotApply: boolean;
+  outputRestart: boolean;
+  dmxRestart: boolean;
+  syncRestart: boolean;
+  schedulerRestart: boolean;
+  mqttRestart: boolean;
+  rebootRequired: boolean;
+}
+
+export interface ConfigValidationResponse {
+  valid: boolean;
+  currentChecksum: number;
+  impact: ConfigApplyImpact;
+  warnings: string[];
+}
+
+// ── Config save response ──────────────────────────────────────────────────────
+
+export interface SaveDeviceConfigResponse {
+  accepted: boolean;
+  saved: boolean;
+  commandId: number;
+  checksum: number;
+  apply: string;
+}
+
+// ── Conflict error ────────────────────────────────────────────────────────────
+
+/**
+ * Thrown when PUT /api/v1/config returns 409 config_conflict.
+ * The UI must surface this explicitly — do NOT translate to a generic "Save failed".
+ */
+export class ConfigConflictError extends Error {
+  constructor(public readonly currentChecksum: number) {
+    super(`config_conflict: configuration changed on the node since you opened it (currentChecksum=${currentChecksum})`);
+    this.name = 'ConfigConflictError';
+  }
+}
+
+// ── DeviceConfig (internal normalized model) ──────────────────────────────────
+
+/**
+ * Internal normalized model used across UI stores and forms.
+ *
+ * schema, checksum, limits, syncTokenSet:  read-only metadata from firmware.
+ * pendingSyncToken:  write-only; supply to set a new token (never displayed).
+ * clearSyncToken:    write-only; supply true to remove the existing token.
+ * syncToken field is deliberately absent — GET never returns the secret.
+ */
 export interface DeviceConfig {
+  /** Config schema version from firmware. Survives normalization. */
+  schema: number;
+  /** CRC32 checksum of the persisted config blob. Survives normalization. */
+  checksum: number;
+  /** Firmware-authoritative hardware limits. Never hard-code these in UI. */
+  limits: DeviceConfigLimits;
+
   deviceName: string;
   activePresetIndex: number;
   fallbackPresetIndex: number;
   watchdogTimeoutS: number;
+  /** Use config.limits.maxPowerMw for the allowed maximum. */
   maxPowerMw: number;
   gammaX10: number;
   softStartEnabled: boolean;
@@ -95,7 +165,12 @@ export interface DeviceConfig {
   mqttPort: number;
   syncEnabled: boolean;
   syncRole: number;
-  syncToken?: number;
+  /** True if a sync token is currently set on the node. Never the token value. */
+  syncTokenSet: boolean;
+  /** Write-only: supply to set a new sync token. Never read back. */
+  pendingSyncToken?: number;
+  /** Write-only: supply true to explicitly clear the existing sync token. */
+  clearSyncToken?: boolean;
   serialNumber?: string;
   hardwareRevision?: string;
   siteLabel?: string;
@@ -116,12 +191,21 @@ export interface DeviceConfig {
   softStart?: boolean;
 }
 
+// ── Wire format ───────────────────────────────────────────────────────────────
+
 export interface ChannelConfigWire extends Partial<ChannelConfig> {
   name: string;
 }
 
-/** Wire format as received from or sent to firmware /api/v1/config. */
+/** Wire format as received from firmware GET /api/v1/config. */
 export interface DeviceConfigWire {
+  /** Config schema version. */
+  schema?: number;
+  /** CRC32 checksum of the persisted config. */
+  checksum?: number;
+  /** Hardware limits provided by firmware. */
+  limits?: Partial<DeviceConfigLimits>;
+
   deviceName: string;
   serialNumber?: string;
   hardwareRevision?: string;
@@ -141,7 +225,8 @@ export interface DeviceConfigWire {
   timezone?: string;
   syncEnabled?: boolean;
   syncRole?: number;
-  syncToken?: number;
+  /** Firmware returns a boolean indicating whether a token is set, never the token value. */
+  syncTokenSet?: boolean;
   mqttEnabled?: boolean;
   mqttBroker?: string;
   mqttPort?: number;
@@ -152,6 +237,8 @@ export interface DeviceConfigWire {
   physicalOutputs?: PhysicalOutput[];
   fixtures?: FixtureConfig[];
 }
+
+// ── Normalization ─────────────────────────────────────────────────────────────
 
 const PIXEL_ORDER_MAP: Record<string, number> = {
   RGB: 0,
@@ -173,7 +260,12 @@ const ZONE_ROLE_NAMES = [
   'custom2',
 ];
 
-/** Normalizes raw wire format into strongly-typed internal DeviceConfig. */
+/**
+ * Normalizes raw wire format into strongly-typed internal DeviceConfig.
+ *
+ * Preserves: schema, checksum, limits, syncTokenSet.
+ * Does NOT discard firmware-authoritative metadata.
+ */
 export function normalizeDeviceConfig(wire: DeviceConfigWire): DeviceConfig {
   const activePresetIndex = wire.activePresetIndex ?? wire.activePreset ?? 0;
   const fallbackPresetIndex = wire.fallbackPresetIndex ?? wire.fallbackPreset ?? 0;
@@ -183,8 +275,17 @@ export function normalizeDeviceConfig(wire: DeviceConfigWire): DeviceConfig {
   const softStartEnabled = wire.softStartEnabled ?? wire.softStart ?? true;
   const softStartMs = wire.softStartMs ?? 500;
 
+  // Firmware-authoritative limits — preserve exactly as received.
+  const limits: DeviceConfigLimits = {
+    maxPowerMw: wire.limits?.maxPowerMw ?? 0,
+    maxPixelsPerChannel: wire.limits?.maxPixelsPerChannel ?? 0,
+    maxGroups: wire.limits?.maxGroups ?? 0,
+    maxChannels: wire.limits?.maxChannels ?? 0,
+    maxDmxUniverse: wire.limits?.maxDmxUniverse ?? 0,
+  };
+
   // Normalize channels
-  const channels: ChannelConfig[] = (wire.channels ?? []).map((ch, idx) => {
+  const channels: ChannelConfig[] = (wire.channels ?? []).map((ch) => {
     let addressableType = ch.addressableType ?? 0;
     let pixelCount = ch.pixelCount ?? 0;
     let pixelOrder = ch.pixelOrder ?? 1;
@@ -219,6 +320,12 @@ export function normalizeDeviceConfig(wire: DeviceConfigWire): DeviceConfig {
   });
 
   return {
+    // Firmware-authoritative metadata — MUST survive normalization
+    schema: wire.schema ?? 1,
+    checksum: wire.checksum ?? 0,
+    limits,
+    syncTokenSet: wire.syncTokenSet ?? false,
+
     deviceName: wire.deviceName || 'lumigrid',
     serialNumber: wire.serialNumber ?? '',
     hardwareRevision: wire.hardwareRevision ?? 'v1.0',
@@ -237,7 +344,6 @@ export function normalizeDeviceConfig(wire: DeviceConfigWire): DeviceConfig {
     mqttPort: wire.mqttPort ?? 1883,
     syncEnabled: Boolean(wire.syncEnabled),
     syncRole: wire.syncRole ?? 0,
-    syncToken: wire.syncToken,
     protocol: wire.protocol ?? {
       artnetEnabled: false,
       sacnEnabled: false,
@@ -257,7 +363,20 @@ export function normalizeDeviceConfig(wire: DeviceConfigWire): DeviceConfig {
   };
 }
 
-/** Serializes internal DeviceConfig into canonical public wire contract for PUT /api/v1/config. */
+// ── Serialization ─────────────────────────────────────────────────────────────
+
+/**
+ * Serializes editable DeviceConfig content for PUT /api/v1/config.
+ *
+ * Does NOT include: checksum, limits, syncTokenSet.
+ * These are not ordinary configuration fields.
+ * The save wrapper adds expectedChecksum separately.
+ *
+ * Sync token write-only handling:
+ *   pendingSyncToken present  → include as syncToken in payload to set a new one
+ *   clearSyncToken true       → include clearSyncToken: true to erase
+ *   neither                   → omit sync token entirely (preserves existing)
+ */
 export function serializeDeviceConfig(config: DeviceConfig): Record<string, unknown> {
   const activePreset = config.activePresetIndex ?? config.activePreset ?? 0;
   const fallbackPreset = config.fallbackPresetIndex ?? config.fallbackPreset ?? 0;
@@ -285,9 +404,16 @@ export function serializeDeviceConfig(config: DeviceConfig): Record<string, unkn
   if (config.timezone !== undefined) payload.timezone = config.timezone;
   if (config.syncEnabled !== undefined) payload.syncEnabled = config.syncEnabled;
   if (config.syncRole !== undefined) payload.syncRole = config.syncRole;
-  if (config.syncToken !== undefined && config.syncToken !== null && config.syncToken !== 0) {
-    payload.syncToken = config.syncToken;
+
+  // Write-only sync token handling — never echoed from GET
+  if (config.clearSyncToken === true) {
+    payload.clearSyncToken = true;
+  } else if (config.pendingSyncToken !== undefined && config.pendingSyncToken !== 0) {
+    // Send as syncToken key so firmware recognizes it
+    payload.syncToken = config.pendingSyncToken;
   }
+  // If neither clearSyncToken nor pendingSyncToken: omit entirely (firmware preserves existing)
+
   if (config.mqttEnabled !== undefined) payload.mqttEnabled = config.mqttEnabled;
   if (config.mqttBroker !== undefined) payload.mqttBroker = config.mqttBroker;
   if (config.mqttPort !== undefined) payload.mqttPort = config.mqttPort;
@@ -343,7 +469,7 @@ export function serializeDeviceConfig(config: DeviceConfig): Record<string, unkn
     });
   }
 
-  // Preserve legacy/diagnostic fields if present
+  // Preserve hardware pin/fixture mappings
   if (config.physicalOutputs) payload.physicalOutputs = config.physicalOutputs;
   if (config.fixtures) payload.fixtures = config.fixtures;
   if (config.zones) payload.zones = config.zones;
@@ -351,31 +477,82 @@ export function serializeDeviceConfig(config: DeviceConfig): Record<string, unkn
   return payload;
 }
 
+// ── API functions ─────────────────────────────────────────────────────────────
+
 export async function getDeviceConfig(ip: string): Promise<DeviceConfig> {
   const wire = await apiJson<DeviceConfigWire>(ip, '/api/v1/config');
   return normalizeDeviceConfig(wire);
 }
 
-export function saveDeviceConfig(ip: string, config: DeviceConfig): Promise<{ saved: true }> {
-  const payload = serializeDeviceConfig(config);
-  return apiJson<{ saved: true }>(ip, '/api/v1/config', {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
-}
-
-export function getBackup(ip: string): Promise<Record<string, unknown>> {
-  return apiJson<Record<string, unknown>>(ip, '/api/v1/backup');
-}
-
-export function restoreBackup(ip: string, payload: Record<string, unknown>): Promise<{ restored: true }> {
-  return apiJson<{ restored: true }>(ip, '/api/v1/restore', {
+/**
+ * Validates a candidate config against POST /api/v1/config/validate.
+ * No write occurs. Returns the impact plan from firmware.
+ *
+ * @param expectedChecksum The checksum from the currently loaded config.
+ */
+export async function validateDeviceConfig(
+  ip: string,
+  config: DeviceConfig,
+  expectedChecksum: number,
+): Promise<ConfigValidationResponse> {
+  const configPayload = serializeDeviceConfig(config);
+  const body = { ...configPayload, expectedChecksum };
+  return apiJson<ConfigValidationResponse>(ip, '/api/v1/config/validate', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
+    body: JSON.stringify(body),
   });
 }
+
+/**
+ * Saves config via PUT /api/v1/config with expectedChecksum for conflict detection.
+ *
+ * Throws ConfigConflictError on 409 config_conflict — the caller must surface
+ * explicit UI for this case. Do NOT translate to a generic "Save failed".
+ */
+export async function saveDeviceConfig(
+  ip: string,
+  config: DeviceConfig,
+  expectedChecksum: number,
+): Promise<SaveDeviceConfigResponse> {
+  const configPayload = serializeDeviceConfig(config);
+  const body = { ...configPayload, expectedChecksum };
+
+  let response: Response;
+  try {
+    const { apiFetch } = await import('./transport');
+    response = await apiFetch(ip, '/api/v1/config', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`[${ip}] /api/v1/config → ${msg}`);
+  }
+
+  if (response.status === 409) {
+    let currentChecksum = 0;
+    try {
+      const errBody = await response.clone().json() as { currentChecksum?: number };
+      currentChecksum = errBody.currentChecksum ?? 0;
+    } catch { /* fallback to 0 */ }
+    throw new ConfigConflictError(currentChecksum);
+  }
+
+  if (!response.ok) {
+    let detail = response.statusText;
+    try {
+      const errBody = await response.clone().json() as { error?: string };
+      if (errBody?.error) detail = errBody.error;
+    } catch { /* keep status text */ }
+    throw new Error(`[${ip}] /api/v1/config → HTTP ${response.status}: ${detail}`);
+  }
+
+  return response.json() as Promise<SaveDeviceConfigResponse>;
+}
+
+// ── Network config (stays here — logically part of device config) ─────────────
 
 export type NetworkMode = 'ap_only' | 'sta_only' | 'sta_with_ap_fallback';
 
@@ -433,5 +610,3 @@ export function saveNetworkConfig(
 export function getNetworkStatus(ip: string): Promise<NetworkRuntimeStatus> {
   return apiJson<NetworkRuntimeStatus>(ip, '/api/v1/network/status');
 }
-
-
