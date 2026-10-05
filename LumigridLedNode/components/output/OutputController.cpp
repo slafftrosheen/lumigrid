@@ -1,39 +1,60 @@
 #include "OutputController.hpp"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "lg_board_pins.hpp"
 
 namespace lg {
 
-esp_err_t OutputController::init() {
-    ESP_LOGI("output", "Initializing OutputController...");
-
-    if (mutex_ == nullptr) {
-        mutex_ = xSemaphoreCreateRecursiveMutex();
-        if (mutex_ == nullptr) {
-            return ESP_ERR_NO_MEM;
-        }
-    }
-
-    lock();
-    esp_err_t err = pixels_.init();
-    if (err != ESP_OK) {
-        unlock();
-        return err;
-    }
-
-    err = pwm_.init();
-    if (err != ESP_OK) {
-        pwm_available_.store(false, std::memory_order_release);
-        ESP_LOGW("output", "Failed to init PCA9685 PWM driver (%s). Addressable LEDs will still work, but PWM configurations will be rejected.", esp_err_to_name(err));
-    } else {
-        pwm_available_.store(true, std::memory_order_release);
-    }
-    unlock();
-
-    return ESP_OK;
+// LG-038.1: Heap telemetry helper for OutputController bring-up
+void log_output_heap_stage(const char *stage) {
+  ESP_LOGI(
+      "lumigrid", "HEAP stage=%s free=%lu largest=%lu", stage,
+      (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+      (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
 }
 
+esp_err_t OutputController::init() {
+  ESP_LOGI("output", "Initializing OutputController...");
+
+  if (mutex_ == nullptr) {
+    mutex_ = xSemaphoreCreateRecursiveMutex();
+    if (mutex_ == nullptr) {
+      return ESP_ERR_NO_MEM;
+    }
+  }
+
+  // LG-038.1: OutputController mutex created
+  log_output_heap_stage("output_controller");
+
+  lock();
+  esp_err_t err = pixels_.init();
+  if (err != ESP_OK) {
+    unlock();
+    return err;
+  }
+
+  // LG-038.1: Addressable/RMT topology initialized
+  log_output_heap_stage("addressable_rmt");
+
+  err = pwm_.init();
+  if (err != ESP_OK) {
+    pwm_available_.store(false, std::memory_order_release);
+    ESP_LOGW("output",
+             "Failed to init PCA9685 PWM driver (%s). Addressable LEDs will "
+             "still work, but PWM configurations will be rejected.",
+             esp_err_to_name(err));
+  } else {
+    pwm_available_.store(true, std::memory_order_release);
+  }
+
+  // LG-038.1: PCA9685 initialized
+  log_output_heap_stage("pca9685");
+
+  unlock();
+
+  return ESP_OK;
+}
 esp_err_t OutputController::reconfigure(const DeviceConfig& cfg) {
     lock();
     ESP_LOGI("output", "Reconfiguring OutputController drivers based on DeviceConfig...");
@@ -79,6 +100,11 @@ esp_err_t OutputController::reconfigure(const DeviceConfig& cfg) {
         FixtureProfile prof = (ccfg.addressable_type == AddressableType::SK6812) ? FixtureProfile::SK6812 : FixtureProfile::WS2812;
 
         esp_err_t err = pixels_.configure_lane(ch, gpio, prof, ccfg.pixel_order, ccfg.pixel_count);
+        ESP_LOGI("output", "RMT_ALLOC lane=A%u GPIO=%u format=%s pixels=%u wireBytes=%u result=%s internal=%lu largestInternal=%lu",
+                 ch + 1, gpio, prof == FixtureProfile::SK6812 ? "RGBW" : "RGB",
+                 ccfg.pixel_count, ccfg.pixel_count * (prof == FixtureProfile::SK6812 ? 4u : 3u),
+                 output_err_name(err), (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                 (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
         if (err != ESP_OK) {
             ESP_LOGE("output", "Failed to configure lane %u (GPIO %u): %s. Rolling back all lanes and entering safe blackout!",
                      ch, gpio, output_err_name(err));
@@ -94,6 +120,8 @@ esp_err_t OutputController::reconfigure(const DeviceConfig& cfg) {
             return err;
         }
     }
+
+    log_output_heap_stage("addressable_topology");
 
     // 3. Hardware Configuration: PWM channels (PCA9685 channels P1..P8)
     if (pwm_ok) {

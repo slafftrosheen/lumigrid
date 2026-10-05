@@ -12,6 +12,7 @@
 #include "esp_log.h"
 #include <algorithm>
 #include <cstring>
+#include <new>
 
 static const char* TAG = "LightingRuntime";
 
@@ -22,6 +23,8 @@ inline uint32_t now_ms() { return static_cast<uint32_t>(esp_timer_get_time() / 1
 
 LightingRuntime::LightingRuntime(ControlSourceManager& source_manager, OutputController& controller, ConfigStore& config)
     : source_manager_(source_manager), controller_(controller), config_(config), scene_manager_(config) {
+    live_pending_.reset(new (std::nothrow) LiveDmxFrame{});
+    live_active_.reset(new (std::nothrow) LiveDmxFrame{});
     mutex_ = xSemaphoreCreateMutex();
     shutdown_sem_ = xSemaphoreCreateBinary();
     controller_.set_commit_observer([this](esp_err_t commit_result) {
@@ -74,8 +77,8 @@ void LightingRuntime::stop() {
     controller_.blackout();
     if (mutex_) {
         xSemaphoreTake(mutex_, portMAX_DELAY);
-        live_pending_ = {};
-        live_active_ = {};
+        if (live_pending_) (*live_pending_) = {};
+        if (live_active_) (*live_active_) = {};
         live_pending_dirty_ = true;
         last_live_stream_ms_ = 0;
         source_manager_.release(ControlSource::LiveDmx);
@@ -103,6 +106,12 @@ esp_err_t LightingRuntime::start() {
         ESP_LOGW(TAG, "LightingRuntime start() rejected: previous task has not terminated");
         return ESP_ERR_INVALID_STATE;
     }
+    if (!live_pending_ || !live_active_) {
+        ESP_LOGE(TAG, "Live DMX frame allocation failed; refusing lighting startup");
+        controller_.blackout();
+        lifecycle_state_.store(LifecycleState::Faulted, std::memory_order_release);
+        return ESP_ERR_NO_MEM;
+    }
     lifecycle_state_.store(LifecycleState::Starting, std::memory_order_release);
     shutting_down_.store(false, std::memory_order_release);
     controller_.set_commit_observer([this](esp_err_t commit_result) {
@@ -112,7 +121,13 @@ esp_err_t LightingRuntime::start() {
             ESP_LOGI(TAG, "Armed commit succeeded: output state restored to HEALTHY");
         }
     });
-    config_.load_config(device_cfg_);
+    esp_err_t config_err = config_.load_config(device_cfg_);
+    if (config_err != ESP_OK) {
+        controller_.set_commit_observer(nullptr);
+        controller_.blackout();
+        lifecycle_state_.store(LifecycleState::Faulted, std::memory_order_release);
+        return config_err;
+    }
     power_budget_.set_limit_mw(device_cfg_.max_power_mw);
     power_budget_.set_soft_start(device_cfg_.soft_start_enabled, device_cfg_.soft_start_ms);
     ColorPipeline::set_gamma(device_cfg_.gamma_x10);
@@ -126,7 +141,18 @@ esp_err_t LightingRuntime::start() {
         }
     }
     if (!shutdown_sem_) shutdown_sem_ = xSemaphoreCreateBinary();
-    scene_manager_.init();
+    if (!shutdown_sem_) {
+        controller_.set_commit_observer(nullptr);
+        lifecycle_state_.store(LifecycleState::Faulted, std::memory_order_release);
+        return ESP_ERR_NO_MEM;
+    }
+    esp_err_t scene_err = scene_manager_.init();
+    if (scene_err != ESP_OK) {
+        controller_.set_commit_observer(nullptr);
+        controller_.blackout();
+        lifecycle_state_.store(LifecycleState::Faulted, std::memory_order_release);
+        return scene_err;
+    }
     BaseType_t ret = xTaskCreatePinnedToCore(task_entry, "lighting_rt", 10240, this, 6, &task_handle_, 1);
     if (ret != pdPASS) {
         ESP_LOGE(TAG, "Failed to create task");
@@ -150,9 +176,9 @@ void LightingRuntime::trigger_estop() {
 }
 
 void LightingRuntime::clear_live_frame() {
-    if (!mutex_) return;
+    if (!mutex_ || !live_pending_) return;
     xSemaphoreTake(mutex_, portMAX_DELAY);
-    live_pending_ = {};
+    (*live_pending_) = {};
     live_pending_dirty_ = true;
     last_live_stream_ms_ = 0;
     source_manager_.release(ControlSource::LiveDmx);
@@ -322,7 +348,7 @@ FrameResult LightingRuntime::render_frame(uint32_t current_ms) {
 
     uint32_t render_scene_generation = 0;
     if (!mutex_ || xSemaphoreTake(mutex_, pdMS_TO_TICKS(5)) != pdTRUE) return FrameResult::NoOutput;
-    if (live_pending_dirty_) { live_active_ = live_pending_; live_pending_dirty_ = false; }
+    if (live_pending_dirty_) { (*live_active_) = (*live_pending_); live_pending_dirty_ = false; }
     current_render_scene_ = scene_manager_.process_frame(current_ms);
     current_local_cfg_ = device_cfg_;
     render_scene_generation = requested_scene_generation_.load(std::memory_order_acquire);
@@ -356,11 +382,11 @@ FrameResult LightingRuntime::render_frame(uint32_t current_ms) {
         const uint16_t num_pixels = is_addressable ? std::min<uint16_t>(channel_cfg.pixel_count, MAX_PIXELS) : 1;
 
         ControlSource ch_owner = ctrl_snapshot.resolve_channel(ch, current_ms);
-        if (ch_owner == ControlSource::LiveDmx && live_channel_is_valid(live_active_.channels[ch])) {
+        if (ch_owner == ControlSource::LiveDmx && live_channel_is_valid(live_active_->channels[ch])) {
             ChannelFrame& live_src = current_live_src_;
-            const uint16_t pcount = std::min<uint16_t>(live_active_.channels[ch].pixel_count, num_pixels);
-            for (uint16_t p = 0; p < pcount; ++p) live_src.pixels[p] = live_active_.channels[ch].pixels[p];
-            live_src.pwm = live_active_.channels[ch].pwm;
+            const uint16_t pcount = std::min<uint16_t>(live_active_->channels[ch].pixel_count, num_pixels);
+            for (uint16_t p = 0; p < pcount; ++p) live_src.pixels[p] = live_active_->channels[ch].pixels[p];
+            live_src.pwm = live_active_->channels[ch].pwm;
 
             if (is_addressable) {
                 for (uint16_t px = 0; px < num_pixels; ++px) {
@@ -557,14 +583,14 @@ void LightingRuntime::activate_scene_direct(const SceneConfig& scene, bool immed
 }
 
 bool LightingRuntime::submit_live_frame(const LiveDmxFrame& frame) {
-    if (shutting_down_.load(std::memory_order_acquire) || !mutex_) return false;
+    if (shutting_down_.load(std::memory_order_acquire) || !mutex_ || !live_pending_ || !live_active_) return false;
     if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(10)) != pdTRUE) return false;
     const uint32_t now = now_ms();
-    live_pending_ = frame; live_pending_.timestamp_ms = now; live_pending_dirty_ = true; last_live_stream_ms_ = now;
-    if (!task_handle_) { live_active_ = live_pending_; live_pending_dirty_ = false; }
+    (*live_pending_) = frame; live_pending_->timestamp_ms = now; live_pending_dirty_ = true; last_live_stream_ms_ = now;
+    if (!task_handle_) { (*live_active_) = (*live_pending_); live_pending_dirty_ = false; }
     uint8_t live_zone_mask = 0, live_layer_mask = 0; uint16_t live_channel_mask = 0;
-    for (uint8_t z = 0; z < 8; ++z) for (uint8_t l = 0; l < 3; ++l) if (live_pending_.layers[z][l].active) { live_zone_mask |= (1 << z); live_layer_mask |= (1 << l); }
-    for (uint8_t ch = 0; ch < 16; ++ch) if (live_pending_.channels[ch].active) live_channel_mask |= (1 << ch);
+    for (uint8_t z = 0; z < 8; ++z) for (uint8_t l = 0; l < 3; ++l) if (live_pending_->layers[z][l].active) { live_zone_mask |= (1 << z); live_layer_mask |= (1 << l); }
+    for (uint8_t ch = 0; ch < 16; ++ch) if (live_pending_->channels[ch].active) live_channel_mask |= (1 << ch);
     if (live_zone_mask == 0 && live_channel_mask == 0) source_manager_.release(ControlSource::LiveDmx);
     else source_manager_.acquire(ControlSource::LiveDmx, 0, live_zone_mask, live_layer_mask, live_channel_mask);
     xSemaphoreGive(mutex_); return true;
@@ -589,18 +615,18 @@ DeviceConfig LightingRuntime::get_config_snapshot() const {
 }
 
 void LightingRuntime::inject_live_data(uint8_t zone_idx, uint8_t layer_idx, const BrandColor& color, uint8_t opacity) {
-    if (zone_idx >= 8 || layer_idx >= 3 || !mutex_) return;
+    if (zone_idx >= 8 || layer_idx >= 3 || !mutex_ || !live_pending_) return;
     xSemaphoreTake(mutex_, portMAX_DELAY); const uint32_t now = now_ms();
-    live_pending_.layers[zone_idx][layer_idx].color = color; live_pending_.layers[zone_idx][layer_idx].opacity = opacity;
-    live_pending_.layers[zone_idx][layer_idx].timestamp_ms = now; live_pending_.layers[zone_idx][layer_idx].active = true;
+    live_pending_->layers[zone_idx][layer_idx].color = color; live_pending_->layers[zone_idx][layer_idx].opacity = opacity;
+    live_pending_->layers[zone_idx][layer_idx].timestamp_ms = now; live_pending_->layers[zone_idx][layer_idx].active = true;
     live_pending_dirty_ = true; last_live_stream_ms_ = now;
     source_manager_.acquire(ControlSource::LiveDmx, kLiveFrameFailsafeTimeoutMs, (1 << zone_idx), (1 << layer_idx), 0);
     xSemaphoreGive(mutex_);
 }
 
 void LightingRuntime::inject_live_fixture(uint8_t fixture_idx, const LightValue* pixels, uint16_t count, const uint16_t* pwm_duties, uint8_t opacity) {
-    if (fixture_idx >= 16 || !mutex_) return;
-    xSemaphoreTake(mutex_, portMAX_DELAY); const uint32_t now = now_ms(); auto& lf = live_pending_.channels[fixture_idx];
+    if (fixture_idx >= 16 || !mutex_ || !live_pending_) return;
+    xSemaphoreTake(mutex_, portMAX_DELAY); const uint32_t now = now_ms(); auto& lf = live_pending_->channels[fixture_idx];
     uint16_t pcount = std::min<uint16_t>(count, MAX_PIXELS); lf.pixel_count = pcount;
     if (pixels && pcount > 0) std::memcpy(lf.pixels.data(), pixels, pcount * sizeof(LightValue));
     if (pwm_duties) {
@@ -612,20 +638,20 @@ void LightingRuntime::inject_live_fixture(uint8_t fixture_idx, const LightValue*
 }
 
 std::array<uint8_t, 512> LightingRuntime::last_dmx_data() const {
-    if (!mutex_) {
+    if (!mutex_ || !live_active_) {
         return {};
     }
     xSemaphoreTake(mutex_, portMAX_DELAY);
-    auto dmx = live_active_.dmx_telemetry;
+    auto dmx = live_active_->dmx_telemetry;
     xSemaphoreGive(mutex_);
     return dmx;
 }
 
 uint8_t LightingRuntime::active_live_objects() const {
-    if (!mutex_ || xSemaphoreTake(mutex_, pdMS_TO_TICKS(5)) != pdTRUE) return 0;
+    if (!mutex_ || !live_active_ || xSemaphoreTake(mutex_, pdMS_TO_TICKS(5)) != pdTRUE) return 0;
     uint8_t count = 0; const uint32_t now = now_ms();
-    for (uint8_t z = 0; z < 8; ++z) for (uint8_t l = 0; l < 3; ++l) { const auto& layer = live_active_.layers[z][l]; if (layer.active && layer.opacity > 0 && now - layer.timestamp_ms <= kLiveFrameFailsafeTimeoutMs) count++; }
-    for (uint8_t ch = 0; ch < 16; ++ch) { const auto& ch_obj = live_active_.channels[ch]; if (ch_obj.active && ch_obj.opacity > 0 && now - ch_obj.timestamp_ms <= kLiveFrameFailsafeTimeoutMs) count++; }
+    for (uint8_t z = 0; z < 8; ++z) for (uint8_t l = 0; l < 3; ++l) { const auto& layer = live_active_->layers[z][l]; if (layer.active && layer.opacity > 0 && now - layer.timestamp_ms <= kLiveFrameFailsafeTimeoutMs) count++; }
+    for (uint8_t ch = 0; ch < 16; ++ch) { const auto& ch_obj = live_active_->channels[ch]; if (ch_obj.active && ch_obj.opacity > 0 && now - ch_obj.timestamp_ms <= kLiveFrameFailsafeTimeoutMs) count++; }
     xSemaphoreGive(mutex_);
     return count;
 }

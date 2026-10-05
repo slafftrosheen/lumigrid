@@ -3,6 +3,7 @@
 #include <atomic>
 #include <functional>
 #include <array>
+#include <memory>
 
 #include "ControlSourceManager.hpp"
 #include "OutputController.hpp"
@@ -311,8 +312,10 @@ private:
     DeviceConfig device_cfg_{};
 
     // Double buffering for LiveDmxFrame
-    LiveDmxFrame live_pending_{};
-    LiveDmxFrame live_active_{};
+    // LG-038.1: Allocate after app_main, leaving DRAM available for scheduler startup.
+    // Owned for the runtime lifetime; stop/start preserves stable buffer addresses.
+    std::unique_ptr<LiveDmxFrame> live_pending_;
+    std::unique_ptr<LiveDmxFrame> live_active_;
     bool live_pending_dirty_{false};
     uint32_t last_live_stream_ms_ = 0;
 

@@ -1,0 +1,110 @@
+Direct-call stack audit of latest ELF; excludes indirect calls, interrupts and ROM frames.
+Individual frame bounds are not proof of target stack safety.
+
+app_main: estimated direct-call maximum 9776 bytes
+     80 app_main
+   1616 lg::LumigridRuntime::init()
+     64 lg::LightingRuntime::start()
+   1632 lg::SceneManager::init()
+     32 lg::ConfigStore::load_scene(unsigned char, lg::SceneConfig&)
+   1456 _ZN2lg11ConfigStore10load_sceneEhRNS_11SceneConfigE$part$0
+    192 lg::ConfigStore::load_scene(unsigned char, lg::SceneConfig&)::{lambda(char const*, lg::SceneConfig&)#1}::operator()(char const*, lg::SceneConfig&) const
+     32 lg::ConfigStore::load_scene(unsigned char, lg::SceneConfig&)::{lambda(unsigned char)#1}::operator()(unsigned char) const
+   1376 lg::ConfigStore::load_config(lg::DeviceConfig&)
+   1168 lg::ConfigStore::load_config(lg::DeviceConfig&)::{lambda(char const*, lg::DeviceConfig&)#1}::operator()(char const*, lg::DeviceConfig&) const
+     32 nvs_get_blob
+     48 nvs_get_str_or_blob(unsigned long, nvs::ItemType, char const*, void*, unsigned int*)
+    160 _Unwind_Resume
+     96 _Unwind_ForcedUnwind_Phase2
+     48 uw_frame_state_for
+     48 _Unwind_Find_FDE
+     80 search_object
+   1616 fde_radixsort
+lg::LumigridRuntime::start(): estimated direct-call maximum 7472 bytes
+    592 lg::LumigridRuntime::start()
+    560 lg::LumigridRuntime::start_network_services()
+   1648 lg::FactoryApi::start(unsigned short, unsigned short, lg::ConfigStore*, lg::LightingRuntime*, lg::Scheduler*, lg::NodeSync*, lg::DmxRouter*, lg::CueRunner*, lg::ShowTransportCoordinator*)
+   1376 lg::ConfigStore::load_config(lg::DeviceConfig&)
+   1168 lg::ConfigStore::load_config(lg::DeviceConfig&)::{lambda(char const*, lg::DeviceConfig&)#1}::operator()(char const*, lg::DeviceConfig&) const
+     32 nvs_get_blob
+     48 nvs_get_str_or_blob(unsigned long, nvs::ItemType, char const*, void*, unsigned int*)
+    160 _Unwind_Resume
+     96 _Unwind_ForcedUnwind_Phase2
+     48 uw_frame_state_for
+     48 _Unwind_Find_FDE
+     80 search_object
+   1616 fde_radixsort
+lg::LumigridRuntime::start_network_services(): estimated direct-call maximum 6880 bytes
+    560 lg::LumigridRuntime::start_network_services()
+   1648 lg::FactoryApi::start(unsigned short, unsigned short, lg::ConfigStore*, lg::LightingRuntime*, lg::Scheduler*, lg::NodeSync*, lg::DmxRouter*, lg::CueRunner*, lg::ShowTransportCoordinator*)
+   1376 lg::ConfigStore::load_config(lg::DeviceConfig&)
+   1168 lg::ConfigStore::load_config(lg::DeviceConfig&)::{lambda(char const*, lg::DeviceConfig&)#1}::operator()(char const*, lg::DeviceConfig&) const
+     32 nvs_get_blob
+     48 nvs_get_str_or_blob(unsigned long, nvs::ItemType, char const*, void*, unsigned int*)
+    160 _Unwind_Resume
+     96 _Unwind_ForcedUnwind_Phase2
+     48 uw_frame_state_for
+     48 _Unwind_Find_FDE
+     80 search_object
+   1616 fde_radixsort
+httpd_start: estimated direct-call maximum 768 bytes
+     96 httpd_start
+     32 calloc
+     32 _calloc_r
+     32 heap_caps_malloc_default
+     32 heap_caps_malloc
+     48 heap_caps_malloc_base
+     32 multi_heap_malloc
+     32 multi_heap_internal_lock
+     48 xPortEnterCriticalTimeout
+    288 __assert_func
+     32 spi_flash_cache_enabled
+     32 cache_hal_is_cache_enabled
+     32 esp_dport_access_reg_read
+lg::FactoryApi::start(unsigned short, unsigned short, lg::ConfigStore*, lg::LightingRuntime*, lg::Scheduler*, lg::NodeSync*, lg::DmxRouter*, lg::CueRunner*, lg::ShowTransportCoordinator*): estimated direct-call maximum 6320 bytes
+   1648 lg::FactoryApi::start(unsigned short, unsigned short, lg::ConfigStore*, lg::LightingRuntime*, lg::Scheduler*, lg::NodeSync*, lg::DmxRouter*, lg::CueRunner*, lg::ShowTransportCoordinator*)
+   1376 lg::ConfigStore::load_config(lg::DeviceConfig&)
+   1168 lg::ConfigStore::load_config(lg::DeviceConfig&)::{lambda(char const*, lg::DeviceConfig&)#1}::operator()(char const*, lg::DeviceConfig&) const
+     32 nvs_get_blob
+     48 nvs_get_str_or_blob(unsigned long, nvs::ItemType, char const*, void*, unsigned int*)
+    160 _Unwind_Resume
+     96 _Unwind_ForcedUnwind_Phase2
+     48 uw_frame_state_for
+     48 _Unwind_Find_FDE
+     80 search_object
+   1616 fde_radixsort
+lg::MdnsService::start(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, unsigned short, lg::NodeIdentity const&): estimated direct-call maximum 704 bytes
+    112 lg::MdnsService::start(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, unsigned short, lg::NodeIdentity const&)
+     48 mdns_service_add
+     48 mdns_service_add_for_host
+     80 mdns_service_add_for_host_base
+     48 mdns_priv_probe_all_pcbs
+     48 mdns_priv_init_pcb_probe
+     64 init_probe_new_service
+     80 mdns_priv_create_probe_packet
+     48 mdns_priv_append_host_list_in_services
+     32 append_host
+     64 mdns_priv_create_answer
+     32 esp_get_free_heap_size
+
+Largest application frames:
+ 2992 lg::get_backup(httpd_req*)
+ 2064 lg::evaluate_scene_references(lg::FactoryApi*, unsigned char)
+ 1872 lg::(anonymous namespace)::get_info(httpd_req*)
+ 1744 lg::collect_runtime_snapshot(lg::FactoryApi*, unsigned long)
+ 1728 lg::LumigridRuntime::execute_network_apply(lg::NetworkApplyRequest const&)
+ 1696 lg::Scheduler::evaluate(lg::Sequence const&, unsigned long long)
+ 1680 lg::SceneManager::activate_scene_custom(unsigned char, unsigned short, lg::TransitionCurve, unsigned long)
+ 1648 lg::SceneManager::prepare_manual_transition(unsigned char)
+ 1648 lg::SceneManager::process_frame(unsigned long)
+ 1648 lg::FactoryApi::start(unsigned short, unsigned short, lg::ConfigStore*, lg::LightingRuntime*, lg::Scheduler*, lg::NodeSync*, lg::DmxRouter*, lg::CueRunner*, lg::ShowTransportCoordinator*)
+ 1632 lg::SceneManager::init()
+ 1616 lg::LumigridRuntime::init()
+ 1504 lg::LightingRuntime::reload_device_config()
+ 1472 lg::ingest_backup_package(httpd_req*, lg::ParsedBackupPackage&, lg::ConfigStore*)
+ 1472 lg::FactoryApi::ws_broadcast_work(void*)
+ 1392 lg::CertificationService::start_session(lg::CertificationProfile, char const*)
+ 1376 lg::ConfigStore::load_config(lg::DeviceConfig&)
+ 1376 lg::CertificationService::init(lg::ConfigStore*, lg::FactoryRunner*, lg::JobManager*, lg::NodeIdentity const&, std::function<lg::CertificationProbeSnapshot ()>)
+ 1376 lg::CueRunner::stop_locked(lg::CueStopReason, unsigned long long)
+ 1360 lg::DmxRouter::get_active_universes(unsigned short*, unsigned int) const

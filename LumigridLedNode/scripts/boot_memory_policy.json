@@ -1,0 +1,6 @@
+{
+  "scheduler_memory_owner": "ESP-IDF port_common.c",
+  "platform": "espressif32@6.7.0",
+  "esp_idf": "5.2.1",
+  "documentation": "docs/LG-038.1-BOOT-HOTFIX.md"
+}

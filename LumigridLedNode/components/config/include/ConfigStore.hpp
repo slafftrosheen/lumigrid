@@ -188,7 +188,7 @@ private:
     bool backup_valid_ = false;
 
     /// Creates a default "Warm White" preset if no presets exist.
-    void ensure_defaults();
+    esp_err_t ensure_defaults();
 
     /// Populates physical hardware definitions based on board constants
     void populate_default_topology(DeviceConfig& config);

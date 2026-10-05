@@ -55,6 +55,8 @@ jobs:
             exit 1
           fi
           # 5. Dedicated invariant checker
+          python LumigridLedNode/scripts/test_boot_config.py
+          python LumigridLedNode/scripts/test_boot_stack.py
           python LumigridLedNode/scripts/check_invariants.py
           # 6. Runtime mathematical and protocol simulation tests
           python LumigridLedNode/scripts/verify_runtime_math.py
@@ -68,6 +70,7 @@ jobs:
           cd LumigridLedNode
           echo "=== Building Factory Environment ==="
           pio run -e factory
+          python scripts/check_invariants.py
           echo "=== Building Test Environment ==="
           pio run -e test
 

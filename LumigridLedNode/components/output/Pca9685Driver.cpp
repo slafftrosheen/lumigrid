@@ -61,7 +61,10 @@ esp_err_t init_i2c_once() {
             .clk_source = I2C_CLK_SRC_DEFAULT,
             .glitch_ignore_cnt = 7,
             .intr_priority = 0,
-            .trans_queue_depth = 4,
+            // IDF 5.2.1 enables async transfers for any nonzero queue depth.
+            // Register readback and writes use stack buffers and require completion
+            // before returning and releasing s_i2c_mutex.
+            .trans_queue_depth = 0,
             .flags = { .enable_internal_pullup = true },
         };
         ESP_RETURN_ON_ERROR(i2c_new_master_bus(&bus_cfg, &s_bus), TAG, "i2c bus create");

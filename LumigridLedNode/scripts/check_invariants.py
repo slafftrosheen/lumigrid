@@ -14,6 +14,7 @@ or lifecycle regressions are discovered in the codebase:
 
 import sys
 import re
+import json
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -212,6 +213,7 @@ cmakelists = NODE_DIR / "CMakeLists.txt"
 if cmakelists.exists():
     check_file_contains(cmakelists, [("CONFIG_LUMIGRID_ENABLE_DEV_CREDENTIALS", "Forbidden dev credentials flag in CMakeLists.txt")])
 
+factory_match = None
 pio_ini = NODE_DIR / "platformio.ini"
 if pio_ini.exists():
     pio_text = pio_ini.read_text(encoding="utf-8")
@@ -227,7 +229,66 @@ if sdk_defs.exists():
     if "CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y" not in sdk_text:
         errors.append("sdkconfig.defaults: CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y is missing")
 
-# 16. LG-036: Backup export must not contain syncToken or Wi-Fi passwords
+# 16. LG-038.1: Factory firmware must not enable unused FreeRTOS static allocation
+#     Project defaults disable application static allocation. The pinned IDF port owns
+#     scheduler memory through its heap-backed hooks (documented owner exception).
+# Explicit owner approved for the pinned IDF port, which forces this option on.
+# Revisit this exception whenever the framework or platform changes.
+owner_path = NODE_DIR / "scripts" / "boot_memory_policy.json"
+try:
+    owner = json.loads(owner_path.read_text(encoding="utf-8"))
+except (OSError, ValueError):
+    owner = {}
+expected_owner = {
+    "scheduler_memory_owner": "ESP-IDF port_common.c",
+    "platform": "espressif32@6.7.0",
+    "esp_idf": "5.2.1",
+    "documentation": "docs/LG-038.1-BOOT-HOTFIX.md",
+}
+framework_owns_scheduler = (
+    owner == expected_owner
+    and (REPO_ROOT / expected_owner["documentation"]).exists()
+    and re.search(r"^platform\s*=\s*espressif32@6\.7\.0\s*$", factory_match.group(1) if factory_match else "", re.MULTILINE)
+    and re.search(r"^framework\s*=\s*espidf\s*$", factory_match.group(1) if factory_match else "", re.MULTILINE)
+)
+for ext in ("*.cpp", "*.hpp", "*.h", "*.c"):
+    for f in list((NODE_DIR / "main").rglob(ext)) + list((NODE_DIR / "components").rglob(ext)):
+        check_file_contains(f, [
+            ("vApplicationGetTimerTaskMemory(", "Application timer scheduler memory hook forbidden"),
+            ("vApplicationGetIdleTaskMemory(", "Application idle scheduler memory hook forbidden"),
+        ])
+
+for sdk_path in (NODE_DIR / "sdkconfig.defaults", NODE_DIR / "sdkconfig.factory.defaults", NODE_DIR / "sdkconfig.factory"):
+    if not sdk_path.exists():
+        errors.append(f"{sdk_path.name}: required production configuration missing")
+        continue
+    sdk_text = sdk_path.read_text(encoding="utf-8")
+    if re.search(r"^CONFIG_FREERTOS_SUPPORT_STATIC_ALLOCATION=y$", sdk_text, re.MULTILINE) and not (sdk_path.name == "sdkconfig.factory" and framework_owns_scheduler):
+        errors.append(f"{sdk_path.name}: Factory/production firmware must not enable CONFIG_FREERTOS_SUPPORT_STATIC_ALLOCATION without an explicit documented static-allocation owner (LG-038.1)")
+
+factory_sdk = NODE_DIR / "sdkconfig.factory"
+if factory_sdk.exists():
+    factory_text = factory_sdk.read_text(encoding="utf-8")
+    for symbol in ("CONFIG_FREERTOS_TIMER_TASK_STACK_DEPTH", "CONFIG_FREERTOS_TIMER_QUEUE_LENGTH"):
+        match = re.search(rf"^{symbol}=(\d+)$", factory_text, re.MULTILINE)
+        if not match or not ((1536 <= int(match.group(1)) <= 32768) if symbol.endswith("STACK_DEPTH") else (5 <= int(match.group(1)) <= 20)):
+            errors.append(f"sdkconfig.factory: {symbol} must be positive and within ESP-IDF limits")
+    main_stack = re.search(r"^CONFIG_ESP_MAIN_TASK_STACK_SIZE=(\d+)$", factory_text, re.MULTILINE)
+    if not main_stack or int(main_stack.group(1)) != 10240:
+        errors.append("sdkconfig.factory: boot stack budgets require the unchanged 10240-byte main stack")
+    # IDF 5.2 enables configUSE_TIMERS unconditionally in FreeRTOSConfig.h.
+    if "# CONFIG_FREERTOS_USE_TIMERS is not set" in factory_text or "CONFIG_FREERTOS_USE_TIMERS=n" in factory_text:
+        errors.append("sdkconfig.factory: timer service must remain enabled")
+
+# LG-038.1: PCA9685 stack buffers require synchronous I2C completion.
+pca_driver = NODE_DIR / "components" / "output" / "Pca9685Driver.cpp"
+if pca_driver.exists():
+    pca_text = pca_driver.read_text(encoding="utf-8")
+    if not re.search(r"\.trans_queue_depth\s*=\s*0\s*,", pca_text):
+        errors.append("Pca9685Driver.cpp: stack buffers require synchronous I2C (trans_queue_depth=0)")
+    check_file_contains(pca_driver, [("i2c_master_register_event_callbacks(", "Asynchronous PCA9685 callbacks invalidate stack buffer lifetime")])
+
+# 17. LG-036: Backup export must not contain syncToken or Wi-Fi passwords
 backup_files = [
     NODE_DIR / "components" / "factory" / "FactoryApi.cpp",
 ]

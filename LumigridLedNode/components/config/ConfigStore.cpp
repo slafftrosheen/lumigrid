@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdarg>
 #include <memory>
+#include <new>
 #include "esp_rom_crc.h"
 #include "lg_board_pins.hpp"
 #include "ChannelHardware.hpp"
@@ -92,7 +93,7 @@ esp_err_t ConfigStore::init() {
     ESP_RETURN_ON_ERROR(err, TAG, "flash init");
     ESP_RETURN_ON_ERROR(nvs_open("lumigrid", NVS_READWRITE, &handle_), TAG, "open");
 
-    ensure_defaults();
+    ESP_RETURN_ON_ERROR(ensure_defaults(), TAG, "defaults");
     ESP_LOGI(TAG, "ConfigStore ready (%u scenes)", scene_count());
     return ESP_OK;
 }
@@ -103,7 +104,9 @@ esp_err_t ConfigStore::init() {
 esp_err_t ConfigStore::save_scene(uint8_t index, const SceneConfig& scene) {
     if (index >= kMaxPresets) return ESP_ERR_INVALID_ARG;
 
-    SceneConfig to_save = scene;
+    std::unique_ptr<SceneConfig> scratch(new (std::nothrow) SceneConfig(scene));
+    if (!scratch) return ESP_ERR_NO_MEM;
+    SceneConfig &to_save = *scratch;
     to_save.checksum = calc_scene_crc(to_save);
 
     char key[12];
@@ -138,19 +141,22 @@ esp_err_t ConfigStore::load_scene(uint8_t index, SceneConfig& scene) {
 
     // Legacy scenes were zone-based. Resolve topology lazily only when an old
     // scene blob is actually encountered; normal v2 scene loads stay NVS-light.
-    DeviceConfig topology_cfg;
+    std::unique_ptr<DeviceConfig> topology_cfg;
+    esp_err_t topology_error = ESP_OK;
     bool topology_checked = false;
     bool have_topology = false;
     bool migrated_legacy_scene = false;
     auto legacy_zone_for_channel = [&](uint8_t channel) -> uint8_t {
         if (!topology_checked) {
-            have_topology = (load_config(topology_cfg) == ESP_OK);
+            topology_cfg.reset(new (std::nothrow) DeviceConfig{});
+            topology_error = topology_cfg ? load_config(*topology_cfg) : ESP_ERR_NO_MEM;
+            have_topology = (topology_error == ESP_OK);
             topology_checked = true;
         }
         if (have_topology && channel < 16) {
             const uint16_t bit = static_cast<uint16_t>(1U << channel);
             for (uint8_t z = 0; z < 8; ++z) {
-                if ((topology_cfg.groups[z].channel_mask & bit) != 0) {
+                if ((topology_cfg->groups[z].channel_mask & bit) != 0) {
                     return z;
                 }
             }
@@ -174,7 +180,8 @@ esp_err_t ConfigStore::load_scene(uint8_t index, SceneConfig& scene) {
                     return ESP_OK;
                 }
             } else if (len == sizeof(SceneConfigV1)) {
-                auto v1 = std::make_unique<SceneConfigV1>();
+                std::unique_ptr<SceneConfigV1> v1(new (std::nothrow) SceneConfigV1{});
+                if (!v1) return ESP_ERR_NO_MEM;
                 err = nvs_get_blob(handle_, k, v1.get(), &len);
                 if (err == ESP_OK) {
                     uint32_t expected_crc = esp_rom_crc32_le(0, (const uint8_t*)v1.get(), sizeof(SceneConfigV1) - sizeof(uint32_t));
@@ -192,6 +199,7 @@ esp_err_t ConfigStore::load_scene(uint8_t index, SceneConfig& scene) {
                             out.channels[ch].layers[l] = v1->zones[legacy_zone_for_channel(ch)].layers[l];
                         }
                     }
+                    if (topology_error == ESP_ERR_NO_MEM) return topology_error;
                     out.checksum = calc_scene_crc(out);
                     migrated_legacy_scene = true;
                     ESP_LOGI(TAG, "Migrated SceneConfigV1 (8-zone) %s to v2 (16-channel)", k);
@@ -247,6 +255,7 @@ esp_err_t ConfigStore::load_scene(uint8_t index, SceneConfig& scene) {
                         out.channels[ch].layers[0].enabled = true;
                     }
                     
+                    if (topology_error == ESP_ERR_NO_MEM) return topology_error;
                     out.checksum = calc_scene_crc(out);
                     migrated_legacy_scene = true;
                     ESP_LOGI(TAG, "Migrated legacy scene %s", k);
@@ -777,7 +786,12 @@ esp_err_t ConfigStore::save_config(const DeviceConfig& config) {
         return val_err;
     }
 
-    auto to_save = std::make_unique<DeviceConfig>(config);
+    std::unique_ptr<DeviceConfig> to_save(new (std::nothrow) DeviceConfig(config));
+    std::unique_ptr<DeviceConfig> verify_buf(new (std::nothrow) DeviceConfig{});
+    if (!to_save || !verify_buf) {
+        persistence_state_ = ConfigPersistenceState::SaveFailed;
+        return ESP_ERR_NO_MEM;
+    }
     to_save->checksum = calc_device_crc(*to_save);
 
     // 1. Transactional primary write & commit (Batch 6 Item 18)
@@ -797,7 +811,6 @@ esp_err_t ConfigStore::save_config(const DeviceConfig& config) {
     }
 
     // 2. Verify primary read-back and checksum before touching backup
-    auto verify_buf = std::make_unique<DeviceConfig>();
     size_t verify_len = sizeof(DeviceConfig);
     err = nvs_get_blob(handle_, "device_cfg", verify_buf.get(), &verify_len);
     if (err != ESP_OK || verify_len != sizeof(DeviceConfig) ||
@@ -1081,7 +1094,8 @@ esp_err_t ConfigStore::load_config(DeviceConfig& config) {
                     return ESP_OK;
                 }
             } else if (len == sizeof(DeviceConfigV2)) {
-                auto v2 = std::make_unique<DeviceConfigV2>();
+                std::unique_ptr<DeviceConfigV2> v2(new (std::nothrow) DeviceConfigV2{});
+                if (!v2) return ESP_ERR_NO_MEM;
                 err = nvs_get_blob(handle_, k, v2.get(), &len);
                 if (err == ESP_OK) {
                     uint32_t expected_crc = esp_rom_crc32_le(0, (const uint8_t*)v2.get(), sizeof(DeviceConfigV2) - sizeof(uint32_t));
@@ -1095,7 +1109,8 @@ esp_err_t ConfigStore::load_config(DeviceConfig& config) {
                     return ESP_OK;
                 }
             } else if (len == sizeof(DeviceConfigV1)) {
-                auto v1 = std::make_unique<DeviceConfigV1>();
+                std::unique_ptr<DeviceConfigV1> v1(new (std::nothrow) DeviceConfigV1{});
+                if (!v1) return ESP_ERR_NO_MEM;
                 err = nvs_get_blob(handle_, k, v1.get(), &len);
                 if (err == ESP_OK) {
                     uint32_t expected_crc = esp_rom_crc32_le(0, (const uint8_t*)v1.get(), sizeof(DeviceConfigV1) - sizeof(uint32_t));
@@ -1104,9 +1119,10 @@ esp_err_t ConfigStore::load_config(DeviceConfig& config) {
                         return ESP_ERR_NVS_INVALID_STATE;
                     }
                     ESP_LOGI(TAG, "Migrating legacy v1 blob %s through v2 to v3", k);
-                    DeviceConfigV2 v2;
-                    migrate_v1_to_v2(*v1, v2);
-                    migrate_v2_to_v3(v2, out);
+                    std::unique_ptr<DeviceConfigV2> v2(new (std::nothrow) DeviceConfigV2{});
+                    if (!v2) return ESP_ERR_NO_MEM;
+                    migrate_v1_to_v2(*v1, *v2);
+                    migrate_v2_to_v3(*v2, out);
                     needs_persist = true;
                     return ESP_OK;
                 }
@@ -1122,9 +1138,11 @@ esp_err_t ConfigStore::load_config(DeviceConfig& config) {
     esp_err_t err = load_from_key("device_cfg", config);
     if (err == ESP_OK) {
         primary_valid_ = true;
-        DeviceConfig bak_cfg;
-        esp_err_t bak_err = load_from_key("device_cfg_bak", bak_cfg);
-        if (bak_err == ESP_OK && bak_cfg.checksum == config.checksum) {
+        std::unique_ptr<DeviceConfig> bak_cfg(new (std::nothrow) DeviceConfig{});
+        if (!bak_cfg) return ESP_ERR_NO_MEM;
+        esp_err_t bak_err = load_from_key("device_cfg_bak", *bak_cfg);
+        if (bak_err == ESP_ERR_NO_MEM) return bak_err;
+        if (bak_err == ESP_OK && bak_cfg->checksum == config.checksum) {
             backup_valid_ = true;
             persistence_state_ = ConfigPersistenceState::Synchronized;
         } else {
@@ -1155,8 +1173,7 @@ esp_err_t ConfigStore::load_config(DeviceConfig& config) {
         populate_default_topology(config);
         config.schema_version = 3;
         config.checksum = calc_device_crc(config);
-        save_config(config);
-        return ESP_OK;
+        return save_config(config);
     } else if (err == ESP_OK) {
         if (needs_persist) {
             ESP_LOGI(TAG, "Persisting migrated/updated DeviceConfig to NVS");
@@ -1166,7 +1183,8 @@ esp_err_t ConfigStore::load_config(DeviceConfig& config) {
                 return s_err;
             }
 
-            auto verify_cfg = std::make_unique<DeviceConfig>();
+            std::unique_ptr<DeviceConfig> verify_cfg(new (std::nothrow) DeviceConfig{});
+            if (!verify_cfg) return ESP_ERR_NO_MEM;
             size_t verify_len = sizeof(DeviceConfig);
             esp_err_t v_err = nvs_get_blob(handle_, "device_cfg", verify_cfg.get(), &verify_len);
             if (v_err != ESP_OK || verify_len != sizeof(DeviceConfig) || verify_cfg->checksum != calc_device_crc(*verify_cfg)) {
@@ -1547,14 +1565,18 @@ esp_err_t ConfigStore::load_network_settings(NetworkSettings& settings) {
 
 // ── Defaults ────────────────────────────────────────────────────────
 
-void ConfigStore::ensure_defaults() {
-    auto test = std::make_unique<SceneConfig>();
-    if (load_scene(0, *test) == ESP_OK) return; // Already has scenes
+esp_err_t ConfigStore::ensure_defaults() {
+    std::unique_ptr<SceneConfig> scratch(new (std::nothrow) SceneConfig{});
+    if (!scratch) return ESP_ERR_NO_MEM;
+    const esp_err_t load_err = load_scene(0, *scratch);
+    if (load_err == ESP_OK) return ESP_OK; // Already has scenes
+    if (load_err != ESP_ERR_NVS_NOT_FOUND && load_err != ESP_ERR_NVS_INVALID_STATE &&
+        load_err != ESP_ERR_NVS_INVALID_LENGTH) return load_err;
 
     ESP_LOGI(TAG, "No scenes found, creating defaults...");
 
     // ── Product-Grade Default Scenes ──
-    auto s_open = std::make_unique<SceneConfig>();
+    SceneConfig *s_open = scratch.get();
     s_open->reset();
     safe_strncpy(s_open->name, "Store Open", sizeof(s_open->name));
     s_open->global_brightness = 180;
@@ -1568,9 +1590,10 @@ void ConfigStore::ensure_defaults() {
     esp_err_t err = save_scene(0, *s_open);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to save default scene 0: %s", esp_err_to_name(err));
+        return err;
     }
 
-    auto s_night = std::make_unique<SceneConfig>();
+    SceneConfig *s_night = scratch.get();
     s_night->reset();
     safe_strncpy(s_night->name, "Night Mode", sizeof(s_night->name));
     s_night->global_brightness = 40;
@@ -1584,7 +1607,9 @@ void ConfigStore::ensure_defaults() {
     err = save_scene(1, *s_night);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to save default scene 1: %s", esp_err_to_name(err));
+        return err;
     }
+    return ESP_OK;
 }
 
 uint32_t ConfigStore::compute_device_crc(const DeviceConfig& dc) {

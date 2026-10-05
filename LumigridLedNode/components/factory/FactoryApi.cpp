@@ -7078,14 +7078,124 @@ esp_err_t FactoryApi::start(
     show_transport_ = show_transport;
 
     const char* dev_name = nullptr;
-    DeviceConfig cfg;
-    if (config_ && config_->load_config(cfg) == ESP_OK) {
+    std::unique_ptr<DeviceConfig> cfg_storage(new (std::nothrow) DeviceConfig{});
+    if (!cfg_storage) return ESP_ERR_NO_MEM;
+    DeviceConfig &cfg = *cfg_storage;
+    if (config_) {
+        const esp_err_t cfg_err = config_->load_config(cfg);
+        if (cfg_err != ESP_OK) return cfg_err;
         dev_name = cfg.device_name;
     }
     identity_ = get_node_identity(dev_name);
+    cfg_storage.reset();
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
+    static const httpd_uri_t factory_routes[] = {
+        // ── Factory test endpoints ──
+        { .uri = "/api/v1/factory/status",         .method = HTTP_GET,  .handler = get_status,                 .user_ctx = nullptr },
+        { .uri = "/api/v1/factory/effect",         .method = HTTP_POST, .handler = post_effect,                .user_ctx = nullptr },
+        { .uri = "/api/v1/factory/lane",           .method = HTTP_POST, .handler = post_lane,                  .user_ctx = nullptr },
+        { .uri = "/api/v1/factory/pwm",            .method = HTTP_POST, .handler = post_pwm,                   .user_ctx = nullptr },
+        { .uri = "/api/v1/factory/abort",          .method = HTTP_POST, .handler = post_abort,                 .user_ctx = nullptr },
+        { .uri = "/api/v1/factory/auto-loop",      .method = HTTP_POST, .handler = post_auto_loop,             .user_ctx = nullptr },
+        { .uri = "/api/v1/factory/test/start",     .method = HTTP_POST, .handler = post_factory_test_start,    .user_ctx = nullptr },
+        { .uri = "/api/v1/factory/test/confirm",   .method = HTTP_POST, .handler = post_factory_test_confirm,  .user_ctx = nullptr },
+        { .uri = "/api/v1/factory/test/abort",     .method = HTTP_POST, .handler = post_factory_test_abort,    .user_ctx = nullptr },
+        { .uri = "/api/v1/factory/test/report",    .method = HTTP_GET,  .handler = get_factory_test_report,    .user_ctx = nullptr },
+        { .uri = "/api/v1/factory/burn-in/start",  .method = HTTP_POST, .handler = post_factory_burn_in_start,  .user_ctx = nullptr },
+        { .uri = "/api/v1/factory/burn-in/stop",   .method = HTTP_POST, .handler = post_factory_burn_in_stop,   .user_ctx = nullptr },
+    };
+
+    static const httpd_uri_t signage_routes[] = {
+        // ── WebSocket + Dashboard + Preflight ──
+        { .uri = "/ws",         .method = HTTP_GET,     .handler = ws_handler,      .user_ctx = nullptr,
+          .is_websocket = true, .handle_ws_control_frames = false, .supported_subprotocol = nullptr },
+        { .uri = "/",           .method = HTTP_GET,     .handler = serve_dashboard, .user_ctx = nullptr },
+        { .uri = "/index.html", .method = HTTP_GET,     .handler = serve_dashboard, .user_ctx = nullptr },
+        { .uri = "/dashboard",  .method = HTTP_GET,     .handler = serve_dashboard, .user_ctx = nullptr },
+        { .uri = "/favicon.ico",.method = HTTP_GET,     .handler = get_favicon,     .user_ctx = nullptr },
+        { .uri = "/api/v1/*",   .method = HTTP_OPTIONS, .handler = options_handler, .user_ctx = nullptr },
+        
+        // ── Identity & Info ──
+        { .uri = "/api/v1/info",              .method = HTTP_GET,  .handler = get_info,           .user_ctx = nullptr },
+        { .uri = "/api/v1/identity",          .method = HTTP_GET,  .handler = get_identity,       .user_ctx = nullptr },
+        { .uri = "/api/v1/fleet/nodes",       .method = HTTP_GET,  .handler = get_fleet_nodes,    .user_ctx = nullptr },
+
+        // ── Auth endpoints (LG-029) ──
+        { .uri = "/api/v1/auth/status",       .method = HTTP_GET,  .handler = get_auth_status,   .user_ctx = nullptr },
+        { .uri = "/api/v1/auth/bootstrap",    .method = HTTP_POST, .handler = post_auth_bootstrap,.user_ctx = nullptr },
+        { .uri = "/api/v1/auth/session",      .method = HTTP_POST, .handler = post_auth_session,  .user_ctx = nullptr },
+        { .uri = "/api/v1/auth/session",      .method = HTTP_GET,  .handler = get_auth_session,   .user_ctx = nullptr },
+        { .uri = "/api/v1/auth/session",      .method = HTTP_DELETE,.handler = delete_auth_session,.user_ctx = nullptr },
+        { .uri = "/api/v1/auth/ws-ticket",    .method = HTTP_POST, .handler = post_auth_ws_ticket,.user_ctx = nullptr },
+        { .uri = "/api/v1/auth/credentials",  .method = HTTP_GET,  .handler = get_auth_credentials,.user_ctx = nullptr },
+        { .uri = "/api/v1/auth/credentials",  .method = HTTP_POST, .handler = post_auth_credentials,.user_ctx = nullptr },
+        { .uri = "/api/v1/auth/credentials",  .method = HTTP_DELETE,.handler = delete_auth_credentials,.user_ctx = nullptr },
+
+        // ── Signage endpoints ──
+        { .uri = "/api/v1/capabilities",      .method = HTTP_GET,  .handler = get_capabilities,   .user_ctx = nullptr },
+        { .uri = "/api/v1/jobs/current",      .method = HTTP_GET,  .handler = get_current_job,    .user_ctx = nullptr },
+        { .uri = "/api/v1/channels",          .method = HTTP_GET,  .handler = get_channels,       .user_ctx = nullptr },
+        { .uri = "/api/v1/channel/test",      .method = HTTP_POST, .handler = post_channel_test,  .user_ctx = nullptr },
+        { .uri = "/api/v1/presets/references",.method = HTTP_GET,  .handler = get_preset_references, .user_ctx = nullptr },
+        { .uri = "/api/v1/presets",           .method = HTTP_GET,  .handler = get_presets,      .user_ctx = nullptr },
+        { .uri = "/api/v1/presets",           .method = HTTP_PUT,  .handler = put_preset,       .user_ctx = nullptr },
+        { .uri = "/api/v1/presets",           .method = HTTP_DELETE,.handler = delete_preset,    .user_ctx = nullptr },
+        { .uri = "/api/v1/activate",          .method = HTTP_POST, .handler = post_activate,    .user_ctx = nullptr },
+        { .uri = "/api/v1/config",            .method = HTTP_GET,  .handler = get_device_config, .user_ctx = nullptr },
+        { .uri = "/api/v1/config",            .method = HTTP_PUT,  .handler = put_device_config, .user_ctx = nullptr },
+        { .uri = "/api/v1/config/validate",   .method = HTTP_POST, .handler = post_config_validate, .user_ctx = nullptr },
+        { .uri = "/api/v1/network/config",    .method = HTTP_GET,  .handler = get_network_config, .user_ctx = nullptr },
+        { .uri = "/api/v1/network/config",    .method = HTTP_PUT,  .handler = put_network_config, .user_ctx = nullptr },
+        { .uri = "/api/v1/network/status",    .method = HTTP_GET,  .handler = get_network_status, .user_ctx = nullptr },
+        { .uri = "/api/v1/status",            .method = HTTP_GET,  .handler = get_signage_status, .user_ctx = nullptr },
+        { .uri = "/api/v1/dmx/frame",         .method = HTTP_GET,  .handler = get_dmx_frame,      .user_ctx = nullptr },
+        { .uri = "/api/v1/manual",            .method = HTTP_PUT,   .handler = put_manual,        .user_ctx = nullptr },
+        { .uri = "/api/v1/manual",            .method = HTTP_DELETE,.handler = delete_manual,     .user_ctx = nullptr },
+        { .uri = "/api/v1/effects",           .method = HTTP_GET,  .handler = get_effects,        .user_ctx = nullptr },
+        { .uri = "/api/v1/palettes",          .method = HTTP_GET,  .handler = get_palettes,       .user_ctx = nullptr },
+        { .uri = "/api/v1/health",            .method = HTTP_GET,  .handler = get_health,         .user_ctx = nullptr },
+        { .uri = "/api/v1/diagnostics/output",.method = HTTP_GET,  .handler = get_diagnostics_output, .user_ctx = nullptr },
+        { .uri = "/api/v1/logs",              .method = HTTP_GET,  .handler = get_logs,           .user_ctx = nullptr },
+        { .uri = "/api/v1/sequence",          .method = HTTP_GET,  .handler = get_sequence,     .user_ctx = nullptr },
+        { .uri = "/api/v1/sequence",          .method = HTTP_PUT,  .handler = put_sequence,     .user_ctx = nullptr },
+        { .uri = "/api/v1/schedules",         .method = HTTP_GET,  .handler = get_calendar_schedule, .user_ctx = nullptr },
+        { .uri = "/api/v1/schedules",         .method = HTTP_PUT,  .handler = put_calendar_schedule, .user_ctx = nullptr },
+        { .uri = "/api/v1/scene-motion",      .method = HTTP_GET,  .handler = get_scene_motion, .user_ctx = nullptr },
+        { .uri = "/api/v1/scene-motion",      .method = HTTP_PUT,  .handler = put_scene_motion, .user_ctx = nullptr },
+        { .uri = "/api/v1/scene-motion",      .method = HTTP_DELETE,.handler = delete_scene_motion, .user_ctx = nullptr },
+        { .uri = "/api/v1/cue-lists",         .method = HTTP_GET,  .handler = get_cue_lists,    .user_ctx = nullptr },
+        { .uri = "/api/v1/cue-list",          .method = HTTP_GET,  .handler = get_cue_list,     .user_ctx = nullptr },
+        { .uri = "/api/v1/cue-list",          .method = HTTP_PUT,  .handler = put_cue_list,     .user_ctx = nullptr },
+        { .uri = "/api/v1/cue-list",          .method = HTTP_DELETE,.handler = delete_cue_list,  .user_ctx = nullptr },
+        { .uri = "/api/v1/cue/control",       .method = HTTP_POST, .handler = post_cue_control, .user_ctx = nullptr },
+        { .uri = "/api/v1/cue/status",        .method = HTTP_GET,  .handler = get_cue_status,   .user_ctx = nullptr },
+        { .uri = "/api/v1/show/status",       .method = HTTP_GET,  .handler = get_show_status,   .user_ctx = nullptr },
+        { .uri = "/api/v1/show/control",      .method = HTTP_POST, .handler = post_show_control,  .user_ctx = nullptr },
+        { .uri = "/api/v1/sync",              .method = HTTP_GET,  .handler = get_sync_status,     .user_ctx = nullptr },
+        { .uri = "/api/v1/show-manifest",     .method = HTTP_GET,  .handler = get_show_manifest, .user_ctx = nullptr },
+        { .uri = "/api/v1/audit",             .method = HTTP_GET,  .handler = get_audit_log,       .user_ctx = nullptr },
+        { .uri = "/api/v1/ota",               .method = HTTP_POST, .handler = post_ota,           .user_ctx = nullptr },
+        { .uri = "/api/v1/ota/status",        .method = HTTP_GET,  .handler = get_ota_status,       .user_ctx = nullptr },
+        { .uri = "/api/v1/recovery/status",   .method = HTTP_GET,  .handler = get_recovery_status,  .user_ctx = nullptr },
+        { .uri = "/api/v1/backup",            .method = HTTP_GET,  .handler = get_backup,         .user_ctx = nullptr },
+        { .uri = "/api/v1/restore/validate",  .method = HTTP_POST, .handler = post_restore_validate, .user_ctx = nullptr },
+        { .uri = "/api/v1/restore",           .method = HTTP_POST, .handler = post_restore,       .user_ctx = nullptr },
+        { .uri = "/api/v1/certification/plan",        .method = HTTP_GET,  .handler = get_certification_plan,        .user_ctx = nullptr },
+        { .uri = "/api/v1/certification/status",      .method = HTTP_GET,  .handler = get_certification_status,      .user_ctx = nullptr },
+        { .uri = "/api/v1/certification/start",       .method = HTTP_POST, .handler = post_certification_start,       .user_ctx = nullptr },
+        { .uri = "/api/v1/certification/test/start",  .method = HTTP_POST, .handler = post_certification_test_start,  .user_ctx = nullptr },
+        { .uri = "/api/v1/certification/test/result", .method = HTTP_POST, .handler = post_certification_test_result, .user_ctx = nullptr },
+        { .uri = "/api/v1/certification/abort",       .method = HTTP_POST, .handler = post_certification_abort,       .user_ctx = nullptr },
+        { .uri = "/api/v1/certification/report",      .method = HTTP_GET,  .handler = get_certification_report,      .user_ctx = nullptr },
+    };
+
 
     httpd_config_t http_config = HTTPD_DEFAULT_CONFIG();
-    http_config.max_uri_handlers = 80;
+    // Keep capacity aligned with the actual registered routes.
+    http_config.max_uri_handlers = sizeof(factory_routes) / sizeof(factory_routes[0]) +
+                                   sizeof(signage_routes) / sizeof(signage_routes[0]);
     http_config.stack_size = 8192;
     http_config.lru_purge_enable = true;
     http_config.recv_wait_timeout = 10;
@@ -7095,119 +7205,20 @@ esp_err_t FactoryApi::start(
     ESP_RETURN_ON_ERROR(httpd_start(&signage_server_, &http_config), "factory-api", "start server");
     factory_server_ = signage_server_;
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
-    const httpd_uri_t factory_routes[] = {
-        // ── Factory test endpoints ──
-        { .uri = "/api/v1/factory/status",         .method = HTTP_GET,  .handler = get_status,                 .user_ctx = this },
-        { .uri = "/api/v1/factory/effect",         .method = HTTP_POST, .handler = post_effect,                .user_ctx = this },
-        { .uri = "/api/v1/factory/lane",           .method = HTTP_POST, .handler = post_lane,                  .user_ctx = this },
-        { .uri = "/api/v1/factory/pwm",            .method = HTTP_POST, .handler = post_pwm,                   .user_ctx = this },
-        { .uri = "/api/v1/factory/abort",          .method = HTTP_POST, .handler = post_abort,                 .user_ctx = this },
-        { .uri = "/api/v1/factory/auto-loop",      .method = HTTP_POST, .handler = post_auto_loop,             .user_ctx = this },
-        { .uri = "/api/v1/factory/test/start",     .method = HTTP_POST, .handler = post_factory_test_start,    .user_ctx = this },
-        { .uri = "/api/v1/factory/test/confirm",   .method = HTTP_POST, .handler = post_factory_test_confirm,  .user_ctx = this },
-        { .uri = "/api/v1/factory/test/abort",     .method = HTTP_POST, .handler = post_factory_test_abort,    .user_ctx = this },
-        { .uri = "/api/v1/factory/test/report",    .method = HTTP_GET,  .handler = get_factory_test_report,    .user_ctx = this },
-        { .uri = "/api/v1/factory/burn-in/start",  .method = HTTP_POST, .handler = post_factory_burn_in_start,  .user_ctx = this },
-        { .uri = "/api/v1/factory/burn-in/stop",   .method = HTTP_POST, .handler = post_factory_burn_in_stop,   .user_ctx = this },
-    };
-
-    const httpd_uri_t signage_routes[] = {
-        // ── WebSocket + Dashboard + Preflight ──
-        { .uri = "/ws",         .method = HTTP_GET,     .handler = ws_handler,      .user_ctx = this,
-          .is_websocket = true, .handle_ws_control_frames = false, .supported_subprotocol = nullptr },
-        { .uri = "/",           .method = HTTP_GET,     .handler = serve_dashboard, .user_ctx = this },
-        { .uri = "/index.html", .method = HTTP_GET,     .handler = serve_dashboard, .user_ctx = this },
-        { .uri = "/dashboard",  .method = HTTP_GET,     .handler = serve_dashboard, .user_ctx = this },
-        { .uri = "/favicon.ico",.method = HTTP_GET,     .handler = get_favicon,     .user_ctx = this },
-        { .uri = "/api/v1/*",   .method = HTTP_OPTIONS, .handler = options_handler, .user_ctx = nullptr },
-        
-        // ── Identity & Info ──
-        { .uri = "/api/v1/info",              .method = HTTP_GET,  .handler = get_info,           .user_ctx = this },
-        { .uri = "/api/v1/identity",          .method = HTTP_GET,  .handler = get_identity,       .user_ctx = this },
-        { .uri = "/api/v1/fleet/nodes",       .method = HTTP_GET,  .handler = get_fleet_nodes,    .user_ctx = this },
-
-        // ── Auth endpoints (LG-029) ──
-        { .uri = "/api/v1/auth/status",       .method = HTTP_GET,  .handler = get_auth_status,   .user_ctx = this },
-        { .uri = "/api/v1/auth/bootstrap",    .method = HTTP_POST, .handler = post_auth_bootstrap,.user_ctx = this },
-        { .uri = "/api/v1/auth/session",      .method = HTTP_POST, .handler = post_auth_session,  .user_ctx = this },
-        { .uri = "/api/v1/auth/session",      .method = HTTP_GET,  .handler = get_auth_session,   .user_ctx = this },
-        { .uri = "/api/v1/auth/session",      .method = HTTP_DELETE,.handler = delete_auth_session,.user_ctx = this },
-        { .uri = "/api/v1/auth/ws-ticket",    .method = HTTP_POST, .handler = post_auth_ws_ticket,.user_ctx = this },
-        { .uri = "/api/v1/auth/credentials",  .method = HTTP_GET,  .handler = get_auth_credentials,.user_ctx = this },
-        { .uri = "/api/v1/auth/credentials",  .method = HTTP_POST, .handler = post_auth_credentials,.user_ctx = this },
-        { .uri = "/api/v1/auth/credentials",  .method = HTTP_DELETE,.handler = delete_auth_credentials,.user_ctx = this },
-
-        // ── Signage endpoints ──
-        { .uri = "/api/v1/capabilities",      .method = HTTP_GET,  .handler = get_capabilities,   .user_ctx = this },
-        { .uri = "/api/v1/jobs/current",      .method = HTTP_GET,  .handler = get_current_job,    .user_ctx = this },
-        { .uri = "/api/v1/channels",          .method = HTTP_GET,  .handler = get_channels,       .user_ctx = this },
-        { .uri = "/api/v1/channel/test",      .method = HTTP_POST, .handler = post_channel_test,  .user_ctx = this },
-        { .uri = "/api/v1/presets/references",.method = HTTP_GET,  .handler = get_preset_references, .user_ctx = this },
-        { .uri = "/api/v1/presets",           .method = HTTP_GET,  .handler = get_presets,      .user_ctx = this },
-        { .uri = "/api/v1/presets",           .method = HTTP_PUT,  .handler = put_preset,       .user_ctx = this },
-        { .uri = "/api/v1/presets",           .method = HTTP_DELETE,.handler = delete_preset,    .user_ctx = this },
-        { .uri = "/api/v1/activate",          .method = HTTP_POST, .handler = post_activate,    .user_ctx = this },
-        { .uri = "/api/v1/config",            .method = HTTP_GET,  .handler = get_device_config, .user_ctx = this },
-        { .uri = "/api/v1/config",            .method = HTTP_PUT,  .handler = put_device_config, .user_ctx = this },
-        { .uri = "/api/v1/config/validate",   .method = HTTP_POST, .handler = post_config_validate, .user_ctx = this },
-        { .uri = "/api/v1/network/config",    .method = HTTP_GET,  .handler = get_network_config, .user_ctx = this },
-        { .uri = "/api/v1/network/config",    .method = HTTP_PUT,  .handler = put_network_config, .user_ctx = this },
-        { .uri = "/api/v1/network/status",    .method = HTTP_GET,  .handler = get_network_status, .user_ctx = this },
-        { .uri = "/api/v1/status",            .method = HTTP_GET,  .handler = get_signage_status, .user_ctx = this },
-        { .uri = "/api/v1/dmx/frame",         .method = HTTP_GET,  .handler = get_dmx_frame,      .user_ctx = this },
-        { .uri = "/api/v1/manual",            .method = HTTP_PUT,   .handler = put_manual,        .user_ctx = this },
-        { .uri = "/api/v1/manual",            .method = HTTP_DELETE,.handler = delete_manual,     .user_ctx = this },
-        { .uri = "/api/v1/effects",           .method = HTTP_GET,  .handler = get_effects,        .user_ctx = this },
-        { .uri = "/api/v1/palettes",          .method = HTTP_GET,  .handler = get_palettes,       .user_ctx = this },
-        { .uri = "/api/v1/health",            .method = HTTP_GET,  .handler = get_health,         .user_ctx = this },
-        { .uri = "/api/v1/diagnostics/output",.method = HTTP_GET,  .handler = get_diagnostics_output, .user_ctx = this },
-        { .uri = "/api/v1/logs",              .method = HTTP_GET,  .handler = get_logs,           .user_ctx = this },
-        { .uri = "/api/v1/sequence",          .method = HTTP_GET,  .handler = get_sequence,     .user_ctx = this },
-        { .uri = "/api/v1/sequence",          .method = HTTP_PUT,  .handler = put_sequence,     .user_ctx = this },
-        { .uri = "/api/v1/schedules",         .method = HTTP_GET,  .handler = get_calendar_schedule, .user_ctx = this },
-        { .uri = "/api/v1/schedules",         .method = HTTP_PUT,  .handler = put_calendar_schedule, .user_ctx = this },
-        { .uri = "/api/v1/scene-motion",      .method = HTTP_GET,  .handler = get_scene_motion, .user_ctx = this },
-        { .uri = "/api/v1/scene-motion",      .method = HTTP_PUT,  .handler = put_scene_motion, .user_ctx = this },
-        { .uri = "/api/v1/scene-motion",      .method = HTTP_DELETE,.handler = delete_scene_motion, .user_ctx = this },
-        { .uri = "/api/v1/cue-lists",         .method = HTTP_GET,  .handler = get_cue_lists,    .user_ctx = this },
-        { .uri = "/api/v1/cue-list",          .method = HTTP_GET,  .handler = get_cue_list,     .user_ctx = this },
-        { .uri = "/api/v1/cue-list",          .method = HTTP_PUT,  .handler = put_cue_list,     .user_ctx = this },
-        { .uri = "/api/v1/cue-list",          .method = HTTP_DELETE,.handler = delete_cue_list,  .user_ctx = this },
-        { .uri = "/api/v1/cue/control",       .method = HTTP_POST, .handler = post_cue_control, .user_ctx = this },
-        { .uri = "/api/v1/cue/status",        .method = HTTP_GET,  .handler = get_cue_status,   .user_ctx = this },
-        { .uri = "/api/v1/show/status",       .method = HTTP_GET,  .handler = get_show_status,   .user_ctx = this },
-        { .uri = "/api/v1/show/control",      .method = HTTP_POST, .handler = post_show_control,  .user_ctx = this },
-        { .uri = "/api/v1/sync",              .method = HTTP_GET,  .handler = get_sync_status,     .user_ctx = this },
-        { .uri = "/api/v1/show-manifest",     .method = HTTP_GET,  .handler = get_show_manifest, .user_ctx = this },
-        { .uri = "/api/v1/audit",             .method = HTTP_GET,  .handler = get_audit_log,       .user_ctx = this },
-        { .uri = "/api/v1/ota",               .method = HTTP_POST, .handler = post_ota,           .user_ctx = this },
-        { .uri = "/api/v1/ota/status",        .method = HTTP_GET,  .handler = get_ota_status,       .user_ctx = this },
-        { .uri = "/api/v1/recovery/status",   .method = HTTP_GET,  .handler = get_recovery_status,  .user_ctx = this },
-        { .uri = "/api/v1/backup",            .method = HTTP_GET,  .handler = get_backup,         .user_ctx = this },
-        { .uri = "/api/v1/restore/validate",  .method = HTTP_POST, .handler = post_restore_validate, .user_ctx = this },
-        { .uri = "/api/v1/restore",           .method = HTTP_POST, .handler = post_restore,       .user_ctx = this },
-        { .uri = "/api/v1/certification/plan",        .method = HTTP_GET,  .handler = get_certification_plan,        .user_ctx = this },
-        { .uri = "/api/v1/certification/status",      .method = HTTP_GET,  .handler = get_certification_status,      .user_ctx = this },
-        { .uri = "/api/v1/certification/start",       .method = HTTP_POST, .handler = post_certification_start,       .user_ctx = this },
-        { .uri = "/api/v1/certification/test/start",  .method = HTTP_POST, .handler = post_certification_test_start,  .user_ctx = this },
-        { .uri = "/api/v1/certification/test/result", .method = HTTP_POST, .handler = post_certification_test_result, .user_ctx = this },
-        { .uri = "/api/v1/certification/abort",       .method = HTTP_POST, .handler = post_certification_abort,       .user_ctx = this },
-        { .uri = "/api/v1/certification/report",      .method = HTTP_GET,  .handler = get_certification_report,      .user_ctx = this },
-    };
-
-
     for (const auto& endpoint : factory_routes) {
+        httpd_uri_t route = endpoint;
+        if (route.handler != options_handler) route.user_ctx = this;
         ESP_RETURN_ON_ERROR(
-            httpd_register_uri_handler(signage_server_, &endpoint),
+            httpd_register_uri_handler(signage_server_, &route),
             "api",
             "register uri"
         );
     }
     for (const auto& endpoint : signage_routes) {
+        httpd_uri_t route = endpoint;
+        if (route.handler != options_handler) route.user_ctx = this;
         ESP_RETURN_ON_ERROR(
-            httpd_register_uri_handler(signage_server_, &endpoint),
+            httpd_register_uri_handler(signage_server_, &route),
             "api",
             "register uri"
         );

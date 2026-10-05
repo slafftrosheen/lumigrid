@@ -4,6 +4,7 @@
 #include "esp_timer.h"
 #include <algorithm>
 #include <cstring>
+#include <new>
 
 static const char* TAG = "SceneManager";
 
@@ -11,24 +12,30 @@ namespace lg {
 
 SceneManager::SceneManager(ConfigStore& config) : config_(config) {}
 
-void SceneManager::init() {
-    config_.load_config(device_cfg_);
+esp_err_t SceneManager::init() {
+    esp_err_t err = config_.load_config(device_cfg_);
+    if (err != ESP_OK) return err;
     
     uint8_t active_idx = 0;
     config_.load_active_state(active_idx);
 
-    SceneConfig scene;
-    if (config_.load_scene(active_idx, scene) != ESP_OK) {
+    // Startup owns these member buffers; avoid two scene-sized stack values.
+    SceneConfig &scene = current_scene_;
+    err = config_.load_scene(active_idx, scene);
+    if (err == ESP_ERR_NO_MEM) return err;
+    if (err != ESP_OK) {
         active_idx = 0;
-        if (config_.load_scene(0, scene) != ESP_OK) {
+        err = config_.load_scene(0, scene);
+        if (err == ESP_ERR_NO_MEM) return err;
+        if (err != ESP_OK) {
             ESP_LOGW(TAG, "No scenes available, starting with blackout");
-            scene = SceneConfig{};
+            scene.~SceneConfig();
+            new (&scene) SceneConfig{};
             strncpy(scene.name, "Default", sizeof(scene.name) - 1);
             scene.name[sizeof(scene.name) - 1] = '\0';
         }
     }
 
-    current_scene_ = scene;
     render_scene_ = scene;
     active_index_ = active_idx;
     saved_active_index_ = active_idx;
@@ -41,6 +48,7 @@ void SceneManager::init() {
     scene_started_ms_ = now;
     last_command_ms_ = now;
     ESP_LOGI(TAG, "SceneManager starting with scene %u: \"%s\"", active_idx, scene.name);
+    return ESP_OK;
 }
 
 void SceneManager::update_device_config(const DeviceConfig& cfg) {

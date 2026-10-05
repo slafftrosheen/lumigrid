@@ -1,0 +1,69 @@
+Conservative direct-call path sums; excludes indirect calls, ROM frames and interrupts.
+Exception-unwind paths included. This is not a certified worst-case stack bound.
+
+app_main: 5072 bytes
+     80 app_main
+    592 lg::LumigridRuntime::start()
+    560 lg::LumigridRuntime::start_network_services()
+     48 lg::NodeSync::start(lg::NodeRole)
+     32 lg::NodeSync::reset_config_cache()
+   1360 lg::NodeSync::refresh_config_cache()
+     64 lg::ConfigStore::load_config(lg::DeviceConfig&)
+    208 lg::ConfigStore::save_config(lg::DeviceConfig const&)
+     32 nvs_get_blob
+     48 nvs_get_str_or_blob(unsigned long, nvs::ItemType, char const*, void*, unsigned int*)
+    160 _Unwind_Resume
+     96 _Unwind_ForcedUnwind_Phase2
+     48 uw_frame_state_for
+     48 _Unwind_Find_FDE
+     80 search_object
+   1616 fde_radixsort
+
+lg::LumigridRuntime::init(): 3984 bytes
+    320 lg::LumigridRuntime::init()
+     48 lg::ConfigStore::init()
+    848 lg::ConfigStore::scene_count()
+    144 lg::ConfigStore::load_scene(unsigned char, lg::SceneConfig&)
+    192 lg::ConfigStore::load_scene(unsigned char, lg::SceneConfig&)::{lambda(char const*, lg::SceneConfig&)#1}::operator()(char const*, lg::SceneConfig&) const
+     32 lg::ConfigStore::load_scene(unsigned char, lg::SceneConfig&)::{lambda(unsigned char)#1}::operator()(unsigned char) const
+     64 lg::ConfigStore::load_config(lg::DeviceConfig&)
+    208 lg::ConfigStore::save_config(lg::DeviceConfig const&)
+     32 nvs_get_blob
+     48 nvs_get_str_or_blob(unsigned long, nvs::ItemType, char const*, void*, unsigned int*)
+    160 _Unwind_Resume
+     96 _Unwind_ForcedUnwind_Phase2
+     48 uw_frame_state_for
+     48 _Unwind_Find_FDE
+     80 search_object
+   1616 fde_radixsort
+
+lg::LumigridRuntime::start(): 4992 bytes
+    592 lg::LumigridRuntime::start()
+    560 lg::LumigridRuntime::start_network_services()
+     48 lg::NodeSync::start(lg::NodeRole)
+     32 lg::NodeSync::reset_config_cache()
+   1360 lg::NodeSync::refresh_config_cache()
+     64 lg::ConfigStore::load_config(lg::DeviceConfig&)
+    208 lg::ConfigStore::save_config(lg::DeviceConfig const&)
+     32 nvs_get_blob
+     48 nvs_get_str_or_blob(unsigned long, nvs::ItemType, char const*, void*, unsigned int*)
+    160 _Unwind_Resume
+     96 _Unwind_ForcedUnwind_Phase2
+     48 uw_frame_state_for
+     48 _Unwind_Find_FDE
+     80 search_object
+   1616 fde_radixsort
+
+httpd_start: 768 bytes
+     96 httpd_start
+     64 xTaskCreatePinnedToCore
+     32 pvPortMalloc
+     32 heap_caps_malloc
+     48 heap_caps_malloc_base
+     32 multi_heap_malloc
+     32 multi_heap_internal_lock
+     48 xPortEnterCriticalTimeout
+    288 __assert_func
+     32 spi_flash_cache_enabled
+     32 cache_hal_is_cache_enabled
+     32 esp_dport_access_reg_read

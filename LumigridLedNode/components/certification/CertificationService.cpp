@@ -10,6 +10,8 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <memory>
+#include <new>
 
 namespace lg {
 
@@ -43,9 +45,11 @@ esp_err_t CertificationService::init(ConfigStore* config,
     }
 
     if (config_) {
-        DeviceConfig cfg{};
-        config_->load_config(cfg);
-        check_invalidation(cfg, identity_.hw_revision, identity_.fw_version);
+        std::unique_ptr<DeviceConfig> cfg(new (std::nothrow) DeviceConfig{});
+        if (!cfg) return ESP_ERR_NO_MEM;
+        err = config_->load_config(*cfg);
+        if (err != ESP_OK) return err;
+        check_invalidation(*cfg, identity_.hw_revision, identity_.fw_version);
     }
 
     return ESP_OK;
@@ -99,7 +103,7 @@ esp_err_t CertificationService::start_session(CertificationProfile profile, cons
     }
 
     CertificationRecord& rec = store_.current_record();
-    rec = CertificationRecord{};
+    reset_certification_record(rec);
     rec.schema_version = 1;
 
     // Unique immutable session ID

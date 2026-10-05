@@ -5,6 +5,8 @@
 #include "esp_log.h"
 #include "esp_rom_crc.h"
 #include <cstring>
+#include <memory>
+#include <new>
 
 namespace lg {
 
@@ -28,7 +30,10 @@ esp_err_t CertificationStore::init() {
         return ESP_OK;
     }
 
-    CertificationRecord loaded{};
+    // LG-038.1: records exceed the startup stack budget; use checked scratch storage.
+    std::unique_ptr<CertificationRecord> loaded_buffer(new (std::nothrow) CertificationRecord{});
+    if (!loaded_buffer) return ESP_ERR_NO_MEM;
+    CertificationRecord& loaded = *loaded_buffer;
     esp_err_t err = load(loaded);
     if (err == ESP_OK) {
         record_ = loaded;
@@ -41,8 +46,10 @@ esp_err_t CertificationStore::init() {
         return ESP_OK;
     }
 
+    if (err == ESP_ERR_NO_MEM) return err;
+
     // Unformatted or not started yet
-    record_ = CertificationRecord{};
+    reset_certification_record(record_);
     record_.magic = kMagic;
     record_.schema_version = 1;
     record_.sequence = 1;
@@ -55,14 +62,17 @@ esp_err_t CertificationStore::init() {
 }
 
 esp_err_t CertificationStore::load(CertificationRecord& out_record) {
+    std::unique_ptr<CertificationRecord> slot_a_buffer(new (std::nothrow) CertificationRecord{});
+    std::unique_ptr<CertificationRecord> slot_b_buffer(new (std::nothrow) CertificationRecord{});
+    if (!slot_a_buffer || !slot_b_buffer) return ESP_ERR_NO_MEM;
     nvs_handle_t handle;
     esp_err_t err = nvs_open(kNvsNamespace, NVS_READONLY, &handle);
     if (err != ESP_OK) {
         return err;
     }
 
-    CertificationRecord slot_a{};
-    CertificationRecord slot_b{};
+    CertificationRecord& slot_a = *slot_a_buffer;
+    CertificationRecord& slot_b = *slot_b_buffer;
     size_t size_a = sizeof(slot_a);
     size_t size_b = sizeof(slot_b);
 
@@ -115,7 +125,9 @@ esp_err_t CertificationStore::load(CertificationRecord& out_record) {
 }
 
 esp_err_t CertificationStore::save(const CertificationRecord& record) {
-    CertificationRecord to_save = record;
+    std::unique_ptr<CertificationRecord> save_buffer(new (std::nothrow) CertificationRecord(record));
+    if (!save_buffer) return ESP_ERR_NO_MEM;
+    CertificationRecord& to_save = *save_buffer;
     to_save.magic = kMagic;
     to_save.schema_version = 1;
     to_save.sequence = record_.sequence + 1;
@@ -155,7 +167,7 @@ esp_err_t CertificationStore::erase() {
         nvs_commit(handle);
         nvs_close(handle);
     }
-    record_ = CertificationRecord{};
+    reset_certification_record(record_);
     record_.magic = kMagic;
     record_.schema_version = 1;
     record_.session.state = CertificationState::NotStarted;

@@ -1,0 +1,123 @@
+Startup capture begins at 0.559 s after USB reconnect.
+I (559) esp_image: segment 4: paddr=0013b0e8 vaddr=40084f4c size=11464h ( 70756) load
+I (587) esp_image: segment 5: paddr=0014c554 vaddr=50000000 size=00004h (     4) load
+I (599) boot: Loaded app from partition at offset 0x10000
+I (599) boot: Disabling RNG early entropy source...
+I (611) cpu_start: Multicore app
+I (619) cpu_start: Pro cpu start user code
+I (619) cpu_start: cpu freq: 160000000 Hz
+I (619) cpu_start: Application information:
+I (622) cpu_start: Project name:     lumigrid_led_node
+I (628) cpu_start: App version:      1.0.0
+I (633) cpu_start: Compile time:     Oct  5 2026 15:35:22
+I (639) cpu_start: ELF file SHA256:  03c939b2a...
+I (644) cpu_start: ESP-IDF:          5.2.1
+I (649) cpu_start: Min chip rev:     v0.0
+I (654) cpu_start: Max chip rev:     v3.99 
+I (659) cpu_start: Chip rev:         v3.1
+I (664) heap_init: Initializing. RAM available for dynamic allocation:
+I (671) heap_init: At 3FFAE6E0 len 00001920 (6 KiB): DRAM
+I (677) heap_init: At 3FFD2CB8 len 0000D348 (52 KiB): DRAM
+I (683) heap_init: At 3FFE0440 len 00003AE0 (14 KiB): D/IRAM
+I (689) heap_init: At 3FFE4350 len 0001BCB0 (111 KiB): D/IRAM
+I (696) heap_init: At 400963B0 len 00009C50 (39 KiB): IRAM
+I (703) spi_flash: detected chip: generic
+I (706) spi_flash: flash io: dio
+W (710) spi_flash: Detected size(8192k) larger than the size in the binary image header(4096k). Using the size in the binary image header.
+I (725) main_task: Started on CPU0
+I (729) main_task: Calling app_main()
+I (732) lumigrid: BOOT_HEAP: free8=160092 largest8=110592 internal=199280 largestInternal=110592 freeHeap=160092 minimum=160092
+I (747) gpio: GPIO[0]| InputEn: 1| OutputEn: 0| OpenDrain: 0| Pullup: 1| Pulldown: 0| Intr:0 
+I (753) lumigrid: === BOOT START ===
+I (1757) lumigrid: Step 1: Hardware output init...
+I (1757) output: Initializing OutputController...
+I (1757) lumigrid: HEAP stage=output_controller free=158188 largest=94208
+I (1764) aled: Initialising AddressableDriver (8 lanes, max 256 px/lane, parallel RMT)
+I (1772) lumigrid: HEAP stage=addressable_rmt free=158188 largest=94208
+I (1780) gpio: GPIO[25]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 1| Pulldown: 0| Intr:0 
+I (1789) gpio: GPIO[21]| InputEn: 1| OutputEn: 1| OpenDrain: 1| Pullup: 1| Pulldown: 0| Intr:0 
+I (1799) gpio: GPIO[22]| InputEn: 1| OutputEn: 1| OpenDrain: 1| Pullup: 1| Pulldown: 0| Intr:0 
+I (1808) pca9685: I2C bus ready at 100 kHz; external SDA/SCL pull-ups remain recommended
+E (1817) pca9685: PCA9685 not found at configured 0x55 or default 0x40
+E (1824) pca9685: init(158): I2C init
+W (1828) output: Failed to init PCA9685 PWM driver (ESP_ERR_NOT_FOUND). Addressable LEDs will still work, but PWM configurations will be rejected.
+I (1842) lumigrid: HEAP stage=pca9685 free=157008 largest=94208
+I (1849) lumigrid: HEAP stage=output_controller free=157008 largest=94208
+I (1856) lumigrid: Step 1.1: source_manager.init()...
+I (1962) lumigrid: Step 2: config.init()...
+I (2000) config: ConfigStore ready (2 scenes)
+I (2013) lumigrid: HEAP stage=config_store free=155100 largest=94208
+I (2517) auth_store: AuthStore initialized (provisioned=0, schema=1)
+I (2535) auth_manager: Migration: legacy universal credentials detected. Node initialized as UNPROVISIONED.
+W (2536) config: Restoring NetworkSettings from backup slot 'network_b'...
+I (2543) output: Reconfiguring OutputController drivers based on DeviceConfig...
+I (2550) lumigrid: HEAP stage=addressable_topology free=153776 largest=94208
+I (2558) lumigrid: Runtime hardening tests: DISABLED (PRODUCTION IMAGE)
+I (2565) lumigrid: Step 3: lighting.start()...
+I (2605) SceneManager: SceneManager starting with scene 0: "Store Open"
+I (2606) LightingRuntime: LightingRuntime started (gamma=2.2, max_mw=0)
+I (2609) lumigrid: HEAP stage=lighting_runtime free=144296 largest=94208
+I (2616) lumigrid: Step 4: factory_runner.start()...
+I (2623) cert_store: CertificationStore starting fresh (no previous certification record)
+I (2645) lumigrid: HEAP stage=certification free=134492 largest=86016
+W (3160) config: Restoring NetworkSettings from backup slot 'network_b'...
+I (3161) lumigrid: Step 5: wifi.start() - Mode: AP, AP SSID: 'LumiGrid-Factory', STA SSID: ''...
+I (3172) wifi:wifi driver task: 3ffefe44, prio:23, stack:6656, core=0
+I (3184) wifi:wifi firmware version: a9f5b59
+I (3185) wifi:wifi certification version: v7.0
+I (3185) wifi:config NVS flash: enabled
+I (3187) wifi:config nano formating: disabled
+I (3191) wifi:Init data frame dynamic rx buffer num: 16
+I (3196) wifi:Init static rx mgmt buffer num: 5
+I (3200) wifi:Init management short buffer num: 12
+I (3205) wifi:Init dynamic tx buffer num: 16
+I (3209) wifi:Init static rx buffer size: 1600
+I (3213) wifi:Init static rx buffer num: 4
+I (3217) wifi:Init dynamic rx buffer num: 16
+I (3222) wifi_init: rx ba win: 4
+I (3224) wifi_init: tcpip mbox: 32
+I (3229) wifi_init: udp mbox: 6
+I (3232) wifi_init: tcp mbox: 6
+I (3236) wifi_init: tcp tx win: 5760
+I (3240) wifi_init: tcp rx win: 5760
+I (3245) wifi_init: tcp mss: 1440
+I (3249) wifi_init: WiFi IRAM OP enabled
+I (3253) wifi_init: WiFi RX IRAM OP enabled
+I (3258) wifi: Configuring SoftAP: SSID='LumiGrid-Factory', channel=1, authmode=WPA2_PSK
+I (3274) phy_init: phy_version 4791,2c4672b,Dec 20 2023,16:06:06
+I (3349) wifi:mode : softAP (88:f1:55:25:3e:ed)
+I (3355) wifi:Total power save buffer number: 8
+I (3356) wifi:Init max length of beacon: 752/752
+I (3357) wifi:Init max length of beacon: 752/752
+I (3360) lumigrid: HEAP stage=wifi free=84668 largest=45056
+I (3362) esp_netif_lwip: DHCP server started on interface WIFI_AP_DEF with IP: 192.168.4.1
+I (3374) wifi: SoftAP started successfully (SSID: LumiGrid-Factory, Channel: 1)
+W (3382) lumigrid: ==================================================
+W (3389) lumigrid:   ACCESS POINT READY
+W (3393) lumigrid:   SSID:     LumiGrid-Factory
+W (3399) lumigrid:   Security: WPA2 configured
+W (3404) lumigrid:   Web UI:   http://192.168.4.1
+W (3409) lumigrid: ==================================================
+I (3431) lumigrid: Step 6: Setting up network services & API...
+I (3432) lumigrid: Starting scheduler...
+I (3433) scheduler: Timezone set to: UTC0
+I (3437) scheduler: SNTP initialized, waiting for sync...
+I (3457) lumigrid: Starting api.start(80, 8080)...
+I (3487) lumigrid: HEAP stage=http_api free=60828 largest=38912
+I (3488) lumigrid: Starting mdns.start()...
+I (3491) mdns_mem: mDNS task will be created from internal RAM
+I (3497) lumigrid: HEAP stage=mdns free=54972 largest=38912
+I (3501) lumigrid: Starting fleet_discovery.start()...
+I (3508) fleet_disc: Fleet discovery service started for self ID 'lg-88f155253eec'
+I (3515) lumigrid: HEAP stage=fleet_discovery free=50228 largest=38912
+I (3522) lumigrid: Starting artnet.start()...
+I (3529) lumigrid: Starting sacn.start()...
+I (3533) lumigrid: BOOT_STACK minimumFree=7148
+
+Separate sustained-idle capture (33.5 through 73.5 s):
+I (33538) lumigrid: Heartbeat: state=Ready, free_heap=4672
+I (43538) lumigrid: Heartbeat: state=Ready, free_heap=4680
+I (53538) lumigrid: Heartbeat: state=Ready, free_heap=4680
+W (63443) scheduler: SNTP sync failed, sequencer will use local uptime
+I (63538) lumigrid: Heartbeat: state=Ready, free_heap=4680
+I (73538) lumigrid: Heartbeat: state=Ready, free_heap=4680

@@ -164,7 +164,7 @@ private:
     static void net_apply_worker(void* arg);
     void execute_network_apply(const NetworkApplyRequest& req);
     void stop_network_services();
-    void start_network_services();
+    esp_err_t start_network_services();
     void rollback_services(StartupStage failed_stage, esp_err_t error);
 
     OutputController output_;

@@ -12,7 +12,7 @@ class SceneManager {
 public:
     SceneManager(ConfigStore& config);
 
-    void init();
+    esp_err_t init();
     void update_device_config(const DeviceConfig& cfg);
 
     // Returns false when the requested preset cannot be loaded. Callers must not

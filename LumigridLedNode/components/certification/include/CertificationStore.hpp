@@ -4,6 +4,7 @@
 #include "CertificationTypes.hpp"
 #include "CertificationPlan.hpp"
 #include "esp_err.h"
+#include <new>
 
 namespace lg {
 
@@ -18,6 +19,12 @@ struct CertificationRecord {
     BurnInMetrics burn_in{};
     uint32_t checksum = 0;
 };
+
+// Reset directly in owned storage without a record-sized stack temporary.
+inline void reset_certification_record(CertificationRecord& record) {
+    record.~CertificationRecord();
+    new (&record) CertificationRecord{};
+}
 
 class CertificationStore {
 public:
