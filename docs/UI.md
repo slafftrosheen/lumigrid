@@ -84,8 +84,18 @@ The operator interface is organized into primary destinations, visually separati
     - **Two-Stage Restore:** Pre-flight upload validation (`POST /api/v1/restore/validate`) displaying source node provenance, domain plan, and preserved security settings before explicit user confirmation to restore and reboot.
     - **OTA Management:** Single canonical uploader (`POST /api/v1/ota`), exact candidate version verification, cross-reboot OTA status reporting (`confirmed` / `rolled_back`), and canary failure abort for fleet deployments.
 
+18. **Hardware Certification Console (LG-037):**
+    - **Physical Port Matrix:** Direct visualization of physical outputs A1–A8 (Addressable) and P1–P8 (PWM) with test status tiles (`NOT TESTED`, `TESTING`, `WAITING`, `PASS`, `FAIL`, `BLOCKED`, `STALE`).
+    - **Profile Selector:** Toggle between `Development`, `ProductionUnit`, and `ReleaseCandidate` certification scopes with mandatory serial number enforcement on production runs.
+    - **Evidence Submission Workflow:**
+      - Operator observation verification for physical outputs with failure reason categorization (`no_output`, `wrong_port`, `wrong_color_order`, `partial_strip`, `flicker`, `crosstalk`, `unstable`, `other`) and mandatory note.
+      - Instrument measurement entry for calibrated power limiting, PWM duty cycle, and optical skew with plan-owned tolerance evaluation.
+    - **Staleness Banners:** Immediate visual indicator (`CERTIFICATION STALE`) if firmware, hardware revision, or configuration fingerprint drifts from certified state.
+    - **Report Generation:** Printable view and machine-readable JSON export (`lumigrid-certification-<node-id>-<firmware>.json`) strictly excluding secrets.
+
 ### Service
 - **Diagnostics:** Unified maintenance hub featuring live health telemetry, real-time node system logs, security/config audit trails, and hardware validation tests.
-- **System / Firmware:** Device configuration, backup/restore, OTA update, and recovery status.
+- **Certification:** Traceable physical hardware qualification and evidence collection (`/dashboard/certification`).
+- **System / Firmware:** Device configuration, backup/restore, OTA update, and recovery status (`/dashboard/firmware`).
 
 

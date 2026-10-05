@@ -32,13 +32,17 @@ All physical milestones remain explicitly tracked below as `[PENDING BENCH]` unt
 
 ---
 
-## 3. LG-035 Software Baseline Status
+## 3. LG-035 & LG-037 Baseline Status
 
-The software architecture and endpoints for factory validation were implemented in LG-035:
+The software architecture and endpoints for factory validation and traceable hardware certification are implemented:
 - `FactoryRunner` state machine (`Idle`, `Running`, `Completed`, `Aborted`, `Failed`)
 - Addressable and PWM lane test patterns (solid, chase, cycle, full)
 - Time-bounded burn-in job execution
-- `/api/v1/factory/*` control and status reporting
-- Diagnostics and Factory Validation operator UI
+- `CertificationService` dedicated domain for traceable evidence collection (LG-037)
+- Dual-slot NVS persistence (`hw_cert` namespace: `cert_a` / `cert_b`)
+- Versioned certification plans (Plan v1) with `Development`, `ProductionUnit`, and `ReleaseCandidate` profiles
+- Three-tier evidence requirements: `AUTOMATIC`, `OPERATOR OBSERVATION`, and `INSTRUMENT REQUIRED`
+- Anti-spoofing policy: browser cannot forge physical test passes; factory safety caps enforced
+- Operator console at `/dashboard/certification` and embedded summary in `dashboard.html`
 
-Execution of the physical bench tests in Section 2 remains a prerequisite before full product deployment certification.
+See [`docs/HARDWARE_CERTIFICATION.md`](file:///c:/Users/slavd/lumigrid/docs/HARDWARE_CERTIFICATION.md) for full certification catalog, evidence rules, and bench execution plan. Physical certification remains dependent on executing the plan on real reference hardware.

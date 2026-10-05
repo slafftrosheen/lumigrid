@@ -5216,6 +5216,13 @@ bool test_lg029_node_backed_authentication() {
         return true;
     }
 
+    static constexpr uint32_t kMaxPowerMw = 60000;
+
+    struct ParsedBackupPackage {
+        uint8_t schema = 4;
+        char family[32] = "led-node";
+    };
+
     bool test_lg036_configuration_recovery_and_ota() {
         ESP_LOGI(TAG, "Testing LG-036 Configuration, Recovery, Backup/Restore & OTA Hardening...");
 
@@ -5244,7 +5251,7 @@ bool test_lg029_node_backed_authentication() {
             // Invalid addressable type
             cfg1.channels[0].addressable_type = static_cast<AddressableType>(99);
             assert(ConfigStore::validate_config(cfg1, &res) != ESP_OK || !res.valid);
-            cfg1.channels[0].addressable_type = AddressableType::WS2812B;
+            cfg1.channels[0].addressable_type = AddressableType::WS2812;
 
             // Invalid pixel order
             cfg1.channels[0].pixel_order = static_cast<PixelOrder>(99);
@@ -5371,7 +5378,7 @@ bool test_lg029_node_backed_authentication() {
     // 1. CertificationPlan and Catalog Invariants (§110)
     {
         size_t count = CertificationPlan::test_count();
-        assert(count == kCertificationPlanVersion); // plan version count check
+        assert(kCertificationPlanVersion == 1); // plan version check
         const CertificationTestDefinition* tests = CertificationPlan::test_definitions();
         assert(tests != nullptr);
         assert(count == 36); // 36 tests in plan v1
@@ -5414,7 +5421,7 @@ bool test_lg029_node_backed_authentication() {
             DeviceConfig cfg1{};
             cfg1.max_power_mw = 50000;
             cfg1.channels[0].pixel_count = 60;
-            cfg1.channels[0].addressable_type = AddressableType::WS2812B;
+            cfg1.channels[0].addressable_type = AddressableType::WS2812;
             cfg1.channels[0].pixel_order = PixelOrder::GRB;
 
             uint32_t fp1 = CertificationService::compute_hardware_fingerprint(cfg1, "A");

@@ -1228,5 +1228,100 @@ Response after bootloader rollback:
 }
 ```
 
+---
+
+## Hardware Certification & Bench Evidence (LG-037)
+
+The Certification domain manages versioned qualification plans, test lifecycle, evidence recording, and result persistence.
+
+Role requirements:
+- `GET /api/v1/certification/plan`: Operator+
+- `GET /api/v1/certification/status`: Operator+
+- `GET /api/v1/certification/report`: Operator+
+- `POST /api/v1/certification/start`: Admin
+- `POST /api/v1/certification/test/start`: Admin
+- `POST /api/v1/certification/test/result`: Admin
+- `POST /api/v1/certification/abort`: Admin
+
+### Get Certification Plan
+```http
+GET /api/v1/certification/plan
+Authorization: Bearer <operator-or-admin-token>
+```
+Returns active test definitions, profile requirements, tolerances, and required evidence sources (`automatic`, `operator_observation`, `instrument_measurement`).
+
+### Get Certification Status
+```http
+GET /api/v1/certification/status
+Authorization: Bearer <operator-or-admin-token>
+```
+Returns current session summary, passed/failed/pending/total counts, staleness flag, and individual test progress.
+
+### Start Certification Session
+```http
+POST /api/v1/certification/start
+Authorization: Bearer <admin-token>
+Content-Type: application/json
+
+{
+  "profile": "production_unit",
+  "serialNumber": "SN-2026-0042"
+}
+```
+
+### Start Individual Certification Test
+```http
+POST /api/v1/certification/test/start
+Authorization: Bearer <admin-token>
+Content-Type: application/json
+
+{
+  "testId": "ADDR-A1"
+}
+```
+
+### Submit Certification Evidence & Result
+```http
+POST /api/v1/certification/test/result
+Authorization: Bearer <admin-token>
+Content-Type: application/json
+
+{
+  "testId": "ADDR-A1",
+  "passed": true,
+  "evidenceSource": "operator_observation",
+  "note": "Only A1 illuminated, chase complete, no flicker"
+}
+```
+
+For instrument tests:
+```http
+POST /api/v1/certification/test/result
+Authorization: Bearer <admin-token>
+Content-Type: application/json
+
+{
+  "testId": "POWER-LIMIT-001",
+  "passed": true,
+  "evidenceSource": "instrument_measurement",
+  "measuredValue": 3200.0,
+  "unit": "mW",
+  "note": "Measured with calibrated DC power meter"
+}
+```
+
+### Abort Certification Session
+```http
+POST /api/v1/certification/abort
+Authorization: Bearer <admin-token>
+```
+
+### Export Certification Report
+```http
+GET /api/v1/certification/report
+Authorization: Bearer <operator-or-admin-token>
+```
+Returns a comprehensive JSON report containing all test evidence, measurements, attempt counts, and burn-in metrics. Never includes credentials, tokens, or Wi-Fi passwords.
+
 
 

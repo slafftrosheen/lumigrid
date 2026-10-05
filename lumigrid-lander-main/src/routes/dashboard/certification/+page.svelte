@@ -446,15 +446,15 @@
           {@const res = getPortStatus(port)}
           <button
             class="cert-port-tile"
-            class:state-passed={res?.state === 'passed'}
-            class:state-failed={res?.state === 'failed'}
-            class:state-running={res?.state === 'running'}
-            class:state-waiting={res?.state === 'waiting_for_operator'}
-            class:state-blocked={res?.state === 'blocked'}
+            class:cert-state-passed={res?.state === 'passed'}
+            class:cert-state-failed={res?.state === 'failed'}
+            class:cert-state-running={res?.state === 'running'}
+            class:cert-state-waiting={res?.state === 'waiting_for_operator'}
+            class:cert-state-blocked={res?.state === 'blocked'}
             onclick={() => openTestDialog(`ADDR-${port}`)}
           >
-            <div class="tile-top">
-              <span class="tile-port">{port}</span>
+            <div class="cert-tile-top">
+              <span class="cert-tile-port">{port}</span>
               <span class="cert-tile-pill">
                 {#if res?.state === 'passed'}PASS
                 {:else if res?.state === 'failed'}FAIL
@@ -464,10 +464,10 @@
                 {:else}NOT TESTED{/if}
               </span>
             </div>
-            <div class="tile-body">
-              <span class="tile-type">WS2812/SK6812</span>
+            <div class="cert-tile-body">
+              <span class="cert-tile-type">WS2812/SK6812</span>
               {#if res?.attempts && res.attempts > 1}
-                <span class="tile-attempts">Attempts: {res.attempts}</span>
+                <span class="cert-tile-attempts">Attempts: {res.attempts}</span>
               {/if}
             </div>
           </button>
@@ -483,15 +483,15 @@
           {@const res = getPortStatus(port)}
           <button
             class="cert-port-tile"
-            class:state-passed={res?.state === 'passed'}
-            class:state-failed={res?.state === 'failed'}
-            class:state-running={res?.state === 'running'}
-            class:state-waiting={res?.state === 'waiting_for_operator'}
-            class:state-blocked={res?.state === 'blocked'}
+            class:cert-state-passed={res?.state === 'passed'}
+            class:cert-state-failed={res?.state === 'failed'}
+            class:cert-state-running={res?.state === 'running'}
+            class:cert-state-waiting={res?.state === 'waiting_for_operator'}
+            class:cert-state-blocked={res?.state === 'blocked'}
             onclick={() => openTestDialog(`PWM-${port}`)}
           >
-            <div class="tile-top">
-              <span class="tile-port">{port}</span>
+            <div class="cert-tile-top">
+              <span class="cert-tile-port">{port}</span>
               <span class="cert-tile-pill">
                 {#if res?.state === 'passed'}PASS
                 {:else if res?.state === 'failed'}FAIL
@@ -501,10 +501,10 @@
                 {:else}NOT TESTED{/if}
               </span>
             </div>
-            <div class="tile-body">
-              <span class="tile-type">PCA9685 Raw</span>
+            <div class="cert-tile-body">
+              <span class="cert-tile-type">PCA9685 Raw</span>
               {#if res?.measuredValue}
-                <span class="tile-measured">{res.measuredValue} {res.unit}</span>
+                <span class="cert-tile-measured">{res.measuredValue} {res.unit}</span>
               {/if}
             </div>
           </button>
@@ -1089,7 +1089,7 @@ result={reportData.state}</pre>
     flex-direction: column;
     gap: 0.4rem;
   }
-  .port-tile:hover {
+  .cert-port-tile:hover {
     border-color: #64748b;
     transform: translateY(-2px);
   }

@@ -232,7 +232,8 @@ With the completion of LG-029 (Node-Backed Authentication, Sessions & Credential
 
 ## 6. Stop Condition Notice
 
-With the completion of LG-024 (Live Desk Hardening), LG-025 (Fleet Sync Studio & Show Deployment v1), LG-026 (Show Transport v2 & Synchronized Cue Playback), LG-029 (Node-Backed Authentication & Provisioning), LG-030 (Frontend Architecture Alignment), and LG-031 (Canonical Runtime State & API v1 Cutover):
-- **Architecture is frozen** across firmware services, state machines, API contracts, and frontend stores.
+With the completion of LG-024 (Live Desk Hardening), LG-025 (Fleet Sync Studio & Show Deployment v1), LG-026 (Show Transport v2 & Synchronized Cue Playback), LG-029 (Node-Backed Authentication & Provisioning), LG-030 (Frontend Architecture Alignment), LG-031 (Canonical Runtime State & API v1 Cutover), LG-036 / LG-036.1 (System, Recovery & Hardened OTA), and LG-037 (Hardware Certification, Bench Evidence & Production Bring-Up):
+- **Certification workflow and evidence architecture are fully implemented.**
 - **No new feature families** (Scene Studio redesign, Timeline drag/drop, TLS, cloud services) will be introduced before physical hardware validation.
-- Timing certification requires completion of the bench test matrices above on physical LumiGrid LED Node hardware.
+- Physical hardware certification remains dependent on executing the plan on real reference hardware using the procedures defined in [`docs/HARDWARE_CERTIFICATION.md`](file:///c:/Users/slavd/lumigrid/docs/HARDWARE_CERTIFICATION.md).
+

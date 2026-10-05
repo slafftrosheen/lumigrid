@@ -61,7 +61,25 @@ Backup endpoint returns `application/x-lumigrid-backup` (streaming NDJSON `.lgba
 - No proliferation of new effects before the existing scene/effect system is excellent.
 - No second independent dashboard architecture.
 - No Secure Boot or flash encryption in this batch.
-- No CertificationService (LG-037) until LG-036.1 is merged.
+
+### 20. Hardware Certification, Bench Evidence & Production Bring-Up (LG-037)
+
+**Status: Hardware certification workflow implemented.**
+Physical certification remains dependent on executing the plan on real reference hardware.
+
+Architecture delivered:
+- `CertificationService` domain completely decoupled from `FactoryRunner`
+- Versioned certification plans (`kCertificationPlanVersion = 1`)
+- Three explicit profiles: `Development`, `ProductionUnit`, `ReleaseCandidate`
+- Stable test IDs (36 tests in Plan v1)
+- Evidence sources: `AUTOMATIC`, `OPERATOR OBSERVATION`, `INSTRUMENT REQUIRED`
+- Dual-slot NVS storage (`hw_cert` namespace: `cert_a` / `cert_b`) with CRC32 protection
+- Dynamic hardware-relevant configuration fingerprinting and staleness detection
+- Anti-spoofing validation: browser cannot forge physical test results
+- Operator console at `/dashboard/certification` and embedded status in `dashboard.html`
+- Zero secrets invariant: certification reports strictly omit all credentials, tokens, and keys
+
+See [`docs/HARDWARE_CERTIFICATION.md`](file:///c:/Users/slavd/lumigrid/docs/HARDWARE_CERTIFICATION.md) for full certification catalog, evidence rules, and bench execution plan.
 
 ## Definition of Done (Items 1–37 Satisfied)
 
