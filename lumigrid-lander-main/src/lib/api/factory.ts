@@ -37,6 +37,9 @@ export interface FactoryTestSession {
   finishedMs?: number;
   operatorConfirmationRequired?: boolean;
   errorCode?: number;
+  stage?: string;
+  stageIndex?: number;
+  stageCount?: number;
 }
 
 export interface ChannelValidationStatus {

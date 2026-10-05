@@ -71,7 +71,9 @@ Every certification test definition explicitly specifies its required evidence s
 | `ADDR-XTALK` | ADDRESSABLE | `OPERATOR OBSERVATION` | Opt | Req | Req | Crosstalk isolation: active A1 with A2–A8 fully off |
 | `PWM-P1`..`PWM-P8` | PWM | `OPERATOR OBSERVATION` | Req | Req | Req | Stepped duty (0% → 25% → 50% → 75% → 100% cap → 0%) |
 | `PWM-XTALK` | PWM | `OPERATOR OBSERVATION` | Opt | Req | Req | PWM crosstalk isolation & neighboring pin silence |
-| `SAFE-ESTOP-001` | SAFETY | `OPERATOR OBSERVATION` | Req | Req | Req | Hardware E-stop trip: immediate blackout & latched inhibit |
+| `SAFE-ESTOP-LOGIC` | SAFETY | `AUTOMATIC` | Req | Req | Req | Software E-stop state latching & command rejection |
+| `SAFE-ESTOP-PWM` | SAFETY | `INSTRUMENT REQUIRED` | Req | Req | Req | PCA9685 /OE direct fast cutoff & zero PWM voltage |
+| `SAFE-ESTOP-ADDRESSABLE`| SAFETY | `OPERATOR OBSERVATION` | Req | Req | Req | Physical addressable strip blackout observation |
 | `SAFE-DISABLE-001`| SAFETY | `OPERATOR OBSERVATION` | Req | Req | Req | Output disable / OE pin shutdown verification |
 | `SAFE-WATCHDOG-001`| SAFETY | `AUTOMATIC` | Opt | Opt | Req | Live control source loss fallback trigger |
 | `POWER-LIMIT-001` | POWER | `INSTRUMENT REQUIRED` | Opt | Req | Req | Calibrated bench PSU current shunt: measured mW within tolerance |
@@ -89,6 +91,17 @@ Every certification test definition explicitly specifies its required evidence s
 | `SYNC-LEADER-001` | MULTI-NODE | `AUTOMATIC` | Opt | Opt | Req | Leader election stability & follower lock |
 | `SYNC-SCENE-001` | MULTI-NODE | `OPERATOR OBSERVATION` | Opt | Opt | Req | Visually synchronized scene transition |
 | `SYNC-TIMING-001` | MULTI-NODE | `INSTRUMENT REQUIRED` | Opt | Opt | Req | Oscilloscope/logic analyzer inter-node optical skew (<5 ms) |
+
+> [!NOTE]
+> **Physical Timing Realities (LG-038):**
+> - **Total Test Count**: Plan v1 contains **38 tests** across 10 categories.
+> - **Addressable Capacity**: Strictly capped at **256 pixels per lane** (2,048 pixels total per node).
+> - **PWM / I2C Clock**: PCA9685 operates at standard **100 kHz I2C** clock with prescale 5 (~1017 Hz PWM).
+> - **Honest E-Stop Cutoff**:
+>   - PCA9685 `/OE` is asserted HIGH directly via GPIO (<1 µs) without waiting on I2C transactions.
+>   - Addressable LED blackout is protocol-bound to serial wire transmission: ~7.68 ms for 256 pixels of WS2812 (30 µs/px) and ~10.24 ms for SK6812 RGBW (40 µs/px).
+>   - Sub-5ms addressable physical blackout requires a future hardware power-gate / load switch.
+>   - Parallel RMT driver and microsecond telemetry are fully implemented in firmware; physical bench validation remains pending oscilloscope/meter measurement on physical hardware.
 
 ---
 

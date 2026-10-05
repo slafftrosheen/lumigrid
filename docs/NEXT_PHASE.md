@@ -81,6 +81,20 @@ Architecture delivered:
 
 See [`docs/HARDWARE_CERTIFICATION.md`](file:///c:/Users/slavd/lumigrid/docs/HARDWARE_CERTIFICATION.md) for full certification catalog, evidence rules, and bench execution plan.
 
+### 21. Physical Output Engine Stabilization & Certification Truth Pass (LG-038)
+
+**Status: Complete & verified.**
+
+Objectives achieved:
+- **True 8-Lane Parallel RMT Driver**: Deterministic submit-all-then-wait invariant replacing sequential lane blocking. All 8 RMT channels transmit concurrently with hardware-level synchronized start.
+- **Strict Bounded Timeouts**: Protocol-derived timeout margin calculated from physical wire time (`addressable_wait_timeout_us(pixels, rgbw) = wire_time + 20ms`), preventing indefinite driver hangs on electrical fault.
+- **Canonical 256-Pixel Hard Limit**: Replaced oversized 512/1024 claims with honest 256 pixels/lane (2,048 total) canonical limit, guaranteeing wire time <= 7.96 ms (WS2812) / 10.52 ms (SK6812) within 25.0 ms target frame budget (40 FPS).
+- **Safe PCA9685 I2C Operation**: Auxiliary PWM configured at standard-mode 100 kHz I2C (2.16 ms commit duration, leaving > 12 ms frame headroom). Instant hardware-level E-stop via fast dedicated GPIO `/OE` cutoff pin (0 us delay, bypassing I2C bus transactions).
+- **Monotonic Frame Scheduler**: Eliminated catch-up burst loops on deadline misses; dropped frames advance time monotonically without multi-commit spin-locking.
+- **Diagnostic & Telemetry Pipeline**: Exposed honest timing metrics via `/api/v1/diagnostics/output`, WebSocket runtime snapshots, and dedicated Output Engine Timing card on `/dashboard/diagnostics`.
+- **Certification Truth Pass**: Split monolithic `SAFE-ESTOP` into three physically honest tests: `SAFE-ESTOP-LOGIC`, `SAFE-ESTOP-PWM`, and `SAFE-ESTOP-ADDRESSABLE` (total 38 tests in Plan v1). Prohibited CI false PASS claims without real bench oscilloscopes/meters connected.
+- **Factory Partition Discipline**: Kept factory firmware partition strictly within the 1.31 MB (1,310,720 bytes) hard budget.
+
 ## Definition of Done (Items 1–37 Satisfied)
 
 All 37 verification items in the LG-036.1 specification are verified:

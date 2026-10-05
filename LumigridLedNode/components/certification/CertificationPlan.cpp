@@ -103,7 +103,15 @@ static constexpr CertificationTestDefinition kPlanV1Tests[] = {
       300000, 0.0f, 0.0f, "" },
 
     // ── OUTPUT SAFETY ──
-    { "SAFE-ESTOP-001", "OUTPUT SAFETY", "E-Stop Hardware Blackout & Latch",
+    { "SAFE-ESTOP-LOGIC", "OUTPUT SAFETY", "E-Stop Logic Latch & Suppression",
+      EvidenceSource::Automatic, RequirementLevel::Required, RequirementLevel::Required, RequirementLevel::Required,
+      5000, 0.0f, 0.0f, "" },
+
+    { "SAFE-ESTOP-PWM", "OUTPUT SAFETY", "E-Stop Hardware PWM Inhibit",
+      EvidenceSource::InstrumentMeasurement, RequirementLevel::Optional, RequirementLevel::Required, RequirementLevel::Required,
+      300000, 0.0f, 5000.0f, "us" },
+
+    { "SAFE-ESTOP-ADDRESSABLE", "OUTPUT SAFETY", "E-Stop Addressable Blackout Protocol",
       EvidenceSource::OperatorObservation, RequirementLevel::Required, RequirementLevel::Required, RequirementLevel::Required,
       300000, 0.0f, 0.0f, "" },
 

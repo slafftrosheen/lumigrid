@@ -32,4 +32,10 @@ static_assert(kPcaAddress >= 0x40 && kPcaAddress <= 0x7F,
 static_assert(kPcaOe != kI2cSda && kPcaOe != kI2cScl,
               "PCA9685 /OE must not alias the I2C bus");
 
+struct BoardSafetyCapabilities {
+    static constexpr bool kPhysicalEstopInput = false;
+    static constexpr bool kAddressablePowerGate = false;
+    static constexpr bool kPwmOutputEnable = true;
+};
+
 } // namespace lg::board

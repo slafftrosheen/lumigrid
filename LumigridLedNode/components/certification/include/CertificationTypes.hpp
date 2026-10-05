@@ -232,4 +232,19 @@ struct CertificationSession {
     uint32_t checksum = 0;
 };
 
+struct CertificationProbeSnapshot {
+    bool runtime_ready = false;
+
+    bool api_running = false;
+    uint32_t authenticated_ws_clients = 0;
+
+    bool ap_active = false;
+    bool sta_connected = false;
+    bool mdns_running = false;
+
+    bool backup_serializer_healthy = false;
+
+    uint32_t reset_reason = 0;
+};
+
 } // namespace lg

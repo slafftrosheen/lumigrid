@@ -299,12 +299,12 @@ void build_status_json(const FactoryStatus& status, char* response, size_t max_l
         state_str = "waiting_for_operator";
     }
 
-    char session_buf[256];
+    char session_buf[384];
     if (status.session.session_id != 0) {
         snprintf(
             session_buf,
             sizeof(session_buf),
-            "{\"id\":%" PRIu32 ",\"kind\":\"%s\",\"state\":\"%s\",\"channel\":%d,\"startedMs\":%" PRIu64 ",\"finishedMs\":%" PRIu64 ",\"operatorConfirmationRequired\":%s,\"errorCode\":%" PRId32 "}",
+            "{\"id\":%" PRIu32 ",\"kind\":\"%s\",\"state\":\"%s\",\"channel\":%d,\"startedMs\":%" PRIu64 ",\"finishedMs\":%" PRIu64 ",\"operatorConfirmationRequired\":%s,\"errorCode\":%" PRId32 ",\"stage\":\"%s\",\"stageIndex\":%u,\"stageCount\":%u}",
             status.session.session_id,
             test_kind_name(status.session.kind),
             test_state_name(status.session.state),
@@ -312,7 +312,10 @@ void build_status_json(const FactoryStatus& status, char* response, size_t max_l
             status.session.started_ms,
             status.session.finished_ms,
             status.session.operator_confirmation_required ? "true" : "false",
-            status.session.error_code
+            status.session.error_code,
+            test_stage_name(status.session.stage),
+            status.session.stage_index,
+            status.session.stage_count
         );
     } else {
         snprintf(session_buf, sizeof(session_buf), "null");
@@ -993,6 +996,99 @@ esp_err_t get_health(httpd_req_t* request) {
     if (!root) {
         return send_error(request, "500 Internal Server Error", "json_encode_failed");
     }
+    char* json = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (!json) {
+        return send_error(request, "500 Internal Server Error", "json_encode_failed");
+    }
+    esp_err_t ret = send_json(request, json);
+    cJSON_free(json);
+    return ret;
+}
+
+esp_err_t get_diagnostics_output(httpd_req_t* request) {
+    if (!api::authorize(request, api::ApiRole::Installer)) return ESP_OK;
+
+    auto* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+    cJSON* root = cJSON_CreateObject();
+    if (!root) {
+        return send_error(request, "500 Internal Server Error", "json_encode_failed");
+    }
+
+    uint32_t active_lanes = 0;
+    uint32_t max_pixels = AddressableDriver::kPixels;
+    uint32_t last_commit_us = 0;
+    uint32_t max_commit_us = 0;
+    int failed_lane = -1;
+
+    bool pwm_available = false;
+    uint8_t pwm_address = 85;
+    uint32_t i2c_hz = 100000;
+    uint32_t pwm_hz = 1017;
+    bool oe_enabled = false;
+    uint32_t pwm_commit_failures = 0;
+
+    uint32_t target_period_us = 25000;
+    uint32_t last_frame_us = 0;
+    uint32_t max_frame_us = 0;
+    uint32_t deadline_misses = 0;
+
+    if (api_ptr && api_ptr->signage()) {
+        auto* signage = api_ptr->signage();
+        const auto& ctrl = signage->controller();
+        const auto commit_m = ctrl.commit_metrics();
+        const auto pca_diag = ctrl.pwm().diagnostics();
+        const auto frame_m = signage->frame_timing_metrics();
+
+        for (size_t lane = 0; lane < AddressableDriver::kLanes; ++lane) {
+            if (ctrl.pixels().configured(lane)) {
+                active_lanes++;
+            }
+        }
+        last_commit_us = commit_m.last_addressable_us;
+        max_commit_us = commit_m.max_addressable_us;
+        failed_lane = (commit_m.last_failed_lane != kNoFailedLane) ? static_cast<int>(commit_m.last_failed_lane) : -1;
+
+        pwm_available = ctrl.is_pwm_available();
+        pwm_address = pca_diag.address;
+        i2c_hz = pca_diag.i2c_hz;
+        pwm_hz = pca_diag.pwm_hz;
+        oe_enabled = pca_diag.outputs_enabled;
+        pwm_commit_failures = pca_diag.commit_failures;
+
+        last_frame_us = frame_m.last_frame_us;
+        max_frame_us = frame_m.max_frame_us;
+        deadline_misses = frame_m.deadline_misses;
+    }
+
+    cJSON* addr = cJSON_CreateObject();
+    cJSON_AddNumberToObject(addr, "activeLanes", active_lanes);
+    cJSON_AddNumberToObject(addr, "maxPixels", max_pixels);
+    cJSON_AddNumberToObject(addr, "lastCommitUs", last_commit_us);
+    cJSON_AddNumberToObject(addr, "maxCommitUs", max_commit_us);
+    if (failed_lane >= 0) {
+        cJSON_AddNumberToObject(addr, "failedLane", failed_lane);
+    } else {
+        cJSON_AddNullToObject(addr, "failedLane");
+    }
+    cJSON_AddItemToObject(root, "addressable", addr);
+
+    cJSON* pwm = cJSON_CreateObject();
+    cJSON_AddBoolToObject(pwm, "available", pwm_available);
+    cJSON_AddNumberToObject(pwm, "address", pwm_address);
+    cJSON_AddNumberToObject(pwm, "i2cHz", i2c_hz);
+    cJSON_AddNumberToObject(pwm, "pwmHz", pwm_hz);
+    cJSON_AddBoolToObject(pwm, "oeEnabled", oe_enabled);
+    cJSON_AddNumberToObject(pwm, "commitFailures", pwm_commit_failures);
+    cJSON_AddItemToObject(root, "pwm", pwm);
+
+    cJSON* frame = cJSON_CreateObject();
+    cJSON_AddNumberToObject(frame, "targetPeriodUs", target_period_us);
+    cJSON_AddNumberToObject(frame, "lastUs", last_frame_us);
+    cJSON_AddNumberToObject(frame, "maxUs", max_frame_us);
+    cJSON_AddNumberToObject(frame, "deadlineMisses", deadline_misses);
+    cJSON_AddItemToObject(root, "frame", frame);
+
     char* json = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
     if (!json) {
@@ -7066,6 +7162,7 @@ esp_err_t FactoryApi::start(
         { .uri = "/api/v1/effects",           .method = HTTP_GET,  .handler = get_effects,        .user_ctx = this },
         { .uri = "/api/v1/palettes",          .method = HTTP_GET,  .handler = get_palettes,       .user_ctx = this },
         { .uri = "/api/v1/health",            .method = HTTP_GET,  .handler = get_health,         .user_ctx = this },
+        { .uri = "/api/v1/diagnostics/output",.method = HTTP_GET,  .handler = get_diagnostics_output, .user_ctx = this },
         { .uri = "/api/v1/logs",              .method = HTTP_GET,  .handler = get_logs,           .user_ctx = this },
         { .uri = "/api/v1/sequence",          .method = HTTP_GET,  .handler = get_sequence,     .user_ctx = this },
         { .uri = "/api/v1/sequence",          .method = HTTP_PUT,  .handler = put_sequence,     .user_ctx = this },
@@ -7293,6 +7390,21 @@ void FactoryApi::stop() {
         signage_server_ = nullptr;
         factory_server_ = nullptr;
     }
+}
+
+uint32_t FactoryApi::active_ws_clients() const {
+    httpd_handle_t srv = signage_server_ ? signage_server_ : factory_server_;
+    if (!srv) return 0;
+    std::vector<int> client_fds(max_open_sockets_);
+    size_t clients = client_fds.size();
+    if (httpd_get_client_list(srv, &clients, client_fds.data()) != ESP_OK || clients == 0) return 0;
+    size_t ws_clients = 0;
+    for (size_t i = 0; i < clients; ++i) {
+        if (httpd_ws_get_fd_info(srv, client_fds[i]) == HTTPD_WS_CLIENT_WEBSOCKET) {
+            ws_clients++;
+        }
+    }
+    return static_cast<uint32_t>(ws_clients);
 }
 
 } // namespace lg

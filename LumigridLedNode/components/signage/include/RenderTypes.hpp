@@ -68,4 +68,39 @@ struct LiveDmxFrame {
     bool active = false;
 };
 
+// ── Frame Timing and Diagnostics (LG-038) ──
+
+enum class FrameResult : uint8_t {
+    Committed = 0,
+    NoOutput,
+    Failed,
+    EstopBlackout,
+};
+
+struct FrameTimingMetrics {
+    float loop_fps = 0.0f;
+    float committed_fps = 0.0f;
+
+    uint32_t last_frame_us = 0;
+    uint32_t max_frame_us = 0;
+
+    uint32_t deadline_misses = 0;
+    uint32_t dropped_periods = 0;
+
+    uint32_t failed_frames = 0;
+};
+
+enum class FrameBudgetStatus : uint8_t {
+    Healthy = 0,
+    NearLimit = 1,
+    Impossible = 2,
+};
+
+struct FrameBudgetEstimate {
+    uint32_t longest_addr_us = 0;
+    uint32_t estimated_pwm_us = 0;
+    uint32_t total_estimated_us = 0;
+    FrameBudgetStatus status = FrameBudgetStatus::Healthy;
+};
+
 } // namespace lg

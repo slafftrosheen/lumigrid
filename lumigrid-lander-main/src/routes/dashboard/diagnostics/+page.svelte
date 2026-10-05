@@ -2,8 +2,8 @@
   import { onMount, onDestroy } from 'svelte';
   import { getHealth, getLogs, getAuditLog } from '$lib/api/node';
   import type { HealthSnapshot, AuditEvent } from '$lib/api/node';
-  import { evaluateActionableIssues } from '$lib/api/diagnostics';
-  import type { ActionableIssue } from '$lib/api/diagnostics';
+  import { evaluateActionableIssues, getOutputDiagnostics } from '$lib/api/diagnostics';
+  import type { ActionableIssue, OutputDiagnosticsResponse } from '$lib/api/diagnostics';
   import { getSelectedNodeIp } from '$lib/auth/storage';
   import { nodeStore } from '$lib/state/nodeStore';
 
@@ -11,6 +11,7 @@
   let loading = $state(true);
   let error = $state('');
   let health = $state<HealthSnapshot | null>(null);
+  let outputDiag = $state<OutputDiagnosticsResponse | null>(null);
   let rawLogs = $state('');
   let audit = $state<AuditEvent[]>([]);
   let autoRefresh = $state(false);
@@ -81,15 +82,17 @@
     }
     error = '';
     try {
-      const [h, l, a] = await Promise.all([
+      const [h, l, a, od] = await Promise.all([
         getHealth(targetIp).catch(() => null),
         getLogs(targetIp).catch(() => ''),
         getAuditLog(targetIp).catch(() => [] as AuditEvent[]),
+        getOutputDiagnostics(targetIp).catch(() => null),
       ]);
       if (gen !== loadGen) return;
       health = h;
       rawLogs = l;
       audit = a;
+      outputDiag = od;
     } catch (e) {
       if (gen !== loadGen) return;
       error = String(e);
@@ -158,6 +161,21 @@
   const displayRssi = $derived(liveNetwork?.rssi ?? health?.network.wifi_rssi ?? 0);
   const displayEstop = $derived(liveOutput?.estopActive ?? health?.output.estop_latched ?? false);
   const actionableIssues = $derived<ActionableIssue[]>(health ? evaluateActionableIssues(health) : []);
+
+  // Output Engine Timing telemetry (LG-038)
+  const targetFps = 40.0;
+  const committedFps = $derived(liveOutput?.frame?.committedFps ?? health?.system.fps ?? 40.0);
+  const frameDurationMs = $derived((((liveOutput?.commitUs ?? outputDiag?.frame?.lastUs ?? 0) / 1000)).toFixed(2));
+  const rmtDurationMs = $derived((((liveOutput?.addressableUs ?? outputDiag?.addressable?.lastCommitUs ?? 0) / 1000)).toFixed(2));
+  const pwmDurationMs = $derived((((liveOutput?.pwmUs ?? 0) / 1000)).toFixed(2));
+  const headroomMs = $derived.by(() => {
+    const commitUs = liveOutput?.commitUs ?? outputDiag?.frame?.lastUs ?? 0;
+    const targetUs = outputDiag?.frame?.targetPeriodUs ?? 25000;
+    const rem = Math.max(0, targetUs - commitUs);
+    return (rem / 1000).toFixed(2);
+  });
+  const deadlineMisses = $derived(liveOutput?.frame?.deadlineMisses ?? outputDiag?.frame?.deadlineMisses ?? 0);
+  const activeLanes = $derived(outputDiag?.addressable?.activeLanes ?? 8);
 
   function statusColor(ok: boolean): string {
     return ok ? '#30d158' : '#ff453a';
@@ -520,6 +538,52 @@
               <span class="stat-val" style:color={statusColor(!health.output.watchdog_fallback)}>
                 {health.output.watchdog_fallback ? 'YES' : 'No'}
               </span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Output Timing & Physical Engine (LG-038) -->
+        <div class="stat-card wide">
+          <div class="card-head">
+            <h3>Output Engine Timing</h3>
+            <span class="status-tag" style:color={deadlineMisses > 0 ? '#ff9f0a' : '#30d158'}>
+              {deadlineMisses > 0 ? `${deadlineMisses} Deadline Misses` : 'Nominal 40 FPS Engine'}
+            </span>
+          </div>
+          <div class="stat-grid-2col">
+            <div class="stat-row">
+              <span>Target Framerate</span>
+              <span class="stat-val mono">{targetFps.toFixed(1)} FPS (25.00 ms period)</span>
+            </div>
+            <div class="stat-row">
+              <span>Committed Framerate</span>
+              <span class="stat-val mono font-bold" style:color={committedFps < 35 ? '#ff453a' : '#30d158'}>
+                {committedFps.toFixed(1)} FPS
+              </span>
+            </div>
+            <div class="stat-row">
+              <span>Frame Commit Duration</span>
+              <span class="stat-val mono">{frameDurationMs} ms</span>
+            </div>
+            <div class="stat-row">
+              <span>RMT Parallel Wire Time</span>
+              <span class="stat-val mono">{rmtDurationMs} ms</span>
+            </div>
+            <div class="stat-row">
+              <span>PWM I2C Time</span>
+              <span class="stat-val mono">{pwmDurationMs} ms</span>
+            </div>
+            <div class="stat-row">
+              <span>Frame Headroom</span>
+              <span class="stat-val mono" style:color={parseFloat(headroomMs) < 2 ? '#ff453a' : '#30d158'}>{headroomMs} ms</span>
+            </div>
+            <div class="stat-row">
+              <span>Deadline Misses</span>
+              <span class="stat-val mono" class:err={deadlineMisses > 0}>{deadlineMisses}</span>
+            </div>
+            <div class="stat-row">
+              <span>Active Lanes / Max Limit</span>
+              <span class="stat-val mono">{activeLanes} lanes / 256 px</span>
             </div>
           </div>
         </div>

@@ -149,13 +149,26 @@ RuntimeSnapshot collect_runtime_snapshot(FactoryApi* api, uint32_t stream_seq) {
 
     // 3. Output State
     if (api->signage()) {
-        snap.output.enabled = api->signage()->controller().output_enabled();
+        const auto& ctrl = api->signage()->controller();
+        const auto m = ctrl.commit_metrics();
+        const auto ftm = api->signage()->frame_timing_metrics();
+        snap.output.enabled = ctrl.output_enabled();
         snap.output.power_mw = api->signage()->power_budget().current_power_mw();
         snprintf(snap.output.state, sizeof(snap.output.state), "%s",
                  output_state_to_str(api->signage()->output_state()));
         snap.output.fault = api->signage()->output_fault();
         snap.output.fault_count = api->signage()->output_fault_count();
         snap.output.estop_active = api->signage()->is_estop_active();
+
+        snap.output.commit_us = m.last_total_us;
+        snap.output.max_commit_us = m.max_total_us;
+        snap.output.addressable_us = m.last_addressable_us;
+        snap.output.pwm_us = m.last_pwm_us;
+        snap.output.commit_failures = static_cast<uint32_t>(m.failed);
+
+        snap.output.frame.loop_fps = ftm.loop_fps;
+        snap.output.frame.committed_fps = ftm.committed_fps;
+        snap.output.frame.deadline_misses = ftm.deadline_misses;
     } else {
         snap.output.enabled = api->runner().status().outputs_enabled;
         snap.output.power_mw = 0;
@@ -163,6 +176,16 @@ RuntimeSnapshot collect_runtime_snapshot(FactoryApi* api, uint32_t stream_seq) {
         snap.output.fault = false;
         snap.output.fault_count = 0;
         snap.output.estop_active = false;
+
+        snap.output.commit_us = 0;
+        snap.output.max_commit_us = 0;
+        snap.output.addressable_us = 0;
+        snap.output.pwm_us = 0;
+        snap.output.commit_failures = api->runner().status().commit_failures;
+
+        snap.output.frame.loop_fps = 0.0f;
+        snap.output.frame.committed_fps = 0.0f;
+        snap.output.frame.deadline_misses = 0;
     }
 
     // 4. Scene State
@@ -442,13 +465,23 @@ bool serialize_runtime_snapshot(const RuntimeSnapshot& snap, FixedJsonWriter& wr
 
     // Output
     writer.append_printf(
-        "\"output\":{\"enabled\":%s,\"powerMw\":%" PRIu32 ",\"state\":\"%s\",\"fault\":%s,\"faultCount\":%" PRIu32 ",\"estopActive\":%s},",
+        "\"output\":{\"enabled\":%s,\"powerMw\":%" PRIu32 ",\"state\":\"%s\",\"fault\":%s,\"faultCount\":%" PRIu32 ",\"estopActive\":%s,"
+        "\"commitUs\":%" PRIu32 ",\"maxCommitUs\":%" PRIu32 ",\"addressableUs\":%" PRIu32 ",\"pwmUs\":%" PRIu32 ",\"commitFailures\":%" PRIu32 ","
+        "\"frame\":{\"loopFps\":%.1f,\"committedFps\":%.1f,\"deadlineMisses\":%" PRIu32 "}},",
         snap.output.enabled ? "true" : "false",
         snap.output.power_mw,
         snap.output.state,
         snap.output.fault ? "true" : "false",
         snap.output.fault_count,
-        snap.output.estop_active ? "true" : "false"
+        snap.output.estop_active ? "true" : "false",
+        snap.output.commit_us,
+        snap.output.max_commit_us,
+        snap.output.addressable_us,
+        snap.output.pwm_us,
+        snap.output.commit_failures,
+        snap.output.frame.loop_fps,
+        snap.output.frame.committed_fps,
+        snap.output.frame.deadline_misses
     );
 
     // Scene

@@ -7,6 +7,7 @@
 #include "OutputScheduler.hpp"
 #include "ColorPipeline.hpp"
 #include "SceneTransition.hpp"
+#include "ParallelRmtDriver.hpp"
 #include "esp_timer.h"
 #include "esp_log.h"
 #include <algorithm>
@@ -226,30 +227,63 @@ void LightingRuntime::clear_estop() {
 void LightingRuntime::task_entry(void* arg) { static_cast<LightingRuntime*>(arg)->task(); }
 
 void LightingRuntime::task() {
-    TickType_t last_wake = xTaskGetTickCount();
+    TickType_t next_deadline = xTaskGetTickCount() + pdMS_TO_TICKS(kFramePeriodMs);
     enable_ms_ = now_ms();
     power_budget_.on_enable();
+
+    uint32_t loop_count = 0;
+    uint32_t commit_count = 0;
+    uint32_t last_fps_calc_ms = now_ms();
+
     while (!shutting_down_.load(std::memory_order_acquire)) {
-        uint32_t current_ms = now_ms();
+        const int64_t t_frame_start = esp_timer_get_time();
+        const uint32_t current_ms = static_cast<uint32_t>(t_frame_start / 1000);
+
         if (maintenance_cb_) maintenance_cb_(current_ms);
-        render_frame(current_ms);
-        frame_count_++;
-        if (current_ms - last_fps_time_ms_ >= 1000) {
-            current_fps_ = (frame_count_ * 1000.0f) / (current_ms - last_fps_time_ms_);
-            frame_count_ = 0;
-            last_fps_time_ms_ = current_ms;
+
+        FrameResult result = render_frame(current_ms);
+        loop_count++;
+
+        if (result == FrameResult::Committed) {
+            commit_count++;
+        } else if (result == FrameResult::Failed) {
+            frame_metrics_.failed_frames++;
         }
+
+        const int64_t t_frame_end = esp_timer_get_time();
+        const uint32_t frame_us = static_cast<uint32_t>(t_frame_end - t_frame_start);
+        frame_metrics_.last_frame_us = frame_us;
+        if (frame_us > frame_metrics_.max_frame_us) {
+            frame_metrics_.max_frame_us = frame_us;
+        }
+
+        if (current_ms - last_fps_calc_ms >= 1000) {
+            const float dt = (current_ms - last_fps_calc_ms) / 1000.0f;
+            frame_metrics_.loop_fps = loop_count / dt;
+            frame_metrics_.committed_fps = commit_count / dt;
+            current_fps_ = frame_metrics_.committed_fps;
+            loop_count = 0;
+            commit_count = 0;
+            last_fps_calc_ms = current_ms;
+        }
+
         TickType_t now_ticks = xTaskGetTickCount();
-        if ((now_ticks - last_wake) > pdMS_TO_TICKS(1000)) {
-            last_wake = now_ticks;
+        if (now_ticks >= next_deadline) {
+            frame_metrics_.deadline_misses++;
+            TickType_t overrun_ticks = now_ticks - next_deadline;
+            uint32_t dropped = static_cast<uint32_t>(overrun_ticks / pdMS_TO_TICKS(kFramePeriodMs)) + 1;
+            frame_metrics_.dropped_periods += dropped;
+            next_deadline = now_ticks + pdMS_TO_TICKS(kFramePeriodMs);
+        } else {
+            vTaskDelay(next_deadline - now_ticks);
+            next_deadline += pdMS_TO_TICKS(kFramePeriodMs);
         }
-        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(kFramePeriodMs));
     }
     if (shutdown_sem_) xSemaphoreGive(shutdown_sem_);
     vTaskDelete(NULL);
 }
 
-void LightingRuntime::render_frame(uint32_t current_ms) {
+FrameResult LightingRuntime::render_frame(uint32_t current_ms) {
     const EstopState es = estop_state_.load(std::memory_order_acquire);
     if (es == EstopState::Tripped) {
         controller_.blackout();
@@ -260,7 +294,7 @@ void LightingRuntime::render_frame(uint32_t current_ms) {
             }
             preview_cb_(current_render_frame_, current_local_cfg_);
         }
-        return;
+        return FrameResult::EstopBlackout;
     } else if (es == EstopState::PendingReset) {
         controller_.blackout();
         if (preview_cb_) {
@@ -271,7 +305,7 @@ void LightingRuntime::render_frame(uint32_t current_ms) {
             preview_cb_(current_render_frame_, current_local_cfg_);
         }
         estop_state_.store(EstopState::ReArmedBlackout, std::memory_order_release);
-        return;
+        return FrameResult::EstopBlackout;
     } else if (es == EstopState::ReArmedBlackout) {
         controller_.clear_estop();
         if (preview_cb_) {
@@ -283,11 +317,11 @@ void LightingRuntime::render_frame(uint32_t current_ms) {
         }
         estop_state_.store(EstopState::Inactive, std::memory_order_release);
         ESP_LOGI(TAG, "EMERGENCY STOP RESET: Controller re-armed, resuming output on subsequent frame");
-        return;
+        return FrameResult::EstopBlackout;
     }
 
     uint32_t render_scene_generation = 0;
-    if (!mutex_ || xSemaphoreTake(mutex_, pdMS_TO_TICKS(5)) != pdTRUE) return;
+    if (!mutex_ || xSemaphoreTake(mutex_, pdMS_TO_TICKS(5)) != pdTRUE) return FrameResult::NoOutput;
     if (live_pending_dirty_) { live_active_ = live_pending_; live_pending_dirty_ = false; }
     current_render_scene_ = scene_manager_.process_frame(current_ms);
     current_local_cfg_ = device_cfg_;
@@ -417,16 +451,27 @@ void LightingRuntime::render_frame(uint32_t current_ms) {
     }
     power_budget_.enforce(render_frame, local_cfg, current_ms);
     OutputState state = output_state_.load(std::memory_order_acquire);
+    FrameResult frame_result = FrameResult::NoOutput;
     if (state == OutputState::Faulted) {
         output_fault_frame_count_.fetch_add(1, std::memory_order_relaxed);
         controller_.blackout();
+        frame_result = FrameResult::Failed;
     } else {
         bool frame_committed = false;
         ControlSource dominant = source_manager_.current_owner();
         if (dominant != ControlSource::Factory && dominant != ControlSource::EStop) {
             const esp_err_t sched_err = OutputScheduler::schedule(render_frame, local_cfg, controller_);
-            if (sched_err != ESP_OK) { report_output_fault(sched_err); return; }
+            if (sched_err != ESP_OK) {
+                report_output_fault(sched_err);
+                if (preview_cb_) {
+                    try { preview_cb_(render_frame, local_cfg); } catch (...) {}
+                }
+                return FrameResult::Failed;
+            }
             frame_committed = true;
+            frame_result = FrameResult::Committed;
+        } else {
+            frame_result = FrameResult::NoOutput;
         }
         if (state == OutputState::Armed) {
             output_state_.store(OutputState::Healthy, std::memory_order_release);
@@ -460,6 +505,41 @@ void LightingRuntime::render_frame(uint32_t current_ms) {
             ESP_LOGW(TAG, "preview_cb unknown exception");
         }
     }
+    return frame_result;
+}
+
+FrameBudgetEstimate LightingRuntime::preflight_frame_budget(const DeviceConfig& cfg) {
+    FrameBudgetEstimate est;
+    uint32_t max_wire_us = 0;
+    bool any_pwm = false;
+
+    for (uint8_t ch = 0; ch < 8; ++ch) {
+        if (cfg.channels[ch].enabled && cfg.channels[ch].pixel_count > 0) {
+            const bool is_rgbw = (cfg.channels[ch].addressable_type == AddressableType::SK6812);
+            const uint16_t px = std::min<uint16_t>(cfg.channels[ch].pixel_count, MAX_PIXELS);
+            const uint32_t wire_us = addressable_wire_time_us(px, is_rgbw);
+            if (wire_us > max_wire_us) max_wire_us = wire_us;
+        }
+    }
+    for (uint8_t ch = 8; ch < 16; ++ch) {
+        if (cfg.channels[ch].enabled) {
+            any_pwm = true;
+            break;
+        }
+    }
+
+    est.longest_addr_us = max_wire_us;
+    est.estimated_pwm_us = any_pwm ? 3500 : 0;
+    est.total_estimated_us = est.longest_addr_us + est.estimated_pwm_us;
+
+    if (est.total_estimated_us <= 18000) {
+        est.status = FrameBudgetStatus::Healthy;
+    } else if (est.total_estimated_us <= 24500) {
+        est.status = FrameBudgetStatus::NearLimit;
+    } else {
+        est.status = FrameBudgetStatus::Impossible;
+    }
+    return est;
 }
 
 void LightingRuntime::activate_scene(uint8_t index) {

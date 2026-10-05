@@ -177,7 +177,9 @@ public:
 
     PowerBudget& power_budget() { return power_budget_; }
     const PowerBudget& power_budget() const { return power_budget_; }
-    float get_fps() const { return current_fps_; }
+    float get_fps() const { return frame_metrics_.committed_fps; }
+    FrameTimingMetrics frame_timing_metrics() const { return frame_metrics_; }
+    static FrameBudgetEstimate preflight_frame_budget(const DeviceConfig& cfg);
     void set_beat_period(uint16_t period_ms);
     void reload_device_config();
 
@@ -280,7 +282,9 @@ private:
     GenerationAppliedCallback generation_applied_cb_;
     static void task_entry(void* arg);
     void task();
-    void render_frame(uint32_t current_ms);
+    FrameResult render_frame(uint32_t current_ms);
+
+    FrameTimingMetrics frame_metrics_{};
 
     ControlSourceManager& source_manager_;
     OutputController& controller_;

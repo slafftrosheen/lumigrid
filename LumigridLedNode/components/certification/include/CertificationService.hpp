@@ -9,12 +9,17 @@
 #include "esp_err.h"
 #include <cstdint>
 #include <cstddef>
+#include <functional>
+#include <utility>
 struct cJSON;
 
 namespace lg {
 
 class FactoryRunner;
 class ConfigStore;
+class JobManager;
+
+using CertificationProbeProvider = std::function<CertificationProbeSnapshot()>;
 
 struct CertificationStatusSummary {
     CertificationState state = CertificationState::NotStarted;
@@ -31,7 +36,21 @@ public:
     CertificationService();
     ~CertificationService() = default;
 
-    esp_err_t init(ConfigStore* config, FactoryRunner* runner, const NodeIdentity& identity);
+    esp_err_t init(ConfigStore* config,
+                   FactoryRunner* runner,
+                   JobManager* job_mgr,
+                   const NodeIdentity& identity,
+                   CertificationProbeProvider probe_provider = nullptr);
+
+    esp_err_t init(ConfigStore* config, FactoryRunner* runner, const NodeIdentity& identity) {
+        return init(config, runner, nullptr, identity, nullptr);
+    }
+
+    void set_probe_provider(CertificationProbeProvider provider) {
+        probe_provider_ = std::move(provider);
+    }
+
+    void tick(uint64_t now_ms);
 
     // Session lifecycle
     esp_err_t start_session(CertificationProfile profile, const char* serial_number = nullptr);
@@ -91,6 +110,11 @@ private:
     bool burn_in_active_ = false;
     uint32_t burn_in_target_s_ = 0;
     uint64_t burn_in_start_ms_ = 0;
+    uint32_t burn_in_job_id_ = 0;
+
+    JobManager* job_mgr_ = nullptr;
+    CertificationProbeProvider probe_provider_{};
+    uint32_t current_factory_session_id_ = 0;
 };
 
 } // namespace lg

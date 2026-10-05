@@ -18,7 +18,7 @@
   } from '$lib/api/certification';
   import { getSelectedNodeIp } from '$lib/auth/storage';
   import { nodeStore } from '$lib/state/nodeStore';
-  import { postFactoryAbort } from '$lib/api/factory';
+  import { postFactoryAbort, getFactoryStatus, type FactoryStatus } from '$lib/api/factory';
 
   let nodeIp = $state('');
   let loading = $state(true);
@@ -27,6 +27,7 @@
 
   let plan = $state<CertificationPlanResponse | null>(null);
   let status = $state<CertificationStatusResponse | null>(null);
+  let factoryStatus = $state<FactoryStatus | null>(null);
 
   // Profile setup
   let selectedProfile = $state<CertificationProfile>('production_unit');
@@ -89,12 +90,14 @@
   async function loadData() {
     if (!nodeIp) return;
     try {
-      const [p, s] = await Promise.all([
+      const [p, s, f] = await Promise.all([
         getCertificationPlan(nodeIp),
         getCertificationStatus(nodeIp),
+        getFactoryStatus(nodeIp).catch(() => null),
       ]);
       plan = p;
       status = s;
+      factoryStatus = f;
       if (s.serialNumber && !serialNumberInput) {
         serialNumberInput = s.serialNumber;
       }
@@ -458,7 +461,12 @@
               <span class="cert-tile-pill">
                 {#if res?.state === 'passed'}PASS
                 {:else if res?.state === 'failed'}FAIL
-                {:else if res?.state === 'running'}TESTING
+                {:else if res?.state === 'running'}
+                  {#if factoryStatus?.session?.stage}
+                    {factoryStatus.session.stage.toUpperCase()}
+                  {:else}
+                    TESTING
+                  {/if}
                 {:else if res?.state === 'waiting_for_operator'}WAITING
                 {:else if res?.state === 'blocked'}BLOCKED
                 {:else}NOT TESTED{/if}
@@ -495,7 +503,12 @@
               <span class="cert-tile-pill">
                 {#if res?.state === 'passed'}PASS
                 {:else if res?.state === 'failed'}FAIL
-                {:else if res?.state === 'running'}TESTING
+                {:else if res?.state === 'running'}
+                  {#if factoryStatus?.session?.stage}
+                    {factoryStatus.session.stage.toUpperCase()}
+                  {:else}
+                    TESTING
+                  {/if}
                 {:else if res?.state === 'waiting_for_operator'}WAITING
                 {:else if res?.state === 'blocked'}BLOCKED
                 {:else}NOT TESTED{/if}
@@ -669,6 +682,13 @@
               Current Test Status: <strong>{res?.state || 'pending'}</strong>
               {#if res?.attempts} • Attempts: {res.attempts}{/if}
             </div>
+
+            {#if factoryStatus?.session?.stage}
+              <div class="test-stage-indicator">
+                <span class="stage-pulse">●</span>
+                <span>Stage {(factoryStatus.session.stageIndex ?? 0) + 1} / {factoryStatus.session.stageCount ?? 6}: <strong>{factoryStatus.session.stage.toUpperCase()}</strong></span>
+              </div>
+            {/if}
           </div>
 
           <div class="modal-footer">              <button class="cert-btn cert-btn-outline" onclick={() => handleStartTest(selectedTestId)} disabled={testingInProgress}>
@@ -1323,6 +1343,27 @@ result={reportData.state}</pre>
     display: flex;
     flex-direction: column;
     gap: 0.75rem;
+  }
+  .test-stage-indicator {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.5rem 0.75rem;
+    background: #022c22;
+    border: 1px solid #059669;
+    border-radius: 6px;
+    color: #6ee7b7;
+    font-size: 0.85rem;
+    font-weight: 600;
+  }
+  .stage-pulse {
+    animation: stagePulse 1.2s infinite ease-in-out;
+    color: #10b981;
+    font-size: 0.9rem;
+  }
+  @keyframes stagePulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.4; transform: scale(0.85); }
   }
   .checklist-box h4 {
     margin: 0;

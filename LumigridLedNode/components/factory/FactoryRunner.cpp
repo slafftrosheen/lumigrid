@@ -510,7 +510,7 @@ void FactoryRunner::apply_command(const FactoryCommand& command,
             status_.auto_loop = false;
 
             const bool is_burn_in = (command.session_kind == FactoryTestKind::BurnIn);
-            const uint32_t clamped_dur = clamp_duration(command.duration_ms, is_burn_in);
+            uint32_t clamped_dur = clamp_duration(command.duration_ms, is_burn_in);
             const uint8_t clamped_b = clamp_brightness(command.brightness, is_burn_in);
 
             status_.session.session_id = command.session_id;
@@ -538,10 +538,20 @@ void FactoryRunner::apply_command(const FactoryCommand& command,
                 command.session_kind == FactoryTestKind::PwmChannel) {
                 direct_test_.type = FactoryCommandType::ChannelTest;
                 direct_test_.lane_or_channel = command.lane_or_channel;
+                const uint32_t req_dur = (command.session_kind == FactoryTestKind::AddressableChannel) ? 4000 : 3000;
+                if (clamped_dur < req_dur) {
+                    clamped_dur = req_dur;
+                    status_.effect_duration_ms = clamped_dur;
+                }
                 direct_test_.duration_ms = clamped_dur;
                 direct_test_.brightness = clamped_b;
                 direct_test_active_ = true;
                 status_.active_effect = FactoryEffect::SafeBlackout;
+                status_.session.stage_count = 6;
+                status_.session.stage_index = 1;
+                status_.session.stage = (command.session_kind == FactoryTestKind::AddressableChannel)
+                                            ? FactoryTestStage::Red
+                                            : FactoryTestStage::Pwm0;
             } else if (command.session_kind == FactoryTestKind::CombinedOutputs) {
                 status_.active_effect = FactoryEffect::CombinedPulse;
             } else if (command.session_kind == FactoryTestKind::SafetyGate) {
@@ -697,22 +707,79 @@ void FactoryRunner::task() {
                 const uint8_t ch = direct_test_.lane_or_channel;
                 const ChannelHardwareDescriptor hw = channel_hardware(ch);
                 if (hw.kind == ChannelKind::Addressable) {
-                    // red green blue white black
-                    const uint32_t step = (elapsed / 400) % 5;
-                    uint8_t r = 0, g = 0, b = 0;
-                    if (step == 0) r = 255;
-                    else if (step == 1) g = 255;
-                    else if (step == 2) b = 255;
-                    else if (step == 3) { r = 255; g = 255; b = 255; }
-                    controller_.pixels().fill(hw.hardware_id, r, g, b);
+                    uint8_t stage_idx = 1;
+                    FactoryTestStage st = FactoryTestStage::Red;
+                    if (elapsed < 500) {
+                        stage_idx = 1;
+                        st = FactoryTestStage::Red;
+                        controller_.pixels().fill(hw.hardware_id, 255, 0, 0);
+                    } else if (elapsed < 1000) {
+                        stage_idx = 2;
+                        st = FactoryTestStage::Green;
+                        controller_.pixels().fill(hw.hardware_id, 0, 255, 0);
+                    } else if (elapsed < 1500) {
+                        stage_idx = 3;
+                        st = FactoryTestStage::Blue;
+                        controller_.pixels().fill(hw.hardware_id, 0, 0, 255);
+                    } else if (elapsed < 2000) {
+                        stage_idx = 4;
+                        st = FactoryTestStage::White;
+                        controller_.pixels().fill(hw.hardware_id, 255, 255, 255, 255);
+                    } else if (elapsed < 3500) {
+                        stage_idx = 5;
+                        st = FactoryTestStage::Chase;
+                        controller_.pixels().clear();
+                        const uint16_t lane_px = controller_.pixels().configured_pixels(hw.hardware_id);
+                        if (lane_px > 0) {
+                            const uint32_t chase_elapsed = elapsed - 2000;
+                            const uint16_t chase_px = (chase_elapsed / 50) % lane_px;
+                            controller_.pixels().set(hw.hardware_id, chase_px, 255, 255, 255, 255);
+                        }
+                    } else {
+                        stage_idx = 6;
+                        st = FactoryTestStage::Blackout;
+                        controller_.pixels().clear();
+                    }
+                    xSemaphoreTake(status_mutex_, portMAX_DELAY);
+                    status_.session.stage_index = stage_idx;
+                    status_.session.stage_count = 6;
+                    status_.session.stage = st;
+                    xSemaphoreGive(status_mutex_);
                 } else {
-                    // 0% 25% 50% 100% 0%
-                    const uint32_t step = (elapsed / 400) % 5;
+                    uint8_t stage_idx = 1;
+                    FactoryTestStage st = FactoryTestStage::Pwm0;
                     uint16_t duty = 0;
-                    if (step == 1) duty = 1024;
-                    else if (step == 2) duty = 2048;
-                    else if (step == 3) duty = 4095;
+                    if (elapsed < 500) {
+                        stage_idx = 1;
+                        st = FactoryTestStage::Pwm0;
+                        duty = 0;
+                    } else if (elapsed < 1000) {
+                        stage_idx = 2;
+                        st = FactoryTestStage::Pwm25;
+                        duty = 1024;
+                    } else if (elapsed < 1500) {
+                        stage_idx = 3;
+                        st = FactoryTestStage::Pwm50;
+                        duty = 2048;
+                    } else if (elapsed < 2000) {
+                        stage_idx = 4;
+                        st = FactoryTestStage::Pwm75;
+                        duty = 3072;
+                    } else if (elapsed < 2500) {
+                        stage_idx = 5;
+                        st = FactoryTestStage::Pwm100;
+                        duty = 4095;
+                    } else {
+                        stage_idx = 6;
+                        st = FactoryTestStage::Pwm0;
+                        duty = 0;
+                    }
                     controller_.pwm().set(hw.hardware_id, duty);
+                    xSemaphoreTake(status_mutex_, portMAX_DELAY);
+                    status_.session.stage_index = stage_idx;
+                    status_.session.stage_count = 6;
+                    status_.session.stage = st;
+                    xSemaphoreGive(status_mutex_);
                 }
             }
             esp_err_t commit_err = controller_.try_commit_locked();

@@ -1,39 +1,72 @@
 #pragma once
-#include <array>
 #include <cstdint>
 #include "esp_err.h"
-#include "led_strip.h"
 #include "SignageTypes.hpp"
 #include "FactoryApp.hpp"
+#include "ParallelRmtDriver.hpp"
 
 namespace lg {
 
+/// Diagnostic mirror of the values actually staged for the hardware, including W.
+/// Observational only: fixed-size, no per-frame allocation, no locking per pixel.
+struct AddressableShadowPixel {
+    uint8_t r;
+    uint8_t g;
+    uint8_t b;
+    uint8_t w;
+};
+
+/// Addressable (RMT) output facade. All transmission is delegated to ParallelRmtDriver:
+/// every active lane is submitted before any lane is waited on.
 class AddressableDriver {
 public:
     static constexpr uint8_t kLanes = MAX_RMT_LANES;
-    static constexpr uint16_t kPixels = 144; // Max pixels for factory preview
+    /// Same canonical product maximum as config validation. There is no separate limit.
+    static constexpr uint16_t kPixels = MAX_PIXELS;
+
+    AddressableDriver() = default;
+    ~AddressableDriver();
+    AddressableDriver(const AddressableDriver&) = delete;
+    AddressableDriver& operator=(const AddressableDriver&) = delete;
 
     esp_err_t init();
-    
-    // Reconfigure a specific lane with the proper physical parameters
+
+    /// Reconfigure a specific lane. Returns kErrRmtResourceExhausted (never a silent
+    /// downgrade) when RMT resources cannot be allocated.
     esp_err_t configure_lane(uint8_t lane, uint8_t gpio, FixtureProfile profile, PixelOrder order, uint16_t num_pixels);
 
     void clear();
     void clear_lane(uint8_t lane);
     void clear_buffer();
     void set(uint8_t lane, uint16_t pixel, uint8_t r, uint8_t g, uint8_t b, uint8_t w);
-    
-    esp_err_t show();
-    esp_err_t blackout();
-    
     void fill(uint8_t lane, uint8_t r, uint8_t g, uint8_t b, uint8_t w = 0);
-    const std::array<std::array<BrandColor, kPixels>, kLanes>& buffer() const { return buffer_; }
+
+    /// Parallel commit of all staged lanes.
+    AddressableCommitResult show();
+    /// Stage zeros and transmit them on every configured lane (including faulted ones).
+    AddressableCommitResult blackout();
+
+    // ── Lane metadata ────────────────────────────────────────────────────────
+    uint16_t configured_pixels(uint8_t lane) const { return rmt_.pixels(lane); }
+    bool has_white(uint8_t lane) const { return rmt_.has_white(lane); }
+    bool configured(uint8_t lane) const { return rmt_.configured(lane); }
+    LaneState lane_state(uint8_t lane) const { return rmt_.lane_state(lane); }
+    uint8_t active_lanes() const { return rmt_.active_lanes(); }
+    uint32_t longest_wire_time_us() const { return rmt_.longest_wire_time_us(); }
+
+    /// Diagnostic shadow. Returns zeros outside the configured lane/pixel range.
+    AddressableShadowPixel shadow_pixel(uint8_t lane, uint16_t pixel) const;
+
+    /// Test seam: install a fake RMT transport. Only valid while no lane is configured.
+    esp_err_t use_transport(IRmtTransport* transport) { return rmt_.set_transport(transport); }
+    const ParallelRmtDriver& rmt() const { return rmt_; }
 
 private:
-    std::array<led_strip_handle_t, kLanes> strips_{};
-    std::array<bool, kLanes> has_white_{}; // true if SK6812 RGBW
-    std::array<uint16_t, kLanes> num_pixels_{};
-    std::array<std::array<BrandColor, kPixels>, kLanes> buffer_{};
+    void free_shadow(uint8_t lane);
+
+    ParallelRmtDriver rmt_;
+    // Per-lane shadow, allocated at configure time (never per frame).
+    AddressableShadowPixel* shadow_[kLanes] = {};
 };
 
 } // namespace lg

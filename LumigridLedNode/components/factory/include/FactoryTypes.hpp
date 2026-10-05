@@ -37,6 +37,41 @@ enum class FactoryTestKind : uint8_t {
     BurnIn = 4
 };
 
+enum class FactoryTestStage : uint8_t {
+    None = 0,
+
+    Red,
+    Green,
+    Blue,
+    White,
+    Chase,
+    Blackout,
+
+    Pwm0,
+    Pwm25,
+    Pwm50,
+    Pwm75,
+    Pwm100,
+};
+
+inline const char* test_stage_name(FactoryTestStage stage) {
+    switch (stage) {
+        case FactoryTestStage::None: return "none";
+        case FactoryTestStage::Red: return "red";
+        case FactoryTestStage::Green: return "green";
+        case FactoryTestStage::Blue: return "blue";
+        case FactoryTestStage::White: return "white";
+        case FactoryTestStage::Chase: return "chase";
+        case FactoryTestStage::Blackout: return "blackout";
+        case FactoryTestStage::Pwm0: return "pwm_0";
+        case FactoryTestStage::Pwm25: return "pwm_25";
+        case FactoryTestStage::Pwm50: return "pwm_50";
+        case FactoryTestStage::Pwm75: return "pwm_75";
+        case FactoryTestStage::Pwm100: return "pwm_100";
+        default: return "none";
+    }
+}
+
 inline const char* test_state_name(FactoryTestState state) {
     switch (state) {
         case FactoryTestState::Idle: return "idle";
@@ -104,6 +139,9 @@ struct FactoryTestSession {
     char notes[64] = {0};
     FactorySessionOwner owner = FactorySessionOwner::ManualFactory;
     char certification_test_id[16] = {0};
+    FactoryTestStage stage = FactoryTestStage::None;
+    uint8_t stage_index = 0;
+    uint8_t stage_count = 0;
 };
 
 struct ChannelValidationStatus {

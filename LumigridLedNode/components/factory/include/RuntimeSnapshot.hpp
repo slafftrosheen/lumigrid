@@ -53,6 +53,12 @@ struct RuntimeStateSnapshot {
     uint32_t frame_count = 0;
 };
 
+struct FrameSnapshot {
+    float loop_fps = 0.0f;
+    float committed_fps = 0.0f;
+    uint32_t deadline_misses = 0;
+};
+
 struct OutputSnapshot {
     bool enabled = false;
     uint32_t power_mw = 0;
@@ -60,6 +66,14 @@ struct OutputSnapshot {
     bool fault = false;
     uint32_t fault_count = 0;
     bool estop_active = false;
+
+    // LG-038 timing telemetry
+    uint32_t commit_us = 0;
+    uint32_t max_commit_us = 0;
+    uint32_t addressable_us = 0;
+    uint32_t pwm_us = 0;
+    uint32_t commit_failures = 0;
+    FrameSnapshot frame{};
 };
 
 struct SceneSnapshot {

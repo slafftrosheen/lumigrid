@@ -40,6 +40,8 @@
 #include "CertificationPlan.hpp"
 #include "CertificationStore.hpp"
 #include "CertificationService.hpp"
+#include "ParallelRmtDriver.hpp"
+#include "lg_board_pins.hpp"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -5381,7 +5383,7 @@ bool test_lg029_node_backed_authentication() {
         assert(kCertificationPlanVersion == 1); // plan version check
         const CertificationTestDefinition* tests = CertificationPlan::test_definitions();
         assert(tests != nullptr);
-        assert(count == 36); // 36 tests in plan v1
+        assert(count == 38); // 38 tests in plan v1 (LG-038 truth pass)
 
         for (size_t i = 0; i < count; ++i) {
             assert(strlen(tests[i].id) > 0);
@@ -5401,6 +5403,19 @@ bool test_lg029_node_backed_authentication() {
         const auto* pwm1 = CertificationPlan::find_test("PWM-P1");
         assert(pwm1 != nullptr);
         assert(pwm1->required_evidence == EvidenceSource::OperatorObservation);
+
+        // Split E-stop tests (LG-038 §45)
+        const auto* estop_logic = CertificationPlan::find_test("SAFE-ESTOP-LOGIC");
+        assert(estop_logic != nullptr);
+        assert(estop_logic->required_evidence == EvidenceSource::Automatic);
+
+        const auto* estop_pwm = CertificationPlan::find_test("SAFE-ESTOP-PWM");
+        assert(estop_pwm != nullptr);
+        assert(estop_pwm->required_evidence == EvidenceSource::InstrumentMeasurement);
+
+        const auto* estop_addr = CertificationPlan::find_test("SAFE-ESTOP-ADDRESSABLE");
+        assert(estop_addr != nullptr);
+        assert(estop_addr->required_evidence == EvidenceSource::OperatorObservation);
 
         // Instrument measurement test
         const auto* pwr1 = CertificationPlan::find_test("POWER-LIMIT-001");
@@ -5602,6 +5617,209 @@ bool test_lg029_node_backed_authentication() {
         return true;
     }
 
+    bool test_lg038_physical_output_engine() {
+        ESP_LOGI(TAG, "Testing LG-038 Physical Output Engine Stabilization & Certification Truth...");
+
+        // 1. Parallel RMT Scheduling Invariant: All lanes submitted before any lane waited on (§78, §79)
+        {
+            class FakeRmtTransport : public IRmtTransport {
+            public:
+                enum class ActionType { Submit, Wait };
+                struct Action {
+                    ActionType type;
+                    uint8_t lane;
+                };
+                std::vector<Action> actions;
+                int fail_lane = -1;
+
+                esp_err_t create(uint8_t, int, bool) override {
+                    return ESP_OK;
+                }
+
+                esp_err_t submit(uint8_t lane, const uint8_t*, size_t) override {
+                    actions.push_back({ActionType::Submit, lane});
+                    return ESP_OK;
+                }
+
+                esp_err_t wait(uint8_t lane, uint32_t) override {
+                    actions.push_back({ActionType::Wait, lane});
+                    if (static_cast<int>(lane) == fail_lane) {
+                        return ESP_ERR_TIMEOUT;
+                    }
+                    return ESP_OK;
+                }
+
+                esp_err_t destroy(uint8_t) override {
+                    return ESP_OK;
+                }
+            };
+
+            FakeRmtTransport fake_transport;
+            ParallelRmtDriver driver(&fake_transport);
+
+            // Configure all 8 lanes with 256 pixels
+            for (uint8_t l = 0; l < ParallelRmtDriver::kLanes; ++l) {
+                driver.configure_lane(l, board::kAledPins[l], false, PixelOrder::GRB, 256);
+            }
+
+            AddressableCommitResult outcome = driver.commit();
+            assert(outcome.result == ESP_OK);
+            assert(outcome.active_lanes == 8);
+            assert(fake_transport.actions.size() == 16);
+
+            // CRITICAL INVARIANT: First 8 operations MUST be Submit, next 8 MUST be Wait!
+            for (size_t i = 0; i < 8; ++i) {
+                assert(fake_transport.actions[i].type == FakeRmtTransport::ActionType::Submit);
+                assert(fake_transport.actions[i].lane == i);
+            }
+            for (size_t i = 8; i < 16; ++i) {
+                assert(fake_transport.actions[i].type == FakeRmtTransport::ActionType::Wait);
+                assert(fake_transport.actions[i].lane == (i - 8));
+            }
+
+            // 2. Parallel RMT Failure on Lane Timeout (§80)
+            fake_transport.actions.clear();
+            fake_transport.fail_lane = 3; // Lane A4 fails
+            outcome = driver.commit();
+            assert(outcome.result == ESP_ERR_TIMEOUT);
+            assert(outcome.failed_lane == 3);
+            // All 8 submitted lanes MUST still be waited on (not early-return leak)
+            assert(fake_transport.actions.size() == 16);
+        }
+
+        // 3. Addressable Wire-Time Pure Math (§81)
+        {
+            // WS2812: 24 bits * 1.25 us = 30 us/pixel. 256 px -> 7680 us data time + 280 us reset = 7960 us wire time
+            assert(addressable_data_time_us(256, false) == 7680);
+            assert(addressable_wire_time_us(256, false) == 7680 + kAddressableResetUs);
+            // SK6812: 32 bits * 1.25 us = 40 us/pixel. 256 px -> 10240 us data time + 280 us reset = 10520 us wire time
+            assert(addressable_data_time_us(256, true) == 10240);
+            assert(addressable_wire_time_us(256, true) == 10240 + kAddressableResetUs);
+
+            // Explicit wait margin included (never infinite -1 wait)
+            assert(addressable_timeout_us(256, false) == 7680 + kAddressableResetUs + kAddressableWaitMarginUs);
+            assert(addressable_timeout_us(256, true) == 10240 + kAddressableResetUs + kAddressableWaitMarginUs);
+        }
+
+        // 4. Frame Budget Preflight & Headroom Calculation (§27, §82)
+        {
+            DeviceConfig cfg{};
+            for (size_t i = 0; i < 8; ++i) {
+                cfg.channels[i].enabled = true;
+                cfg.channels[i].pixel_count = 256;
+                cfg.channels[i].addressable_type = AddressableType::WS2812;
+            }
+            FrameBudgetEstimate estimate = LightingRuntime::preflight_frame_budget(cfg);
+            assert(estimate.longest_addr_us == addressable_wire_time_us(256, false));
+            assert(estimate.estimated_pwm_us == 0);
+            assert(estimate.total_estimated_us == estimate.longest_addr_us);
+            assert(estimate.status == FrameBudgetStatus::Healthy);
+        }
+
+        // 5. Factory Guided Test Stages & Exact Durations (§32-§36, §84)
+        {
+            FactoryTestSession session{};
+            session.stage = FactoryTestStage::Red;
+            session.stage_index = 1;
+            session.stage_count = 6;
+            assert(session.stage == FactoryTestStage::Red);
+            assert(session.stage_index == 1);
+            assert(session.stage_count == 6);
+
+            // Verify PWM stages include 75%
+            assert(FactoryTestStage::Pwm75 != FactoryTestStage::None);
+        }
+
+        // 6. Truthful E-Stop Software Latch & PCA /OE Fast Fail-Safe (§41, §45, §86)
+        {
+            assert(board::BoardSafetyCapabilities::kPwmOutputEnable == true);
+            assert(board::BoardSafetyCapabilities::kPhysicalEstopInput == false);
+            assert(board::BoardSafetyCapabilities::kAddressablePowerGate == false);
+
+            OutputController ctrl;
+            assert(!ctrl.is_estop_latched());
+            ctrl.latch_estop();
+            assert(ctrl.is_estop_latched());
+            // When latched, try_commit MUST be rejected
+            assert(ctrl.try_commit() == ESP_ERR_INVALID_STATE);
+
+            ctrl.clear_estop();
+            assert(!ctrl.is_estop_latched());
+        }
+
+        // 7. Certification Truth Pass: Injected Probe & No Placeholder Passes (§50-§56, §85)
+        {
+            ConfigStore cs;
+            NodeIdentity identity{};
+            strncpy(identity.id, "lg-cert-probe", sizeof(identity.id) - 1);
+            strncpy(identity.hw_revision, "A", sizeof(identity.hw_revision) - 1);
+            strncpy(identity.fw_version, "0.8.0", sizeof(identity.fw_version) - 1);
+
+            CertificationService svc;
+            CertificationProbeSnapshot mock_probe{};
+            mock_probe.ap_active = false;
+            mock_probe.api_running = false;
+            mock_probe.authenticated_ws_clients = 0;
+            mock_probe.backup_serializer_healthy = false;
+
+            svc.init(&cs, nullptr, nullptr, identity, [&mock_probe]() { return mock_probe; });
+            assert(svc.start_session(CertificationProfile::Development, "DEV-TRUTH-01") == ESP_OK);
+
+            // NET-AP-001 must FAIL when probe says AP inactive (No constant true!)
+            assert(svc.start_test("NET-AP-001") == ESP_OK);
+            const auto* res_ap = svc.get_test_result("NET-AP-001");
+            assert(res_ap != nullptr);
+            assert(res_ap->state == CertificationTestState::Failed);
+
+            // API-001 must be BLOCKED when probe says API not running (No constant true!)
+            assert(svc.start_test("API-001") == ESP_OK);
+            const auto* res_api = svc.get_test_result("API-001");
+            assert(res_api != nullptr);
+            assert(res_api->state == CertificationTestState::Blocked);
+
+            // WS-001 must FAIL when no authenticated WS clients observed
+            assert(svc.start_test("WS-001") == ESP_OK);
+            const auto* res_ws = svc.get_test_result("WS-001");
+            assert(res_ws != nullptr);
+            assert(res_ws->state == CertificationTestState::Failed);
+
+            // REC-BACKUP-001 must be BLOCKED when serializer unhealthy
+            assert(svc.start_test("REC-BACKUP-001") == ESP_OK);
+            const auto* res_bak = svc.get_test_result("REC-BACKUP-001");
+            assert(res_bak != nullptr);
+            assert(res_bak->state == CertificationTestState::Blocked);
+
+            // Now provide healthy probe
+            mock_probe.ap_active = true;
+            mock_probe.api_running = true;
+            mock_probe.authenticated_ws_clients = 1;
+            mock_probe.backup_serializer_healthy = true;
+
+            assert(svc.start_test("NET-AP-001") == ESP_OK);
+            assert(svc.get_test_result("NET-AP-001")->state == CertificationTestState::Passed);
+
+            assert(svc.start_test("API-001") == ESP_OK);
+            assert(svc.get_test_result("API-001")->state == CertificationTestState::Passed);
+
+            assert(svc.start_test("WS-001") == ESP_OK);
+            assert(svc.get_test_result("WS-001")->state == CertificationTestState::Passed);
+
+            assert(svc.start_test("REC-BACKUP-001") == ESP_OK);
+            assert(svc.get_test_result("REC-BACKUP-001")->state == CertificationTestState::Passed);
+
+            // Split E-stop logic test passes automatically
+            assert(svc.start_test("SAFE-ESTOP-LOGIC") == ESP_OK);
+            assert(svc.get_test_result("SAFE-ESTOP-LOGIC")->state == CertificationTestState::Passed);
+
+            // Unsupported automatic test without a probe becomes BLOCKED
+            assert(svc.start_test("SYNC-ID-001") == ESP_OK);
+            assert(svc.get_test_result("SYNC-ID-001")->state == CertificationTestState::Blocked);
+        }
+
+        ESP_LOGI(TAG, "[PASS] LG-038 Physical Output Engine Stabilization & Certification Truth tests passed.");
+        return true;
+    }
+
 } // namespace
 
 bool run_runtime_hardening_tests() {
@@ -5717,6 +5935,9 @@ bool run_runtime_hardening_tests() {
 
     // LG-037 Hardware Certification Bench, Evidence & Production Bring-Up
     all_ok &= test_lg037_hardware_certification();
+
+    // LG-038 Physical Output Engine Stabilization & Certification Truth Pass
+    all_ok &= test_lg038_physical_output_engine();
 
     if (all_ok) {
         ESP_LOGI(TAG, "==================================================");

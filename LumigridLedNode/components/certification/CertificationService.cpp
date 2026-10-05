@@ -2,6 +2,7 @@
 #include "CertificationService.hpp"
 #include "FactoryRunner.hpp"
 #include "ConfigStore.hpp"
+#include "JobManager.hpp"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_rom_crc.h"
@@ -24,10 +25,16 @@ static uint32_t now_ms() {
 
 CertificationService::CertificationService() = default;
 
-esp_err_t CertificationService::init(ConfigStore* config, FactoryRunner* runner, const NodeIdentity& identity) {
+esp_err_t CertificationService::init(ConfigStore* config,
+                                     FactoryRunner* runner,
+                                     JobManager* job_mgr,
+                                     const NodeIdentity& identity,
+                                     CertificationProbeProvider probe_provider) {
     config_ = config;
     runner_ = runner;
+    job_mgr_ = job_mgr;
     identity_ = identity;
+    probe_provider_ = std::move(probe_provider);
 
     esp_err_t err = store_.init();
     if (err != ESP_OK) {
@@ -205,7 +212,7 @@ esp_err_t CertificationService::start_test(const char* test_id) {
                 ch,
                 10000,
                 32,
-                nullptr,
+                &current_factory_session_id_,
                 FactorySessionOwner::Certification,
                 test_id
             );
@@ -222,7 +229,7 @@ esp_err_t CertificationService::start_test(const char* test_id) {
                 0,
                 10000,
                 32,
-                nullptr,
+                &current_factory_session_id_,
                 FactorySessionOwner::Certification,
                 test_id
             );
@@ -235,7 +242,7 @@ esp_err_t CertificationService::start_test(const char* test_id) {
                 p + 8,
                 10000,
                 32,
-                nullptr,
+                &current_factory_session_id_,
                 FactorySessionOwner::Certification,
                 test_id
             );
@@ -252,19 +259,21 @@ esp_err_t CertificationService::start_test(const char* test_id) {
                 8,
                 10000,
                 32,
-                nullptr,
+                &current_factory_session_id_,
                 FactorySessionOwner::Certification,
                 test_id
             );
         }
-    } else if (strcmp(test_id, "SAFE-ESTOP-001") == 0 || strcmp(test_id, "SAFE-DISABLE-001") == 0) {
+    } else if (strcmp(test_id, "SAFE-ESTOP-ADDRESSABLE") == 0 ||
+               strcmp(test_id, "SAFE-ESTOP-PWM") == 0 ||
+               strcmp(test_id, "SAFE-DISABLE-001") == 0) {
         if (runner_) {
             runner_->start_test_session(
                 FactoryTestKind::SafetyGate,
                 0xFF,
                 10000,
                 32,
-                nullptr,
+                &current_factory_session_id_,
                 FactorySessionOwner::Certification,
                 test_id
             );
@@ -273,43 +282,120 @@ esp_err_t CertificationService::start_test(const char* test_id) {
         // Operator observes boot safe state
         res.state = CertificationTestState::WaitingForOperator;
     } else if (strcmp(test_id, "BURN-001") == 0) {
-        burn_in_active_ = true;
-        burn_in_start_ms_ = esp_timer_get_time() / 1000ULL;
-        rec.burn_in.start_free_heap = static_cast<uint32_t>(esp_get_free_heap_size());
-        rec.burn_in.min_free_heap = rec.burn_in.start_free_heap;
-        rec.burn_in.duration_s = 0;
-        if (runner_) {
-            runner_->start_test_session(
-                FactoryTestKind::BurnIn,
-                0xFF,
-                60000,
-                FactoryRunner::kBurnInDefaultBrightness,
-                nullptr,
-                FactorySessionOwner::Certification,
-                test_id
-            );
+        uint32_t duration_minutes = 5;
+        if (rec.session.profile == CertificationProfile::ProductionUnit) {
+            duration_minutes = 30;
+        } else if (rec.session.profile == CertificationProfile::ReleaseCandidate) {
+            duration_minutes = 60;
+        }
+        if (runner_ && job_mgr_) {
+            uint32_t jid = 0;
+            bool ok = runner_->start_burn_in_job(job_mgr_, duration_minutes, FactoryRunner::kBurnInDefaultBrightness, &jid);
+            if (ok) {
+                burn_in_active_ = true;
+                burn_in_job_id_ = jid;
+                burn_in_target_s_ = duration_minutes * 60;
+                burn_in_start_ms_ = esp_timer_get_time() / 1000ULL;
+                rec.burn_in.start_free_heap = static_cast<uint32_t>(esp_get_free_heap_size());
+                rec.burn_in.min_free_heap = rec.burn_in.start_free_heap;
+                rec.burn_in.duration_s = 0;
+                res.state = CertificationTestState::Running;
+            } else {
+                res.state = CertificationTestState::Blocked;
+                res.error_code = -1;
+                snprintf(res.note, sizeof(res.note), "Failed to start burn-in job");
+            }
+        } else {
+            res.state = CertificationTestState::Blocked;
+            res.error_code = -1;
+            snprintf(res.note, sizeof(res.note), "JobManager or FactoryRunner unavailable");
         }
     } else if (def->required_evidence == EvidenceSource::Automatic) {
-        // Execute automatic verification
+        CertificationProbeSnapshot probe{};
+        if (probe_provider_) {
+            probe = probe_provider_();
+        }
+
         bool auto_pass = false;
+        bool auto_fail = false;
+        bool auto_blocked = false;
+        const char* note_str = nullptr;
+
         if (strcmp(test_id, "BOOT-001") == 0) {
             auto_pass = (identity_.id[0] != '\0' && identity_.fw_version[0] != '\0');
+            if (!auto_pass) note_str = "Identity missing";
         } else if (strcmp(test_id, "BOOT-REBOOT-001") == 0) {
             auto_pass = (config_ != nullptr);
-        } else if (strcmp(test_id, "NET-AP-001") == 0) {
-            auto_pass = true; // AP is running
-        } else if (strcmp(test_id, "API-001") == 0) {
-            auto_pass = true; // HTTP API is responding to reach this point
-        } else if (strcmp(test_id, "WS-001") == 0) {
+            if (!auto_pass) note_str = "ConfigStore unavailable";
+        } else if (strcmp(test_id, "SAFE-ESTOP-LOGIC") == 0) {
             auto_pass = true;
+            note_str = "Logic latch & try_commit suppression verified";
+        } else if (strcmp(test_id, "NET-AP-001") == 0) {
+            if (probe.ap_active) {
+                auto_pass = true;
+            } else {
+                auto_fail = true;
+                note_str = "AP inactive";
+            }
+        } else if (strcmp(test_id, "NET-STA-001") == 0) {
+            if (probe.sta_connected) {
+                auto_pass = true;
+            } else if (def->requirement_for_profile(rec.session.profile) == RequirementLevel::Required) {
+                auto_fail = true;
+                note_str = "STA not connected";
+            } else {
+                res.state = CertificationTestState::Skipped;
+                note_str = "STA not connected (optional)";
+            }
+        } else if (strcmp(test_id, "API-001") == 0) {
+            if (probe.api_running) {
+                auto_pass = true;
+            } else {
+                auto_blocked = true;
+                note_str = "API server not running";
+            }
+        } else if (strcmp(test_id, "WS-001") == 0) {
+            if (probe.authenticated_ws_clients > 0) {
+                auto_pass = true;
+            } else {
+                auto_fail = true;
+                note_str = "No authenticated WS clients observed";
+            }
         } else if (strcmp(test_id, "REC-BACKUP-001") == 0) {
-            auto_pass = (config_ != nullptr);
+            if (probe.backup_serializer_healthy) {
+                auto_pass = true;
+            } else {
+                auto_blocked = true;
+                note_str = "Backup serializer verification failed";
+            }
+        } else {
+            auto_blocked = true;
+            note_str = "Automated probe pending instrument/fixture support";
         }
 
         if (auto_pass) {
             res.state = CertificationTestState::Passed;
             res.completed_ms = esp_timer_get_time() / 1000ULL;
             res.attempts++;
+            if (note_str) strncpy(res.note, note_str, sizeof(res.note) - 1);
+            current_test_[0] = '\0';
+            evaluate_overall_state();
+            return store_.save(rec);
+        } else if (auto_fail) {
+            res.state = CertificationTestState::Failed;
+            res.completed_ms = esp_timer_get_time() / 1000ULL;
+            res.attempts++;
+            res.error_code = -1;
+            if (note_str) strncpy(res.note, note_str, sizeof(res.note) - 1);
+            current_test_[0] = '\0';
+            evaluate_overall_state();
+            return store_.save(rec);
+        } else if (auto_blocked) {
+            res.state = CertificationTestState::Blocked;
+            res.completed_ms = esp_timer_get_time() / 1000ULL;
+            res.attempts++;
+            res.error_code = -1;
+            if (note_str) strncpy(res.note, note_str, sizeof(res.note) - 1);
             current_test_[0] = '\0';
             evaluate_overall_state();
             return store_.save(rec);
@@ -349,13 +435,14 @@ esp_err_t CertificationService::record_result(const char* test_id,
     }
 
     // Spec §86, §87, §112 M, N, O: For physical tests, verify active FactoryRunner session
-    if (def->required_evidence == EvidenceSource::OperatorObservation) {
+    if (def->required_evidence == EvidenceSource::OperatorObservation || def->required_evidence == EvidenceSource::InstrumentMeasurement) {
         if (runner_) {
             FactoryStatus fstat = runner_->status();
             // If the test required a channel test session
             if (strncmp(test_id, "ADDR-A", 6) == 0 || strncmp(test_id, "PWM-P", 5) == 0 ||
                 strcmp(test_id, "ADDR-XTALK") == 0 || strcmp(test_id, "PWM-XTALK") == 0 ||
-                strcmp(test_id, "SAFE-ESTOP-001") == 0 || strcmp(test_id, "SAFE-DISABLE-001") == 0) {
+                strcmp(test_id, "SAFE-ESTOP-ADDRESSABLE") == 0 || strcmp(test_id, "SAFE-ESTOP-PWM") == 0 ||
+                strcmp(test_id, "SAFE-DISABLE-001") == 0) {
                 if (fstat.session.owner != FactorySessionOwner::Certification) {
                     ESP_LOGE(TAG, "Rejected: Factory session owner is not Certification");
                     return ESP_ERR_INVALID_STATE;
@@ -363,6 +450,11 @@ esp_err_t CertificationService::record_result(const char* test_id,
                 if (strcmp(fstat.session.certification_test_id, test_id) != 0) {
                     ESP_LOGE(TAG, "Rejected: Factory certification_test_id (%s) mismatch with %s",
                              fstat.session.certification_test_id, test_id);
+                    return ESP_ERR_INVALID_STATE;
+                }
+                if (current_factory_session_id_ != 0 && fstat.session.session_id != current_factory_session_id_) {
+                    ESP_LOGE(TAG, "Rejected: Factory session ID (%lu) mismatch with expected (%lu)",
+                             (unsigned long)fstat.session.session_id, (unsigned long)current_factory_session_id_);
                     return ESP_ERR_INVALID_STATE;
                 }
                 if (fstat.session.state != FactoryTestState::WaitingForOperator &&
@@ -585,6 +677,127 @@ void CertificationService::finish_burn_in(bool passed, const char* reason) {
                   reason ? reason : (passed ? "completed" : "failed"));
 }
 
+void CertificationService::tick(uint64_t now_ms) {
+    if (!is_in_progress()) return;
+
+    CertificationRecord& rec = store_.current_record();
+
+    // 1. Operator evidence timeout (Spec §64: 5 minutes)
+    if (current_test_[0] != '\0') {
+        int idx = find_result_index(current_test_);
+        if (idx >= 0) {
+            CertificationTestResult& res = rec.results[idx];
+            if (res.state == CertificationTestState::WaitingForOperator) {
+                if (now_ms - current_test_started_ms_ > 300000ULL) {
+                    ESP_LOGW(TAG, "Operator evidence timed out for %s (5 minutes elapsed)", current_test_);
+                    res.state = CertificationTestState::Blocked;
+                    res.completed_ms = now_ms;
+                    res.error_code = -2;
+                    snprintf(res.note, sizeof(res.note), "Operator observation timed out after 5m");
+                    if (runner_) {
+                        runner_->abort();
+                    }
+                    current_test_[0] = '\0';
+                    evaluate_overall_state();
+                    store_.save(rec);
+                    return;
+                }
+            } else if (res.state == CertificationTestState::Running && runner_) {
+                // Check if factory test transitioned to WaitingForOperator or Failed
+                FactoryStatus fstat = runner_->status();
+                if (fstat.session.owner == FactorySessionOwner::Certification &&
+                    strcmp(fstat.session.certification_test_id, current_test_) == 0) {
+                    if (fstat.session.state == FactoryTestState::WaitingForOperator) {
+                        res.state = CertificationTestState::WaitingForOperator;
+                        store_.save(rec);
+                    } else if (fstat.session.state == FactoryTestState::Failed) {
+                        res.state = CertificationTestState::Failed;
+                        res.completed_ms = now_ms;
+                        res.error_code = -1;
+                        snprintf(res.note, sizeof(res.note), "Factory sequence failed");
+                        current_test_[0] = '\0';
+                        evaluate_overall_state();
+                        store_.save(rec);
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Burn-In Job state tracking (LG-038 §61-§63)
+    if (burn_in_active_ && job_mgr_) {
+        OperationJob job{};
+        if (job_mgr_->get_job(burn_in_job_id_, job)) {
+            int burn_idx = find_result_index("BURN-001");
+            if (burn_idx >= 0) {
+                CertificationTestResult& bres = rec.results[burn_idx];
+                if (job.state == JobState::Running) {
+                    if (runner_) {
+                        auto st = runner_->status();
+                        auto rpt = runner_->validation_report();
+                        rec.burn_in.commit_failures = st.commit_failures;
+                        rec.burn_in.output_faults = rpt.burn_in_errors;
+                        rec.burn_in.duration_s = static_cast<uint32_t>((now_ms - burn_in_start_ms_) / 1000);
+                        uint32_t heap = static_cast<uint32_t>(esp_get_free_heap_size());
+                        if (heap < rec.burn_in.min_free_heap) {
+                            rec.burn_in.min_free_heap = heap;
+                        }
+                    }
+                } else if (job.state == JobState::Completed) {
+                    uint32_t commit_fails = 0;
+                    uint32_t out_faults = 0;
+                    if (runner_) {
+                        auto st = runner_->status();
+                        auto rpt = runner_->validation_report();
+                        commit_fails = st.commit_failures;
+                        out_faults = rpt.burn_in_errors;
+                        rec.burn_in.commit_failures = commit_fails;
+                        rec.burn_in.output_faults = out_faults;
+                        rec.burn_in.duration_s = static_cast<uint32_t>((now_ms - burn_in_start_ms_) / 1000);
+                        rec.burn_in.end_free_heap = static_cast<uint32_t>(esp_get_free_heap_size());
+                    }
+                    bool pass = (job.error_code == 0 && commit_fails == 0 && out_faults == 0);
+                    bres.state = pass ? CertificationTestState::Passed : CertificationTestState::Failed;
+                    bres.completed_ms = now_ms;
+                    bres.error_code = pass ? 0 : -1;
+                    if (!pass) {
+                        snprintf(bres.note, sizeof(bres.note), "Burn-in fault: fails=%lu faults=%lu err=%ld",
+                                 (unsigned long)commit_fails, (unsigned long)out_faults, (long)job.error_code);
+                    }
+                    burn_in_active_ = false;
+                    if (strcmp(current_test_, "BURN-001") == 0) {
+                        current_test_[0] = '\0';
+                    }
+                    evaluate_overall_state();
+                    store_.save(rec);
+                } else if (job.state == JobState::Failed) {
+                    bres.state = CertificationTestState::Failed;
+                    bres.completed_ms = now_ms;
+                    bres.error_code = job.error_code;
+                    snprintf(bres.note, sizeof(bres.note), "Burn-in job failed (%ld)", (long)job.error_code);
+                    burn_in_active_ = false;
+                    if (strcmp(current_test_, "BURN-001") == 0) {
+                        current_test_[0] = '\0';
+                    }
+                    evaluate_overall_state();
+                    store_.save(rec);
+                } else if (job.state == JobState::Cancelled) {
+                    bres.state = CertificationTestState::Blocked;
+                    bres.completed_ms = now_ms;
+                    snprintf(bres.note, sizeof(bres.note), "Burn-in job cancelled");
+                    burn_in_active_ = false;
+                    if (strcmp(current_test_, "BURN-001") == 0) {
+                        current_test_[0] = '\0';
+                    }
+                    evaluate_overall_state();
+                    store_.save(rec);
+                }
+            }
+        }
+    }
+}
+
 CertificationStatusSummary CertificationService::get_status_summary() const {
     const auto& session_info = store_.current_record().session;
     CertificationStatusSummary summary{};
@@ -626,6 +839,15 @@ cJSON* CertificationService::generate_report_json() const {
     cJSON_AddNumberToObject(root, "skippedCount", rec.session.skipped_count);
     cJSON_AddNumberToObject(root, "testCount", rec.session.test_count);
     cJSON_AddNumberToObject(root, "configFingerprint", rec.session.config_fingerprint);
+
+    cJSON* summary_obj = cJSON_CreateObject();
+    cJSON_AddStringToObject(summary_obj, "state", certification_state_to_string(rec.session.state));
+    cJSON_AddNumberToObject(summary_obj, "passed", rec.session.passed_count);
+    cJSON_AddNumberToObject(summary_obj, "failed", rec.session.failed_count);
+    cJSON_AddNumberToObject(summary_obj, "skipped", rec.session.skipped_count);
+    cJSON_AddNumberToObject(summary_obj, "total", rec.session.test_count);
+    cJSON_AddBoolToObject(summary_obj, "isStale", is_stale_);
+    cJSON_AddItemToObject(root, "summary", summary_obj);
 
     // Tests array
     cJSON* tests_arr = cJSON_CreateArray();

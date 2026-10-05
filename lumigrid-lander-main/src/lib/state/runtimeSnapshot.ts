@@ -17,6 +17,12 @@ export interface RuntimeState {
   frameCount: number;
 }
 
+export interface OutputFrameMetrics {
+  loopFps: number;
+  committedFps: number;
+  deadlineMisses: number;
+}
+
 export interface OutputState {
   enabled: boolean;
   powerMw: number;
@@ -24,6 +30,12 @@ export interface OutputState {
   fault: boolean;
   faultCount: number;
   estopActive: boolean;
+  commitUs?: number;
+  maxCommitUs?: number;
+  addressableUs?: number;
+  pwmUs?: number;
+  commitFailures?: number;
+  frame?: OutputFrameMetrics;
 }
 
 export interface SceneRuntimeState {

@@ -95,10 +95,10 @@ void render_effect(FactoryEffect effect,
             break;
 
         case FactoryEffect::PixelChase: {
-            const uint16_t pixel =
-                (elapsed_ms / 75) % AddressableDriver::kPixels;
-
             for (uint8_t lane = 0; lane < 8; ++lane) {
+                const uint16_t lane_px = output.pixels().configured_pixels(lane);
+                if (lane_px == 0) continue;
+                const uint16_t pixel = (elapsed_ms / 75) % lane_px;
                 set_rgb(output, 
                     lane,
                     pixel,
@@ -115,7 +115,8 @@ void render_effect(FactoryEffect effect,
 
         case FactoryEffect::Rainbow:
             for (uint8_t lane = 0; lane < 8; ++lane) {
-                for (uint16_t px = 0; px < AddressableDriver::kPixels; ++px) {
+                const uint16_t lane_px = output.pixels().configured_pixels(lane);
+                for (uint16_t px = 0; px < lane_px; ++px) {
                     const uint8_t hue = phase8 + px * 8 + lane * 24;
                     set_rgb(output, lane, px, scale(wheel(hue), brightness));
                 }

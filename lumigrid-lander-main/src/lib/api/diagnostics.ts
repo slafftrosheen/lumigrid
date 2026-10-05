@@ -209,3 +209,37 @@ export function getLogs(ip: string): Promise<string> {
 export function getAuditLog(ip: string): Promise<AuditEvent[]> {
   return apiJson<AuditEvent[]>(ip, '/api/v1/audit');
 }
+
+export interface OutputDiagnosticsAddressable {
+  activeLanes: number;
+  maxPixels: number;
+  lastCommitUs: number;
+  maxCommitUs: number;
+  failedLane: number | null;
+}
+
+export interface OutputDiagnosticsPwm {
+  available: boolean;
+  address: number;
+  i2cHz: number;
+  pwmHz: number;
+  oeEnabled: boolean;
+  commitFailures: number;
+}
+
+export interface OutputDiagnosticsFrame {
+  targetPeriodUs: number;
+  lastUs: number;
+  maxUs: number;
+  deadlineMisses: number;
+}
+
+export interface OutputDiagnosticsResponse {
+  addressable: OutputDiagnosticsAddressable;
+  pwm: OutputDiagnosticsPwm;
+  frame: OutputDiagnosticsFrame;
+}
+
+export function getOutputDiagnostics(ip: string): Promise<OutputDiagnosticsResponse> {
+  return apiJson<OutputDiagnosticsResponse>(ip, '/api/v1/diagnostics/output');
+}

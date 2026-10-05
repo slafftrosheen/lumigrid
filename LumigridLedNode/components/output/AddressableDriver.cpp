@@ -1,39 +1,41 @@
 // components/output/AddressableDriver.cpp
 //
-// Manages up to kLanes independent RMT-driven addressable LED strips (WS2812/SK6812).
-// Built on the ESP-IDF led_strip component (v5.x), which handles RMT encoding internally.
+// Facade over ParallelRmtDriver (LG-038). Manages up to kLanes independent RMT lanes
+// (WS2812 RGB / SK6812 RGBW) and a bounded diagnostic shadow of the staged values.
 //
-// RMT resolution: 10 MHz (100 ns per symbol). WS2812 timing fits within ±150 ns tolerance.
-// SK6812 RGBW: 4-byte data order; the LED strip component handles W-channel placement.
+// Pixel ordering is per-fixture (PixelOrder): RGB, GRB, RGBW, GRBW. The wire buffer
+// receives the configured byte order directly; SK6812 profile selects 4 bytes/pixel.
 //
-// Pixel ordering is per-fixture and specified via PixelOrder:
-//   RGB → LED_STRIP_COLOR_COMPONENT_FMT_RGB
-//   GRB → LED_STRIP_COLOR_COMPONENT_FMT_GRB   (WS2812 default)
-//   RGBW, GRBW → require SK6812 model for correct hardware decoding.
-//
+// RMT resolution: 10 MHz (100 ns per tick). Timing/encoder details live in
+// ParallelRmtDriver.cpp. The managed led_strip component is not used.
 #include "AddressableDriver.hpp"
 #include "lg_board_pins.hpp"
 
-#include "led_strip.h"
-#include "esp_check.h"
 #include "esp_log.h"
+#include <cstdlib>
 #include <cstring>
 
 namespace lg {
 
 static const char* TAG = "aled";
 
+AddressableDriver::~AddressableDriver() {
+    for (uint8_t lane = 0; lane < kLanes; ++lane) free_shadow(lane);
+}
+
+void AddressableDriver::free_shadow(uint8_t lane) {
+    free(shadow_[lane]);
+    shadow_[lane] = nullptr;
+}
+
 // ── Lifecycle ─────────────────────────────────────────────────────────────────
 
 esp_err_t AddressableDriver::init() {
-    ESP_LOGI(TAG, "Initialising AddressableDriver (%u lanes, max %u px/lane)",
+    ESP_LOGI(TAG, "Initialising AddressableDriver (%u lanes, max %u px/lane, parallel RMT)",
              kLanes, kPixels);
     for (uint8_t lane = 0; lane < kLanes; ++lane) {
-        strips_[lane]      = nullptr;
-        has_white_[lane]   = false;
-        num_pixels_[lane]  = 0;
+        clear_lane(lane);
     }
-    buffer_ = {};
     return ESP_OK;
 }
 
@@ -48,175 +50,103 @@ esp_err_t AddressableDriver::configure_lane(
         ESP_LOGE(TAG, "configure_lane: lane %u >= kLanes (%u)", lane, kLanes);
         return ESP_ERR_INVALID_ARG;
     }
-
-    // ── Tear down any existing strip on this lane first ───────────────────────
-    if (strips_[lane] != nullptr) {
-        led_strip_del(strips_[lane]);
-        strips_[lane] = nullptr;
+    if (num_pixels > kPixels) {
+        ESP_LOGE(TAG, "configure_lane: %u pixels exceeds maximum %u", num_pixels, kPixels);
+        return ESP_ERR_INVALID_ARG;
     }
 
-    // Reset lane metadata. Must be done here (not after the early return) so that
-    // previously-set has_white_ and num_pixels_ are always consistent with the
-    // current (potentially zero) strip configuration.
-    has_white_[lane]  = false;
-    num_pixels_[lane] = num_pixels;
-
-    // Clear software buffer for this lane regardless of whether a strip is
-    // installed, so stale pixel data is never surfaced by the visualizer.
-    for (uint16_t p = 0; p < kPixels; ++p) {
-        buffer_[lane][p] = {};
-    }
+    // Tear down any existing lane first so state is always consistent with the
+    // current (potentially zero-length) configuration.
+    clear_lane(lane);
 
     if (num_pixels == 0) {
         ESP_LOGI(TAG, "Lane %u deconfigured (num_pixels=0)", lane);
         return ESP_OK;
     }
 
-    // ── Resolve LED model and pixel format ────────────────────────────────────
     const bool is_rgbw = (profile == FixtureProfile::SK6812);
-    if (is_rgbw) {
-        has_white_[lane] = true;
-    }
-
-    // led_model_t selects the physical signal timing:
-    //   LED_MODEL_WS2812 → WS2812/WS2812B/WS2811 family (3 data bytes)
-    //   LED_MODEL_SK6812  → SK6812/SK6812RGBW      (4 data bytes for RGBW)
-    const led_model_t model = is_rgbw ? LED_MODEL_SK6812 : LED_MODEL_WS2812;
-
-    // Color component format maps to the wire byte order expected by the LED IC.
-    // GRB is the default for WS2812; SK6812 is typically GRBW.
-    led_color_component_format_t format;
-    switch (order) {
-        case PixelOrder::RGB:  format = LED_STRIP_COLOR_COMPONENT_FMT_RGB;  break;
-        case PixelOrder::GRB:  format = LED_STRIP_COLOR_COMPONENT_FMT_GRB;  break;
-        case PixelOrder::RGBW: format = LED_STRIP_COLOR_COMPONENT_FMT_RGBW; break;
-        case PixelOrder::GRBW: format = LED_STRIP_COLOR_COMPONENT_FMT_GRBW; break;
-        default:               format = LED_STRIP_COLOR_COMPONENT_FMT_GRB;  break;
-    }
-
-    // ── Create the led_strip RMT device ──────────────────────────────────────
-    const led_strip_config_t strip_cfg = {
-        .strip_gpio_num        = gpio,
-        .max_leds              = static_cast<uint32_t>(num_pixels),
-        .led_model             = model,
-        .color_component_format = format,
-        .flags                 = { .invert_out = false },
-    };
-
-    // mem_block_symbols: RMT memory block allocated for this channel.
-    // Each encoded LED bit uses 2 RMT symbols (16-bit entries), so per LED:
-    //   WS2812: 24 bits → 48 symbols
-    //   SK6812: 32 bits → 64 symbols
-    // With DMA disabled, the RMT hardware sends from its internal SRAM;
-    // the led_strip component re-fills per-call. 64 symbols is the minimum
-    // safe block size and avoids over-allocating the shared RMT SRAM.
-    const led_strip_rmt_config_t rmt_cfg = {
-        .clk_src          = RMT_CLK_SRC_DEFAULT,
-        .resolution_hz    = 10 * 1000 * 1000, // 10 MHz → 100 ns resolution (WS2812 ±150 ns)
-        .mem_block_symbols = 64,
-        .flags             = { .with_dma = false },
-    };
-
-    ESP_LOGI(TAG, "Configuring lane %u: GPIO %d, %u pixels, model=%s, order=%u",
+    ESP_LOGI(TAG, "Configuring lane %u: GPIO %u, %u pixels, model=%s, order=%u",
              lane, gpio, num_pixels, is_rgbw ? "SK6812" : "WS2812", static_cast<uint8_t>(order));
 
-    const esp_err_t err = led_strip_new_rmt_device(&strip_cfg, &rmt_cfg, &strips_[lane]);
+    const esp_err_t err = rmt_.configure_lane(lane, gpio, is_rgbw, order, num_pixels);
     if (err != ESP_OK) {
-        // Roll back state so this lane appears unconfigured.
-        has_white_[lane]  = false;
-        num_pixels_[lane] = 0;
-        ESP_LOGE(TAG, "Failed to create RMT strip on lane %u (GPIO %d): %s",
-                 lane, gpio, esp_err_to_name(err));
+        ESP_LOGE(TAG, "Failed to configure lane %u (GPIO %u): %s", lane, gpio, output_err_name(err));
+        return err;
     }
-    return err;
+
+    shadow_[lane] = static_cast<AddressableShadowPixel*>(calloc(num_pixels, sizeof(AddressableShadowPixel)));
+    if (shadow_[lane] == nullptr) {
+        rmt_.release_lane(lane);
+        ESP_LOGE(TAG, "Lane %u shadow alloc failed: %s", lane, output_err_name(kErrRmtResourceExhausted));
+        return kErrRmtResourceExhausted;
+    }
+    return ESP_OK;
 }
 
 // ── Buffer management ─────────────────────────────────────────────────────────
 
-// clear() zeroes the internal led_strip encoder buffer and our shadow buffer.
-// It does NOT transmit to the hardware — call show() separately to blank the LEDs.
+// clear() zeroes staged wire data and the diagnostic shadow. It does NOT transmit;
+// call show()/blackout() to push zeros to the LEDs.
 void AddressableDriver::clear() {
+    rmt_.stage_clear_all();
     for (uint8_t lane = 0; lane < kLanes; ++lane) {
-        if (strips_[lane]) {
-            led_strip_clear(strips_[lane]); // zeroes encoder's internal pixel buffer
-        }
-        for (uint16_t p = 0; p < kPixels; ++p) {
-            buffer_[lane][p] = {};
-        }
+        if (shadow_[lane]) memset(shadow_[lane], 0, rmt_.pixels(lane) * sizeof(AddressableShadowPixel));
     }
 }
 
-// clear_lane() tears down the physical strip on this lane and resets all state.
-// Call this when deconfiguring a lane between reconfigure() calls.
+// clear_lane() releases the RMT resources of this lane and resets all its state.
 void AddressableDriver::clear_lane(uint8_t lane) {
     if (lane >= kLanes) return;
-    if (strips_[lane] != nullptr) {
-        led_strip_del(strips_[lane]);
-        strips_[lane] = nullptr;
-    }
-    has_white_[lane]  = false;
-    num_pixels_[lane] = 0;
-    for (uint16_t p = 0; p < kPixels; ++p) {
-        buffer_[lane][p] = {};
-    }
+    rmt_.release_lane(lane);
+    free_shadow(lane);
 }
 
-// clear_buffer() resets the software shadow buffer without touching the hardware.
+// clear_buffer() zeroes staged data without touching the hardware.
 void AddressableDriver::clear_buffer() {
-    buffer_ = {};
+    clear();
 }
 
 // ── Per-pixel staging ─────────────────────────────────────────────────────────
 
 void AddressableDriver::set(uint8_t lane, uint16_t pixel, uint8_t r, uint8_t g, uint8_t b, uint8_t w) {
-    if (lane >= kLanes || strips_[lane] == nullptr) return;
+    if (lane >= kLanes || !rmt_.configured(lane)) return;
+    if (pixel >= rmt_.pixels(lane)) return; // bounds: configured length, not kPixels
 
-    // Bounds-check against the actual configured pixel count, not kPixels.
-    // Prevents writing past the end of what led_strip_new_rmt_device() allocated.
-    if (pixel >= num_pixels_[lane]) return;
+    rmt_.stage_pixel(lane, pixel, r, g, b, w);
 
-    if (has_white_[lane]) {
-        led_strip_set_pixel_rgbw(strips_[lane], pixel, r, g, b, w);
-    } else {
-        led_strip_set_pixel(strips_[lane], pixel, r, g, b);
-    }
-
-    // Mirror to the shadow buffer for the visualizer (bounded by kPixels).
-    if (pixel < kPixels) {
-        buffer_[lane][pixel] = { r, g, b };
+    if (shadow_[lane]) {
+        // Shadow reflects what was actually staged: W only exists on RGBW lanes.
+        shadow_[lane][pixel] = { r, g, b, rmt_.has_white(lane) ? w : uint8_t{0} };
     }
 }
 
 void AddressableDriver::fill(uint8_t lane, uint8_t r, uint8_t g, uint8_t b, uint8_t w) {
-    if (lane >= kLanes || strips_[lane] == nullptr) return;
-    for (uint16_t i = 0; i < num_pixels_[lane]; ++i) {
+    if (lane >= kLanes || !rmt_.configured(lane)) return;
+    const uint16_t n = rmt_.pixels(lane);
+    for (uint16_t i = 0; i < n; ++i) {
         set(lane, i, r, g, b, w);
     }
 }
 
-// ── Hardware commit ───────────────────────────────────────────────────────────
-
-// show() transmits the current encoder buffer to all active lanes.
-// Lanes are independent RMT channels — a failure on one lane must NOT prevent
-// the remaining lanes from being refreshed, as that would leave them stale.
-// The first error encountered is captured and returned to the caller.
-esp_err_t AddressableDriver::show() {
-    esp_err_t first_err = ESP_OK;
-    for (uint8_t lane = 0; lane < kLanes; ++lane) {
-        if (strips_[lane] == nullptr) continue;
-        const esp_err_t err = led_strip_refresh(strips_[lane]);
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "refresh lane %u failed: %s", lane, esp_err_to_name(err));
-            if (first_err == ESP_OK) first_err = err;
-        }
-    }
-    return first_err;
+AddressableShadowPixel AddressableDriver::shadow_pixel(uint8_t lane, uint16_t pixel) const {
+    if (lane >= kLanes || shadow_[lane] == nullptr || pixel >= rmt_.pixels(lane)) return {};
+    return shadow_[lane][pixel];
 }
 
-// blackout() clears all channels and immediately transmits zeros to hardware.
-esp_err_t AddressableDriver::blackout() {
+// ── Hardware commit ───────────────────────────────────────────────────────────
+
+// show() transmits staged data to ALL active lanes in parallel: every lane is
+// submitted before any lane is waited on. See ParallelRmtDriver::commit().
+AddressableCommitResult AddressableDriver::show() {
+    return rmt_.commit(false);
+}
+
+// blackout() stages zeros and transmits them on every configured lane, including
+// lanes previously marked Faulted. The caller inspects the result: a lane that
+// cannot transmit a zero frame is NOT confirmed dark.
+AddressableCommitResult AddressableDriver::blackout() {
     clear();
-    return show();
+    return rmt_.commit(true);
 }
 
 } // namespace lg

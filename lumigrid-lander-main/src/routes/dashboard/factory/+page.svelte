@@ -343,7 +343,11 @@
       <span class="telemetry-label">FACTORY STATE</span>
       <span class="status-pill status-{status?.state || (isTestActive ? 'running' : 'idle')}">
         <span class="dot"></span>
-        {status?.state?.toUpperCase() || (isTestActive ? 'RUNNING' : 'IDLE')}
+        {#if status?.session?.stage}
+          {status.session.stage.toUpperCase()} ({(status.session.stageIndex ?? 0) + 1}/{status.session.stageCount ?? 6})
+        {:else}
+          {status?.state?.toUpperCase() || (isTestActive ? 'RUNNING' : 'IDLE')}
+        {/if}
       </span>
     </div>
 
@@ -459,7 +463,11 @@
             {:else if chStatus?.tested}
               <span class="badge badge-danger">✗ FAILED</span>
             {:else if isCurrentLane}
-              <span class="badge badge-warning">TESTING...</span>
+              {#if currentSession?.stage}
+                <span class="badge badge-warning">{currentSession.stage.toUpperCase()} ({(currentSession.stageIndex ?? 0) + 1}/{currentSession.stageCount ?? 6})</span>
+              {:else}
+                <span class="badge badge-warning">TESTING...</span>
+              {/if}
             {:else}
               <span class="badge badge-idle">UNTESTED</span>
             {/if}
@@ -510,7 +518,11 @@
             {:else if chStatus?.tested}
               <span class="badge badge-danger">✗ FAILED</span>
             {:else if isCurrentPwm}
-              <span class="badge badge-warning">TESTING...</span>
+              {#if currentSession?.stage}
+                <span class="badge badge-warning">{currentSession.stage.toUpperCase()} ({(currentSession.stageIndex ?? 0) + 1}/{currentSession.stageCount ?? 6})</span>
+              {:else}
+                <span class="badge badge-warning">TESTING...</span>
+              {/if}
             {:else}
               <span class="badge badge-idle">UNTESTED</span>
             {/if}

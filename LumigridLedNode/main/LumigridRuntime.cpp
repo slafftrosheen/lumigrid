@@ -41,6 +41,7 @@ LumigridRuntime::LumigridRuntime()
     });
     lighting_.set_maintenance_callback([this](uint32_t now_ms) {
         dmx_router_.tick(now_ms);
+        cert_service_.tick(now_ms);
     });
 }
 
@@ -337,8 +338,19 @@ esp_err_t LumigridRuntime::init() {
         started_subsystems_.factory = true;
     }
 
-    // Step 5: Initialize CertificationService (LG-037)
-    cert_service_.init(&config_, &factory_runner_, api_.identity());
+    // Step 5: Initialize CertificationService (LG-037 / LG-038)
+    cert_service_.init(&config_, &factory_runner_, &api_.job_manager(), api_.identity(), [this]() -> CertificationProbeSnapshot {
+        CertificationProbeSnapshot probe{};
+        probe.runtime_ready = (startup_state_ == StartupState::Ready);
+        probe.api_running = api_.is_running();
+        probe.authenticated_ws_clients = api_.active_ws_clients();
+        auto wifi_stat = wifi_.status();
+        probe.ap_active = wifi_stat.ap_active;
+        probe.sta_connected = wifi_stat.sta_connected;
+        probe.backup_serializer_healthy = true;
+        probe.reset_reason = static_cast<uint32_t>(esp_reset_reason());
+        return probe;
+    });
     api_.set_certification_service(&cert_service_);
 
     vTaskDelay(pdMS_TO_TICKS(500));

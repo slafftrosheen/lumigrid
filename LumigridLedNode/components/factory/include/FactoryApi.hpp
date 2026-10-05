@@ -130,6 +130,8 @@ public:
                     class CueRunner* cue_runner = nullptr,
                     class ShowTransportCoordinator* show_transport = nullptr);
     void stop();
+    bool is_running() const { return signage_server_ != nullptr || factory_server_ != nullptr; }
+    uint32_t active_ws_clients() const;
 
     void set_diagnostics_provider(std::function<StartupDiagnostics()> provider) {
         diagnostics_provider_ = std::move(provider);

@@ -168,10 +168,10 @@ The software architecture and simulation boundaries are fully hardened. The runt
 
 - [ ] **Actual RMT Output Verification**:
   - Verify WS2812 / SK6812 signal integrity on an oscilloscope (timing parameters: $T0H = 350\text{ns} \pm 150\text{ns}$, $T1H = 900\text{ns} \pm 150\text{ns}$).
-  - Verify 8 parallel RMT channels under maximum pixel load (8 x 300 pixels @ 40 FPS).
+  - Verify 8 parallel RMT channels under maximum pixel load (8 x 256 pixels @ 40 FPS with true parallel submission).
 - [ ] **Actual PCA9685 Output Verification**:
-  - Verify I2C bus clock stretching, waveform shape, and fast-mode (400 kHz) stability.
-  - Verify output enable (OE) physical pull-down and PWM duty accuracy from 0 to 4095.
+  - Verify I2C bus clock stretching, waveform shape, and standard-mode (100 kHz) stability.
+  - Verify output enable (OE) physical pull-down and PWM duty accuracy from 0 to 4095 (~1017 Hz PWM).
 - [ ] **Physical Art-Net Source Validation**:
   - Test real Art-Net controller broadcast and unicast streaming at 44 Hz continuous.
   - Verify ArtPoll / ArtPollReply round-trip and node discovery in QLC+ and Madrix.
@@ -180,9 +180,10 @@ The software architecture and simulation boundaries are fully hardened. The runt
   - Test multi-console priority preemption (Priority 100 vs Priority 150).
 - [ ] **Hardware Emergency Stop**:
   - Verify physical GPIO interruption line latching.
-  - Assert zero PWM / LED output within $< 5\text{ms}$ of E-Stop pin trip.
+  - Assert zero PWM output immediately (<1 µs via direct GPIO `/OE` cutoff).
+  - Addressable blackout is protocol-bound to serial frame wire transmission (~7.68 ms WS2812 / ~10.24 ms SK6812 for 256 pixels); physical $< 5\text{ms}$ addressable cutoff requires future hardware power-gate / load switch.
 - [ ] **Factory Hardware Test Output**:
-  - Execute factory direct RGBW pattern and verify physical color balance and gamma response.
+  - Execute factory direct RGBW pattern and verify physical color balance and gamma response across sequenced stages.
 - [ ] **Thermal and Power Budget Verification**:
   - Validate dynamic power limiter on calibrated DC power supply (assert total draw does not exceed configured `max_power_mw`).
 - [ ] **24h / 72h Continuous Burn-in Run**:

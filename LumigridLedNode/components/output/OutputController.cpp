@@ -47,6 +47,7 @@ esp_err_t OutputController::reconfigure(const DeviceConfig& cfg) {
                 ESP_LOGE("output", "Reconfigure validation: channel[%u] (P%u) is enabled, but PCA9685 driver is unavailable", ch, ch - 7);
                 topology_valid_.store(false, std::memory_order_release);
                 output_enabled_.store(false, std::memory_order_release);
+                Pca9685Driver::disable_outputs();
                 unlock();
                 return ESP_ERR_NOT_FOUND;
             }
@@ -60,6 +61,7 @@ esp_err_t OutputController::reconfigure(const DeviceConfig& cfg) {
             ESP_LOGE("output", "Reconfigure validation: channel[%u] pixel_count (%u) > MAX_PIXELS", ch, ccfg.pixel_count);
             topology_valid_.store(false, std::memory_order_release);
             output_enabled_.store(false, std::memory_order_release);
+            Pca9685Driver::disable_outputs();
             unlock();
             return ESP_ERR_INVALID_ARG;
         }
@@ -79,9 +81,10 @@ esp_err_t OutputController::reconfigure(const DeviceConfig& cfg) {
         esp_err_t err = pixels_.configure_lane(ch, gpio, prof, ccfg.pixel_order, ccfg.pixel_count);
         if (err != ESP_OK) {
             ESP_LOGE("output", "Failed to configure lane %u (GPIO %u): %s. Rolling back all lanes and entering safe blackout!",
-                     ch, gpio, esp_err_to_name(err));
+                     ch, gpio, output_err_name(err));
             topology_valid_.store(false, std::memory_order_release);
             output_enabled_.store(false, std::memory_order_release);
+            Pca9685Driver::disable_outputs();
             for (uint8_t l = 0; l < OutputCapabilities::kRmtLanes; ++l) {
                 pixels_.clear_lane(l);
             }
@@ -109,40 +112,68 @@ esp_err_t OutputController::reconfigure(const DeviceConfig& cfg) {
     topology_valid_.store(true, std::memory_order_release);
     if (!estop_latched_.load(std::memory_order_acquire)) {
         output_enabled_.store(true, std::memory_order_release);
+        if (pwm_ok) {
+            Pca9685Driver::enable_outputs();
+        }
     }
     unlock();
     return ESP_OK;
-
 }
 
-esp_err_t OutputController::blackout_locked() {
-    esp_err_t err1 = pixels_.blackout();
-    esp_err_t err2 = pwm_.clear();
-    return (err1 != ESP_OK) ? err1 : err2;
+BlackoutResult OutputController::blackout_locked() {
+    Pca9685Driver::disable_outputs();
+    AddressableCommitResult a_res = pixels_.blackout();
+    esp_err_t p_err = pwm_available_.load(std::memory_order_acquire) ? pwm_.clear() : ESP_OK;
+
+    BlackoutResult res;
+    res.addressable_result = a_res.result;
+    res.pwm_result = p_err;
+    res.addressable_confirmed = (a_res.result == ESP_OK);
+    res.pwm_confirmed = (p_err == ESP_OK);
+    return res;
 }
 
-esp_err_t OutputController::blackout() {
+BlackoutResult OutputController::blackout() {
     lock();
-    esp_err_t err = blackout_locked();
+    BlackoutResult res = blackout_locked();
     unlock();
-    return err;
+    return res;
 }
 
 void OutputController::latch_estop() {
-    lock();
+    // 1. Atomically latch state
     estop_latched_.store(true, std::memory_order_release);
     output_enabled_.store(false, std::memory_order_release);
+
+    // 2. Assert PCA /OE HIGH immediately without waiting on output lock or RMT
+    Pca9685Driver::force_disable_outputs();
+
+    // 3. Acquire output lock and blackout
+    lock();
     blackout_locked();
     unlock();
 }
 
 void OutputController::clear_estop() {
-    // Clearing the physical latch only re-arms the controller.
-    // It must NOT immediately restore previous output.
+    // Clearing the physical latch only re-arms the controller with known-zero outputs.
+    // It must NOT immediately restore previous or stale output.
     lock();
-    estop_latched_.store(false, std::memory_order_release);
-    output_enabled_.store(true, std::memory_order_release);
-    blackout_locked();
+    Pca9685Driver::disable_outputs();
+
+    esp_err_t p_err = pwm_available_.load(std::memory_order_acquire) ? pwm_.clear() : ESP_OK;
+    pixels_.clear();
+    AddressableCommitResult a_res = pixels_.blackout();
+
+    if (p_err == ESP_OK && a_res.result == ESP_OK) {
+        estop_latched_.store(false, std::memory_order_release);
+        output_enabled_.store(true, std::memory_order_release);
+        if (topology_valid_.load(std::memory_order_acquire)) {
+            Pca9685Driver::enable_outputs();
+        }
+    } else {
+        ESP_LOGE("output", "clear_estop failed to zero hardware cleanly (addr=%s, pwm=%s)",
+                 output_err_name(a_res.result), esp_err_to_name(p_err));
+    }
     unlock();
 }
 
@@ -150,7 +181,10 @@ void OutputController::set_output_enabled(bool enabled) {
     lock();
     output_enabled_.store(enabled, std::memory_order_release);
     if (!enabled) {
+        Pca9685Driver::disable_outputs();
         blackout_locked();
+    } else if (topology_valid_.load(std::memory_order_acquire) && !estop_latched_.load(std::memory_order_acquire)) {
+        Pca9685Driver::enable_outputs();
     }
     unlock();
 }
@@ -202,47 +236,25 @@ esp_err_t OutputTransaction::commit() {
 
 esp_err_t OutputTransaction::abort() {
     if (!active_) return ESP_ERR_INVALID_STATE;
-    esp_err_t err = controller_.blackout_locked();
+    BlackoutResult b_res = controller_.blackout_locked();
     controller_.unlock();
     active_ = false;
-    return err;
+    return b_res;
 }
 
 esp_err_t OutputController::try_commit_locked() {
-    static uint32_t s_commit_count = 0;
-    static uint32_t s_last_log_ms = 0;
-    s_commit_count++;
-    
-    uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000);
-    if (now - s_last_log_ms >= 1000) {
-        s_last_log_ms = now;
-        uint32_t non_zero_pixels = 0;
-        uint32_t non_zero_bytes = 0;
-        uint32_t pixel_count = 0;
-        auto& buf = pixels_.buffer();
-        for (uint8_t l = 0; l < AddressableDriver::kLanes; ++l) {
-            for (uint16_t p = 0; p < AddressableDriver::kPixels; ++p) {
-                pixel_count++;
-                if (buf[l][p].r > 0 || buf[l][p].g > 0 || buf[l][p].b > 0) {
-                    non_zero_pixels++;
-                    non_zero_bytes += (buf[l][p].r > 0 ? 1 : 0) + (buf[l][p].g > 0 ? 1 : 0) + (buf[l][p].b > 0 ? 1 : 0);
-                }
-            }
-        }
-        bool enabled = output_enabled_.load(std::memory_order_acquire);
-        bool estop = estop_latched_.load(std::memory_order_acquire);
-        bool valid = topology_valid_.load(std::memory_order_acquire);
-        ESP_LOGI("output_diag", "OUTPUT frame=%lu enabled=%d lanes=8 pixels=%lu nonZeroPx=%lu nonZeroBytes=%lu estop=%d valid=%d",
-                 s_commit_count, enabled, pixel_count, non_zero_pixels, non_zero_bytes, estop, valid);
-    }
-
+    commit_metrics_.attempted++;
 
     if (estop_latched_.load(std::memory_order_acquire) ||
         !output_enabled_.load(std::memory_order_acquire) ||
         !topology_valid_.load(std::memory_order_acquire)) {
-        esp_err_t b_err = blackout_locked();
-        esp_err_t err = (b_err != ESP_OK) ? b_err : ESP_ERR_INVALID_STATE;
+        Pca9685Driver::disable_outputs();
+        BlackoutResult b_res = blackout_locked();
+        esp_err_t err = (b_res.addressable_result != ESP_OK) ? b_res.addressable_result :
+                        (b_res.pwm_result != ESP_OK) ? b_res.pwm_result : ESP_ERR_INVALID_STATE;
         last_commit_error_.store(err, std::memory_order_release);
+        commit_metrics_.last_error = err;
+        commit_metrics_.failed++;
         last_commit_time_ms_.store(static_cast<uint32_t>(esp_timer_get_time() / 1000), std::memory_order_release);
         if (commit_observer_) {
             commit_observer_(err);
@@ -250,8 +262,34 @@ esp_err_t OutputController::try_commit_locked() {
         return err;
     }
 
-    esp_err_t err1 = pixels_.show();
-    esp_err_t err2 = pwm_available_.load(std::memory_order_acquire) ? pwm_.commit() : ESP_OK;
+    const int64_t t_total_start = esp_timer_get_time();
+
+    // 1. Parallel Addressable commit
+    const int64_t t_addr_start = esp_timer_get_time();
+    AddressableCommitResult a_res = pixels_.show();
+    const int64_t t_addr_end = esp_timer_get_time();
+    const uint32_t addr_us = static_cast<uint32_t>(t_addr_end - t_addr_start);
+
+    // 2. PWM commit
+    esp_err_t pwm_err = ESP_OK;
+    uint32_t pwm_us = 0;
+    if (pwm_available_.load(std::memory_order_acquire)) {
+        const int64_t t_pwm_start = esp_timer_get_time();
+        pwm_err = pwm_.commit();
+        const int64_t t_pwm_end = esp_timer_get_time();
+        pwm_us = static_cast<uint32_t>(t_pwm_end - t_pwm_start);
+        if (pwm_err == ESP_OK) {
+            Pca9685Driver::enable_outputs();
+        } else {
+            Pca9685Driver::disable_outputs();
+        }
+    }
+
+    const int64_t t_total_end = esp_timer_get_time();
+    const uint32_t total_us = static_cast<uint32_t>(t_total_end - t_total_start);
+
+    esp_err_t err1 = a_res.result;
+    esp_err_t err2 = pwm_err;
 
 #if defined(CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS) && CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS
     if (mock_failure_injections_ > 0) {
@@ -267,11 +305,29 @@ esp_err_t OutputController::try_commit_locked() {
 #endif
 
     esp_err_t final_err = (err1 != ESP_OK) ? err1 : err2;
+
+    commit_metrics_.last_addressable_us = addr_us;
+    if (addr_us > commit_metrics_.max_addressable_us) commit_metrics_.max_addressable_us = addr_us;
+
+    commit_metrics_.last_pwm_us = pwm_us;
+    if (pwm_us > commit_metrics_.max_pwm_us) commit_metrics_.max_pwm_us = pwm_us;
+
+    commit_metrics_.last_total_us = total_us;
+    if (total_us > commit_metrics_.max_total_us) commit_metrics_.max_total_us = total_us;
+
+    commit_metrics_.last_error = final_err;
+    commit_metrics_.last_failed_lane = (err1 != ESP_OK) ? a_res.failed_lane : kNoFailedLane;
+
     last_commit_error_.store(final_err, std::memory_order_release);
-    last_commit_time_ms_.store(static_cast<uint32_t>(esp_timer_get_time() / 1000), std::memory_order_release);
+    last_commit_time_ms_.store(static_cast<uint32_t>(t_total_end / 1000), std::memory_order_release);
+
     if (final_err != ESP_OK) {
+        commit_metrics_.failed++;
         failed_commit_count_.fetch_add(1, std::memory_order_relaxed);
+        Pca9685Driver::disable_outputs();
         blackout_locked(); // Deterministic blackout on failed commit!
+    } else {
+        commit_metrics_.successful++;
     }
 
     if (commit_observer_) {

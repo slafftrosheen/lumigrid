@@ -38,6 +38,35 @@ private:
     bool active_ = false;
 };
 
+struct BlackoutResult {
+    esp_err_t addressable_result = ESP_OK;
+    esp_err_t pwm_result = ESP_OK;
+    bool addressable_confirmed = false;
+    bool pwm_confirmed = false;
+
+    operator esp_err_t() const {
+        return (addressable_result != ESP_OK) ? addressable_result : pwm_result;
+    }
+};
+
+struct OutputCommitMetrics {
+    uint64_t attempted = 0;
+    uint64_t successful = 0;
+    uint64_t failed = 0;
+
+    uint32_t last_total_us = 0;
+    uint32_t max_total_us = 0;
+
+    uint32_t last_addressable_us = 0;
+    uint32_t max_addressable_us = 0;
+
+    uint32_t last_pwm_us = 0;
+    uint32_t max_pwm_us = 0;
+
+    uint32_t last_error = 0;
+    uint8_t  last_failed_lane = kNoFailedLane;
+};
+
 /// Controls all output hardware (addressable LEDs + PCA9685 PWM).
 ///
 /// Thread-safety: All physical output commits MUST pass the try_commit() safety gate.
@@ -61,7 +90,7 @@ public:
     // Reconfigures hardware driver layers based on logical configuration
     esp_err_t reconfigure(const DeviceConfig& cfg);
     
-    esp_err_t blackout();
+    BlackoutResult blackout();
 
     /// Unified physical output safety gate
     esp_err_t try_commit();
@@ -93,8 +122,13 @@ public:
     esp_err_t last_commit_error() const { return last_commit_error_.load(std::memory_order_acquire); }
     uint32_t last_commit_time_ms() const { return last_commit_time_ms_.load(std::memory_order_acquire); }
 
+    OutputCommitMetrics commit_metrics() const { return commit_metrics_; }
+
     AddressableDriver& pixels() { return pixels_; }
+    const AddressableDriver& pixels() const { return pixels_; }
+
     Pca9685Driver& pwm() { return pwm_; }
+    const Pca9685Driver& pwm() const { return pwm_; }
 
     /// Acquire the output mutex. Use when performing multi-step
     /// pixel/pwm operations that must be atomic.
@@ -104,7 +138,7 @@ public:
     friend class OutputTransaction;
 
 private:
-    esp_err_t blackout_locked();
+    BlackoutResult blackout_locked();
 
     AddressableDriver pixels_;
     Pca9685Driver pwm_;
@@ -119,6 +153,8 @@ private:
     std::atomic<uint32_t> failed_commit_count_{0};
     std::atomic<esp_err_t> last_commit_error_{ESP_OK};
     std::atomic<uint32_t> last_commit_time_ms_{0};
+
+    OutputCommitMetrics commit_metrics_{};
 
 #if defined(CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS) && CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS
 public:
@@ -135,4 +171,3 @@ private:
 };
 
 } // namespace lg
-

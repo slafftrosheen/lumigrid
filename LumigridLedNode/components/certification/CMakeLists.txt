@@ -8,6 +8,7 @@ idf_component_register(
     REQUIRES
         config
         factory
+        control
         auth
         output
         board

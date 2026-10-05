@@ -10,6 +10,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include <atomic>
 #include <cstring>
 
 namespace lg {
@@ -31,14 +32,17 @@ i2c_master_bus_handle_t s_bus = nullptr;
 i2c_master_dev_handle_t s_dev = nullptr;
 SemaphoreHandle_t s_i2c_mutex = nullptr;
 uint8_t s_detected_addr = lg::board::kPcaAddress;
+std::atomic<bool> s_outputs_enabled{false};
 
 void disable_pwm_outputs() {
     // PCA9685 /OE is active-low. HIGH is the hardware fail-safe state.
     gpio_set_level(lg::board::kPcaOe, 1);
+    s_outputs_enabled.store(false, std::memory_order_release);
 }
 
 void enable_pwm_outputs() {
     gpio_set_level(lg::board::kPcaOe, 0);
+    s_outputs_enabled.store(true, std::memory_order_release);
 }
 
 esp_err_t init_i2c_once() {
@@ -92,6 +96,22 @@ esp_err_t init_i2c_once() {
 
 } // namespace
 
+void Pca9685Driver::force_disable_outputs() {
+    disable_pwm_outputs();
+}
+
+void Pca9685Driver::enable_outputs() {
+    enable_pwm_outputs();
+}
+
+void Pca9685Driver::disable_outputs() {
+    disable_pwm_outputs();
+}
+
+bool Pca9685Driver::is_outputs_enabled() {
+    return s_outputs_enabled.load(std::memory_order_acquire);
+}
+
 esp_err_t Pca9685Driver::write_register(uint8_t reg, uint8_t value) {
     if (s_dev == nullptr || s_i2c_mutex == nullptr) return ESP_ERR_INVALID_STATE;
     xSemaphoreTake(s_i2c_mutex, portMAX_DELAY);
@@ -119,8 +139,9 @@ esp_err_t Pca9685Driver::write_bytes(uint8_t start_reg, const uint8_t* data, siz
 }
 
 esp_err_t Pca9685Driver::init() {
+    initialized_ = false;
     // Keep hardware disabled until the controller is configured, verified and a
-    // known-zero frame has been written. This prevents boot-time PWM flashes.
+    // known-safe frame has been written. This prevents boot-time PWM flashes.
     const gpio_config_t oe_conf = {
         .pin_bit_mask = (1ULL << lg::board::kPcaOe),
         .mode = GPIO_MODE_OUTPUT,
@@ -129,7 +150,7 @@ esp_err_t Pca9685Driver::init() {
         .intr_type = GPIO_INTR_DISABLE,
     };
     ESP_RETURN_ON_ERROR(gpio_config(&oe_conf), TAG, "/OE gpio config");
-    ESP_RETURN_ON_ERROR(gpio_set_level(lg::board::kPcaOe, 1), TAG, "/OE safe disable");
+    disable_pwm_outputs();
 
     ESP_RETURN_ON_ERROR(init_i2c_once(), TAG, "I2C init");
     ESP_LOGI(TAG, "Initialising PCA9685 at 0x%02X, target PWM ~1017 Hz", s_detected_addr);
@@ -141,17 +162,33 @@ esp_err_t Pca9685Driver::init() {
     ESP_RETURN_ON_ERROR(write_register(kRegMode1, kMode1AutoInc), TAG, "wake");
     vTaskDelay(pdMS_TO_TICKS(2)); // datasheet oscillator wake-up is <= 500 us
 
-    uint8_t reg = kRegMode1;
-    uint8_t mode1 = 0;
+    // Read back MODE1, MODE2, PRE_SCALE to verify correct hardware state
+    uint8_t reg_m1 = kRegMode1;
+    uint8_t reg_m2 = kRegMode2;
+    uint8_t reg_pre = kRegPrescale;
+    uint8_t m1 = 0, m2 = 0, pre = 0;
+
     xSemaphoreTake(s_i2c_mutex, portMAX_DELAY);
-    const esp_err_t read_err = i2c_master_transmit_receive(s_dev, &reg, 1, &mode1, 1, 50);
+    esp_err_t r1 = i2c_master_transmit_receive(s_dev, &reg_m1, 1, &m1, 1, 50);
+    esp_err_t r2 = (r1 == ESP_OK) ? i2c_master_transmit_receive(s_dev, &reg_m2, 1, &m2, 1, 50) : r1;
+    esp_err_t r3 = (r2 == ESP_OK) ? i2c_master_transmit_receive(s_dev, &reg_pre, 1, &pre, 1, 50) : r2;
     xSemaphoreGive(s_i2c_mutex);
-    if (read_err != ESP_OK || (mode1 & kMode1Sleep) != 0 || (mode1 & kMode1AutoInc) == 0) {
+
+    if (r1 != ESP_OK || r2 != ESP_OK || r3 != ESP_OK ||
+        (m1 & kMode1Sleep) != 0 ||
+        (m1 & kMode1AutoInc) == 0 ||
+        (m2 & kMode2OutDrv) == 0 ||
+        pre != kPrescaleFor1kHz) {
         disable_pwm_outputs();
-        ESP_LOGE(TAG, "PCA9685 MODE1 verification failed (err=%s, mode1=0x%02X)",
-                 esp_err_to_name(read_err), mode1);
-        return read_err != ESP_OK ? read_err : ESP_ERR_INVALID_RESPONSE;
+        ESP_LOGE(TAG, "PCA9685 verification failed (m1=0x%02X sleep_clr=%d autoinc=%d, m2=0x%02X outdrv=%d, pre=%u exp=%u)",
+                 m1, (m1 & kMode1Sleep) == 0, (m1 & kMode1AutoInc) != 0,
+                 m2, (m2 & kMode2OutDrv) != 0, pre, kPrescaleFor1kHz);
+        return ESP_ERR_INVALID_RESPONSE;
     }
+
+    mode1_ = m1;
+    mode2_ = m2;
+    prescale_ = pre;
 
     values_.fill(0);
     const esp_err_t clear_err = commit();
@@ -160,7 +197,9 @@ esp_err_t Pca9685Driver::init() {
         return clear_err;
     }
 
-    ESP_LOGI(TAG, "PCA9685 verified and enabled from known-zero output state");
+    initialized_ = true;
+    ESP_LOGI(TAG, "PCA9685 verified (MODE1=0x%02X, MODE2=0x%02X, PRE_SCALE=%u) and initialized to zero",
+             m1, m2, pre);
     return ESP_OK;
 }
 
@@ -203,14 +242,29 @@ esp_err_t Pca9685Driver::commit() {
 
     const esp_err_t err = write_bytes(kRegLed0OnL, bytes, sizeof(bytes));
     if (err != ESP_OK) {
+        commit_failures_++;
         disable_pwm_outputs();
         ESP_LOGE(TAG, "PWM commit failed; /OE latched HIGH (%s)", esp_err_to_name(err));
         return err;
     }
 
-    // Only expose outputs after the complete register burst has succeeded.
-    enable_pwm_outputs();
+    // Note: Do NOT automatically lower /OE here.
+    // Physical OE enable is controlled exclusively by OutputController safety state.
     return ESP_OK;
+}
+
+PcaDiagnostics Pca9685Driver::diagnostics() const {
+    PcaDiagnostics diag;
+    diag.initialized = initialized_;
+    diag.outputs_enabled = is_outputs_enabled();
+    diag.address = s_detected_addr;
+    diag.i2c_hz = 100000;
+    diag.pwm_hz = 1017;
+    diag.mode1 = mode1_;
+    diag.mode2 = mode2_;
+    diag.prescale = prescale_;
+    diag.commit_failures = commit_failures_;
+    return diag;
 }
 
 } // namespace lg
