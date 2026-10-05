@@ -336,6 +336,11 @@ esp_err_t LumigridRuntime::init() {
         startup_stage_ = StartupStage::FactoryStarted;
         started_subsystems_.factory = true;
     }
+
+    // Step 5: Initialize CertificationService (LG-037)
+    cert_service_.init(&config_, &factory_runner_, api_.identity());
+    api_.set_certification_service(&cert_service_);
+
     vTaskDelay(pdMS_TO_TICKS(500));
 
     if (!net_apply_queue_) {
@@ -1288,6 +1293,9 @@ esp_err_t LumigridRuntime::apply_device_config(
             }
         }
     }
+
+    // 7. Check certification invalidation on hardware-relevant config changes (LG-037)
+    cert_service_.check_invalidation(new_cfg, api_.identity().hw_revision, api_.identity().fw_version);
 
     return ESP_OK;
 }

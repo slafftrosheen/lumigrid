@@ -15,6 +15,7 @@ import VisualizerPage from './visualizer/+page.svelte';
 import UptimePage from './uptime/+page.svelte';
 import DiagnosticsPage from './diagnostics/+page.svelte';
 import FactoryPage from './factory/+page.svelte';
+import CertificationPage from './certification/+page.svelte';
 import PreviewPage from './preview/+page.svelte';
 import FirmwarePage from './firmware/+page.svelte';
 import CuesPage from './cues/+page.svelte';
@@ -35,6 +36,7 @@ const routes = [
   { path: '/dashboard/uptime', component: UptimePage, name: 'Uptime' },
   { path: '/dashboard/diagnostics', component: DiagnosticsPage, name: 'Diagnostics' },
   { path: '/dashboard/factory', component: FactoryPage, name: 'Factory' },
+  { path: '/dashboard/certification', component: CertificationPage, name: 'Certification' },
   { path: '/dashboard/preview', component: PreviewPage, name: 'Preview' },
   { path: '/dashboard/firmware', component: FirmwarePage, name: 'Firmware' },
 ];
@@ -54,6 +56,7 @@ const routeSourceFiles = [
   './uptime/+page.svelte',
   './diagnostics/+page.svelte',
   './factory/+page.svelte',
+  './certification/+page.svelte',
   './firmware/+page.svelte',
 ];
 
@@ -82,7 +85,7 @@ describe('dashboard routes smoke & contract tests', () => {
   let mockStorage: MockStorage;
 
   it('keeps the dashboard route registry complete and unique', () => {
-    expect(routes).toHaveLength(15);
+    expect(routes).toHaveLength(16);
     expect(new Set(routes.map(r => r.path)).size).toBe(routes.length);
     expect(routes.map(r => r.path)).toEqual(expect.arrayContaining([
       '/dashboard',
@@ -99,6 +102,7 @@ describe('dashboard routes smoke & contract tests', () => {
       '/dashboard/uptime',
       '/dashboard/diagnostics',
       '/dashboard/factory',
+      '/dashboard/certification',
       '/dashboard/firmware',
     ]));
   });
@@ -125,6 +129,7 @@ describe('dashboard routes smoke & contract tests', () => {
   it('keeps destructive maintenance workspaces admin-only in navigation', () => {
     const layout = sourceFor('./+layout.svelte');
     expect(layout).toMatch(/href:\s*'\/dashboard\/factory'[\s\S]{0,120}adminOnly:\s*true/);
+    expect(layout).toMatch(/href:\s*'\/dashboard\/certification'[\s\S]{0,120}adminOnly:\s*true/);
     expect(layout).toMatch(/href:\s*'\/dashboard\/firmware'[\s\S]{0,120}adminOnly:\s*true/);
     expect(layout).toContain('Admin access required');
   });

@@ -12,6 +12,7 @@
 #include "CueRunner.hpp"
 #include "ShowTransport.hpp"
 #include "WifiService.hpp"
+#include "CertificationService.hpp"
 #include "ChannelConfiguration.hpp"
 #include "esp_wifi.h"
 #include "esp_log.h"
@@ -370,7 +371,19 @@ RuntimeSnapshot collect_runtime_snapshot(FactoryApi* api, uint32_t stream_seq) {
         snap.job.has_job = false;
     }
 
-    // 13. Channels
+    // 13. Certification
+    if (api->certification_service()) {
+        auto cs = api->certification_service()->get_status_summary();
+        snprintf(snap.certification.state, sizeof(snap.certification.state), "%s", certification_state_to_string(cs.state));
+        snprintf(snap.certification.current_test, sizeof(snap.certification.current_test), "%s", cs.current_test);
+        snap.certification.passed = cs.passed;
+        snap.certification.failed = cs.failed;
+        snap.certification.total = cs.total;
+    } else {
+        snprintf(snap.certification.state, sizeof(snap.certification.state), "not_started");
+    }
+
+    // 14. Channels
     DeviceConfig status_cfg{};
     if (api->config()) {
         api->config()->load_config(status_cfg);
@@ -544,6 +557,16 @@ bool serialize_runtime_snapshot(const RuntimeSnapshot& snap, FixedJsonWriter& wr
     } else {
         writer.append("\"job\":null,");
     }
+
+    // Certification (compact summary)
+    writer.append_printf(
+        "\"certification\":{\"state\":\"%s\",\"currentTest\":\"%s\",\"passed\":%u,\"failed\":%u,\"total\":%u},",
+        snap.certification.state,
+        snap.certification.current_test,
+        snap.certification.passed,
+        snap.certification.failed,
+        snap.certification.total
+    );
 
     // Channels
     writer.append("\"channels\":[");

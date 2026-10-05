@@ -184,6 +184,14 @@ struct ChannelSnapshot {
     uint16_t level = 0;
 };
 
+struct CertificationSnapshot {
+    char state[16] = {0};
+    char current_test[16] = {0};
+    uint16_t passed = 0;
+    uint16_t failed = 0;
+    uint16_t total = 0;
+};
+
 struct RuntimeSnapshot {
     uint8_t schema = 3;
     uint32_t stream_seq = 0;
@@ -201,6 +209,7 @@ struct RuntimeSnapshot {
     TimelineSnapshot timeline;
     AutomationSnapshot automation;
     JobSnapshot job;
+    CertificationSnapshot certification;
 
     ChannelSnapshot channels[kChannelCount];
 };

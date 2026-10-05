@@ -27,6 +27,7 @@ idf_component_register(
         show
         auth
         discovery
+        certification
 )
 
 # LittleFS image: enable when web/dist frontend build exists.

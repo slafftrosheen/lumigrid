@@ -348,6 +348,7 @@
     { group: 'System',   href: '/dashboard/uptime',       icon: '▣',  label: 'Uptime' },
     { group: 'System',   href: '/dashboard/diagnostics',  icon: '⚕',  label: 'Diagnostics' },
     { group: 'System',   href: '/dashboard/factory',      icon: '⚙',  label: 'Factory', adminOnly: true },
+    { group: 'System',   href: '/dashboard/certification',icon: '🛡️', label: 'Certification', adminOnly: true },
     { group: 'System',   href: '/dashboard/firmware',     icon: '⟳',  label: 'System & Recovery', adminOnly: true },
   ];
 

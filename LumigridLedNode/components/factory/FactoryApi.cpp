@@ -28,6 +28,8 @@
 #include "CueRunner.hpp"
 #include "ChannelConfiguration.hpp"
 #include "ShowTransport.hpp"
+#include "CertificationService.hpp"
+#include "CertificationPlan.hpp"
 #include <inttypes.h>
 #include <cmath>
 
@@ -4577,6 +4579,15 @@ esp_err_t get_fleet_nodes(httpd_req_t* request) {
     cJSON_AddStringToObject(self_obj, "model", self_id.model);
     cJSON_AddStringToObject(self_obj, "firmware", self_id.fw_version);
     cJSON_AddStringToObject(self_obj, "hardwareRevision", self_id.hw_revision);
+    if (api_ptr->certification_service()) {
+        auto cs = api_ptr->certification_service()->get_status_summary();
+        cJSON* cert_obj = cJSON_CreateObject();
+        cJSON_AddStringToObject(cert_obj, "state", cs.is_stale ? "stale" : certification_state_to_string(cs.state));
+        cJSON_AddStringToObject(cert_obj, "certificationId", api_ptr->certification_service()->session().identity.certification_id);
+        cJSON_AddNumberToObject(cert_obj, "planVersion", api_ptr->certification_service()->session().identity.plan_version);
+        cJSON_AddStringToObject(cert_obj, "firmwareVersion", api_ptr->certification_service()->session().identity.firmware_version);
+        cJSON_AddItemToObject(self_obj, "certification", cert_obj);
+    }
     cJSON_AddItemToObject(root, "self", self_obj);
 
     // Discovered nodes
@@ -6668,6 +6679,265 @@ esp_err_t post_restore(httpd_req_t* request) {
     return ESP_OK;
 }
 
+// ── Certification Handlers (LG-037) ──────────────────────────────────────────
+
+static esp_err_t get_certification_plan(httpd_req_t* request) {
+    if (!api::authorize(request, api::ApiRole::Operator)) return ESP_OK;
+
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "schema", 1);
+    cJSON_AddNumberToObject(root, "planVersion", kCertificationPlanVersion);
+
+    cJSON* tests_arr = cJSON_CreateArray();
+    const auto* defs = CertificationPlan::test_definitions();
+    size_t count = CertificationPlan::test_count();
+
+    for (size_t i = 0; i < count; ++i) {
+        cJSON* t = cJSON_CreateObject();
+        cJSON_AddStringToObject(t, "id", defs[i].id);
+        cJSON_AddStringToObject(t, "category", defs[i].category);
+        cJSON_AddStringToObject(t, "title", defs[i].title);
+        cJSON_AddStringToObject(t, "requiredEvidence", evidence_source_to_string(defs[i].required_evidence));
+        cJSON_AddStringToObject(t, "reqDev", requirement_level_to_string(defs[i].req_dev));
+        cJSON_AddStringToObject(t, "reqProd", requirement_level_to_string(defs[i].req_prod));
+        cJSON_AddStringToObject(t, "reqRc", requirement_level_to_string(defs[i].req_rc));
+        cJSON_AddNumberToObject(t, "timeoutMs", defs[i].timeout_ms);
+        cJSON_AddNumberToObject(t, "expectedValue", defs[i].expected_value);
+        cJSON_AddNumberToObject(t, "tolerance", defs[i].tolerance);
+        cJSON_AddStringToObject(t, "unit", defs[i].unit);
+        cJSON_AddItemToArray(tests_arr, t);
+    }
+    cJSON_AddItemToObject(root, "tests", tests_arr);
+
+    return send_json(request, root, "200 OK");
+}
+
+static esp_err_t get_certification_status(httpd_req_t* request) {
+    if (!api::authorize(request, api::ApiRole::Operator)) return ESP_OK;
+
+    FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+    if (!api_ptr->certification_service()) {
+        return send_error(request, "503 Service Unavailable", "CertificationService not available");
+    }
+
+    const auto& s = api_ptr->certification_service()->session();
+    const auto& r = api_ptr->certification_service()->record();
+    bool stale = api_ptr->certification_service()->is_stale();
+    const char* stale_reason = api_ptr->certification_service()->stale_reason();
+    const char* cur_test = api_ptr->certification_service()->current_running_test();
+
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "schema", 1);
+    cJSON_AddStringToObject(root, "certificationId", s.identity.certification_id);
+    cJSON_AddStringToObject(root, "profile", certification_profile_to_string(s.profile));
+    cJSON_AddNumberToObject(root, "planVersion", s.identity.plan_version);
+    cJSON_AddStringToObject(root, "state", certification_state_to_string(s.state));
+    cJSON_AddStringToObject(root, "nodeId", s.identity.node_id);
+    cJSON_AddStringToObject(root, "firmwareVersion", s.identity.firmware_version);
+    cJSON_AddStringToObject(root, "hardwareRevision", s.identity.hardware_revision);
+    cJSON_AddStringToObject(root, "serialNumber", s.identity.serial_number);
+
+    cJSON_AddNumberToObject(root, "passed", s.passed_count);
+    cJSON_AddNumberToObject(root, "failed", s.failed_count);
+    cJSON_AddNumberToObject(root, "skipped", s.skipped_count);
+    cJSON_AddNumberToObject(root, "total", s.test_count);
+    uint16_t pending = (s.test_count >= s.passed_count + s.failed_count + s.skipped_count)
+                       ? (s.test_count - s.passed_count - s.failed_count - s.skipped_count) : 0;
+    cJSON_AddNumberToObject(root, "pending", pending);
+
+    cJSON_AddBoolToObject(root, "stale", stale);
+    if (stale) {
+        cJSON_AddStringToObject(root, "staleReason", stale_reason);
+    }
+    cJSON_AddStringToObject(root, "currentTest", cur_test ? cur_test : "");
+
+    // Test results matrix
+    cJSON* tests_arr = cJSON_CreateArray();
+    for (size_t i = 0; i < r.result_count; ++i) {
+        const auto& item = r.results[i];
+        cJSON* t = cJSON_CreateObject();
+        cJSON_AddStringToObject(t, "id", item.test_id);
+        cJSON_AddStringToObject(t, "state", cert_test_state_to_string(item.state));
+        cJSON_AddStringToObject(t, "evidenceSource", evidence_source_to_string(item.evidence_source));
+        cJSON_AddNumberToObject(t, "startedMs", static_cast<double>(item.started_ms));
+        cJSON_AddNumberToObject(t, "completedMs", static_cast<double>(item.completed_ms));
+        cJSON_AddNumberToObject(t, "errorCode", item.error_code);
+        cJSON_AddNumberToObject(t, "measuredValue", item.measured_value);
+        cJSON_AddStringToObject(t, "unit", item.unit);
+        cJSON_AddStringToObject(t, "note", item.note);
+        cJSON_AddNumberToObject(t, "attempts", item.attempts);
+        cJSON_AddItemToArray(tests_arr, t);
+    }
+    cJSON_AddItemToObject(root, "tests", tests_arr);
+
+    return send_json(request, root, "200 OK");
+}
+
+static esp_err_t post_certification_start(httpd_req_t* request) {
+    if (!api::authorize(request, api::ApiRole::Admin)) return ESP_OK;
+
+    FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+    if (!api_ptr->certification_service()) {
+        return send_error(request, "503 Service Unavailable", "CertificationService not available");
+    }
+
+    cJSON* root = nullptr;
+    read_json(request, &root);
+    CertificationProfile profile = CertificationProfile::ProductionUnit;
+    const char* serial_num = nullptr;
+
+    if (root) {
+        cJSON* p = cJSON_GetObjectItem(root, "profile");
+        if (p && p->valuestring) {
+            parse_certification_profile(p->valuestring, profile);
+        }
+        cJSON* sn = cJSON_GetObjectItem(root, "serialNumber");
+        if (sn && sn->valuestring) {
+            serial_num = sn->valuestring;
+        }
+    }
+
+    esp_err_t err = api_ptr->certification_service()->start_session(profile, serial_num);
+    if (root) cJSON_Delete(root);
+
+    if (err != ESP_OK) {
+        return send_error(request, "400 Bad Request", "Failed to start certification session (check serial/hw revision)");
+    }
+
+    const auto& s = api_ptr->certification_service()->session();
+    cJSON* resp = cJSON_CreateObject();
+    cJSON_AddStringToObject(resp, "certificationId", s.identity.certification_id);
+    cJSON_AddNumberToObject(resp, "planVersion", s.identity.plan_version);
+    cJSON_AddStringToObject(resp, "profile", certification_profile_to_string(s.profile));
+    cJSON_AddStringToObject(resp, "state", certification_state_to_string(s.state));
+
+    api_ptr->notify_status_async();
+    return send_json(request, resp, "200 OK");
+}
+
+static esp_err_t post_certification_test_start(httpd_req_t* request) {
+    if (!api::authorize(request, api::ApiRole::Admin)) return ESP_OK;
+
+    FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+    if (!api_ptr->certification_service()) {
+        return send_error(request, "503 Service Unavailable", "CertificationService not available");
+    }
+
+    cJSON* root = nullptr;
+    if (read_json(request, &root) != ESP_OK || !root) {
+        return send_error(request, "400 Bad Request", "Missing JSON body");
+    }
+
+    cJSON* tid = cJSON_GetObjectItem(root, "testId");
+    if (!tid || !tid->valuestring) {
+        cJSON_Delete(root);
+        return send_error(request, "400 Bad Request", "Missing testId");
+    }
+
+    esp_err_t err = api_ptr->certification_service()->start_test(tid->valuestring);
+    cJSON_Delete(root);
+
+    if (err != ESP_OK) {
+        return send_error(request, "400 Bad Request", "Failed to start certification test");
+    }
+
+    cJSON* resp = cJSON_CreateObject();
+    cJSON_AddStringToObject(resp, "status", "started");
+    api_ptr->notify_status_async();
+    return send_json(request, resp, "200 OK");
+}
+
+static esp_err_t post_certification_test_result(httpd_req_t* request) {
+    if (!api::authorize(request, api::ApiRole::Admin)) return ESP_OK;
+
+    FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+    if (!api_ptr->certification_service()) {
+        return send_error(request, "503 Service Unavailable", "CertificationService not available");
+    }
+
+    cJSON* root = nullptr;
+    if (read_json(request, &root) != ESP_OK || !root) {
+        return send_error(request, "400 Bad Request", "Missing JSON body");
+    }
+
+    cJSON* tid = cJSON_GetObjectItem(root, "testId");
+    if (!tid || !tid->valuestring) {
+        cJSON_Delete(root);
+        return send_error(request, "400 Bad Request", "Missing testId");
+    }
+
+    bool passed = false;
+    cJSON* p = cJSON_GetObjectItem(root, "passed");
+    if (p) passed = cJSON_IsTrue(p);
+
+    CertificationTestState state = passed ? CertificationTestState::Passed : CertificationTestState::Failed;
+    cJSON* st_item = cJSON_GetObjectItem(root, "state");
+    if (st_item && st_item->valuestring) {
+        parse_cert_test_state(st_item->valuestring, state);
+    }
+
+    EvidenceSource src = EvidenceSource::OperatorObservation;
+    cJSON* src_item = cJSON_GetObjectItem(root, "evidenceSource");
+    if (src_item && src_item->valuestring) {
+        parse_evidence_source(src_item->valuestring, src);
+    }
+
+    float measured_val = 0.0f;
+    cJSON* mv = cJSON_GetObjectItem(root, "measuredValue");
+    if (mv && cJSON_IsNumber(mv)) {
+        measured_val = static_cast<float>(mv->valuedouble);
+    }
+
+    const char* unit = "";
+    cJSON* u = cJSON_GetObjectItem(root, "unit");
+    if (u && u->valuestring) unit = u->valuestring;
+
+    const char* note = "";
+    cJSON* n = cJSON_GetObjectItem(root, "note");
+    if (n && n->valuestring) note = n->valuestring;
+
+    esp_err_t err = api_ptr->certification_service()->record_result(
+        tid->valuestring, state, src, measured_val, unit, note);
+    cJSON_Delete(root);
+
+    if (err != ESP_OK) {
+        return send_error(request, "400 Bad Request", "Failed to record test result (validation / anti-spoof check failed)");
+    }
+
+    cJSON* resp = cJSON_CreateObject();
+    cJSON_AddStringToObject(resp, "status", "recorded");
+    cJSON_AddStringToObject(resp, "overallState", certification_state_to_string(api_ptr->certification_service()->session().state));
+    api_ptr->notify_status_async();
+    return send_json(request, resp, "200 OK");
+}
+
+static esp_err_t post_certification_abort(httpd_req_t* request) {
+    if (!api::authorize(request, api::ApiRole::Admin)) return ESP_OK;
+
+    FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+    if (!api_ptr->certification_service()) {
+        return send_error(request, "503 Service Unavailable", "CertificationService not available");
+    }
+
+    api_ptr->certification_service()->abort();
+    cJSON* resp = cJSON_CreateObject();
+    cJSON_AddStringToObject(resp, "status", "aborted");
+    api_ptr->notify_status_async();
+    return send_json(request, resp, "200 OK");
+}
+
+static esp_err_t get_certification_report(httpd_req_t* request) {
+    if (!api::authorize(request, api::ApiRole::Operator)) return ESP_OK;
+
+    FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+    if (!api_ptr->certification_service()) {
+        return send_error(request, "503 Service Unavailable", "CertificationService not available");
+    }
+
+    cJSON* report = api_ptr->certification_service()->generate_report_json();
+    return send_json(request, report, "200 OK");
+}
+
 struct WsBroadcastArg {
     FactoryApi* api;
     char payload[kRuntimeSnapshotMaxBytes];
@@ -6821,6 +7091,13 @@ esp_err_t FactoryApi::start(
         { .uri = "/api/v1/backup",            .method = HTTP_GET,  .handler = get_backup,         .user_ctx = this },
         { .uri = "/api/v1/restore/validate",  .method = HTTP_POST, .handler = post_restore_validate, .user_ctx = this },
         { .uri = "/api/v1/restore",           .method = HTTP_POST, .handler = post_restore,       .user_ctx = this },
+        { .uri = "/api/v1/certification/plan",        .method = HTTP_GET,  .handler = get_certification_plan,        .user_ctx = this },
+        { .uri = "/api/v1/certification/status",      .method = HTTP_GET,  .handler = get_certification_status,      .user_ctx = this },
+        { .uri = "/api/v1/certification/start",       .method = HTTP_POST, .handler = post_certification_start,       .user_ctx = this },
+        { .uri = "/api/v1/certification/test/start",  .method = HTTP_POST, .handler = post_certification_test_start,  .user_ctx = this },
+        { .uri = "/api/v1/certification/test/result", .method = HTTP_POST, .handler = post_certification_test_result, .user_ctx = this },
+        { .uri = "/api/v1/certification/abort",       .method = HTTP_POST, .handler = post_certification_abort,       .user_ctx = this },
+        { .uri = "/api/v1/certification/report",      .method = HTTP_GET,  .handler = get_certification_report,      .user_ctx = this },
     };
 
 

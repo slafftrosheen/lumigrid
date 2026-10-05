@@ -24,6 +24,7 @@ class NodeSync;
 class DmxRouter;
 class ShowTransportCoordinator;
 class WifiService;
+class CertificationService;
 namespace auth {
 class AuthManager;
 }
@@ -156,6 +157,9 @@ public:
     discovery::FleetDiscoveryService* fleet_discovery() { return fleet_discovery_; }
     const discovery::FleetDiscoveryService* fleet_discovery() const { return fleet_discovery_; }
     void set_fleet_discovery(discovery::FleetDiscoveryService* disc) { fleet_discovery_ = disc; }
+    CertificationService* certification_service() { return cert_service_; }
+    const CertificationService* certification_service() const { return cert_service_; }
+    void set_certification_service(CertificationService* cert) { cert_service_ = cert; }
 
     using ShowClockProvider = std::function<uint64_t()>;
     void set_show_clock_provider(ShowClockProvider provider) { show_clock_provider_ = std::move(provider); }
@@ -229,6 +233,7 @@ public:
     WifiService* wifi_ = nullptr;
     auth::AuthManager* auth_manager_ = nullptr;
     discovery::FleetDiscoveryService* fleet_discovery_ = nullptr;
+    CertificationService* cert_service_ = nullptr;
     ShowClockProvider show_clock_provider_{};
     std::function<StartupDiagnostics()> diagnostics_provider_{};
     RuntimeConfigApplyCallback config_apply_callback_{};

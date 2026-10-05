@@ -22,6 +22,7 @@
 #include "RecoveryTypes.hpp"
 #include "ConfigApplyPlan.hpp"
 #include "OtaBootVerifier.hpp"
+#include "CertificationService.hpp"
 #include "esp_err.h"
 #include <atomic>
 
@@ -139,6 +140,8 @@ public:
     ConfigStore& config() { return config_; }
     auth::AuthManager& auth_manager() { return auth_manager_; }
     discovery::FleetDiscoveryService& fleet_discovery() { return fleet_discovery_; }
+    CertificationService& certification() { return cert_service_; }
+    const CertificationService& certification() const { return cert_service_; }
 
     esp_err_t queue_network_apply(const NetworkApplyRequest& request);
     NetworkApplyState network_apply_state() const { return apply_state_.load(); }
@@ -184,6 +187,7 @@ private:
     NodeSync node_sync_;
     MqttService mqtt_;
     discovery::FleetDiscoveryService fleet_discovery_;
+    CertificationService cert_service_;
 
     struct StartedSubsystems {
         bool wifi = false;

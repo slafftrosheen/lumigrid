@@ -12,6 +12,12 @@ export interface DiscoveredFleetNode {
   lastSeenMs: number;
   ageMs: number;
   status: 'online' | 'stale' | 'offline';
+  certification?: {
+    state: 'passed' | 'failed' | 'incomplete' | 'stale' | 'not_tested';
+    certificationId?: string;
+    planVersion?: number;
+    firmwareVersion?: string;
+  };
 }
 
 export interface NodeSelfIdentity {
@@ -22,6 +28,12 @@ export interface NodeSelfIdentity {
   model: string;
   firmware: string;
   hardwareRevision: string;
+  certification?: {
+    state: 'passed' | 'failed' | 'incomplete' | 'stale' | 'not_tested';
+    certificationId?: string;
+    planVersion?: number;
+    firmwareVersion?: string;
+  };
 }
 
 export interface FleetNodesResponse {

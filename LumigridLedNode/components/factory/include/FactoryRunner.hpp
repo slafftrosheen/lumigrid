@@ -74,7 +74,9 @@ public:
         uint8_t channel = 0xFF,
         uint32_t duration_ms = 5000,
         uint8_t brightness = 32,
-        uint32_t* out_session_id = nullptr
+        uint32_t* out_session_id = nullptr,
+        FactorySessionOwner owner = FactorySessionOwner::ManualFactory,
+        const char* cert_test_id = nullptr
     );
 
     bool confirm_test_session(

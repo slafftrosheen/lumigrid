@@ -86,6 +86,11 @@ inline bool parse_test_kind(const char* str, FactoryTestKind& kind) {
     return false;
 }
 
+enum class FactorySessionOwner : uint8_t {
+    ManualFactory = 0,
+    Certification = 1,
+};
+
 struct FactoryTestSession {
     uint32_t session_id = 0;
     FactoryTestKind kind = FactoryTestKind::AddressableChannel;
@@ -97,6 +102,8 @@ struct FactoryTestSession {
     bool operator_confirmation_required = false;
     int32_t error_code = 0;
     char notes[64] = {0};
+    FactorySessionOwner owner = FactorySessionOwner::ManualFactory;
+    char certification_test_id[16] = {0};
 };
 
 struct ChannelValidationStatus {
@@ -151,6 +158,8 @@ struct FactoryCommand {
     uint32_t session_id = 0;
     bool session_passed = false;
     char session_notes[64] = {0};
+    FactorySessionOwner session_owner = FactorySessionOwner::ManualFactory;
+    char session_cert_test_id[16] = {0};
 
     StreamFramePayload stream{};
 };

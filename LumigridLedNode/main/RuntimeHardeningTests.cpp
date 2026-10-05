@@ -36,6 +36,10 @@
 #include "RecoveryTypes.hpp"
 #include "ConfigApplyPlan.hpp"
 #include "OtaBootVerifier.hpp"
+#include "CertificationTypes.hpp"
+#include "CertificationPlan.hpp"
+#include "CertificationStore.hpp"
+#include "CertificationService.hpp"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -5361,6 +5365,236 @@ bool test_lg029_node_backed_authentication() {
         return true;
     }
 
+    bool test_lg037_hardware_certification() {
+        ESP_LOGI(TAG, "Testing LG-037 Physical Hardware Certification Bench & Evidence...");
+
+    // 1. CertificationPlan and Catalog Invariants (§110)
+    {
+        size_t count = CertificationPlan::test_count();
+        assert(count == kCertificationPlanVersion); // plan version count check
+        const CertificationTestDefinition* tests = CertificationPlan::test_definitions();
+        assert(tests != nullptr);
+        assert(count == 36); // 36 tests in plan v1
+
+        for (size_t i = 0; i < count; ++i) {
+            assert(strlen(tests[i].id) > 0);
+            assert(strlen(tests[i].category) > 0);
+            assert(strlen(tests[i].title) > 0);
+            for (size_t j = i + 1; j < count; ++j) {
+                assert(strcmp(tests[i].id, tests[j].id) != 0);
+            }
+        }
+
+        // Physical tests require OperatorObservation
+        const auto* addr1 = CertificationPlan::find_test("ADDR-A1");
+        assert(addr1 != nullptr);
+        assert(addr1->required_evidence == EvidenceSource::OperatorObservation);
+        assert(addr1->requirement_for_profile(CertificationProfile::ProductionUnit) == RequirementLevel::Required);
+
+        const auto* pwm1 = CertificationPlan::find_test("PWM-P1");
+        assert(pwm1 != nullptr);
+        assert(pwm1->required_evidence == EvidenceSource::OperatorObservation);
+
+        // Instrument measurement test
+        const auto* pwr1 = CertificationPlan::find_test("POWER-LIMIT-001");
+        assert(pwr1 != nullptr);
+        assert(pwr1->required_evidence == EvidenceSource::InstrumentMeasurement);
+        assert(pwr1->expected_value == 0.0f);
+        assert(pwr1->tolerance == 5000.0f);
+        assert(strcmp(pwr1->unit, "mW") == 0);
+
+        // Automatic test
+        const auto* boot1 = CertificationPlan::find_test("BOOT-001");
+        assert(boot1 != nullptr);
+        assert(boot1->required_evidence == EvidenceSource::Automatic);
+    }
+
+        // 2. Hardware Fingerprint Computation & Invalidation (§114)
+        {
+            DeviceConfig cfg1{};
+            cfg1.max_power_mw = 50000;
+            cfg1.channels[0].pixel_count = 60;
+            cfg1.channels[0].addressable_type = AddressableType::WS2812B;
+            cfg1.channels[0].pixel_order = PixelOrder::GRB;
+
+            uint32_t fp1 = CertificationService::compute_hardware_fingerprint(cfg1, "A");
+            DeviceConfig cfg2 = cfg1;
+            uint32_t fp2 = CertificationService::compute_hardware_fingerprint(cfg2, "A");
+            assert(fp1 == fp2);
+
+            // Change channel pixel count -> fingerprint must change
+            cfg2.channels[0].pixel_count = 120;
+            uint32_t fp3 = CertificationService::compute_hardware_fingerprint(cfg2, "A");
+            assert(fp1 != fp3);
+
+            // Change power limit -> fingerprint must change
+            cfg2 = cfg1;
+            cfg2.max_power_mw = 40000;
+            uint32_t fp4 = CertificationService::compute_hardware_fingerprint(cfg2, "A");
+            assert(fp1 != fp4);
+
+            // Change hardware revision -> fingerprint must change
+            uint32_t fp5 = CertificationService::compute_hardware_fingerprint(cfg1, "B");
+            assert(fp1 != fp5);
+        }
+
+        // 3. Session Lifecycle, Exclusivity & Anti-Spoofing (§111, §112, §113)
+        {
+            ConfigStore cs;
+            NodeIdentity identity{};
+            strncpy(identity.id, "lg-testnode01", sizeof(identity.id) - 1);
+            strncpy(identity.name, "Test Node", sizeof(identity.name) - 1);
+            strncpy(identity.family, "led-node", sizeof(identity.family) - 1);
+            strncpy(identity.model, "lg-led-v1", sizeof(identity.model) - 1);
+            strncpy(identity.hw_revision, "A", sizeof(identity.hw_revision) - 1);
+            strncpy(identity.fw_version, "0.8.0", sizeof(identity.fw_version) - 1);
+
+            CertificationService svc;
+            assert(svc.init(&cs, nullptr, identity) == ESP_OK);
+            assert(!svc.is_in_progress());
+
+            // Starting without serial in ProductionUnit mode must fail
+            assert(svc.start_session(CertificationProfile::ProductionUnit, "") == ESP_ERR_INVALID_ARG);
+            assert(svc.start_session(CertificationProfile::ProductionUnit, nullptr) == ESP_ERR_INVALID_ARG);
+
+            // Start with valid serial
+            assert(svc.start_session(CertificationProfile::ProductionUnit, "LG-PROD-2026-0042") == ESP_OK);
+            assert(svc.is_in_progress());
+            assert(svc.session().state == CertificationState::InProgress);
+            assert(svc.session().identity.plan_version == 1);
+            assert(strcmp(svc.session().identity.serial_number, "LG-PROD-2026-0042") == 0);
+
+            // Second session start while one is in progress must fail
+            assert(svc.start_session(CertificationProfile::Development, "OTHER-SN") == ESP_ERR_INVALID_STATE);
+
+            // Anti-spoofing check 1: Submitting Automatic evidence for OperatorObservation test must fail
+            esp_err_t spoof_res = svc.record_result(
+                "ADDR-A1",
+                CertificationTestState::Passed,
+                EvidenceSource::Automatic, // Spoof attempt!
+                0.0f,
+                "",
+                "Automated fake pass"
+            );
+            assert(spoof_res == ESP_ERR_INVALID_ARG);
+
+            // Valid operator submission for ADDR-A1 passes (runner_ is null so no hardware gate conflict)
+            assert(svc.start_test("ADDR-A1") == ESP_OK);
+            assert(svc.record_result(
+                "ADDR-A1",
+                CertificationTestState::Passed,
+                EvidenceSource::OperatorObservation,
+                0.0f,
+                "",
+                "LEDs illuminated sequentially in blue"
+            ) == ESP_OK);
+
+            // Instrument measurement tolerance check for PWR-01 (expected 5.0, tolerance 0.25 -> 4.75 .. 5.25)
+            assert(svc.start_test("PWR-01") == ESP_OK);
+            // Out-of-tolerance value (measured 6000mW vs 0 expected, tolerance 5000mW)
+            // POWER-LIMIT-001: expected=0, tolerance=5000 => range [0, 5000]
+            // 6000 > 5000 -> Failed
+            assert(svc.start_test("POWER-LIMIT-001") == ESP_OK);
+            assert(svc.record_result(
+                "POWER-LIMIT-001",
+                CertificationTestState::Passed,
+                EvidenceSource::InstrumentMeasurement,
+                6000.0f,
+                "mW",
+                "Measured at 6W"
+            ) == ESP_OK);
+            const auto* pwr_res = svc.get_test_result("POWER-LIMIT-001");
+            assert(pwr_res != nullptr);
+            assert(pwr_res->state == CertificationTestState::Failed);
+
+            // In-tolerance value (3000mW, within [0, 5000])
+            assert(svc.start_test("POWER-LIMIT-001") == ESP_OK);
+            assert(svc.record_result(
+                "POWER-LIMIT-001",
+                CertificationTestState::Passed,
+                EvidenceSource::InstrumentMeasurement,
+                3000.0f,
+                "mW",
+                "Measured with calibrated power meter"
+            ) == ESP_OK);
+            pwr_res = svc.get_test_result("POWER-LIMIT-001");
+            assert(pwr_res != nullptr);
+            assert(pwr_res->state == CertificationTestState::Passed);
+
+            // Status summary
+            CertificationStatusSummary summary = svc.get_status_summary();
+            assert(summary.state == CertificationState::InProgress);
+            assert(summary.passed >= 2);
+
+            // Check invalidation on configuration drift
+            DeviceConfig drift_cfg{};
+            drift_cfg.max_power_mw = 30000; // was different
+            svc.check_invalidation(drift_cfg, "A", "0.8.0");
+            assert(svc.is_stale());
+            assert(strlen(svc.stale_reason()) > 0);
+
+            // Abort preserves results and transitions state to Incomplete
+            assert(svc.abort() == ESP_OK);
+            assert(!svc.is_in_progress());
+            assert(svc.session().state == CertificationState::Incomplete);
+        }
+
+        // 4. Report Generation & Zero-Secrets Invariant (§117, §118)
+        {
+            ConfigStore cs;
+            NodeIdentity identity{};
+            strncpy(identity.id, "lg-node-report", sizeof(identity.id) - 1);
+            strncpy(identity.hw_revision, "A", sizeof(identity.hw_revision) - 1);
+            strncpy(identity.fw_version, "0.8.0", sizeof(identity.fw_version) - 1);
+
+            CertificationService svc;
+            svc.init(&cs, nullptr, identity);
+            svc.start_session(CertificationProfile::Development, "DEV-UNIT-01");
+
+            cJSON* report_json = svc.generate_report_json();
+            assert(report_json != nullptr);
+
+            char* report_str = cJSON_PrintUnformatted(report_json);
+            assert(report_str != nullptr);
+
+            // Canonical report metadata
+            assert(strstr(report_str, "certificationId") != nullptr);
+            assert(strstr(report_str, "planVersion") != nullptr);
+            assert(strstr(report_str, "serialNumber") != nullptr);
+            assert(strstr(report_str, "summary") != nullptr);
+            assert(strstr(report_str, "tests") != nullptr);
+
+            // Zero secrets invariant
+            assert(strstr(report_str, "syncToken") == nullptr);
+            assert(strstr(report_str, "password") == nullptr);
+            assert(strstr(report_str, "adminToken") == nullptr);
+            assert(strstr(report_str, "wifi_pass") == nullptr);
+
+            free(report_str);
+            cJSON_Delete(report_json);
+        }
+
+        // 5. Dual-slot NVS Persistence CRC Invariants (§115, §116)
+        {
+            CertificationRecord rec{};
+            rec.magic = 0x4C474354;
+            rec.schema_version = 1;
+            rec.sequence = 1;
+            strncpy(rec.session.identity.certification_id, "CERT-TEST-CRC", sizeof(rec.session.identity.certification_id) - 1);
+            rec.checksum = CertificationStore::calculate_crc(rec);
+
+            uint32_t expected_crc = CertificationStore::calculate_crc(rec);
+            assert(rec.checksum == expected_crc);
+
+            // Corrupted payload changes CRC
+            rec.sequence = 2;
+            assert(rec.checksum != CertificationStore::calculate_crc(rec));
+        }
+
+        ESP_LOGI(TAG, "[PASS] LG-037 Physical Hardware Certification Bench & Evidence tests passed.");
+        return true;
+    }
+
 } // namespace
 
 bool run_runtime_hardening_tests() {
@@ -5473,6 +5707,9 @@ bool run_runtime_hardening_tests() {
 
     // LG-036 Configuration, Recovery, Backup/Restore & OTA Hardening
     all_ok &= test_lg036_configuration_recovery_and_ota();
+
+    // LG-037 Hardware Certification Bench, Evidence & Production Bring-Up
+    all_ok &= test_lg037_hardware_certification();
 
     if (all_ok) {
         ESP_LOGI(TAG, "==================================================");

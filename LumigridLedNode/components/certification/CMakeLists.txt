@@ -1,0 +1,18 @@
+idf_component_register(
+    SRCS
+        "CertificationPlan.cpp"
+        "CertificationStore.cpp"
+        "CertificationService.cpp"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        config
+        factory
+        auth
+        output
+        board
+        esp_timer
+        nvs_flash
+        esp_rom
+        freertos
+)

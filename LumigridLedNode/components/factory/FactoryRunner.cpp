@@ -253,7 +253,9 @@ bool FactoryRunner::start_test_session(
     uint8_t channel,
     uint32_t duration_ms,
     uint8_t brightness,
-    uint32_t* out_session_id
+    uint32_t* out_session_id,
+    FactorySessionOwner owner,
+    const char* cert_test_id
 ) {
     if (lifecycle_state_.load(std::memory_order_acquire) != LifecycleState::Running) {
         return false;
@@ -278,6 +280,11 @@ bool FactoryRunner::start_test_session(
     cmd.lane_or_channel = channel;
     cmd.duration_ms = duration_ms;
     cmd.brightness = brightness;
+    cmd.session_owner = owner;
+    if (cert_test_id) {
+        strncpy(cmd.session_cert_test_id, cert_test_id, sizeof(cmd.session_cert_test_id) - 1);
+        cmd.session_cert_test_id[sizeof(cmd.session_cert_test_id) - 1] = '\0';
+    }
     return enqueue(cmd);
 }
 
@@ -516,6 +523,9 @@ void FactoryRunner::apply_command(const FactoryCommand& command,
             status_.session.operator_confirmation_required = true;
             status_.session.error_code = 0;
             status_.session.notes[0] = '\0';
+            status_.session.owner = command.session_owner;
+            strncpy(status_.session.certification_test_id, command.session_cert_test_id, sizeof(status_.session.certification_test_id) - 1);
+            status_.session.certification_test_id[sizeof(status_.session.certification_test_id) - 1] = '\0';
 
             status_.active_channel = command.lane_or_channel;
             status_.effect_started_ms = current_ms;
