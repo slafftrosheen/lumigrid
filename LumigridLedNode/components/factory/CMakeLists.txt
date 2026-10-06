@@ -5,6 +5,7 @@ idf_component_register(
         "FactoryApi.cpp"
         "DiagnosticLog.cpp"
         "RuntimeSnapshot.cpp"
+        "RuntimeMemory.cpp"
     INCLUDE_DIRS
         "include"
         "../../generated"
@@ -29,4 +30,5 @@ idf_component_register(
         discovery
         ota
         certification
+        freertos
 )

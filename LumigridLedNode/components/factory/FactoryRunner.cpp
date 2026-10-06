@@ -2,6 +2,7 @@
 #include "FactoryApp.hpp"
 #include "ChannelHardware.hpp"
 #include "JobManager.hpp"
+#include "RuntimeMemory.hpp"
 
 #include "esp_err.h"
 #include "esp_check.h"
@@ -110,6 +111,7 @@ esp_err_t FactoryRunner::start() {
     if (queue_ == nullptr) {
         lifecycle_state_.store(LifecycleState::Faulted, std::memory_order_release);
         source_manager_.release(ControlSource::Factory);
+        note_factory_task_start_failure();
         return ESP_ERR_NO_MEM;
     }
 
@@ -119,6 +121,7 @@ esp_err_t FactoryRunner::start() {
         queue_ = nullptr;
         lifecycle_state_.store(LifecycleState::Faulted, std::memory_order_release);
         source_manager_.release(ControlSource::Factory);
+        note_factory_task_start_failure();
         return ESP_ERR_NO_MEM;
     }
 
@@ -150,11 +153,30 @@ esp_err_t FactoryRunner::start() {
         task_handle_ = nullptr;
         source_manager_.release(ControlSource::Factory);
         lifecycle_state_.store(LifecycleState::Faulted, std::memory_order_release);
+        note_factory_task_start_failure();
         return ESP_FAIL;
     }
 
+    // LG-038.3 §29/§32: track the factory worker's stack high-water mark.
+    task_stack_registry().register_task("lg_factory", 8192);
+
     lifecycle_state_.store(LifecycleState::Running, std::memory_order_release);
+    ESP_LOGI("FactoryRunner", "Factory worker started lazily (8192 B stack)");
     return ESP_OK;
+}
+
+bool FactoryRunner::ensure_worker_started() {
+    const LifecycleState current = lifecycle_state_.load(std::memory_order_acquire);
+    if (current == LifecycleState::Running ||
+        current == LifecycleState::Starting) {
+        return true;
+    }
+    if (current == LifecycleState::Stopping) {
+        return false;
+    }
+    // Faulted or Stopped or Constructed: attempt one start. A previous
+    // un-terminated task keeps start() refusing; that is surfaced as false.
+    return start() == ESP_OK;
 }
 
 void FactoryRunner::stop() {
@@ -191,6 +213,9 @@ void FactoryRunner::stop() {
         vQueueDelete(queue_);
         queue_ = nullptr;
     }
+    // LG-038.3 §19: the worker stays alive until reboot once started; stop()
+    // here means runtime shutdown. Drop stack telemetry with it.
+    task_stack_registry().unregister_task("lg_factory");
     lifecycle_state_.store(LifecycleState::Stopped, std::memory_order_release);
 }
 
@@ -218,6 +243,15 @@ bool FactoryRunner::abort() {
 }
 
 bool FactoryRunner::enqueue(const FactoryCommand& command) {
+    // LG-038.3 §18: first Factory command starts the lazy worker.
+    if (!ensure_worker_started()) {
+        if (status_mutex_ != nullptr &&
+            xSemaphoreTake(status_mutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
+            ++status_.command_rejections;
+            xSemaphoreGive(status_mutex_);
+        }
+        return false;
+    }
     if (queue_ == nullptr) return false;
     if (xQueueSend(queue_, &command, 0) == pdPASS) return true;
     if (status_mutex_ != nullptr &&
@@ -257,6 +291,11 @@ bool FactoryRunner::start_test_session(
     FactorySessionOwner owner,
     const char* cert_test_id
 ) {
+    // LG-038.3 §18/§20: a physical test (Factory or Certification) is a real
+    // use of the worker; start it here, not at boot.
+    if (!ensure_worker_started()) {
+        return false;
+    }
     if (lifecycle_state_.load(std::memory_order_acquire) != LifecycleState::Running) {
         return false;
     }
@@ -334,6 +373,8 @@ bool FactoryRunner::start_burn_in_job(
 ) {
     if (job_mgr == nullptr) return false;
     if (burn_in_active_) return false;
+    // LG-038.3 §18: Burn-In is explicit physical use of the worker.
+    if (!ensure_worker_started()) return false;
 
     uint32_t job_id = 0;
     esp_err_t err = job_mgr->start_job(JobType::BurnIn, &job_id);

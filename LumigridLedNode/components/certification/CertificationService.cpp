@@ -3,6 +3,7 @@
 #include "FactoryRunner.hpp"
 #include "ConfigStore.hpp"
 #include "JobManager.hpp"
+#include "RuntimeMemory.hpp"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_rom_crc.h"
@@ -207,7 +208,11 @@ esp_err_t CertificationService::start_test(const char* test_id) {
     res.completed_ms = 0;
     res.error_code = 0;
 
-    // Route physical tests to FactoryRunner
+    // Route physical tests to FactoryRunner.
+    // LG-038.3 §20: holding a FactoryRunner pointer is fine, but automatic
+    // probes below never touch it — the worker only starts when a physical
+    // test actually begins (via start_test_session's lazy start). Probe
+    // collection allocates no Factory stack.
     if (strncmp(test_id, "ADDR-A", 6) == 0 && strlen(test_id) == 7) {
         uint8_t ch = static_cast<uint8_t>(test_id[6] - '1');
         if (ch < 8 && runner_) {
@@ -302,6 +307,13 @@ esp_err_t CertificationService::start_test(const char* test_id) {
                 burn_in_start_ms_ = esp_timer_get_time() / 1000ULL;
                 rec.burn_in.start_free_heap = static_cast<uint32_t>(esp_get_free_heap_size());
                 rec.burn_in.min_free_heap = rec.burn_in.start_free_heap;
+                // LG-038.3 §74: burn-in memory evidence uses the canonical
+                // 8-bit snapshot (start/min/end recorded across the run).
+                const RuntimeMemorySnapshot burn_in_mem = capture_runtime_memory();
+                burn_in_start_free8_ = burn_in_mem.free_8bit;
+                burn_in_min_free8_ = burn_in_mem.free_8bit;
+                burn_in_start_largest8_ = burn_in_mem.largest_8bit;
+                burn_in_min_largest8_ = burn_in_mem.largest_8bit;
                 rec.burn_in.duration_s = 0;
                 res.state = CertificationTestState::Running;
             } else {
@@ -665,6 +677,14 @@ void CertificationService::update_burn_in_tick(uint32_t elapsed_s, uint32_t comm
     if (heap < rec.burn_in.min_free_heap) {
         rec.burn_in.min_free_heap = heap;
     }
+    // LG-038.3 §74: 8-bit heap truth minima over the run.
+    const RuntimeMemorySnapshot mem = capture_runtime_memory();
+    if (burn_in_min_free8_ == 0 || mem.free_8bit < burn_in_min_free8_) {
+        burn_in_min_free8_ = mem.free_8bit;
+    }
+    if (burn_in_min_largest8_ == 0 || mem.largest_8bit < burn_in_min_largest8_) {
+        burn_in_min_largest8_ = mem.largest_8bit;
+    }
 }
 
 void CertificationService::finish_burn_in(bool passed, const char* reason) {
@@ -886,6 +906,12 @@ cJSON* CertificationService::generate_report_json() const {
     cJSON_AddNumberToObject(burn_obj, "startFreeHeap", rec.burn_in.start_free_heap);
     cJSON_AddNumberToObject(burn_obj, "minFreeHeap", rec.burn_in.min_free_heap);
     cJSON_AddNumberToObject(burn_obj, "endFreeHeap", rec.burn_in.end_free_heap);
+    // LG-038.3 §74: canonical 8-bit heap evidence.
+    cJSON_AddNumberToObject(burn_obj, "startFree8", burn_in_start_free8_);
+    cJSON_AddNumberToObject(burn_obj, "minFree8", burn_in_min_free8_);
+    cJSON_AddNumberToObject(burn_obj, "endFree8", capture_runtime_memory().free_8bit);
+    cJSON_AddNumberToObject(burn_obj, "startLargest8", burn_in_start_largest8_);
+    cJSON_AddNumberToObject(burn_obj, "minLargest8", burn_in_min_largest8_);
     cJSON_AddNumberToObject(burn_obj, "networkDisconnects", rec.burn_in.network_disconnects);
     cJSON_AddNumberToObject(burn_obj, "watchdogResets", rec.burn_in.watchdog_resets);
     cJSON_AddItemToObject(root, "burnIn", burn_obj);

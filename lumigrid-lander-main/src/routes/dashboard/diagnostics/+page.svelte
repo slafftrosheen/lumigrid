@@ -2,8 +2,8 @@
   import { onMount, onDestroy } from 'svelte';
   import { getHealth, getLogs, getAuditLog } from '$lib/api/node';
   import type { HealthSnapshot, AuditEvent } from '$lib/api/node';
-  import { evaluateActionableIssues, getOutputDiagnostics } from '$lib/api/diagnostics';
-  import type { ActionableIssue, OutputDiagnosticsResponse } from '$lib/api/diagnostics';
+  import { evaluateActionableIssues, getOutputDiagnostics, getMemoryDiagnostics } from '$lib/api/diagnostics';
+  import type { ActionableIssue, OutputDiagnosticsResponse, MemoryDiagnosticsResponse } from '$lib/api/diagnostics';
   import { getSelectedNodeIp } from '$lib/auth/storage';
   import { nodeStore } from '$lib/state/nodeStore';
 
@@ -12,6 +12,8 @@
   let error = $state('');
   let health = $state<HealthSnapshot | null>(null);
   let outputDiag = $state<OutputDiagnosticsResponse | null>(null);
+  let memoryDiag = $state<MemoryDiagnosticsResponse | null>(null);
+  let showAdvancedMemory = $state(false);
   let rawLogs = $state('');
   let audit = $state<AuditEvent[]>([]);
   let autoRefresh = $state(false);
@@ -82,17 +84,19 @@
     }
     error = '';
     try {
-      const [h, l, a, od] = await Promise.all([
+      const [h, l, a, od, md] = await Promise.all([
         getHealth(targetIp).catch(() => null),
         getLogs(targetIp).catch(() => ''),
         getAuditLog(targetIp).catch(() => [] as AuditEvent[]),
         getOutputDiagnostics(targetIp).catch(() => null),
+        getMemoryDiagnostics(targetIp).catch(() => null),
       ]);
       if (gen !== loadGen) return;
       health = h;
       rawLogs = l;
       audit = a;
       outputDiag = od;
+      memoryDiag = md;
     } catch (e) {
       if (gen !== loadGen) return;
       error = String(e);
@@ -179,6 +183,50 @@
 
   function statusColor(ok: boolean): string {
     return ok ? '#30d158' : '#ff453a';
+  }
+
+  // Runtime Memory card data (LG-038.3 §58): primary metric is free8 (§59);
+  // generic internal heap is never presented as "free RAM".
+  const memoryFree8 = $derived(memoryDiag?.free8 ?? health?.memory?.free8 ?? health?.system.free_heap ?? 0);
+  const memoryLargest8 = $derived(memoryDiag?.largest8 ?? health?.memory?.largest8 ?? 0);
+  const memoryMinFree = $derived(memoryDiag?.minimumFree ?? health?.memory?.minimum_free ?? health?.system.min_free_heap ?? 0);
+  const memoryAllocationFailures = $derived(
+    memoryDiag?.allocationFailures
+      ? memoryDiag.allocationFailures.apiAllocationFailures +
+          memoryDiag.allocationFailures.previewAllocationFailures +
+          memoryDiag.allocationFailures.rmtAllocationFailures +
+          memoryDiag.allocationFailures.factoryTaskStartFailures +
+          memoryDiag.allocationFailures.networkTaskStartFailures
+      : 0
+  );
+  const memoryHealthName = $derived(memoryDiag?.health ?? health?.memory?.health ?? 'HEALTHY');
+  const memoryHealthy = $derived(memoryHealthName === 'HEALTHY');
+  const memoryFragmentedOnly = $derived(memoryHealthName === 'HEAP_FRAGMENTED');
+  const memoryStatusLabel = $derived(
+    memoryHealthName === 'HEALTHY'
+      ? 'Healthy'
+      : memoryHealthName === 'LOW_RUNTIME_MEMORY'
+        ? 'Low Memory'
+        : memoryHealthName === 'HEAP_FRAGMENTED'
+          ? 'Fragmented'
+          : 'Critical'
+  );
+
+  function serviceLabel(key: string): string {
+    const labels: Record<string, string> = {
+      lighting: 'Lighting',
+      scheduler: 'Scheduler',
+      api: 'API',
+      mdns: 'mDNS',
+      fleetDiscovery: 'Fleet',
+      artnet: 'Art-Net',
+      sacn: 'sACN',
+      nodeSync: 'Node Sync',
+      mqtt: 'MQTT',
+      factoryWorker: 'Factory',
+      networkApplyWorker: 'Net Apply',
+    };
+    return labels[key] ?? key;
   }
 
   function controlSourceName(cs: number): string {
@@ -393,7 +441,7 @@
         <!-- System & Compute -->
         <div class="stat-card">
           <div class="card-head">
-            <h3>System & Memory</h3>
+            <h3>System</h3>
             <span class="card-fps">{health.system.fps.toFixed(1)} FPS</span>
           </div>
           <div class="stat-row">
@@ -401,17 +449,69 @@
             <span class="stat-val">{formatUptime(health.system.uptime_s)}</span>
           </div>
           <div class="stat-row">
-            <span>Free Heap</span>
-            <span class="stat-val">{formatBytes(health.system.free_heap)}</span>
-          </div>
-          <div class="stat-row">
-            <span>Min Free Heap</span>
-            <span class="stat-val">{formatBytes(health.system.min_free_heap)}</span>
-          </div>
-          <div class="stat-row">
             <span>Reset Reason</span>
             <span class="stat-val">{health.system.reset_reason}</span>
           </div>
+        </div>
+
+        <!-- Runtime Memory (LG-038.3 §58/§59) -->
+        <div class="stat-card">
+          <div class="card-head">
+            <h3>Runtime Memory</h3>
+            <span
+              class="status-tag"
+              style:color={memoryHealthy ? '#30d158' : memoryFragmentedOnly ? '#ff9f0a' : '#ff453a'}
+            >
+              {memoryStatusLabel}
+            </span>
+          </div>
+          <div class="stat-row">
+            <span>Free heap</span>
+            <span class="stat-val mono">{formatBytes(memoryFree8)}</span>
+          </div>
+          <div class="stat-row">
+            <span>Largest block</span>
+            <span class="stat-val mono">{formatBytes(memoryLargest8)}</span>
+          </div>
+          <div class="stat-row">
+            <span>Minimum free</span>
+            <span class="stat-val mono">{formatBytes(memoryMinFree)}</span>
+          </div>
+          {#if memoryAllocationFailures > 0}
+            <div class="stat-row">
+              <span>Allocation failures</span>
+              <span class="stat-val mono err">{memoryAllocationFailures}</span>
+            </div>
+          {/if}
+          {#if memoryDiag && memoryDiag.tasks.length > 0}
+            <button class="advanced-toggle" type="button" onclick={() => (showAdvancedMemory = !showAdvancedMemory)}>
+              {showAdvancedMemory ? 'Hide' : 'Show'} task stacks (Advanced)
+            </button>
+            {#if showAdvancedMemory}
+              {#each memoryDiag.tasks as t}
+                <div class="stat-row">
+                  <span class="mono">{t.name}</span>
+                  <span class="stat-val mono">{formatBytes(t.minimumFreeStack)} / {formatBytes(t.stackBytes)}</span>
+                </div>
+              {/each}
+            {/if}
+          {/if}
+        </div>
+
+        <!-- Active Services (LG-038.3 §60) -->
+        <div class="stat-card">
+          <div class="card-head">
+            <h3>Active Services</h3>
+          </div>
+          {#if memoryDiag?.services}
+            <div class="service-grid">
+              {#each Object.entries(memoryDiag.services) as [name, active]}
+                <span class="service-pill {active ? 'on' : 'off'}">{serviceLabel(name)}: {active ? 'On' : 'Off'}</span>
+              {/each}
+            </div>
+          {:else}
+            <div class="stat-row"><span>Service state unavailable</span><span class="stat-val">—</span></div>
+          {/if}
         </div>
 
         <!-- Network & RF -->
@@ -962,6 +1062,42 @@
   }
   .stat-card.wide {
     grid-column: 1 / -1;
+  }
+  .service-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+    padding-top: 0.25rem;
+  }
+  .service-pill {
+    font-size: 0.7rem;
+    font-family: monospace;
+    font-weight: 700;
+    padding: 0.18rem 0.45rem;
+    border-radius: 6px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+  }
+  .service-pill.on {
+    background: rgba(48, 209, 88, 0.14);
+    color: #30d158;
+    border-color: rgba(48, 209, 88, 0.35);
+  }
+  .service-pill.off {
+    background: rgba(255, 255, 255, 0.04);
+    color: #86868b;
+  }
+  .advanced-toggle {
+    align-self: flex-start;
+    background: transparent;
+    border: none;
+    color: #86868b;
+    font-size: 0.72rem;
+    cursor: pointer;
+    padding: 0.25rem 0;
+    text-decoration: underline dotted;
+  }
+  .advanced-toggle:hover {
+    color: #f5f5f7;
   }
   .card-head {
     display: flex;

@@ -1,6 +1,8 @@
 // components/factory/FactoryApi.cpp
 #include "FactoryApi.hpp"
 #include "RuntimeSnapshot.hpp"
+#include "RuntimeMemory.hpp"
+#include "RuntimeServices.hpp"
 #include "esp_ota_ops.h"
 #include "esp_app_format.h"
 #include "OtaBootVerifier.hpp"
@@ -914,6 +916,18 @@ void RuntimeHealthSnapshot::collect(FactoryApi* api) {
     if (api->node_sync()) {
         sync.packet_loss = api->node_sync()->status().packets_missed;
     }
+
+    // LG-038.3 §3/§45/§59: real 8-bit heap truth in health, plus health issues
+    // derived from BOTH free total and largest block.
+    const RuntimeMemorySnapshot mem = capture_runtime_memory();
+    memory.free8 = mem.free_8bit;
+    memory.largest8 = mem.largest_8bit;
+    memory.minimum_free = mem.minimum_free_heap;
+    memory.health = evaluate_memory_health(mem);
+    memory.low_runtime_memory = (memory.health == MemoryHealth::LowRuntimeMemory ||
+                                 memory.health == MemoryHealth::Critical);
+    memory.heap_fragmented = (memory.health == MemoryHealth::HeapFragmented ||
+                              memory.health == MemoryHealth::Critical);
 }
 
 cJSON* RuntimeHealthSnapshot::to_json() const {
@@ -981,6 +995,15 @@ cJSON* RuntimeHealthSnapshot::to_json() const {
 
     cJSON* sync_obj = cJSON_AddObjectToObject(root, "sync");
     cJSON_AddNumberToObject(sync_obj, "packet_loss", sync.packet_loss);
+
+    // LG-038.3 §3/§58/§59: memory card data. Primary metric is free8.
+    cJSON* mem_obj = cJSON_AddObjectToObject(root, "memory");
+    cJSON_AddNumberToObject(mem_obj, "free8", memory.free8);
+    cJSON_AddNumberToObject(mem_obj, "largest8", memory.largest8);
+    cJSON_AddNumberToObject(mem_obj, "minimum_free", memory.minimum_free);
+    cJSON_AddStringToObject(mem_obj, "health", memory_health_name(memory.health));
+    cJSON_AddBoolToObject(mem_obj, "low_runtime_memory", memory.low_runtime_memory);
+    cJSON_AddBoolToObject(mem_obj, "heap_fragmented", memory.heap_fragmented);
 
     return root;
 }
@@ -1099,11 +1122,92 @@ esp_err_t get_diagnostics_output(httpd_req_t* request) {
     return ret;
 }
 
+// ── LG-038.3 §4: detailed memory diagnostics (Installer+). ───────────────
+// Real 8-bit heap truth, fragmentation ratio (§46) and per-task stack
+// high-water data (§29). Task data stays here, NOT in the 5 Hz snapshot.
+esp_err_t get_diagnostics_memory(httpd_req_t* request) {
+    if (!api::authorize(request, api::ApiRole::Installer)) return ESP_OK;
+
+    auto* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+    const RuntimeMemorySnapshot mem = capture_runtime_memory();
+    const RuntimeMemoryCounters& counters = runtime_memory_counters();
+
+    cJSON* root = cJSON_CreateObject();
+    if (!root) {
+        note_api_allocation_failure();
+        return send_error(request, "500 Internal Server Error", "json_encode_failed");
+    }
+
+    cJSON_AddNumberToObject(root, "free8", mem.free_8bit);
+    cJSON_AddNumberToObject(root, "largest8", mem.largest_8bit);
+    cJSON_AddNumberToObject(root, "minimumFree", mem.minimum_free_heap);
+    cJSON_AddNumberToObject(root, "freeInternal", mem.free_internal);
+    cJSON_AddNumberToObject(root, "largestInternal", mem.largest_internal);
+    cJSON_AddNumberToObject(root, "freeDma", mem.free_dma);
+    cJSON_AddNumberToObject(root, "largestDma", mem.largest_dma);
+    // §46: diagnostics-only fragmentation metric; no universal PASS threshold.
+    cJSON_AddNumberToObject(root, "fragmentationRatio", fragmentation_ratio(mem));
+
+    const MemoryHealth health = evaluate_memory_health(mem);
+    cJSON_AddStringToObject(root, "health", memory_health_name(health));
+
+    cJSON* failures = cJSON_AddObjectToObject(root, "allocationFailures");
+    cJSON_AddNumberToObject(failures, "apiAllocationFailures", counters.api_allocation_failures);
+    cJSON_AddNumberToObject(failures, "previewAllocationFailures", counters.preview_allocation_failures);
+    cJSON_AddNumberToObject(failures, "rmtAllocationFailures", counters.rmt_allocation_failures);
+    cJSON_AddNumberToObject(failures, "factoryTaskStartFailures", counters.factory_task_start_failures);
+    cJSON_AddNumberToObject(failures, "networkTaskStartFailures", counters.network_task_start_failures);
+
+    if (api_ptr) {
+        const ServiceStateTruth services = api_ptr->service_state_truth();
+        cJSON* svc = cJSON_AddObjectToObject(root, "services");
+        cJSON_AddBoolToObject(svc, "lighting", services.lighting);
+        cJSON_AddBoolToObject(svc, "factoryWorker", services.factory_worker);
+        cJSON_AddBoolToObject(svc, "scheduler", services.scheduler);
+        cJSON_AddBoolToObject(svc, "api", services.api);
+        cJSON_AddBoolToObject(svc, "mdns", services.mdns);
+        cJSON_AddBoolToObject(svc, "fleetDiscovery", services.fleet_discovery);
+        cJSON_AddBoolToObject(svc, "artnet", services.artnet);
+        cJSON_AddBoolToObject(svc, "sacn", services.sacn);
+        cJSON_AddBoolToObject(svc, "nodeSync", services.node_sync);
+        cJSON_AddBoolToObject(svc, "mqtt", services.mqtt);
+        cJSON_AddBoolToObject(svc, "networkApplyWorker", services.network_apply_worker);
+    }
+
+    // §29: per-task configured stack + minimum observed free (bytes).
+    cJSON* tasks = cJSON_AddArrayToObject(root, "tasks");
+    if (tasks) {
+        TaskStackInfo stack_info[kMaxTrackedTasks];
+        task_stack_registry().sample_all();
+        const size_t n = task_stack_registry().copy(stack_info, kMaxTrackedTasks);
+        for (size_t i = 0; i < n; ++i) {
+            cJSON* t = cJSON_CreateObject();
+            if (!t) break;
+            cJSON_AddStringToObject(t, "name", stack_info[i].name ? stack_info[i].name : "");
+            cJSON_AddNumberToObject(t, "stackBytes", stack_info[i].configured_bytes);
+            cJSON_AddNumberToObject(t, "minimumFreeStack", stack_info[i].minimum_free_bytes);
+            cJSON_AddItemToArray(tasks, t);
+        }
+    }
+
+    char* json = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (!json) {
+        return send_error(request, "500 Internal Server Error", "json_encode_failed");
+    }
+    esp_err_t ret = send_json(request, json);
+    cJSON_free(json);
+    return ret;
+}
+
 esp_err_t get_logs(httpd_req_t* request) {
     if (!api::authorize(request, api::ApiRole::Installer)) return ESP_OK;
 
     char* logs = new (std::nothrow) char[DiagnosticLog::kBufferSize + 1];
-    if (!logs) return send_error(request, "500 Internal Server Error", "Out of Memory");
+    if (!logs) {
+        note_api_allocation_failure();
+        return send_error(request, "500 Internal Server Error", "Out of Memory");
+    }
     
     DiagnosticLog::instance().copy_logs(logs, DiagnosticLog::kBufferSize + 1);
     
@@ -1125,6 +1229,8 @@ esp_err_t get_auth_status(httpd_req_t* request) {
     cJSON* root = cJSON_CreateObject();
     cJSON_AddBoolToObject(root, "provisioned", prov);
     cJSON_AddBoolToObject(root, "bootstrapAllowed", allowed);
+    cJSON_AddBoolToObject(root, "factorySetupAllowed", allowed &&
+        auth_mgr->commissioning_state() == lg::auth::CommissioningState::FactoryFirstBoot);
     return send_json(request, root, "200 OK");
 }
 
@@ -1136,6 +1242,8 @@ esp_err_t post_auth_bootstrap(httpd_req_t* request) {
     if (!auth_mgr->is_bootstrap_allowed()) {
         return send_error(request, "403 Forbidden", "bootstrap_not_allowed");
     }
+    if (auth_mgr->commissioning_state() == lg::auth::CommissioningState::FactoryFirstBoot &&
+        !api::authorize(request, api::ApiRole::Admin)) return ESP_OK;
 
     cJSON* root = nullptr;
     if (read_json(request, &root) != ESP_OK || !root) {
@@ -1148,7 +1256,9 @@ esp_err_t post_auth_bootstrap(httpd_req_t* request) {
         return send_error(request, "400 Bad Request", "invalid_token_length");
     }
 
-    esp_err_t err = auth_mgr->bootstrap(tok->valuestring);
+    char session_hex[65] = {};
+    uint32_t expires_in = 0;
+    esp_err_t err = auth_mgr->bootstrap(tok->valuestring, session_hex, &expires_in);
     cJSON_Delete(root);
 
     if (err != ESP_OK) {
@@ -1160,6 +1270,10 @@ esp_err_t post_auth_bootstrap(httpd_req_t* request) {
     cJSON* resp = cJSON_CreateObject();
     cJSON_AddBoolToObject(resp, "success", true);
     cJSON_AddBoolToObject(resp, "provisioned", true);
+    cJSON_AddBoolToObject(resp, "authenticated", true);
+    cJSON_AddStringToObject(resp, "role", "admin");
+    cJSON_AddStringToObject(resp, "sessionToken", session_hex);
+    cJSON_AddNumberToObject(resp, "expiresIn", expires_in);
     return send_json(request, resp, "200 OK");
 }
 
@@ -1209,6 +1323,7 @@ esp_err_t post_auth_session(httpd_req_t* request) {
     cJSON_AddStringToObject(resp, "role", role_str);
     cJSON_AddStringToObject(resp, "sessionToken", session_hex);
     cJSON_AddNumberToObject(resp, "expiresIn", expires_in);
+    cJSON_AddBoolToObject(resp, "setupRequired", !auth_mgr->is_provisioned());
     return send_json(request, resp, "200 OK");
 }
 
@@ -4107,6 +4222,47 @@ esp_err_t post_config_validate(httpd_req_t* request) {
     if (!api_ptr->config()->scene_exists(candidate_cfg.fallback_preset_index)) {
         cJSON_AddItemToArray(warnings, cJSON_CreateString("fallback_scene_not_found"));
     }
+
+    // LG-038.3 §42: output configuration impact preview. Estimate the new
+    // topology cost against the projected free heap and warn / invalidate.
+    {
+        uint32_t required = 0;
+        for (uint8_t ch = 0; ch < 8; ++ch) {
+            const ChannelConfig& ccfg = candidate_cfg.channels[ch];
+            if (ccfg.enabled && ccfg.pixel_count > 0) {
+                const uint32_t bpp = (ccfg.addressable_type == AddressableType::SK6812) ? 4u : 3u;
+                required += ccfg.pixel_count * (bpp + 4u) + 256u;
+            }
+        }
+        uint32_t current_held = 0;
+        DeviceConfig running_cfg{};
+        api_ptr->config()->load_config(running_cfg);
+        for (uint8_t ch = 0; ch < 8; ++ch) {
+            const ChannelConfig& ccfg = running_cfg.channels[ch];
+            if (ccfg.enabled && ccfg.pixel_count > 0) {
+                const uint32_t bpp = (ccfg.addressable_type == AddressableType::SK6812) ? 4u : 3u;
+                current_held += ccfg.pixel_count * (bpp + 4u);
+            }
+        }
+        const RuntimeMemorySnapshot mem = capture_runtime_memory();
+        const uint32_t projected_free = (mem.free_8bit + current_held > required)
+                                            ? (mem.free_8bit + current_held - required)
+                                            : 0;
+        if (required > 0) {
+            char warn[128];
+            snprintf(warn, sizeof(warn),
+                     "topology_estimated_remaining_heap_bytes:%u_reserve_bytes:%u",
+                     (unsigned)projected_free, (unsigned)kPostTopologyHeapReserveBytes);
+            cJSON_AddItemToArray(warnings, cJSON_CreateString(warn));
+            if (projected_free < kPostTopologyHeapReserveBytes) {
+                cJSON_AddBoolToObject(resp, "valid", false);
+                cJSON_AddStringToObject(resp, "error", "insufficient_runtime_memory");
+                cJSON_AddNumberToObject(resp, "requiredBytes", required);
+                cJSON_AddNumberToObject(resp, "freeBytes", mem.free_8bit);
+                cJSON_AddNumberToObject(resp, "reserveBytes", kPostTopologyHeapReserveBytes);
+            }
+        }
+    }
     cJSON_AddItemToObject(resp, "warnings", warnings);
 
     return send_json(request, resp);
@@ -5444,6 +5600,25 @@ esp_err_t post_ota(httpd_req_t* request) {
         return send_error(request, "400 Bad Request", "empty_payload");
     }
 
+    // LG-038.3 §43/§44: OTA knows its own scratch requirement (1 KB stream
+    // buffer + protocol/TLS headroom) and must preserve the post-operation
+    // reserve. Do not enter the operation if admission fails halfway-safe.
+    {
+        const MemoryAdmissionResult admission =
+            check_memory_admission(2048 /* ota scratch */);
+        if (!admission.accepted) {
+            char err_body[192];
+            snprintf(err_body, sizeof(err_body),
+                     "{\"error\":\"insufficient_runtime_memory\",\"requiredBytes\":%u,\"freeBytes\":%u,\"reserveBytes\":%u}",
+                     (unsigned)admission.required_bytes,
+                     (unsigned)capture_runtime_memory().free_8bit,
+                     (unsigned)admission.reserve_bytes);
+            httpd_resp_set_status(request, "507 Insufficient Storage");
+            httpd_resp_set_type(request, "application/json");
+            return httpd_resp_sendstr(request, err_body);
+        }
+    }
+
     const esp_partition_t* update_partition = esp_ota_get_next_update_partition(nullptr);
     if (!update_partition) {
         return send_error(request, "500 Internal Server Error", "No OTA partition found");
@@ -6241,6 +6416,9 @@ struct ParsedBackupPackage {
     char error[128] = "";
 };
 
+// LG-038.3 §49: restore stays record-bounded. Individual record limit.
+static constexpr size_t kMaxRestoreRecordSize = 16384;
+
 static esp_err_t ingest_backup_package(httpd_req_t* request, ParsedBackupPackage& pkg, ConfigStore* store) {
     if (request->content_len <= 0) {
         snprintf(pkg.error, sizeof(pkg.error), "empty_payload");
@@ -6248,10 +6426,11 @@ static esp_err_t ingest_backup_package(httpd_req_t* request, ParsedBackupPackage
     }
 
     // Allocate 16 KB line buffer for streaming NDJSON (§33)
-    constexpr size_t kMaxRecordSize = 16384;
+    const size_t kMaxRecordSize = kMaxRestoreRecordSize;
     std::unique_ptr<char[]> line_buf(new (std::nothrow) char[kMaxRecordSize + 1]);
     if (!line_buf) {
         snprintf(pkg.error, sizeof(pkg.error), "out_of_memory");
+        note_api_allocation_failure();
         return ESP_ERR_NO_MEM;
     }
 
@@ -6609,6 +6788,25 @@ esp_err_t post_restore(httpd_req_t* request) {
 
     if (api_ptr->current_maintenance_mode() != MaintenanceMode::None) {
         return send_error(request, "409 Conflict", "maintenance_job_active");
+    }
+
+    // LG-038.3 §43/§49: restore stays record-bounded; its known scratch cost
+    // (kMaxRecordSize parse buffer + one record's cJSON tree) must be
+    // allocatable while preserving the post-operation reserve.
+    {
+        const MemoryAdmissionResult admission =
+            check_memory_admission(kMaxRestoreRecordSize + 2048);
+        if (!admission.accepted) {
+            char err_body[192];
+            snprintf(err_body, sizeof(err_body),
+                     "{\"error\":\"insufficient_runtime_memory\",\"requiredBytes\":%u,\"freeBytes\":%u,\"reserveBytes\":%u}",
+                     (unsigned)admission.required_bytes,
+                     (unsigned)capture_runtime_memory().free_8bit,
+                     (unsigned)admission.reserve_bytes);
+            httpd_resp_set_status(request, "507 Insufficient Storage");
+            httpd_resp_set_type(request, "application/json");
+            return httpd_resp_sendstr(request, err_body);
+        }
     }
 
     // Start Restore Job BEFORE mutation (§38)
@@ -7030,6 +7228,16 @@ static esp_err_t get_certification_report(httpd_req_t* request) {
         return send_error(request, "503 Service Unavailable", "CertificationService not available");
     }
 
+    // LG-038.3 §43: report generation builds a full cJSON tree; admit it
+    // against the operation's scratch requirement instead of failing halfway.
+    {
+        const MemoryAdmissionResult admission =
+            check_memory_admission(4096 /* report tree scratch */);
+        if (!admission.accepted) {
+            return send_error(request, "507 Insufficient Storage", "insufficient_runtime_memory");
+        }
+    }
+
     cJSON* report = api_ptr->certification_service()->generate_report_json();
     return send_json(request, report, "200 OK");
 }
@@ -7039,10 +7247,50 @@ struct WsBroadcastArg {
     char payload[kRuntimeSnapshotMaxBytes];
 };
 
+// ── LG-038.3 §52/§53/§54: bounded, downsampled binary preview ──────────────
+// Preview is UI telemetry, NOT hardware truth. A 256-pixel configured lane is
+// sampled down to at most kPreviewSamplesPerLane samples per lane so the
+// payload stays ~1.5 KB regardless of configured pixel count. The header
+// declares schema + lane count + samples-per-lane; the frontend must treat
+// sample indices as preview samples, never physical pixel indices.
+static constexpr uint8_t  kPreviewSchema          = 2;
+static constexpr uint8_t  kPreviewLanes           = 8;
+static constexpr uint16_t kPreviewSamplesPerLane  = 64;
+static constexpr size_t   kPreviewHeaderBytes     = 4;
+static constexpr size_t   kPreviewLaneBytes       = kPreviewSamplesPerLane * 3;
+static constexpr size_t   kPreviewMaxBytes        =
+    kPreviewHeaderBytes + kPreviewLanes * kPreviewLaneBytes; // 4 + 8*64*3 = 1540
+
 struct WsPreviewArg {
     FactoryApi* api;
-    std::vector<uint8_t> payload;
+    uint16_t len;
+    std::array<uint8_t, kPreviewMaxBytes> payload;
 };
+
+// Fixed, bounded client-list buffer. max_open_sockets_ is already bounded by
+// the IDF config; no std::vector allocation per broadcast (§55, §82).
+static constexpr size_t kMaxClientListFds = 16;
+
+// Samples the physical frame for one lane into the bounded preview buffer.
+// Downsample by stepping across the full configured length; W folds into RGB
+// for visualization only.
+inline void preview_sample_lane(uint8_t* out, size_t out_cap,
+                                const RenderFrame& frame, uint8_t lane,
+                                uint16_t configured_pixels) {
+    if (configured_pixels == 0) return; // lane stays black in the payload
+    const auto& ch_frame = frame.channels[lane];
+    for (uint16_t s = 0; s < kPreviewSamplesPerLane; ++s) {
+        const uint16_t px = static_cast<uint16_t>(
+            (static_cast<uint32_t>(s) * configured_pixels) / kPreviewSamplesPerLane);
+        if (px >= MAX_PIXELS) break;
+        const auto& lv = ch_frame.pixels[px];
+        const size_t off = static_cast<size_t>(s) * 3;
+        if (off + 2 >= out_cap) break;
+        out[off + 0] = static_cast<uint8_t>((std::min)(255, static_cast<int>(lv.r) + lv.w));
+        out[off + 1] = static_cast<uint8_t>((std::min)(255, static_cast<int>(lv.g) + lv.w));
+        out[off + 2] = static_cast<uint8_t>((std::min)(255, static_cast<int>(lv.b) + lv.w));
+    }
+}
 
 static esp_err_t get_favicon(httpd_req_t* request) {
     httpd_resp_set_status(request, "204 No Content");
@@ -7157,6 +7405,7 @@ esp_err_t FactoryApi::start(
         { .uri = "/api/v1/palettes",          .method = HTTP_GET,  .handler = get_palettes,       .user_ctx = nullptr },
         { .uri = "/api/v1/health",            .method = HTTP_GET,  .handler = get_health,         .user_ctx = nullptr },
         { .uri = "/api/v1/diagnostics/output",.method = HTTP_GET,  .handler = get_diagnostics_output, .user_ctx = nullptr },
+        { .uri = "/api/v1/diagnostics/memory", .method = HTTP_GET,  .handler = get_diagnostics_memory, .user_ctx = nullptr },
         { .uri = "/api/v1/logs",              .method = HTTP_GET,  .handler = get_logs,           .user_ctx = nullptr },
         { .uri = "/api/v1/sequence",          .method = HTTP_GET,  .handler = get_sequence,     .user_ctx = nullptr },
         { .uri = "/api/v1/sequence",          .method = HTTP_PUT,  .handler = put_sequence,     .user_ctx = nullptr },
@@ -7256,8 +7505,8 @@ esp_err_t FactoryApi::start(
             }
 
             // Only generate preview frames if there are active WebSocket clients connected
-            size_t client_count = 4;
-            int client_fds[4];
+            size_t client_count = kMaxClientListFds;
+            int client_fds[kMaxClientListFds];
             if (httpd_get_client_list(this->factory_server_, &client_count, client_fds) != ESP_OK || client_count == 0) {
                 this->preview_pending_ = false;
                 return;
@@ -7265,37 +7514,30 @@ esp_err_t FactoryApi::start(
 
             auto* arg = new (std::nothrow) WsPreviewArg{};
             if (!arg) {
+                // §57: allocation failures are counted, never silently dropped.
+                note_preview_allocation_failure();
                 this->preview_pending_ = false;
                 return;
             }
             arg->api = this;
-            
-            try {
-                // Fixed payload size: 1 byte header + 8 lanes * 144 pixels * 3 colors = 3457 bytes
-                arg->payload.resize(3457, 0);
-                arg->payload[0] = 0x01; // Header
 
-                for (uint8_t f = 0; f < 8; ++f) {
-                    const auto& ch_cfg = cfg.channels[f];
-                    const auto& ch_frame = frame.channels[f];
-                    
-                    if (ch_cfg.pixel_count > 0) {
-                        uint16_t pcount = std::min<uint16_t>(ch_cfg.pixel_count, 144);
-                        size_t offset = 1 + (f * 144 * 3);
-                        for (uint16_t p = 0; p < pcount; ++p) {
-                            const auto& lv = ch_frame.pixels[p];
-                            arg->payload[offset++] = (std::min)(255, int(lv.r) + lv.w);
-                            arg->payload[offset++] = (std::min)(255, int(lv.g) + lv.w);
-                            arg->payload[offset++] = (std::min)(255, int(lv.b) + lv.w);
-                        }
-                    }
-                }
+            // Fixed-size bounded payload (§54): no vector, no resize, no
+            // per-frame heap churn. Header declares the sampling contract.
+            arg->len = static_cast<uint16_t>(kPreviewMaxBytes);
+            arg->payload[0] = kPreviewSchema;                       // schema
+            arg->payload[1] = kPreviewLanes;                        // lane count
+            arg->payload[2] = static_cast<uint8_t>(kPreviewSamplesPerLane); // samples per lane
+            arg->payload[3] = 0;                                    // reserved
 
-                if (httpd_queue_work(this->factory_server_, ws_broadcast_preview_work, arg) != ESP_OK) {
-                    this->preview_pending_ = false;
-                    delete arg;
-                }
-            } catch (...) {
+            for (uint8_t f = 0; f < kPreviewLanes; ++f) {
+                const auto& ch_cfg = cfg.channels[f];
+                uint8_t* lane_out = arg->payload.data() + kPreviewHeaderBytes + f * kPreviewLaneBytes;
+                preview_sample_lane(lane_out, kPreviewLaneBytes, frame, f,
+                                    ch_cfg.enabled ? ch_cfg.pixel_count : 0);
+            }
+
+            if (httpd_queue_work(this->factory_server_, ws_broadcast_preview_work, arg) != ESP_OK) {
+                note_preview_allocation_failure();
                 this->preview_pending_ = false;
                 delete arg;
             }
@@ -7308,10 +7550,11 @@ esp_err_t FactoryApi::start(
 void FactoryApi::ws_broadcast_work(void* arg) {
     std::unique_ptr<WsBroadcastArg> msg(static_cast<WsBroadcastArg*>(arg));
 
-    std::vector<int> client_fds(msg->api->max_open_sockets_);
-    size_t clients = client_fds.size();
+    // LG-038.3 §55/§82: fixed bounded array; no heap vector per broadcast.
+    int client_fds[kMaxClientListFds];
+    size_t clients = kMaxClientListFds;
 
-    if (httpd_get_client_list(msg->api->factory_server_, &clients, client_fds.data()) != ESP_OK || clients == 0) {
+    if (httpd_get_client_list(msg->api->factory_server_, &clients, client_fds) != ESP_OK || clients == 0) {
         msg->api->status_pending_.store(false);
         return;
     }
@@ -7354,17 +7597,18 @@ void FactoryApi::ws_broadcast_preview_work(void* arg) {
     std::unique_ptr<WsPreviewArg> msg(static_cast<WsPreviewArg*>(arg));
     msg->api->preview_pending_ = false;
 
-    std::vector<int> client_fds(msg->api->max_open_sockets_);
-    size_t clients = client_fds.size();
+    // LG-038.3 §55/§82: fixed bounded array; no heap vector per broadcast.
+    int client_fds[kMaxClientListFds];
+    size_t clients = kMaxClientListFds;
 
-    if (httpd_get_client_list(msg->api->factory_server_, &clients, client_fds.data()) != ESP_OK || clients == 0) {
+    if (httpd_get_client_list(msg->api->factory_server_, &clients, client_fds) != ESP_OK || clients == 0) {
         return;
     }
 
     httpd_ws_frame_t frame = {};
     frame.type = HTTPD_WS_TYPE_BINARY;
     frame.payload = msg->payload.data();
-    frame.len = msg->payload.size();
+    frame.len = msg->len;
 
     for (size_t i = 0; i < clients; ++i) {
         if (httpd_ws_get_fd_info(msg->api->factory_server_, client_fds[i]) == HTTPD_WS_CLIENT_WEBSOCKET) {
@@ -7383,6 +7627,7 @@ void FactoryApi::notify_status_async() {
 
     auto* arg = new (std::nothrow) WsBroadcastArg{};
     if (!arg) {
+        note_api_allocation_failure();
         status_pending_.store(false);
         return;
     }
@@ -7390,6 +7635,7 @@ void FactoryApi::notify_status_async() {
     arg->payload[0] = '\0';
 
     if (httpd_queue_work(factory_server_, ws_broadcast_work, arg) != ESP_OK) {
+        note_api_allocation_failure();
         status_pending_.store(false);
         delete arg;
     }
@@ -7406,9 +7652,10 @@ void FactoryApi::stop() {
 uint32_t FactoryApi::active_ws_clients() const {
     httpd_handle_t srv = signage_server_ ? signage_server_ : factory_server_;
     if (!srv) return 0;
-    std::vector<int> client_fds(max_open_sockets_);
-    size_t clients = client_fds.size();
-    if (httpd_get_client_list(srv, &clients, client_fds.data()) != ESP_OK || clients == 0) return 0;
+    // LG-038.3 §56/§82: routine client counting must not heap-allocate.
+    int client_fds[kMaxClientListFds];
+    size_t clients = kMaxClientListFds;
+    if (httpd_get_client_list(srv, &clients, client_fds) != ESP_OK || clients == 0) return 0;
     size_t ws_clients = 0;
     for (size_t i = 0; i < clients; ++i) {
         if (httpd_ws_get_fd_info(srv, client_fds[i]) == HTTPD_WS_CLIENT_WEBSOCKET) {

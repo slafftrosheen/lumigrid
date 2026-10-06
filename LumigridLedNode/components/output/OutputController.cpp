@@ -1,10 +1,57 @@
 #include "OutputController.hpp"
+#include "RuntimeMemory.hpp"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "lg_board_pins.hpp"
 
 namespace lg {
+
+namespace {
+// LG-038.3 §39: deterministic per-lane admission cost. The driver allocates
+// one wire buffer (3 B/pixel RGB, 4 B/pixel RGBW) + one shadow buffer
+// (4 B/pixel) per lane; RMT channel/encoder overhead is reserved separately.
+constexpr uint32_t kRmtPerLaneReserveBytes = 256u;
+
+uint32_t lane_admission_bytes(const ChannelConfig& ccfg) {
+    const uint32_t bpp_wire = (ccfg.addressable_type == AddressableType::SK6812) ? 4u : 3u;
+    return ccfg.pixel_count * (bpp_wire + 4u) + kRmtPerLaneReserveBytes;
+}
+
+// LG-038.3 §40/§41: explicit admission failure payload used by callers.
+struct TopologyAdmission {
+    bool ok = false;
+    uint32_t required_bytes = 0;
+    uint32_t free_bytes = 0;
+    uint32_t reserve_bytes = kPostTopologyHeapReserveBytes;
+};
+
+TopologyAdmission check_topology_admission(const DeviceConfig& candidate,
+                                           const AddressableDriver& pixels) {
+    TopologyAdmission res;
+    for (uint8_t ch = 0; ch < 8; ++ch) {
+        const ChannelConfig& ccfg = candidate.channels[ch];
+        if (ccfg.enabled && ccfg.pixel_count > 0) {
+            res.required_bytes += lane_admission_bytes(ccfg);
+        }
+    }
+    // Buffers held by the CURRENT topology are released during reconfigure,
+    // so they count toward available memory (prevents false rejection when
+    // shrinking a large topology).
+    uint32_t current_topology_bytes = 0;
+    for (uint8_t lane = 0; lane < OutputCapabilities::kRmtLanes; ++lane) {
+        const uint16_t n = pixels.configured_pixels(lane);
+        if (n > 0 && pixels.configured(lane)) {
+            current_topology_bytes += n * (pixels.has_white(lane) ? 8u : 7u);
+        }
+    }
+    RuntimeMemorySnapshot snap = capture_runtime_memory();
+    res.free_bytes = snap.free_8bit;
+    const uint32_t effective_free = snap.free_8bit + current_topology_bytes;
+    res.ok = (effective_free >= res.required_bytes + res.reserve_bytes);
+    return res;
+}
+} // namespace
 
 // LG-038.1: Heap telemetry helper for OutputController bring-up
 void log_output_heap_stage(const char *stage) {
@@ -59,6 +106,20 @@ esp_err_t OutputController::reconfigure(const DeviceConfig& cfg) {
     lock();
     ESP_LOGI("output", "Reconfiguring OutputController drivers based on DeviceConfig...");
 
+    // LG-038.3 §39: refuse a topology that would violate the runtime heap
+    // reserve BEFORE mutating any driver state (§70: reject before OOM).
+    const TopologyAdmission admission = check_topology_admission(cfg, pixels_);
+    if (!admission.ok) {
+        ESP_LOGE("output",
+                 "Topology admission rejected: required=%lu free8=%lu reserve=%lu (insufficient_runtime_memory)",
+                 (unsigned long)admission.required_bytes,
+                 (unsigned long)admission.free_bytes,
+                 (unsigned long)admission.reserve_bytes);
+        note_rmt_allocation_failure();
+        unlock();
+        return kErrInsufficientRuntimeMemory;
+    }
+
     const bool pwm_ok = pwm_available_.load(std::memory_order_acquire);
 
     // 0. PWM Availability Validation
@@ -88,7 +149,23 @@ esp_err_t OutputController::reconfigure(const DeviceConfig& cfg) {
         }
     }
 
-    // 2. Hardware Configuration: Addressable channels (RMT lanes A1..A8)
+    // 2. Hardware Configuration: Addressable channels (A1..A8)
+    // LG-038.3 §40: capture the currently-applied lane topology first. If a
+    // candidate lane cannot be allocated, the previous topology is restored
+    // from this snapshot: never a half-configured controller, old topology
+    // preserved on failure (§80).
+    struct LaneParams {
+        uint16_t pixels = 0;
+        bool configured = false;
+        bool rgbw = false;
+        PixelOrder order = PixelOrder::RGB;
+    };
+    LaneParams previous[OutputCapabilities::kRmtLanes];
+    for (uint8_t l = 0; l < OutputCapabilities::kRmtLanes; ++l) {
+        previous[l].configured = pixels_.configured(l);
+        previous[l].pixels = pixels_.configured_pixels(l);
+        previous[l].rgbw = pixels_.has_white(l);
+    }
     for (uint8_t ch = 0; ch < 8; ++ch) {
         const ChannelConfig& ccfg = cfg.channels[ch];
         if (!ccfg.enabled || ccfg.pixel_count == 0) {
@@ -100,20 +177,33 @@ esp_err_t OutputController::reconfigure(const DeviceConfig& cfg) {
         FixtureProfile prof = (ccfg.addressable_type == AddressableType::SK6812) ? FixtureProfile::SK6812 : FixtureProfile::WS2812;
 
         esp_err_t err = pixels_.configure_lane(ch, gpio, prof, ccfg.pixel_order, ccfg.pixel_count);
-        ESP_LOGI("output", "RMT_ALLOC lane=A%u GPIO=%u format=%s pixels=%u wireBytes=%u result=%s internal=%lu largestInternal=%lu",
+        RuntimeMemorySnapshot mem_after = capture_runtime_memory();
+        ESP_LOGI("output", "RMT_ALLOC lane=A%u GPIO=%u format=%s pixels=%u wireBytes=%u result=%s free8=%lu largest8=%lu",
                  ch + 1, gpio, prof == FixtureProfile::SK6812 ? "RGBW" : "RGB",
                  ccfg.pixel_count, ccfg.pixel_count * (prof == FixtureProfile::SK6812 ? 4u : 3u),
-                 output_err_name(err), (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
-                 (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+                 output_err_name(err), (unsigned long)mem_after.free_8bit,
+                 (unsigned long)mem_after.largest_8bit);
         if (err != ESP_OK) {
-            ESP_LOGE("output", "Failed to configure lane %u (GPIO %u): %s. Rolling back all lanes and entering safe blackout!",
+            ESP_LOGE("output", "Failed to configure lane %u (GPIO %u): %s. Restoring previous topology and entering safe blackout!",
                      ch, gpio, output_err_name(err));
-            topology_valid_.store(false, std::memory_order_release);
+            if (err == kErrRmtResourceExhausted || err == ESP_ERR_NO_MEM) {
+                note_rmt_allocation_failure();
+            }
+            // Restore the old topology lane-by-lane (best effort), then safe blackout.
+            for (uint8_t l = 0; l < OutputCapabilities::kRmtLanes; ++l) {
+                if (!previous[l].configured) {
+                    pixels_.clear_lane(l);
+                    continue;
+                }
+                const FixtureProfile prev_prof = previous[l].rgbw ? FixtureProfile::SK6812 : FixtureProfile::WS2812;
+                if (pixels_.configure_lane(l, board::kAledPins[l], prev_prof, previous[l].order,
+                                           previous[l].pixels) != ESP_OK) {
+                    pixels_.clear_lane(l);
+                }
+            }
+            topology_valid_.store(true, std::memory_order_release);
             output_enabled_.store(false, std::memory_order_release);
             Pca9685Driver::disable_outputs();
-            for (uint8_t l = 0; l < OutputCapabilities::kRmtLanes; ++l) {
-                pixels_.clear_lane(l);
-            }
             last_commit_error_.store(err, std::memory_order_release);
             blackout_locked();
             unlock();

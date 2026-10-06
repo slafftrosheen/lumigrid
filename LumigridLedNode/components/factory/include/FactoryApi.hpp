@@ -9,6 +9,8 @@
 #include "NetworkSettings.hpp"
 #include "RecoveryTypes.hpp"
 #include "ConfigApplyPlan.hpp"
+#include "RuntimeServices.hpp"
+#include "RuntimeMemory.hpp"
 #include <atomic>
 #include <functional>
 
@@ -111,6 +113,16 @@ struct RuntimeHealthSnapshot {
         uint32_t packet_loss = 0;
     } sync;
 
+    // LG-038.3 §3/§45: 8-bit heap truth + memory health issues.
+    struct Memory {
+        uint32_t free8 = 0;
+        uint32_t largest8 = 0;
+        uint32_t minimum_free = 0;
+        MemoryHealth health = MemoryHealth::Healthy;
+        bool low_runtime_memory = false;
+        bool heap_fragmented = false;
+    } memory;
+
     void collect(class FactoryApi* api);
     cJSON* to_json() const;
 };
@@ -199,6 +211,15 @@ public:
         return maintenance_mode_func_ ? maintenance_mode_func_() : MaintenanceMode::None;
     }
 
+    // LG-038.3 §60: active service state provider (set by LumigridRuntime).
+    using ServiceStateProvider = std::function<ServiceStateTruth()>;
+    void set_service_state_provider(ServiceStateProvider provider) {
+        service_state_provider_ = std::move(provider);
+    }
+    ServiceStateTruth service_state_truth() const {
+        return service_state_provider_ ? service_state_provider_() : ServiceStateTruth{};
+    }
+
 
     using NetworkApplyQueueFunc = std::function<esp_err_t(const NetworkApplyRequest&)>;
     using NetworkApplyStatusFunc = std::function<void(NetworkApplyState& state, uint32_t& cmd_id, const char*& err_str)>;
@@ -256,6 +277,7 @@ public:
     RecoveryStatusProvider recovery_status_provider_{};
     RuntimeApplyFunc runtime_apply_func_{};
     MaintenanceModeCheckFunc maintenance_mode_func_{};
+    ServiceStateProvider service_state_provider_{};
 
     NetworkApplyStatusFunc network_apply_status_func() const { return network_apply_status_; }
 };

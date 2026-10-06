@@ -21,12 +21,16 @@
 #include <new>
 
 namespace {
-// LG-038.1: Heap telemetry helper for bring-up
+// LG-038.3 §2/§59: heap telemetry uses the canonical 8-bit snapshot; the
+// internal figure is logged once per stage for bring-up diagnostics only.
 void log_heap_stage(const char *stage) {
+  const lg::RuntimeMemorySnapshot mem = lg::capture_runtime_memory();
   ESP_LOGI(
-      "lumigrid", "HEAP stage=%s free=%lu largest=%lu", stage,
-      (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
-      (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+      "lumigrid", "HEAP stage=%s free8=%lu largest8=%lu internal=%lu minFree=%lu", stage,
+      (unsigned long)mem.free_8bit,
+      (unsigned long)mem.largest_8bit,
+      (unsigned long)mem.free_internal,
+      (unsigned long)mem.minimum_free_heap);
 }
 } // namespace
 
@@ -155,6 +159,8 @@ esp_err_t LumigridRuntime::init() {
     failing_error_ = ESP_ERR_NO_MEM;
     return ESP_ERR_NO_MEM;
   }
+  // LG-038.3 §29: register persistent task stacks for high-water telemetry.
+  task_stack_registry().register_task("recovery", 4096);
 
   api_.set_diagnostics_provider([this]() -> StartupDiagnostics {
     return StartupDiagnostics{startup_state_str(), startup_stage_str(),
@@ -246,6 +252,23 @@ esp_err_t LumigridRuntime::init() {
     return apply_device_config(old_cfg, new_cfg, plan);
   });
   api_.set_maintenance_mode_func([this]() { return maintenance_mode(); });
+  // LG-038.3 §60: observable service state for RuntimeSnapshot/diagnostics.
+  api_.set_service_state_provider([this]() -> ServiceStateTruth {
+    const RuntimeServicePlan actual = service_plan();
+    ServiceStateTruth truth{};
+    truth.lighting = actual.lighting;
+    truth.scheduler = actual.scheduler;
+    truth.api = actual.api;
+    truth.mdns = actual.mdns;
+    truth.fleet_discovery = actual.fleet_discovery;
+    truth.artnet = actual.artnet;
+    truth.sacn = actual.sacn;
+    truth.node_sync = actual.node_sync;
+    truth.mqtt = actual.mqtt;
+    truth.factory_worker = actual.factory_worker;
+    truth.network_apply_worker = actual.network_apply_worker;
+    return truth;
+  });
 
   // Initialize AuthStore and AuthManager
   err = auth_store_.init();
@@ -384,6 +407,7 @@ esp_err_t LumigridRuntime::init() {
     } else {
       startup_stage_ = StartupStage::LightingStarted;
       started_subsystems_.lighting = true;
+      task_stack_registry().register_task("lighting_rt", 10240);
       log_heap_stage("lighting_runtime");
     }
   } else {
@@ -393,18 +417,12 @@ esp_err_t LumigridRuntime::init() {
                          "skipping lighting runtime start");
   }
 
-  ESP_LOGI("lumigrid", "Step 4: factory_runner.start()...");
-  err = factory_runner_.start();
-  if (err != ESP_OK) {
-    startup_state_ = StartupState::Faulted;
-    failing_stage_ = StartupStage::FactoryStarted;
-    failing_error_ = err;
-    ESP_LOGE("lumigrid", "factory_runner.start() FAILED: %s",
-             esp_err_to_name(err));
-  } else {
-    startup_stage_ = StartupStage::FactoryStarted;
-    started_subsystems_.factory = true;
-  }
+  // LG-038.3 §17/§18: the Factory worker is NOT started at boot anymore.
+  // The FactoryRunner object stays initialized and idle (§20: Certification
+  // keeps only a pointer); the 8 KB lg_factory task is allocated on the first
+  // real Factory/Certification command via ensure_worker_started().
+  startup_stage_ = StartupStage::FactoryStarted;
+  ESP_LOGI("lumigrid", "Step 4: factory worker lazy (not started; 8 KB reserved on first use)");
 
   // Step 5: Initialize CertificationService (LG-037 / LG-038)
   err = cert_service_.init(
@@ -436,24 +454,9 @@ esp_err_t LumigridRuntime::init() {
 
   vTaskDelay(pdMS_TO_TICKS(500));
 
-  if (!net_apply_queue_) {
-    net_apply_queue_ = xQueueCreate(1, sizeof(NetworkApplyRequest));
-  }
-  if (!net_apply_task_ && net_apply_queue_) {
-    if (xTaskCreatePinnedToCore(&LumigridRuntime::net_apply_worker, "net_apply",
-                              8192, this, 5, &net_apply_task_, 1) != pdPASS) {
-      failing_error_ = ESP_ERR_NO_MEM;
-    }
-  }
-
-  if (!net_apply_queue_ || !net_apply_task_) {
-    startup_state_ = StartupState::Faulted;
-    failing_stage_ = StartupStage::NetworkConfigured;
-    failing_error_ = ESP_ERR_NO_MEM;
-    safe_mode_ = true;
-    output_.blackout();
-    output_.set_output_enabled(false);
-  }
+  // LG-038.3 §7/§8: no permanent net_apply task or queue at boot. The 8 KB
+  // worker is created on demand by queue_network_apply() and deletes itself
+  // after the apply finishes.
 
   return (startup_state_ == StartupState::Faulted) ? failing_error_ : ESP_OK;
 }
@@ -503,6 +506,7 @@ void LumigridRuntime::rollback_services(StartupStage failed_stage,
   }
   if (started_subsystems_.lighting) {
     lighting_.stop();
+    task_stack_registry().unregister_task("lighting_rt");
     started_subsystems_.lighting = false;
   }
 
@@ -540,6 +544,9 @@ esp_err_t LumigridRuntime::stop() {
   }
 
   if (net_apply_task_) {
+    // LG-038.3 §8: the one-shot worker normally deletes itself. During full
+    // runtime stop it may still be mid-apply; block deletion is limited to
+    // this shutdown path (the task never blocks longer than one apply).
     TaskHandle_t t = net_apply_task_;
     net_apply_task_ = nullptr;
     vTaskDelete(t);
@@ -586,22 +593,23 @@ esp_err_t LumigridRuntime::start() {
   uint8_t mac[6] = {};
   esp_read_mac(mac, ESP_MAC_WIFI_STA);
 
+  const bool factory_setup = !auth_manager_.is_provisioned() &&
+      auth_manager_.commissioning_state() == auth::CommissioningState::FactoryFirstBoot;
   std::string ap_pass;
-#if defined(CONFIG_LUMIGRID_ENABLE_DEV_CREDENTIALS) &&                         \
-    defined(CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS)
-  ap_pass = "lumigrid123";
-#else
-  // LG-036: Recovery AP credential semantics.
-  // The MAC-derived passphrase "lg_<mac-fragment>" serves strictly as
-  // transitional layer-2 wireless access to reach the node during first-boot
-  // commissioning or recovery. NOTE: Recovery AP access password != node
-  // authentication boundary. Actual authorization remains strictly gated by
-  // AuthManager and physical recovery.
-  char mac_pass[32];
-  snprintf(mac_pass, sizeof(mac_pass), "lg_%02x%02x%02x%02x", mac[2], mac[3],
-           mac[4], mac[5]);
-  ap_pass = mac_pass;
-#endif
+  if (factory_setup) {
+    ap_pass = auth::AuthManager::kFactorySetupCredential;
+    ESP_LOGI("lumigrid", "\n==================================================\n"
+        "LUMIGRID FIRST SETUP\n==================================================\n"
+        "Wi-Fi:      LumiGrid-Setup\nPassword:   %s\n\nOpen:\nhttp://192.168.4.1\n\n"
+        "Temporary setup key:\n%s\n\nYou will be required to create a new Admin key.\n"
+        "==================================================",
+        auth::AuthManager::kFactorySetupCredential, auth::AuthManager::kFactorySetupCredential);
+  } else {
+    // Preserve deliberate recovery/network AP policy; never restore setup auth on STA failure.
+    char mac_pass[32];
+    snprintf(mac_pass, sizeof(mac_pass), "lg_%02x%02x%02x%02x", mac[2], mac[3], mac[4], mac[5]);
+    ap_pass = mac_pass;
+  }
 
   // Derive AP SSID:
   //   safe_mode            -> "LumiGrid-Recovery"  (config invalid / crash
@@ -609,7 +617,9 @@ esp_err_t LumigridRuntime::start() {
   //   device) fallback             -> "LumiGrid-Factory"   (first boot / no
   //   config)
   std::string ap_ssid;
-  if (safe_mode_) {
+  if (factory_setup) {
+    ap_ssid = "LumiGrid-Setup";
+  } else if (safe_mode_) {
     ap_ssid = "LumiGrid-Recovery";
   } else if (configuration_valid_ && strlen(dev_cfg.device_name) > 0 &&
              std::strcmp(dev_cfg.device_name, "lumigrid") != 0) {
@@ -620,12 +630,12 @@ esp_err_t LumigridRuntime::start() {
 
   NetworkSettings net_settings;
   config_.load_network_settings(net_settings);
-  if (!safe_mode_ && net_settings.ap_name[0] != '\0') {
+  if (!factory_setup && !safe_mode_ && net_settings.ap_name[0] != '\0') {
     ap_ssid = net_settings.ap_name;
   }
 
   WifiMode wifi_mode = WifiMode::ApOnly;
-  if (!safe_mode_) {
+  if (!factory_setup && !safe_mode_) {
     switch (net_settings.mode) {
     case NetworkMode::StaOnly:
       wifi_mode = WifiMode::StaOnly;
@@ -939,6 +949,7 @@ esp_err_t LumigridRuntime::start() {
     ESP_LOGI("lumigrid", "Starting scheduler...");
     scheduler_.start(current_cfg.timezone);
     started_subsystems_.scheduler = true;
+    task_stack_registry().register_task("scheduler", 4096);
   }
 
   err = start_network_services();
@@ -1067,12 +1078,17 @@ esp_err_t LumigridRuntime::start_network_services() {
     }
   }
 
-  if (!started_subsystems_.fleet_discovery) {
-    ESP_LOGI("lumigrid", "Starting fleet_discovery.start()...");
+  // LG-038.3 §21/§22: Fleet Discovery only has value with real LAN
+  // connectivity. It must NOT start merely because the setup/recovery AP is
+  // active (§66: first-boot AP-only keeps fleet_disc off).
+  if (!started_subsystems_.fleet_discovery &&
+      network_plan_state_.load(std::memory_order_acquire) == NetworkPlanState::StaConnected) {
+    ESP_LOGI("lumigrid", "Starting fleet_discovery.start() (STA connected)...");
     NodeIdentity identity = get_node_identity(current_cfg.device_name);
     esp_err_t err = fleet_discovery_.start(identity);
     if (err == ESP_OK) {
       started_subsystems_.fleet_discovery = true;
+      task_stack_registry().register_task("fleet_disc", 4096);
       log_heap_stage("fleet_discovery");
     } else {
       ESP_LOGE("lumigrid", "fleet_discovery startup failed: %s", esp_err_to_name(err));
@@ -1080,8 +1096,10 @@ esp_err_t LumigridRuntime::start_network_services() {
     }
   }
 
-  if (!started_subsystems_.artnet) {
-    ESP_LOGI("lumigrid", "Starting artnet.start()...");
+  // LG-038.3 §11: Art-Net starts only when configured AND not in Safe Mode.
+  if (!started_subsystems_.artnet && current_cfg.protocol.artnet_enabled &&
+      !safe_mode_) {
+    ESP_LOGI("lumigrid", "Starting artnet.start() (config-enabled)...");
     esp_err_t err = artnet_.start(node, [this](const ArtnetDmxPacket &packet) {
       if (!safe_mode_) {
         dmx_router_.handle_artnet_dmx(packet);
@@ -1090,14 +1108,21 @@ esp_err_t LumigridRuntime::start_network_services() {
     if (err == ESP_OK) {
       started_subsystems_.artnet = true;
       artnet_.set_output_universes(active_unis, port_count);
+      task_stack_registry().register_task("lg_artnet", 4096);
     } else {
       ESP_LOGE("lumigrid", "artnet startup failed: %s", esp_err_to_name(err));
       return err;
     }
+  } else if (started_subsystems_.artnet && !current_cfg.protocol.artnet_enabled) {
+    // Disabled while already running (e.g. rebind after config change).
+    artnet_.stop();
+    started_subsystems_.artnet = false;
   }
 
-  if (!started_subsystems_.sacn) {
-    ESP_LOGI("lumigrid", "Starting sacn.start()...");
+  // LG-038.3 §12: sACN starts only when configured AND not in Safe Mode.
+  if (!started_subsystems_.sacn && current_cfg.protocol.sacn_enabled &&
+      !safe_mode_) {
+    ESP_LOGI("lumigrid", "Starting sacn.start() (config-enabled)...");
     esp_err_t err = sacn_.start([this](const SacnDmxPacket &packet) {
       if (!safe_mode_) {
         dmx_router_.handle_sacn_dmx(packet);
@@ -1106,17 +1131,27 @@ esp_err_t LumigridRuntime::start_network_services() {
     if (err == ESP_OK) {
       started_subsystems_.sacn = true;
       sacn_.set_subscribed_universes(active_unis, u_count);
+      task_stack_registry().register_task("lg_sacn", 4096);
     } else {
       ESP_LOGE("lumigrid", "sacn startup failed: %s", esp_err_to_name(err));
       return err;
     }
+  } else if (started_subsystems_.sacn && !current_cfg.protocol.sacn_enabled) {
+    sacn_.stop();
+    started_subsystems_.sacn = false;
   }
 
+  // LG-038.3 §25: sync stays config-gated (unchanged behavior) and additionally
+  // requires an actually connected STA for transport viability (§65).
   if (current_cfg.sync_enabled && !safe_mode_ &&
-      !started_subsystems_.node_sync) {
-    ESP_LOGI("lumigrid", "Starting node_sync.start()...");
+      !started_subsystems_.node_sync &&
+      network_plan_state_.load(std::memory_order_acquire) == NetworkPlanState::StaConnected) {
+    ESP_LOGI("lumigrid", "Starting node_sync.start() (config-enabled, STA connected)...");
     node_sync_.start(static_cast<NodeRole>(current_cfg.sync_role));
     started_subsystems_.node_sync = true;
+    task_stack_registry().register_task("sync_worker", 4096);
+    task_stack_registry().register_task("sync_master", 4096);
+    task_stack_registry().register_task("sync_auto", 4096);
   }
 
   if (current_cfg.mqtt_enabled && strlen(current_cfg.mqtt_broker) > 0 &&
@@ -1148,34 +1183,53 @@ esp_err_t LumigridRuntime::start_network_services() {
 
 esp_err_t
 LumigridRuntime::queue_network_apply(const NetworkApplyRequest &request) {
+  // One apply at a time (unchanged contract; the HTTP layer maps this to 409).
   if (apply_in_progress_.exchange(true)) {
     return ESP_ERR_INVALID_STATE;
   }
-  if (!net_apply_queue_) {
-    apply_in_progress_.store(false);
-    return ESP_ERR_INVALID_STATE;
-  }
+
   apply_state_.store(NetworkApplyState::Applying);
   pending_apply_command_id_.store(request.command_id);
   last_apply_error_ = nullptr;
 
-  if (xQueueSend(net_apply_queue_, &request, 0) != pdTRUE) {
+  // LG-038.3 §8/§10: single owned pending request; no FreeRTOS queue and no
+  // permanent worker. The 8 KB task exists only for the duration of the
+  // apply and deletes itself afterwards.
+  pending_apply_ = request;
+  esp_err_t start_err = start_network_apply_task();
+  if (start_err != ESP_OK) {
     apply_in_progress_.store(false);
     apply_state_.store(NetworkApplyState::Idle);
     pending_apply_command_id_.store(0);
+    return start_err;
+  }
+  return ESP_OK;
+}
+
+esp_err_t LumigridRuntime::start_network_apply_task() {
+  if (net_apply_task_ != nullptr) {
+    // A previous one-shot worker is still finishing; treat as in-progress.
+    return ESP_ERR_INVALID_STATE;
+  }
+  TaskHandle_t handle = nullptr;
+  if (xTaskCreatePinnedToCore(&LumigridRuntime::net_apply_worker, "net_apply",
+                              8192, this, 5, &handle, 1) != pdPASS) {
+    note_network_task_start_failure();
     return ESP_ERR_NO_MEM;
   }
+  net_apply_task_ = handle;
+  task_stack_registry().register_task("net_apply", 8192);
   return ESP_OK;
 }
 
 void LumigridRuntime::net_apply_worker(void *arg) {
   auto *self = static_cast<LumigridRuntime *>(arg);
-  NetworkApplyRequest req{};
-  while (self) {
-    if (xQueueReceive(self->net_apply_queue_, &req, portMAX_DELAY) == pdTRUE) {
-      self->execute_network_apply(req);
-    }
-  }
+  // Copy the owned pending request, run exactly one apply, then exit so the
+  // 8 KB stack is reclaimed while the node sits idle (§7).
+  NetworkApplyRequest req = self->pending_apply_;
+  self->execute_network_apply(req);
+  self->net_apply_task_ = nullptr;
+  task_stack_registry().unregister_task("net_apply");
   vTaskDelete(nullptr);
 }
 
@@ -1188,6 +1242,11 @@ void LumigridRuntime::execute_network_apply(const NetworkApplyRequest &req) {
 
   // 1. Give HTTP 202 response 200ms to escape the socket
   vTaskDelay(pdMS_TO_TICKS(200));
+
+  // Snapshot of the DeviceConfig in force before this apply; used as the
+  // "old plan" baseline when reconciling services afterwards (§65).
+  DeviceConfig cfg_before_apply{};
+  config_.load_config(cfg_before_apply);
 
   // 2. Stop network-dependent services
   stop_network_services();
@@ -1215,24 +1274,13 @@ void LumigridRuntime::execute_network_apply(const NetworkApplyRequest &req) {
     ap_ssid = "LumiGrid-Factory";
   }
 
+  // Network apply requires permanent Admin authority; this is the existing AP policy.
   std::string ap_pass;
-#if defined(CONFIG_LUMIGRID_ENABLE_DEV_CREDENTIALS) &&                         \
-    defined(CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS)
-  ap_pass = "lumigrid123";
-#else
-  // LG-036: Recovery AP credential semantics.
-  // The MAC-derived passphrase "lg_<mac-fragment>" serves strictly as
-  // transitional layer-2 wireless access to reach the node during first-boot
-  // commissioning or recovery. NOTE: Recovery AP access password != node
-  // authentication boundary. Actual authorization remains strictly gated by
-  // AuthManager and physical recovery.
   uint8_t mac[6] = {};
   esp_read_mac(mac, ESP_MAC_WIFI_STA);
   char mac_pass[32];
-  snprintf(mac_pass, sizeof(mac_pass), "lg_%02x%02x%02x%02x", mac[2], mac[3],
-           mac[4], mac[5]);
+  snprintf(mac_pass, sizeof(mac_pass), "lg_%02x%02x%02x%02x", mac[2], mac[3], mac[4], mac[5]);
   ap_pass = mac_pass;
-#endif
 
   WifiMode target_wifi_mode = WifiMode::ApOnly;
   switch (req.desired.mode) {
@@ -1307,7 +1355,17 @@ void LumigridRuntime::execute_network_apply(const NetworkApplyRequest &req) {
                          "Persisting configuration.");
     config_.save_network_settings(req.desired);
 
+    // LG-038.3 §65: recompute the service plan after a route/mode change.
+    if (wifi_.state() == WifiState::Connected) {
+      set_network_plan_state(NetworkPlanState::StaConnected);
+    } else {
+      set_network_plan_state(NetworkPlanState::ApOnly);
+    }
     start_network_services();
+    DeviceConfig cfg_after{};
+    if (config_.load_config(cfg_after) == ESP_OK) {
+      reconcile_services(cfg_before_apply, cfg_after, true);
+    }
 
     api_.command_journal().applied(req.command_id);
     last_apply_error_ = nullptr;
@@ -1328,7 +1386,12 @@ void LumigridRuntime::execute_network_apply(const NetworkApplyRequest &req) {
     ESP_LOGI("lumigrid",
              "StaWithApFallback: Recovery AP active at 192.168.4.1. Keeping "
              "previous persisted config intact.");
+    set_network_plan_state(NetworkPlanState::StaDown);
     start_network_services();
+    DeviceConfig cfg_after{};
+    if (config_.load_config(cfg_after) == ESP_OK) {
+      reconcile_services(cfg_before_apply, cfg_after, true);
+    }
     apply_state_.store(NetworkApplyState::Failed);
     pending_apply_command_id_.store(0);
     apply_in_progress_.store(false);
@@ -1399,10 +1462,231 @@ void LumigridRuntime::execute_network_apply(const NetworkApplyRequest &req) {
                    pdMS_TO_TICKS(15000));
   }
 
+  // Rollback path: previous network restored. DHCP/identity is immutable;
+  // discovery just rebinds (LG-038.3 §23).
+  if (wifi_.state() == WifiState::Connected) {
+    set_network_plan_state(NetworkPlanState::StaConnected);
+  } else if (wifi_.state() == WifiState::ApActive ||
+             wifi_.state() == WifiState::FallbackAp) {
+    set_network_plan_state(NetworkPlanState::StaDown);
+  }
   start_network_services();
+  DeviceConfig cfg_rollback{};
+  if (config_.load_config(cfg_rollback) == ESP_OK) {
+    reconcile_services(cfg_before_apply, cfg_rollback, true);
+  }
   apply_state_.store(NetworkApplyState::Failed);
   pending_apply_command_id_.store(0);
   apply_in_progress_.store(false);
+}
+
+// ── LG-038.3 §61-65: deterministic service planner ─────────────────────────
+
+CommissioningPlanState LumigridRuntime::commissioning_plan_state() const {
+    if (auth_manager_.is_provisioned()) {
+        return CommissioningPlanState::Provisioned;
+    }
+    switch (auth_manager_.commissioning_state()) {
+        case auth::CommissioningState::FactoryFirstBoot:
+            return CommissioningPlanState::FactoryFirstBoot;
+        case auth::CommissioningState::PhysicalRecovery:
+            return CommissioningPlanState::PhysicalRecovery;
+        default:
+            return CommissioningPlanState::PhysicalRecovery;
+    }
+}
+
+RuntimeServicePlan LumigridRuntime::compute_plan() const {
+    PlanInputs in{};
+    in.safe_mode = is_safe_mode();
+    in.commissioning = commissioning_plan_state();
+    in.network = network_plan_state_.load(std::memory_order_acquire);
+    // load_config is non-const (cache refresh); use the static cache-buffer
+    // pattern used elsewhere in startup to keep compute_plan() const.
+    static DeviceConfig plan_cfg_buf;
+    if (const_cast<ConfigStore &>(config_).load_config(plan_cfg_buf) == ESP_OK) {
+        in.cfg = &plan_cfg_buf;
+    }
+    return compute_service_plan(in);
+}
+
+RuntimeServicePlan LumigridRuntime::service_plan() const {
+    // Observed truth, not the plan: what is actually running right now.
+    RuntimeServicePlan actual{};
+    actual.lighting = started_subsystems_.lighting;
+    actual.scheduler = started_subsystems_.scheduler;
+    actual.api = started_subsystems_.api;
+    actual.mdns = started_subsystems_.mdns;
+    actual.fleet_discovery = started_subsystems_.fleet_discovery;
+    actual.artnet = started_subsystems_.artnet;
+    actual.sacn = started_subsystems_.sacn;
+    actual.node_sync = started_subsystems_.node_sync;
+    actual.mqtt = started_subsystems_.mqtt;
+    actual.factory_worker =
+        (factory_runner_.lifecycle_state() == FactoryRunner::LifecycleState::Running ||
+         factory_runner_.lifecycle_state() == FactoryRunner::LifecycleState::Starting);
+    actual.network_apply_worker = (net_apply_task_ != nullptr);
+    return actual;
+}
+
+esp_err_t LumigridRuntime::start_artnet_service(const DeviceConfig &cfg) {
+    if (started_subsystems_.artnet) {
+        return ESP_OK;
+    }
+    if (!cfg.protocol.artnet_enabled || safe_mode_) {
+        return ESP_OK;
+    }
+    uint8_t mac[6] = {};
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+
+    uint16_t active_unis[16];
+    size_t u_count = dmx_router_.get_active_universes(active_unis, 16);
+    uint8_t port_count = (u_count > 0 && u_count <= 4)
+                             ? static_cast<uint8_t>(u_count)
+                             : (u_count > 4 ? 4 : 0);
+
+    ArtnetNodeInfo node{};
+    node.short_name = "LumiGrid Factory";
+    node.long_name = "LumiGrid 8xALED 8xPWM Factory Test Node";
+    node.report = "#0001 [0000] LumiGrid ready";
+    node.num_ports = port_count;
+    if (port_count > 0) {
+        uint8_t net = 0, subnet = 0, univ = 0;
+        decode_port_address(active_unis[0], net, subnet, univ);
+        node.net = net;
+        node.subnet = subnet;
+        for (uint8_t i = 0; i < port_count; ++i) {
+            uint8_t p_net = 0, p_sub = 0, p_univ = 0;
+            decode_port_address(active_unis[i], p_net, p_sub, p_univ);
+            node.sw_out[i] = p_univ;
+        }
+    }
+    std::memcpy(node.mac, mac, 6);
+
+    esp_err_t err = artnet_.start(node, [this](const ArtnetDmxPacket &packet) {
+        if (!safe_mode_) {
+            dmx_router_.handle_artnet_dmx(packet);
+        }
+    });
+    if (err == ESP_OK) {
+        started_subsystems_.artnet = true;
+        artnet_.set_output_universes(active_unis, port_count);
+        task_stack_registry().register_task("lg_artnet", 4096);
+    }
+    return err;
+}
+
+esp_err_t LumigridRuntime::start_sacn_service(const DeviceConfig &cfg) {
+    if (started_subsystems_.sacn) {
+        return ESP_OK;
+    }
+    if (!cfg.protocol.sacn_enabled || safe_mode_) {
+        return ESP_OK;
+    }
+    uint16_t active_unis[16];
+    size_t u_count = dmx_router_.get_active_universes(active_unis, 16);
+    esp_err_t err = sacn_.start([this](const SacnDmxPacket &packet) {
+        if (!safe_mode_) {
+            dmx_router_.handle_sacn_dmx(packet);
+        }
+    });
+    if (err == ESP_OK) {
+        started_subsystems_.sacn = true;
+        sacn_.set_subscribed_universes(active_unis, u_count);
+        task_stack_registry().register_task("lg_sacn", 4096);
+    }
+    return err;
+}
+
+esp_err_t LumigridRuntime::reconcile_services(const DeviceConfig &old_cfg,
+                                              const DeviceConfig &new_cfg,
+                                              bool network_changed) {
+    // LG-038.3 §64/§65: compute old and new plans, act on differences only.
+    if (is_safe_mode()) {
+        return ESP_OK; // safe mode keeps the recovery plan; nothing to start
+    }
+
+    DeviceConfig current = new_cfg;
+
+    // ── Art-Net lifecycle (§15) ──
+    if (!current.protocol.artnet_enabled) {
+        if (started_subsystems_.artnet) {
+            artnet_.stop();
+            started_subsystems_.artnet = false;
+            ESP_LOGI("lumigrid", "Art-Net disabled: worker stopped");
+        }
+    } else if (!started_subsystems_.artnet) {
+        esp_err_t err = start_artnet_service(current);
+        if (err != ESP_OK) {
+            ESP_LOGE("lumigrid", "Art-Net start failed (%s); state rolled back",
+                     esp_err_to_name(err));
+            return err; // started_subsystems_.artnet stays false → consistent
+        }
+        ESP_LOGI("lumigrid", "Art-Net enabled: worker started");
+    } else if (old_cfg.protocol.universe_start != current.protocol.universe_start ||
+               network_changed) {
+        // true -> true: refresh mappings only (§15).
+        uint16_t active_unis[16];
+        size_t u_count = dmx_router_.get_active_universes(active_unis, 16);
+        uint8_t port_count = (u_count > 0 && u_count <= 4)
+                                 ? static_cast<uint8_t>(u_count)
+                                 : (u_count > 4 ? 4 : 0);
+        artnet_.set_output_universes(active_unis, port_count);
+    }
+
+    // ── sACN lifecycle (§16) ──
+    if (!current.protocol.sacn_enabled) {
+        if (started_subsystems_.sacn) {
+            sacn_.stop();
+            started_subsystems_.sacn = false;
+            ESP_LOGI("lumigrid", "sACN disabled: worker stopped");
+        }
+    } else if (!started_subsystems_.sacn) {
+        esp_err_t err = start_sacn_service(current);
+        if (err != ESP_OK) {
+            ESP_LOGE("lumigrid", "sACN start failed (%s); state rolled back",
+                     esp_err_to_name(err));
+            return err;
+        }
+        ESP_LOGI("lumigrid", "sACN enabled: worker started");
+    } else if (network_changed ||
+               old_cfg.protocol.universe_start != current.protocol.universe_start) {
+        uint16_t active_unis[16];
+        size_t u_count = dmx_router_.get_active_universes(active_unis, 16);
+        sacn_.set_subscribed_universes(active_unis, u_count);
+    }
+
+    // ── Fleet discovery follows network lifecycle (§23) ──
+    const NetworkPlanState net = network_plan_state_.load(std::memory_order_acquire);
+    if (net == NetworkPlanState::StaConnected) {
+        if (!started_subsystems_.fleet_discovery) {
+            NodeIdentity identity = get_node_identity(current.device_name);
+            if (fleet_discovery_.start(identity) == ESP_OK) {
+                started_subsystems_.fleet_discovery = true;
+                task_stack_registry().register_task("fleet_disc", 4096);
+                ESP_LOGI("lumigrid", "Fleet discovery started (STA connected)");
+            }
+        }
+    } else if (started_subsystems_.fleet_discovery) {
+        fleet_discovery_.stop();
+        started_subsystems_.fleet_discovery = false;
+        ESP_LOGI("lumigrid", "Fleet discovery stopped (no shared LAN)");
+    }
+
+    // ── Sync follows config AND network (§25, §65) ──
+    const bool sync_wanted = current.sync_enabled &&
+                             net == NetworkPlanState::StaConnected;
+    if (!sync_wanted && started_subsystems_.node_sync) {
+        node_sync_.stop(1000);
+        started_subsystems_.node_sync = false;
+    }
+    if (sync_wanted && !started_subsystems_.node_sync) {
+        if (node_sync_.start(static_cast<NodeRole>(current.sync_role)) == ESP_OK) {
+            started_subsystems_.node_sync = true;
+        }
+    }
+
+    return ESP_OK;
 }
 
 RecoveryStatus LumigridRuntime::get_recovery_status() const {
@@ -1463,6 +1747,8 @@ esp_err_t LumigridRuntime::apply_device_config(const DeviceConfig &old_cfg,
   }
 
   // 3. DMX protocol reconfigure
+  // LG-038.3 §14: mapping refresh is only part of the story. Protocol
+  // enable/disable must actually start/stop the workers (§15/§16).
   if (plan.requires_dmx_reconfigure()) {
     dmx_router_.update_config(new_cfg);
     uint16_t active_unis[16];
@@ -1470,8 +1756,19 @@ esp_err_t LumigridRuntime::apply_device_config(const DeviceConfig &old_cfg,
     uint8_t port_count = (u_count > 0 && u_count <= 4)
                              ? static_cast<uint8_t>(u_count)
                              : (u_count > 4 ? 4 : 0);
-    sacn_.set_subscribed_universes(active_unis, u_count);
-    artnet_.set_output_universes(active_unis, port_count);
+    if (started_subsystems_.sacn) {
+      sacn_.set_subscribed_universes(active_unis, u_count);
+    }
+    if (started_subsystems_.artnet) {
+      artnet_.set_output_universes(active_unis, port_count);
+    }
+  }
+
+  // 3.1 Full service-plan reconciliation (protocol start/stop, fleet, sync).
+  // A failure here rolls the runtime service state back (§79).
+  const esp_err_t reconcile_err = reconcile_services(old_cfg, new_cfg, false);
+  if (reconcile_err != ESP_OK) {
+    return reconcile_err;
   }
 
   // 4. Scheduler restart (e.g. timezone changed)

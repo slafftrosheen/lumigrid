@@ -64,6 +64,16 @@ export interface HealthSync {
   packet_loss: number;
 }
 
+/** LG-038.3 §3/§58/§59: real 8-bit heap truth. Primary UI metric is free8. */
+export interface HealthMemory {
+  free8: number;
+  largest8: number;
+  minimum_free: number;
+  health: 'HEALTHY' | 'LOW_RUNTIME_MEMORY' | 'HEAP_FRAGMENTED' | 'CRITICAL' | string;
+  low_runtime_memory: boolean;
+  heap_fragmented: boolean;
+}
+
 export interface HealthSnapshot {
   schema_version: number;
   system: HealthSystem;
@@ -74,6 +84,39 @@ export interface HealthSnapshot {
   output: HealthOutput;
   dmx: HealthDmx;
   sync: HealthSync;
+  memory?: HealthMemory;
+}
+
+/** LG-038.3 §4: /api/v1/diagnostics/memory response. */
+export interface MemoryDiagnosticsTask {
+  name: string;
+  stackBytes: number;
+  minimumFreeStack: number;
+}
+
+export interface MemoryDiagnosticsResponse {
+  free8: number;
+  largest8: number;
+  minimumFree: number;
+  freeInternal?: number;
+  largestInternal?: number;
+  freeDma?: number;
+  largestDma?: number;
+  fragmentationRatio?: number;
+  health: string;
+  allocationFailures?: {
+    apiAllocationFailures: number;
+    previewAllocationFailures: number;
+    rmtAllocationFailures: number;
+    factoryTaskStartFailures: number;
+    networkTaskStartFailures: number;
+  };
+  services?: Record<string, boolean>;
+  tasks: MemoryDiagnosticsTask[];
+}
+
+export function getMemoryDiagnostics(ip: string): Promise<MemoryDiagnosticsResponse> {
+  return apiJson<MemoryDiagnosticsResponse>(ip, '/api/v1/diagnostics/memory');
 }
 
 export interface AuditEvent {
@@ -132,16 +175,28 @@ export function evaluateActionableIssues(health: HealthSnapshot | null): Actiona
     });
   }
 
-  // 4. Low Memory Headroom
-  if (health.system.min_free_heap < 30000) {
-    issues.push({
-      id: 'low_heap',
-      severity: health.system.min_free_heap < 15000 ? 'critical' : 'warning',
-      category: 'memory',
-      title: `Low Free Heap Memory (${Math.round(health.system.free_heap / 1024)} KB, min ${Math.round(health.system.min_free_heap / 1024)} KB)`,
-      description: 'System free memory is critically low, increasing risk of task allocation failure.',
-      remedy: 'Reduce complex scene layers, limit concurrent WebSocket clients, or restart node.',
-    });
+  // 4. Low Memory Headroom (LG-038.3 §45: judge free total AND largest block)
+  {
+    const mem8 = health.memory;
+    const freeForEval = mem8 ? mem8.free8 : health.system.free_heap;
+    const largestForEval = mem8 ? mem8.largest8 : health.system.free_heap;
+    const minForEval = mem8 ? mem8.minimum_free : health.system.min_free_heap;
+    const low = mem8 ? mem8.low_runtime_memory : minForEval < 30000;
+    const fragmented = mem8 ? mem8.heap_fragmented : false;
+    if (low || fragmented) {
+      issues.push({
+        id: 'low_heap',
+        severity: minForEval < 15000 ? 'critical' : 'warning',
+        category: 'memory',
+        title: fragmented && !low
+          ? `Fragmented Heap (${Math.round(freeForEval / 1024)} KB free, largest block ${Math.round(largestForEval / 1024)} KB)`
+          : `Low Free Heap Memory (${Math.round(freeForEval / 1024)} KB, min ${Math.round(minForEval / 1024)} KB)`,
+        description: fragmented
+          ? 'Free 8-bit memory is split into small blocks. Large allocations (topology, restore, OTA) can fail even with free heap remaining.'
+          : 'System free memory is critically low, increasing risk of task allocation failure.',
+        remedy: 'Reduce addressable topology, limit concurrent WebSocket clients, or restart node.',
+      });
+    }
   }
 
   // 5. Weak Wi-Fi RSSI

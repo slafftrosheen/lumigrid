@@ -625,8 +625,12 @@ enum class MergeMode : uint8_t {
 };
 
 struct ProtocolConfig {
-    bool     artnet_enabled       = true;
-    bool     sacn_enabled         = true;
+    // LG-038.3 §13/§36/§37: fresh nodes boot with both DMX protocols OFF.
+    // The setup wizard / user enables exactly what the install needs; a new
+    // controller must not spawn protocol workers before DMX is configured.
+    // Persisted nodes keep whatever they stored (no migration overwrite).
+    bool     artnet_enabled       = false;
+    bool     sacn_enabled         = false;
     uint16_t universe_start       = 0;
     MergeMode merge_mode          = MergeMode::HTP;
     uint16_t stream_timeout_ms    = 2000;

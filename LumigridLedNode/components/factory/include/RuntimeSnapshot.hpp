@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <cstring>
+#include <array>
 #include "ChannelHardware.hpp"
 
 namespace lg {
@@ -206,6 +207,40 @@ struct CertificationSnapshot {
     uint16_t total = 0;
 };
 
+// LG-038.3 §3: lightweight memory telemetry for the high-rate RuntimeSnapshot.
+// Only 8-bit allocatable heap is a product metric (§59); internal/DMA stay in
+// the detailed diagnostics endpoint. No per-allocation telemetry here.
+struct MemorySnapshotTelemetry {
+    uint32_t free8 = 0;
+    uint32_t largest8 = 0;
+    uint32_t minimum_free = 0;
+    uint32_t free_dma = 0;
+};
+
+// LG-038.3 §57: allocation-failure counters (never silently dropped).
+struct MemoryFailureCountersSnapshot {
+    uint32_t api_allocation_failures = 0;
+    uint32_t preview_allocation_failures = 0;
+    uint32_t rmt_allocation_failures = 0;
+    uint32_t factory_task_start_failures = 0;
+    uint32_t network_task_start_failures = 0;
+};
+
+// LG-038.3 §60: active service state. Invaluable when explaining RAM use.
+struct ServicesSnapshot {
+    bool lighting = false;
+    bool factory_worker = false;
+    bool scheduler = false;
+    bool api = false;
+    bool mdns = false;
+    bool fleet_discovery = false;
+    bool artnet = false;
+    bool sacn = false;
+    bool node_sync = false;
+    bool mqtt = false;
+    bool network_apply_worker = false;
+};
+
 struct RuntimeSnapshot {
     uint8_t schema = 3;
     uint32_t stream_seq = 0;
@@ -224,6 +259,9 @@ struct RuntimeSnapshot {
     AutomationSnapshot automation;
     JobSnapshot job;
     CertificationSnapshot certification;
+    MemorySnapshotTelemetry memory;
+    MemoryFailureCountersSnapshot memory_failures;
+    ServicesSnapshot services;
 
     ChannelSnapshot channels[kChannelCount];
 };

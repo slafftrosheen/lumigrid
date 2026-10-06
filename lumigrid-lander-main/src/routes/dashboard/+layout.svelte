@@ -82,6 +82,8 @@
   let authError        = $state('');
   let loginKeyInput    = $state('');
   let bootstrapKeyInput = $state('');
+  let confirmAdminKey = $state('');
+  let generatedAdminKey = $state(false);
 
   // Access Control Modal (Admin-only)
   let showAccessControl = $state(false);
@@ -127,16 +129,19 @@
 
   async function submitBootstrap() {
     if (!nodeIp) return;
-    const key = bootstrapKeyInput.trim();
+    const key = bootstrapKeyInput;
     if (key.length < 16 || key.length > 64) {
       authError = 'Administrator key must be between 16 and 64 characters';
+      return;
+    }
+    if (key !== confirmAdminKey) {
+      authError = 'Admin Access Keys must match';
       return;
     }
     authSubmitting = true;
     authError = '';
     try {
-      await bootstrapAuth(nodeIp, key);
-      const res = await createSession(nodeIp, key);
+      const res = await bootstrapAuth(nodeIp, key, authStatus?.factorySetupAllowed === true);
       nodeAuthStore.setSession({
         address: nodeIp,
         nodeId: liveState.nodeId || '',
@@ -145,9 +150,18 @@
         expiresAt: Date.now() + res.expiresIn * 1000,
       });
       bootstrapKeyInput = '';
+      confirmAdminKey = '';
+      generatedAdminKey = false;
       showFirstInstallWizard = true;
     } catch (err) {
-      authError = err instanceof Error ? err.message : String(err);
+      authError = 'Unable to secure the node. Check your connection and retry. If the key was already saved, sign in with your new Admin Access Key.';
+      try {
+        authStatus = await getAuthStatus(nodeIp);
+        if (authStatus.provisioned) {
+          bootstrapKeyInput = confirmAdminKey = '';
+          generatedAdminKey = false;
+        }
+      } catch { /* Keep the current setup screen while the node is unreachable. */ }
     } finally {
       authSubmitting = false;
     }
@@ -155,7 +169,7 @@
 
   async function submitLogin() {
     if (!nodeIp) return;
-    const key = loginKeyInput.trim();
+    const key = loginKeyInput;
     if (!key) {
       authError = 'Please enter your access key';
       return;
@@ -164,6 +178,11 @@
     authError = '';
     try {
       const res = await createSession(nodeIp, key);
+      if (res.setupRequired) {
+        loginKeyInput = '';
+        authStatus = await getAuthStatus(nodeIp);
+        return;
+      }
       nodeAuthStore.setSession({
         address: nodeIp,
         nodeId: liveState.nodeId || '',
@@ -191,6 +210,7 @@
   }
 
   async function openAccessControl() {
+    if (!isAdmin) return;
     showAccessControl = true;
     credsLoading = true;
     credsError = '';
@@ -208,7 +228,7 @@
 
   async function handleRotateKey() {
     if (!nodeIp || !newKeyInput.trim()) return;
-    const key = newKeyInput.trim();
+    const key = newKeyInput;
     if (key.length < 16 || key.length > 64) {
       credsError = 'Access key must be between 16 and 64 characters';
       return;
@@ -312,6 +332,7 @@
 
     const onRegistryChanged = () => refreshNodeList();
     window.addEventListener(NODE_REGISTRY_CHANGED_EVENT, onRegistryChanged);
+    window.addEventListener('lumigrid:open-access', openAccessControl);
 
     const recInterval = setInterval(() => {
       if (nodeIp) pollRecovery(nodeIp);
@@ -322,6 +343,7 @@
       unsubAuth();
       unsubLive();
       window.removeEventListener(NODE_REGISTRY_CHANGED_EVENT, onRegistryChanged);
+      window.removeEventListener('lumigrid:open-access', openAccessControl);
     };
   });
 
@@ -400,36 +422,48 @@
       <p class="pin-sub">Node: <strong>{nodeIp}</strong></p>
       <p class="pin-error">{authStatusError}</p>
       <button class="pin-btn secondary" onclick={() => checkNodeAuth(nodeIp)}>Retry Connection</button>
-    {:else if authStatus && !authStatus.provisioned}
+    {:else if authStatus && !authStatus.provisioned && authStatus.bootstrapAllowed}
       <!-- First-Boot Provisioning Surface -->
-      <p class="pin-sub">Node <strong>{nodeIp}</strong> is unprovisioned</p>
-      <p class="auth-desc">Provision an initial Administrator access key (16 to 64 characters) to commission this node.</p>
+      <p class="pin-sub">New LumiGrid detected — Set Up Node</p>
+      <h2>Secure your LumiGrid</h2>
+      <p class="auth-desc">Create an Admin Access Key (16–64 characters).</p>
+      {#if authStatus.factorySetupAllowed}
+        <p class="auth-desc">Wi-Fi: LumiGrid-Setup · Wi-Fi password: lumigrid123<br />Open http://192.168.4.1<br />This replaces the temporary setup key “lumigrid123”. Your Wi-Fi password and Node Access Key may be different after setup.</p>
+      {/if}
       
       <div class="key-input-row">
         <input
-          type="text"
-          placeholder="New Admin Key (min 16 chars)"
+          type={generatedAdminKey ? 'text' : 'password'}
+          autocomplete="new-password"
+          aria-label="New Admin Access Key"
+          maxlength="64"
+          placeholder="New Admin Access Key"
           class="pin-input text"
           bind:value={bootstrapKeyInput}
         />
         <button
           type="button"
           class="gen-key-btn"
-          onclick={() => { bootstrapKeyInput = generateSecureKey(); }}
+          onclick={() => { bootstrapKeyInput = generateSecureKey(); confirmAdminKey = ''; generatedAdminKey = true; }}
           title="Generate random secure key"
         >
-          🎲 Generate
+          Generate Secure Key
         </button>
       </div>
+      <input type="password" class="pin-input text" autocomplete="new-password" aria-label="Confirm Admin Access Key" placeholder="Confirm Admin Access Key" maxlength="64" bind:value={confirmAdminKey} />
+      {#if bootstrapKeyInput}<button type="button" class="small-btn" onclick={() => copyKey(bootstrapKeyInput)}>Copy New Key</button>{/if}
 
       {#if authError}<p class="pin-error">{authError}</p>{/if}
       <button
         class="pin-btn"
-        disabled={authSubmitting || bootstrapKeyInput.length < 16}
+        disabled={authSubmitting || bootstrapKeyInput.length < 16 || bootstrapKeyInput.length > 64 || bootstrapKeyInput !== confirmAdminKey}
         onclick={submitBootstrap}
       >
-        {authSubmitting ? 'Provisioning...' : 'Provision & Sign In'}
+        {authSubmitting ? 'Securing Node...' : 'Continue Setup'}
       </button>
+    {:else if authStatus && !authStatus.provisioned}
+      <p class="pin-sub">Physical recovery required</p>
+      <p class="auth-desc">This controller cannot begin first setup in its current state. Use the deliberate physical recovery procedure.</p>
     {:else}
       <!-- Provisioned Node Login Surface -->
       <p class="pin-sub">Node <strong>{nodeIp}</strong></p>
@@ -530,7 +564,7 @@
     </div>
     {#if isAdmin}
       <button class="access-ctrl-btn" onclick={openAccessControl} title="Access Control & Credentials">
-        Access Control
+        Access
       </button>
     {/if}
     <button class="logout-btn" onclick={signOutNode} title="Sign out of node">
@@ -657,12 +691,14 @@
               <div class="cred-row">
                 <span class="cred-role">Administrator</span>
                 <span class="cred-badge enabled">Configured</span>
+                <button class="small-btn" onclick={() => { rotateRole = 'admin'; newKeyInput = ''; }}>Change Admin Key</button>
               </div>
               <div class="cred-row">
                 <span class="cred-role">Installer</span>
                 <span class="cred-badge" class:enabled={credsStatus.installerConfigured}>
-                  {credsStatus.installerConfigured ? 'Configured' : 'Disabled'}
+                  {credsStatus.installerConfigured ? 'Configured' : 'Not configured'}
                 </span>
+                <button class="small-btn" onclick={() => { rotateRole = 'installer'; newKeyInput = ''; }}>{credsStatus.installerConfigured ? 'Change Installer Key' : 'Create'}</button>
                 {#if credsStatus.installerConfigured}
                   <button class="small-btn danger" onclick={() => handleDisableRole('installer')}>Disable</button>
                 {/if}
@@ -670,8 +706,9 @@
               <div class="cred-row">
                 <span class="cred-role">Operator</span>
                 <span class="cred-badge" class:enabled={credsStatus.operatorConfigured}>
-                  {credsStatus.operatorConfigured ? 'Configured' : 'Disabled'}
+                  {credsStatus.operatorConfigured ? 'Configured' : 'Not configured'}
                 </span>
+                <button class="small-btn" onclick={() => { rotateRole = 'operator'; newKeyInput = ''; }}>{credsStatus.operatorConfigured ? 'Change Operator Key' : 'Create'}</button>
                 {#if credsStatus.operatorConfigured}
                   <button class="small-btn danger" onclick={() => handleDisableRole('operator')}>Disable</button>
                 {/if}
@@ -680,7 +717,7 @@
           {/if}
 
           <div class="rotate-section">
-            <h4>Set / Rotate Credential</h4>
+            <h4>Set Access Key</h4>
             <div class="rotate-role-select">
               <label>
                 <input type="radio" name="rotateRole" value="admin" bind:group={rotateRole} /> Admin
@@ -705,7 +742,7 @@
                 class="gen-key-btn"
                 onclick={() => { newKeyInput = generateSecureKey(); }}
               >
-                🎲 Generate
+                Generate Secure Key
               </button>
             </div>
 

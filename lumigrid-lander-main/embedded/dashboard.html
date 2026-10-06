@@ -450,7 +450,7 @@
      ═══════════════════════════════════════════════════════ -->
 <section id="experience-auth" aria-labelledby="login-title">
     <div class="experience-login">
-        <form onsubmit="lg.connect(); return false;">
+        <form id="normal-login" onsubmit="lg.connect(); return false;">
             <div style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1.25rem;">
                 <div class="brand-mark" style="width: 2rem; height: 2rem;">
                     <svg width="18" height="18" viewBox="0 0 22 22" fill="none"><rect x="2" y="2" width="6" height="6" rx="1.5" fill="white"/><rect x="12" y="2" width="6" height="6" rx="1.5" fill="white" opacity=".6"/><rect x="2" y="12" width="6" height="6" rx="1.5" fill="white" opacity=".6"/><rect x="12" y="12" width="6" height="6" rx="1.5" fill="white"/></svg>
@@ -467,6 +467,24 @@
             <input id="experience-token" type="password" autocomplete="current-password" placeholder="Enter operator or admin key" value="" required>
             <button class="button-primary" type="submit" style="width: 100%; margin-top: 1.25rem; min-height: 2.5rem;">Connect to Node</button>
         </form>
+        <form id="first-setup" hidden onsubmit="lg.secureNode(); return false;">
+            <h1>Welcome to LumiGrid</h1>
+            <p>This controller has not been set up yet.</p>
+            <p id="setup-defaults">Wi-Fi: <strong>LumiGrid-Setup</strong><br>Wi-Fi password: <strong>lumigrid123</strong><br>Open: http://192.168.4.1<br>Temporary setup key: <strong>lumigrid123</strong></p>
+            <h2>Secure your LumiGrid</h2>
+            <p>Create an Admin Access Key (16–64 characters). This replaces the temporary setup key.</p>
+            <label for="setup-admin">New Admin Access Key</label>
+            <input id="setup-admin" type="password" autocomplete="new-password" minlength="16" maxlength="64" required>
+            <label for="setup-confirm">Confirm Admin Access Key</label>
+            <input id="setup-confirm" type="password" autocomplete="new-password" minlength="16" maxlength="64" required>
+            <button type="button" onclick="lg.generateSetupKey()">Generate Secure Key</button>
+            <button type="button" onclick="lg.copySetupKey()">Copy New Key</button>
+            <p>Save your new key somewhere safe. It will never be displayed after saving.</p>
+            <p id="setup-error" role="alert"></p>
+            <button id="setup-continue" class="button-primary" type="submit">Continue Setup</button>
+        </form>
+        <p id="setup-unavailable" hidden>Physical recovery required. First setup is unavailable in the current state.</p>
+
     </div>
 </section>
 
@@ -475,6 +493,24 @@
      ═══════════════════════════════════════════════════════ -->
 <main id="product-app" hidden>
     <div class="app-shell">
+        <section id="setup-wizard" hidden>
+            <h2>Setup LumiGrid — Network</h2>
+            <p>Your Admin Access Key is configured. Wi-Fi passwords and Node Access Keys are separate.</p>
+            <form onsubmit="lg.saveSetupNetwork(); return false;">
+                <label for="setup-ssid">Wi-Fi network name</label>
+                <input id="setup-ssid" maxlength="32" required>
+                <label for="setup-wifi">Wi-Fi password</label>
+                <input id="setup-wifi" type="password" autocomplete="new-password" maxlength="63">
+                <button class="button-primary" type="submit">Apply Wi-Fi Network</button>
+            </form>
+            <p id="setup-network-status" role="status">Applying Wi-Fi may disconnect this browser. Reconnect on your selected network, then open the node's new address and sign in with your Admin Access Key.</p>
+            <h3>Continue setup</h3>
+            <ol><li><button onclick="lg.nav('patcher')">Configure outputs</button></li>
+            <li><button onclick="lg.nav('diagnostics')">Review safety and hardware validation</button></li>
+            <li><button onclick="lg.downloadBackup()">Download backup</button></li></ol>
+            <button onclick="document.getElementById('setup-wizard').hidden = true">Close setup guide</button>
+        </section>
+
         
         <!-- Header -->
         <header class="app-header">
@@ -844,6 +880,19 @@
             <div class="page-heading">
                 <div><p class="eyebrow">Maintenance & Hardware</p><h3>Diagnostics & System</h3></div>
             </div>
+            <article id="system-access" class="product-card" hidden>
+                <h4>System → Access</h4>
+                <div id="access-roles"></div>
+                <form onsubmit="lg.saveAccessKey(); return false;">
+                    <label for="access-role">Account</label>
+                    <select id="access-role"><option value="admin">Administrator</option><option value="installer">Installer</option><option value="operator">Operator</option></select>
+                    <label for="access-key">New Access Key (16–64 characters)</label>
+                    <input id="access-key" type="password" autocomplete="new-password" minlength="16" maxlength="64" required>
+                    <button type="button" onclick="lg.generateAccessKey()">Generate Secure Key</button>
+                    <button type="submit">Save Access Key</button>
+                </form>
+                <p id="access-status" role="status">Saved secrets are never displayed.</p>
+            </article>
             <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 1.25rem;">
                 <!-- Left Column: Operations -->
                 <div style="display:flex; flex-direction:column; gap:1.25rem;">
@@ -1120,6 +1169,7 @@ window.lg = (() => {
         ws.onclose = () => {
             if (state.token) setTimeout(initWebSocket, 2000);
         };
+        }).catch(e => toast('Live connection unavailable: ' + e.message, true));
     }
 
     // ── Animation & Render Loop (Decoupled 60fps) ──
@@ -1310,7 +1360,7 @@ window.lg = (() => {
     async function connect() {
         const tokenInput = byId('experience-token');
         const hostInput = byId('experience-host');
-        const keyVal = tokenInput ? tokenInput.value.trim() : '';
+        const keyVal = tokenInput ? tokenInput.value : '';
         state.host = hostInput ? hostInput.value.trim() : '';
         if (state.host) {
             try { sessionStorage.setItem('lg_node_host', state.host); } catch (_) {}
@@ -1318,30 +1368,19 @@ window.lg = (() => {
         if (!keyVal) return toast('Enter node access key.', true);
         try {
             toast('Connecting to node...');
-            // Exchange key for node-backed session token
-            try {
-                const sessionRes = await api('/api/v1/auth/session', 'POST', { token: keyVal });
-                if (sessionRes && sessionRes.sessionToken) {
-                    state.token = sessionRes.sessionToken;
-                    state.role = sessionRes.role || 'operator';
-                } else {
-                    state.token = keyVal;
-                }
-            } catch (authErr) {
-                state.token = keyVal;
+            const sessionRes = await api('/api/v1/auth/session', 'POST', { token: keyVal });
+            tokenInput.value = '';
+            if (sessionRes.setupRequired) {
+                state.token = sessionRes.sessionToken;
+                await detectFirstSetup();
+                return;
             }
+            state.token = sessionRes.sessionToken;
+            state.role = sessionRes.role;
             if (state.token) {
                 try { sessionStorage.setItem('lg_node_token', state.token); } catch (_) {}
             }
-            const status = await api('/api/v1/status');
-            state.status = status;
-            await refresh();
-            byId('experience-auth').hidden = true;
-            byId('product-app').hidden = false;
-            initWebSocket();
-            startAnimationLoop();
-            setupCanvasInteractions();
-            nav('dashboard', document.querySelector('[data-page=dashboard]'));
+            await openDashboard();
             toast('Connected to LumiGrid node.');
         } catch (e) {
             const status = e.status || 0;
@@ -1358,8 +1397,144 @@ window.lg = (() => {
         }
     }
 
+    async function openDashboard() {
+            const status = await api('/api/v1/status');
+            state.status = status;
+            await refresh();
+            byId('experience-auth').hidden = true;
+            byId('product-app').hidden = false;
+            initWebSocket();
+            startAnimationLoop();
+            setupCanvasInteractions();
+            nav('dashboard', document.querySelector('[data-page=dashboard]'));
+    }
+
+    let setupStatus = null;
+    async function detectFirstSetup() {
+        state.host = byId('experience-host').value.trim();
+        setupStatus = null;
+        byId('first-setup').hidden = true;
+        byId('normal-login').hidden = false;
+        byId('setup-unavailable').hidden = true;
+        try {
+            setupStatus = await api('/api/v1/auth/status');
+            if (!setupStatus.provisioned) {
+                byId('normal-login').hidden = true;
+                byId('first-setup').hidden = !setupStatus.bootstrapAllowed;
+                byId('setup-defaults').hidden = !setupStatus.factorySetupAllowed;
+                byId('setup-unavailable').hidden = setupStatus.bootstrapAllowed;
+            } else if (state.token) {
+                try {
+                    const session = await api('/api/v1/auth/session');
+                    state.role = session.role;
+                    await openDashboard();
+                } catch (_) {
+                    state.token = '';
+                    try { sessionStorage.removeItem('lg_node_token'); } catch (_) {}
+                }
+            }
+        } catch (e) { toast('Cannot reach node: ' + e.message, true); }
+    }
+    function generateSetupKey() {
+        const bytes = crypto.getRandomValues(new Uint8Array(24));
+        byId('setup-admin').type = 'text';
+        byId('setup-admin').value = Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+        byId('setup-confirm').value = '';
+    }
+    async function copySetupKey() {
+        try { await navigator.clipboard.writeText(byId('setup-admin').value); toast('New key copied.'); }
+        catch (_) { toast('Copy is unavailable. Choose a key you can save securely.', true); }
+    }
+    async function secureNode() {
+        const key = byId('setup-admin').value;
+        const error = byId('setup-error');
+        error.textContent = '';
+        if (key.length < 16 || key.length > 64 || key !== byId('setup-confirm').value) {
+            error.textContent = 'Use 16–64 characters and confirm the same Admin Access Key.';
+            return;
+        }
+        const button = byId('setup-continue');
+        button.disabled = true;
+        try {
+            if (!setupStatus || setupStatus.provisioned || !setupStatus.bootstrapAllowed) throw new Error('First setup is unavailable.');
+            if (setupStatus.factorySetupAllowed) {
+                const temporary = await api('/api/v1/auth/session', 'POST', { token: 'lumigrid123' });
+                state.token = temporary.sessionToken;
+            }
+            const session = await api('/api/v1/auth/bootstrap', 'POST', { adminToken: key });
+            state.token = session.sessionToken;
+            state.role = session.role;
+            byId('setup-admin').value = byId('setup-confirm').value = '';
+            setupStatus = null;
+            try { sessionStorage.setItem('lg_node_token', state.token); } catch (_) {}
+            byId('first-setup').hidden = true;
+            byId('normal-login').hidden = false;
+            await openDashboard();
+            byId('setup-wizard').hidden = false;
+        } catch (e) {
+            error.textContent = 'Setup could not complete. Check your connection and retry. If the key was already saved, sign in with your new Admin Access Key.';
+            await detectFirstSetup();
+        } finally { button.disabled = false; }
+    }
+    async function saveSetupNetwork() {
+        const ssid = byId('setup-ssid').value;
+        const password = byId('setup-wifi').value;
+        const message = byId('setup-network-status');
+        try {
+            await api('/api/v1/network/config', 'PUT', { mode: 'sta_with_ap_fallback', ssid, password, clearPassword: !password });
+            byId('setup-wifi').value = '';
+            message.textContent = 'Network change requested. Reconnect on your selected Wi-Fi and open the node’s new address. Keep your Admin Access Key.';
+        } catch (e) { message.textContent = 'Network change could not be confirmed: ' + e.message; }
+    }
+
+    async function loadAccess() {
+        byId('system-access').hidden = state.role !== 'admin';
+        if (state.role !== 'admin') return;
+        try {
+            const configured = await api('/api/v1/auth/credentials');
+            byId('access-roles').innerHTML = ['admin', 'installer', 'operator'].map(role => {
+                const label = role === 'admin' ? 'Administrator' : role === 'installer' ? 'Installer' : 'Operator';
+                const enabled = configured[role + 'Configured'];
+                return `<p>${label} — ${enabled ? 'Configured' : 'Not configured'}
+                    <button onclick="lg.selectAccessRole('${role}')">${enabled ? 'Change ' + label + ' Key' : 'Create'}</button>
+                    ${role !== 'admin' && enabled ? `<button onclick="lg.disableAccessRole('${role}')">Disable ${label}</button>` : ''}</p>`;
+            }).join('');
+        } catch (e) { byId('access-status').textContent = e.message; }
+    }
+    function selectAccessRole(role) {
+        byId('access-role').value = role;
+        byId('access-key').value = '';
+        byId('access-key').type = 'password';
+        byId('access-key').focus();
+    }
+    function generateAccessKey() {
+        const bytes = crypto.getRandomValues(new Uint8Array(24));
+        byId('access-key').type = 'text';
+        byId('access-key').value = Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+    }
+    async function saveAccessKey() {
+        const role = byId('access-role').value;
+        const token = byId('access-key').value;
+        if (token.length < 16 || token.length > 64) return;
+        try {
+            await api('/api/v1/auth/credentials', 'POST', { role, token });
+            byId('access-key').value = '';
+            byId('access-status').textContent = 'Access Key saved.';
+            if (role === 'admin') { disconnect(); toast('Admin key changed. Sign in with your new key.'); }
+            else await loadAccess();
+        } catch (e) { byId('access-status').textContent = e.message; }
+    }
+    async function disableAccessRole(role) {
+        if (role !== 'installer' && role !== 'operator') return;
+        try {
+            await api('/api/v1/auth/credentials', 'DELETE', { role });
+            await loadAccess();
+        } catch (e) { byId('access-status').textContent = e.message; }
+    }
+
     function disconnect() {
         state.token = '';
+        try { sessionStorage.removeItem('lg_node_token'); } catch (_) {}
         if (ws) { ws.close(); ws = null; }
         byId('product-app').hidden = true;
         byId('experience-auth').hidden = false;
@@ -1480,6 +1655,7 @@ window.lg = (() => {
             renderCueTelemetry();
         } else if (page === 'diagnostics') {
             loadCommissioning();
+            loadAccess();
         }
     }
 
@@ -2645,17 +2821,18 @@ window.lg = (() => {
             let savedToken = null;
             try { savedToken = sessionStorage.getItem('lg_node_token'); } catch (_) {}
             if (savedToken) {
-                tokenInput.value = savedToken;
                 state.token = savedToken;
-            } else if (tokenInput.value) {
-                state.token = tokenInput.value.trim();
             }
         }
     }
     initAuthInputs();
+    byId('experience-host').addEventListener('change', detectFirstSetup);
+    detectFirstSetup();
 
     return {
         connect, disconnect, refresh, nav, playScene, blackout,
+        secureNode, generateSetupKey, copySetupKey, saveSetupNetwork, detectFirstSetup,
+        loadAccess, selectAccessRole, generateAccessKey, saveAccessKey, disableAccessRole,
         editScene, backToScenes, saveScene, testSceneLive, toggleTargetZone, selectAllTargetZones,
         createNewScene, duplicateScene, clearScene,
         changeLayerEffect, changeLayerEnabled, speedLabel, updateText, initAuthInputs,

@@ -2,6 +2,8 @@
 #include "RuntimeSnapshot.hpp"
 #include "FactoryApi.hpp"
 #include "FactoryEffects.hpp"
+#include "RuntimeMemory.hpp"
+#include "RuntimeServices.hpp"
 #include "LightingRuntime.hpp"
 #include "OutputController.hpp"
 #include "PowerBudget.hpp"
@@ -406,7 +408,36 @@ RuntimeSnapshot collect_runtime_snapshot(FactoryApi* api, uint32_t stream_seq) {
         snprintf(snap.certification.state, sizeof(snap.certification.state), "not_started");
     }
 
-    // 14. Channels
+    // 14. Memory (LG-038.3 §3/§57) + active services (§60)
+    {
+        const RuntimeMemorySnapshot mem = capture_runtime_memory();
+        snap.memory.free8 = mem.free_8bit;
+        snap.memory.largest8 = mem.largest_8bit;
+        snap.memory.minimum_free = mem.minimum_free_heap;
+        snap.memory.free_dma = mem.free_dma;
+
+        const RuntimeMemoryCounters& counters = runtime_memory_counters();
+        snap.memory_failures.api_allocation_failures = counters.api_allocation_failures;
+        snap.memory_failures.preview_allocation_failures = counters.preview_allocation_failures;
+        snap.memory_failures.rmt_allocation_failures = counters.rmt_allocation_failures;
+        snap.memory_failures.factory_task_start_failures = counters.factory_task_start_failures;
+        snap.memory_failures.network_task_start_failures = counters.network_task_start_failures;
+
+        const ServiceStateTruth services = api->service_state_truth();
+        snap.services.lighting = services.lighting;
+        snap.services.scheduler = services.scheduler;
+        snap.services.api = services.api;
+        snap.services.mdns = services.mdns;
+        snap.services.fleet_discovery = services.fleet_discovery;
+        snap.services.artnet = services.artnet;
+        snap.services.sacn = services.sacn;
+        snap.services.node_sync = services.node_sync;
+        snap.services.mqtt = services.mqtt;
+        snap.services.factory_worker = services.factory_worker;
+        snap.services.network_apply_worker = services.network_apply_worker;
+    }
+
+    // 15. Channels
     DeviceConfig status_cfg{};
     if (api->config()) {
         api->config()->load_config(status_cfg);
@@ -599,6 +630,34 @@ bool serialize_runtime_snapshot(const RuntimeSnapshot& snap, FixedJsonWriter& wr
         snap.certification.passed,
         snap.certification.failed,
         snap.certification.total
+    );
+
+    // LG-038.3 §3: memory + §57 counters + §60 services (lightweight)
+    writer.append_printf(
+        "\"memory\":{\"free8\":%" PRIu32 ",\"largest8\":%" PRIu32 ",\"minimumFree\":%" PRIu32 ",\"freeDma\":%" PRIu32 "},",
+        snap.memory.free8, snap.memory.largest8, snap.memory.minimum_free, snap.memory.free_dma
+    );
+    writer.append_printf(
+        "\"memoryFailures\":{\"api\":%" PRIu32 ",\"preview\":%" PRIu32 ",\"rmt\":%" PRIu32 ",\"factoryTask\":%" PRIu32 ",\"networkTask\":%" PRIu32 "},",
+        snap.memory_failures.api_allocation_failures,
+        snap.memory_failures.preview_allocation_failures,
+        snap.memory_failures.rmt_allocation_failures,
+        snap.memory_failures.factory_task_start_failures,
+        snap.memory_failures.network_task_start_failures
+    );
+    writer.append_printf(
+        "\"services\":{\"lighting\":%s,\"factoryWorker\":%s,\"scheduler\":%s,\"api\":%s,\"mdns\":%s,\"fleetDiscovery\":%s,\"artnet\":%s,\"sacn\":%s,\"nodeSync\":%s,\"mqtt\":%s,\"networkApplyWorker\":%s},",
+        snap.services.lighting ? "true" : "false",
+        snap.services.factory_worker ? "true" : "false",
+        snap.services.scheduler ? "true" : "false",
+        snap.services.api ? "true" : "false",
+        snap.services.mdns ? "true" : "false",
+        snap.services.fleet_discovery ? "true" : "false",
+        snap.services.artnet ? "true" : "false",
+        snap.services.sacn ? "true" : "false",
+        snap.services.node_sync ? "true" : "false",
+        snap.services.mqtt ? "true" : "false",
+        snap.services.network_apply_worker ? "true" : "false"
     );
 
     // Channels

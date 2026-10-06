@@ -47,6 +47,7 @@ AuthPrincipal authenticate(httpd_req_t* request) {
             auto res = s_auth_manager->validate_session(token);
             if (res.valid) {
                 principal.authenticated = true;
+                principal.factory_setup = res.factory_setup;
                 principal.role = res.role;
                 principal.method = AuthMethod::Session;
                 return principal;
@@ -69,7 +70,13 @@ AuthPrincipal authenticate(httpd_req_t* request) {
             }
 
             lg::auth::AuthRole role = lg::auth::AuthRole::Operator;
-            if (s_auth_manager->verify_api_key(token, &role)) {
+            bool verified = s_auth_manager->verify_api_key(token, &role);
+            if (!verified && s_auth_manager->verify_factory_setup_credential(token)) {
+                role = lg::auth::AuthRole::Admin;
+                principal.factory_setup = true;
+                verified = true;
+            }
+            if (verified) {
                 principal.authenticated = true;
                 principal.role = role;
                 principal.method = AuthMethod::ApiKey;
@@ -112,6 +119,18 @@ bool authorize(httpd_req_t* request, ApiRole minimum_role) {
     }
 
     AuthPrincipal principal = authenticate(request);
+
+    // Setup authority can only inspect/end its session or set the initial Admin key.
+    // All normal APIs (including network, OTA, restore and WS tickets) require provisioning.
+    if ((principal.factory_setup || !s_auth_manager->is_provisioned()) &&
+        std::strcmp(request->uri, "/api/v1/auth/session") != 0 &&
+        std::strcmp(request->uri, "/api/v1/auth/bootstrap") != 0) {
+        httpd_resp_set_status(request, "403 Forbidden");
+        httpd_resp_set_type(request, "application/json");
+        httpd_resp_set_hdr(request, "Access-Control-Allow-Origin", "*");
+        httpd_resp_sendstr(request, R"({"error":"admin_setup_required"})");
+        return false;
+    }
 
     if (!principal.authenticated) {
         httpd_resp_set_status(request, "401 Unauthorized");

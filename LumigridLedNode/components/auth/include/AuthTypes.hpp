@@ -46,6 +46,7 @@ struct AuthConfig {
 
 struct AuthSession {
     bool active = false;
+    bool factory_setup = false;
     AuthRole role = AuthRole::Operator;
     uint8_t token[32] = {};
     char token_hex[65] = {};

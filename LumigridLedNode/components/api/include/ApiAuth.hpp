@@ -11,6 +11,7 @@ using AuthMethod = lg::auth::AuthMethod;
 
 struct AuthPrincipal {
     bool authenticated = false;
+    bool factory_setup = false;
     ApiRole role = ApiRole::Operator;
     AuthMethod method = AuthMethod::None;
 };

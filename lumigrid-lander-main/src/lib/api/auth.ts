@@ -5,6 +5,7 @@ export type AuthRoleName = 'admin' | 'installer' | 'operator';
 export interface AuthStatus {
   provisioned: boolean;
   bootstrapAllowed: boolean;
+  factorySetupAllowed?: boolean;
 }
 export type AuthStatusResponse = AuthStatus;
 
@@ -13,6 +14,7 @@ export interface SessionResponse {
   role: AuthRoleName;
   sessionToken: string;
   expiresIn: number;
+  setupRequired?: boolean;
 }
 
 export interface SessionInfo {
@@ -39,11 +41,12 @@ export async function getAuthStatus(ip: string): Promise<AuthStatus> {
 
 export async function bootstrapAuth(
   ip: string,
-  adminToken: string
-): Promise<{ provisioned: boolean; status: string }> {
-  return await apiJson<{ provisioned: boolean; status: string }>(ip, '/api/v1/auth/bootstrap', {
+  adminToken: string,
+  factorySetup = false
+): Promise<SessionResponse & { provisioned: boolean }> {
+  return await apiJson<SessionResponse & { provisioned: boolean }>(ip, '/api/v1/auth/bootstrap', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...(factorySetup ? { 'X-API-Key': 'lumigrid123' } : {}) },
     body: JSON.stringify({ adminToken }),
   });
 }

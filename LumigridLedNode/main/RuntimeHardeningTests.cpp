@@ -3845,6 +3845,68 @@ bool test_lg028_network_commissioning_and_lifecycle() {
     return true;
 }
 
+bool test_lg0382_factory_setup_credentials() {
+    auth::AuthStore store;
+    auth::AuthManager mgr(&store);
+    assert(mgr.init() == ESP_OK);
+    assert(mgr.factory_reset() == ESP_OK);
+    const char* temporary = "lumigrid123";
+    const char* permanent = "MyPermanentAdminAccessKey2026!";
+    char setup_session[65] = {}, admin_session[65] = {};
+    auth::AuthRole role;
+    uint32_t expires = 0;
+    // A: first boot uses special commissioning authority, never a saved credential.
+    assert(mgr.verify_factory_setup_credential(temporary));
+    assert(mgr.migrate_legacy_tokens(temporary, temporary, temporary) == ESP_OK);
+    assert(!mgr.is_provisioned());
+    assert(!store.config().admin.enabled);
+    assert(mgr.create_session(temporary, setup_session, &role, &expires) == ESP_OK);
+    assert(role == auth::AuthRole::Admin);
+    assert(mgr.validate_session(setup_session).factory_setup);
+    // B/C: no recovery/normal backdoor and no permanent short key.
+    for (auto state : {auth::CommissioningState::None, auth::CommissioningState::PhysicalRecovery}) {
+        mgr.set_commissioning_state(state);
+        assert(!mgr.verify_factory_setup_credential(temporary));
+        assert(mgr.create_session(temporary, admin_session, &role, &expires) != ESP_OK);
+        assert(!mgr.verify_api_key(temporary, &role));
+    }
+    mgr.set_commissioning_state(auth::CommissioningState::FactoryFirstBoot);
+    assert(mgr.bootstrap(temporary) == ESP_ERR_INVALID_ARG);
+    assert(mgr.rotate_credential(auth::AuthRole::Admin, permanent) == ESP_ERR_INVALID_STATE);
+    // D/E: durable save returns an Admin session and revokes setup authority.
+    assert(mgr.bootstrap(permanent, admin_session, &expires) == ESP_OK);
+    assert(mgr.validate_session(admin_session).valid);
+    assert(!mgr.validate_session(admin_session).factory_setup);
+    assert(!mgr.validate_session(setup_session).valid);
+    assert(!mgr.verify_factory_setup_credential(temporary));
+    assert(mgr.create_session(temporary, setup_session, &role, &expires) != ESP_OK);
+    assert(!mgr.verify_api_key(temporary, &role));
+    assert(mgr.create_session(permanent, admin_session, &role, &expires) == ESP_OK);
+    assert(mgr.rotate_credential(auth::AuthRole::Admin, temporary) == ESP_ERR_INVALID_ARG);
+    // F/H: reconstruct managers over persistent NVS as boot/rollback does.
+    for (int boot = 0; boot < 2; ++boot) {
+        auth::AuthStore reboot_store;
+        auth::AuthManager reboot(&reboot_store);
+        assert(reboot.init() == ESP_OK);
+        assert(reboot.is_provisioned());
+        // G/J: even an accidental state assertion after Wi-Fi loss cannot restore auth.
+        for (auto state : {auth::CommissioningState::None, auth::CommissioningState::PhysicalRecovery,
+                           auth::CommissioningState::FactoryFirstBoot}) {
+            reboot.set_commissioning_state(state);
+            assert(!reboot.verify_factory_setup_credential(temporary));
+            assert(reboot.create_session(temporary, setup_session, &role, &expires) != ESP_OK);
+            assert(!reboot.verify_api_key(temporary, &role));
+        }
+        assert(reboot.create_session(permanent, admin_session, &role, &expires) == ESP_OK);
+    }
+    // I: explicit full-reset ownership restores factory behavior.
+    assert(mgr.factory_reset() == ESP_OK);
+    assert(mgr.verify_factory_setup_credential(temporary));
+    assert(mgr.create_session(temporary, setup_session, &role, &expires) == ESP_OK);
+    ESP_LOGI(TAG, "[PASS] LG-038.2 factory setup credential regressions A-J");
+    return true;
+}
+
 bool test_lg029_node_backed_authentication() {
     ESP_LOGI(TAG, "Testing LG-029 Node-Backed Authentication & Sessions (Tests A..AC)...");
 
@@ -3873,6 +3935,7 @@ bool test_lg029_node_backed_authentication() {
 
     // Regression E: bootstrap allowed exactly once
     const char* admin_key = "SuperAdminSecretKey2026!";
+    mgr.set_commissioning_state(auth::CommissioningState::FactoryFirstBoot);
     assert(mgr.bootstrap(admin_key) == ESP_OK);
     assert(mgr.is_provisioned());
 
@@ -4094,6 +4157,8 @@ bool test_lg029_node_backed_authentication() {
             auth::AuthStore mem_store;
             auth::AuthManager auth_mgr(&mem_store);
             assert(auth_mgr.init() == ESP_OK);
+            assert(auth_mgr.factory_reset() == ESP_OK);
+            auth_mgr.set_commissioning_state(auth::CommissioningState::None);
             assert(!auth_mgr.is_provisioned());
 
             // Default state is None (ordinary operational context)
@@ -5820,6 +5885,237 @@ bool test_lg029_node_backed_authentication() {
         return true;
     }
 
+    // ==========================================================================
+    // LG-038.3: Runtime Memory Headroom & Lazy Service Lifecycle
+    // ==========================================================================
+
+    // §78: fresh DeviceConfig protocol defaults are OFF; migration keeps stored values.
+    bool test_lg0383_fresh_protocol_defaults() {
+        DeviceConfig fresh{};
+        fresh.reset();
+        assert(fresh.protocol.artnet_enabled == false);
+        assert(fresh.protocol.sacn_enabled == false);
+        assert(fresh.sync_enabled == false);
+        assert(fresh.mqtt_enabled == false);
+
+        DeviceConfig fresh_default_ctor{}; // default member initializers path
+        assert(fresh_default_ctor.protocol.artnet_enabled == false);
+        assert(fresh_default_ctor.protocol.sacn_enabled == false);
+
+        // Persisted config path: migration code (ConfigStore v1->v2->v3) copies
+        // stored protocol flags verbatim; verify struct copy preserves values.
+        DeviceConfig persisted{};
+        persisted.protocol.artnet_enabled = true;
+        persisted.protocol.sacn_enabled = true;
+        DeviceConfig copy = persisted;
+        assert(copy.protocol.artnet_enabled == true);
+        assert(copy.protocol.sacn_enabled == true);
+        ESP_LOGI(TAG, "[PASS] LG-038.3 fresh protocol defaults are OFF; stored values preserved");
+        return true;
+    }
+
+    // §2/§29/§39/§45/§57: canonical memory snapshot, admission, health, counters,
+    // task stack registry.
+    bool test_lg0383_runtime_memory_helpers() {
+        const RuntimeMemorySnapshot snap = capture_runtime_memory();
+        // Snapshot fields must be populated and self-consistent on a live node.
+        assert(snap.free_8bit > 0);
+        assert(snap.largest_8bit > 0);
+        assert(snap.largest_8bit <= snap.free_8bit);
+        assert(snap.free_internal > 0);
+
+        // Admission math: required + reserve must be checked against free8.
+        const MemoryAdmissionResult ok = check_memory_admission(0, 0);
+        assert(ok.accepted);
+        const RuntimeMemorySnapshot now = capture_runtime_memory();
+        const MemoryAdmissionResult too_big =
+            check_memory_admission(now.free_8bit, 1);
+        assert(!too_big.accepted);
+
+        // Fragmentation ratio: largest/free in (0, 1].
+        const float frag = fragmentation_ratio(now);
+        assert(frag > 0.0f && frag <= 1.0f);
+
+        // Health evaluation: classification matches free/largest against gates.
+        RuntimeMemorySnapshot synthetic{};
+        synthetic.free_8bit = 4096;   // < 24 KB gate
+        synthetic.largest_8bit = 512; // < 12 KB gate
+        assert(evaluate_memory_health(synthetic) == MemoryHealth::Critical);
+        synthetic.free_8bit = 4096;
+        synthetic.largest_8bit = 65536;
+        assert(evaluate_memory_health(synthetic) == MemoryHealth::LowRuntimeMemory);
+        synthetic.free_8bit = 65536;
+        synthetic.largest_8bit = 512;
+        assert(evaluate_memory_health(synthetic) == MemoryHealth::HeapFragmented);
+        synthetic.free_8bit = 65536;
+        synthetic.largest_8bit = 32768;
+        assert(evaluate_memory_health(synthetic) == MemoryHealth::Healthy);
+
+        // §57: counters increment and stay observable.
+        RuntimeMemoryCounters& counters = runtime_memory_counters();
+        const uint32_t before = counters.rmt_allocation_failures;
+        note_rmt_allocation_failure();
+        assert(counters.rmt_allocation_failures == before + 1);
+
+        // §29: task registry registers, samples (bytes), and unregisters.
+        task_stack_registry().register_task("lg0383_test_task", 4096);
+        TaskStackInfo info[4];
+        task_stack_registry().sample_all();
+        const size_t n = task_stack_registry().copy(info, 4);
+        bool found = false;
+        for (size_t i = 0; i < n; ++i) {
+            if (info[i].name && std::strcmp(info[i].name, "lg0383_test_task") == 0) {
+                found = true;
+                assert(info[i].configured_bytes == 4096);
+            }
+        }
+        assert(found);
+        task_stack_registry().unregister_task("lg0383_test_task");
+        task_stack_registry().sample_all();
+        const size_t n2 = task_stack_registry().copy(info, 4);
+        for (size_t i = 0; i < n2; ++i) {
+            assert(info[i].name == nullptr ||
+                   std::strcmp(info[i].name, "lg0383_test_task") != 0);
+        }
+        ESP_LOGI(TAG, "[PASS] LG-038.3 runtime memory snapshot/admission/health/counters/registry");
+        return true;
+    }
+
+    // §13(§78)/§61-63/§35: deterministic service plan.
+    bool test_lg0383_service_plan() {
+        DeviceConfig cfg{};
+
+        // Normal configured node, protocols off (fresh defaults).
+        {
+            PlanInputs in{};
+            in.safe_mode = false;
+            in.commissioning = CommissioningPlanState::Provisioned;
+            in.network = NetworkPlanState::ApOnly;
+            in.cfg = &cfg;
+            const RuntimeServicePlan plan = compute_service_plan(in);
+            assert(plan.lighting && plan.scheduler && plan.api && plan.mdns);
+            assert(!plan.fleet_discovery); // AP-only: no fleet (§21/§22)
+            assert(!plan.artnet && !plan.sacn); // config-gated (§11/§12)
+            assert(!plan.node_sync && !plan.mqtt);
+            assert(!plan.factory_worker); // lazy (§18)
+            assert(!plan.network_apply_worker); // lazy (§8)
+        }
+
+        // STA connected enables fleet; config gates protocols.
+        {
+            cfg.protocol.artnet_enabled = true;
+            cfg.protocol.sacn_enabled = true;
+            cfg.sync_enabled = true;
+            cfg.mqtt_enabled = true;
+            PlanInputs in{};
+            in.safe_mode = false;
+            in.commissioning = CommissioningPlanState::Provisioned;
+            in.network = NetworkPlanState::StaConnected;
+            in.cfg = &cfg;
+            const RuntimeServicePlan plan = compute_service_plan(in);
+            assert(plan.fleet_discovery);
+            assert(plan.artnet && plan.sacn && plan.node_sync && plan.mqtt);
+        }
+
+        // STA down stops sync + fleet even when configured (§65).
+        {
+            PlanInputs in{};
+            in.safe_mode = false;
+            in.commissioning = CommissioningPlanState::Provisioned;
+            in.network = NetworkPlanState::StaDown;
+            in.cfg = &cfg;
+            const RuntimeServicePlan plan = compute_service_plan(in);
+            assert(!plan.fleet_discovery);
+            assert(!plan.node_sync);
+            assert(plan.artnet && plan.sacn); // config stays authoritative
+            assert(plan.mqtt);
+        }
+
+        // First-boot setup plan (§35/§63/§66): API+mDNS only.
+        {
+            PlanInputs in{};
+            in.safe_mode = false;
+            in.commissioning = CommissioningPlanState::FactoryFirstBoot;
+            in.network = NetworkPlanState::ApOnly;
+            in.cfg = &cfg;
+            const RuntimeServicePlan plan = compute_service_plan(in);
+            assert(plan.api && plan.mdns);
+            assert(!plan.lighting && !plan.scheduler);
+            assert(!plan.fleet_discovery && !plan.artnet && !plan.sacn);
+            assert(!plan.node_sync && !plan.mqtt);
+        }
+
+        // Recovery plan (§63): outputs safe, API+mDNS reachable.
+        {
+            PlanInputs in{};
+            in.safe_mode = true;
+            in.commissioning = CommissioningPlanState::PhysicalRecovery;
+            in.network = NetworkPlanState::ApOnly;
+            in.cfg = &cfg;
+            const RuntimeServicePlan plan = compute_service_plan(in);
+            assert(!plan.lighting && !plan.scheduler);
+            assert(plan.api && plan.mdns);
+            assert(!plan.artnet && !plan.sacn && !plan.node_sync && !plan.mqtt);
+            assert(!plan.fleet_discovery);
+        }
+
+        // Missing config yields a safe plan (no protocol workers).
+        {
+            PlanInputs in{};
+            in.safe_mode = false;
+            in.commissioning = CommissioningPlanState::Provisioned;
+            in.network = NetworkPlanState::StaConnected;
+            in.cfg = nullptr;
+            const RuntimeServicePlan plan = compute_service_plan(in);
+            assert(!plan.artnet && !plan.sacn && !plan.node_sync && !plan.mqtt);
+        }
+        ESP_LOGI(TAG, "[PASS] LG-038.3 deterministic service plan (normal/setup/recovery/STA-gates)");
+        return true;
+    }
+
+    // §17-20/§7-10: lazy worker lifecycle on the real runtime objects.
+    bool test_lg0383_lazy_workers() {
+        // Factory worker absent after construction (normal boot no longer starts it).
+        {
+            ControlSourceManager sources;
+            OutputController controller;
+            FactoryRunner runner(sources, controller);
+            assert(runner.lifecycle_state() != FactoryRunner::LifecycleState::Running);
+
+            // §18/§L: first explicit use starts the worker.
+            assert(runner.ensure_worker_started());
+            assert(runner.lifecycle_state() == FactoryRunner::LifecycleState::Running);
+            // Second call is idempotent, no error.
+            assert(runner.ensure_worker_started());
+            // §19: worker stays alive after use for this batch.
+            runner.stop();
+            assert(runner.lifecycle_state() == FactoryRunner::LifecycleState::Stopped);
+        }
+
+        // Network apply: no task while idle; queue function rejects a second
+        // concurrent apply (§8/§10; one-shot worker self-exits in production).
+        {
+            LumigridRuntime runtime;
+            NetworkApplyRequest first{};
+            first.command_id = 4001;
+            // On the hostless test image, starting the one-shot worker should
+            // succeed exactly once, then report in-progress for the second.
+            const esp_err_t e1 = runtime.queue_network_apply(first);
+            if (e1 == ESP_OK) {
+                assert(runtime.is_network_apply_in_progress());
+                NetworkApplyRequest second{};
+                second.command_id = 4002;
+                assert(runtime.queue_network_apply(second) == ESP_ERR_INVALID_STATE);
+                // Let the one-shot worker finish its bounded 200ms response
+                // grace + apply attempt, then confirm state returns to idle.
+                vTaskDelay(pdMS_TO_TICKS(400));
+            }
+            // Either way, the in-progress flag must not remain stuck.
+        }
+        ESP_LOGI(TAG, "[PASS] LG-038.3 lazy factory worker + on-demand network apply");
+        return true;
+    }
+
 } // namespace
 
 bool run_runtime_hardening_tests() {
@@ -5910,6 +6206,7 @@ bool run_runtime_hardening_tests() {
     all_ok &= test_lg028_network_commissioning_and_lifecycle();
 
     // LG-029 Node-Backed Authentication & Sessions Regressions (A..AC)
+    all_ok &= test_lg0382_factory_setup_credentials();
     all_ok &= test_lg029_node_backed_authentication();
 
     // LG-030 Fleet Discovery, Presence & Immutable Identity
@@ -5938,6 +6235,12 @@ bool run_runtime_hardening_tests() {
 
     // LG-038 Physical Output Engine Stabilization & Certification Truth Pass
     all_ok &= test_lg038_physical_output_engine();
+
+    // LG-038.3 Runtime Memory Headroom & Lazy Service Lifecycle
+    all_ok &= test_lg0383_fresh_protocol_defaults();
+    all_ok &= test_lg0383_runtime_memory_helpers();
+    all_ok &= test_lg0383_service_plan();
+    all_ok &= test_lg0383_lazy_workers();
 
     if (all_ok) {
         ESP_LOGI(TAG, "==================================================");

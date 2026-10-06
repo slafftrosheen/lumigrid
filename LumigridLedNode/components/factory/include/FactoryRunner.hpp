@@ -38,6 +38,13 @@ public:
 
     esp_err_t start();
     void stop();
+
+    /// LG-038.3 §18: lazily start the 8 KB factory worker on first real use.
+    /// Normal nodes that never invoke Factory/Certification operations never
+    /// pay the task stack. The worker, once started, stays alive until reboot
+    /// for this batch (§19: no idle-retirement race yet).
+    bool ensure_worker_started();
+
     LifecycleState lifecycle_state() const {
         return lifecycle_state_.load(std::memory_order_acquire);
     }

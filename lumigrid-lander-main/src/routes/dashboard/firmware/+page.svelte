@@ -110,6 +110,7 @@
 
   <!-- Navigation Tabs -->
   <nav class="system-tabs" aria-label="System sections">
+    <button type="button" class="tab-btn" onclick={() => window.dispatchEvent(new Event('lumigrid:open-access'))}>Access</button>
     <button
       type="button"
       class="tab-btn"

@@ -23,8 +23,12 @@
 #include "ConfigApplyPlan.hpp"
 #include "OtaBootVerifier.hpp"
 #include "CertificationService.hpp"
+#include "RuntimeServices.hpp"
+#include "RuntimeMemory.hpp"
 #include "esp_err.h"
 #include <atomic>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 
 namespace lg {
@@ -149,6 +153,12 @@ public:
     const char* last_apply_error() const { return last_apply_error_; }
     bool is_network_apply_in_progress() const { return apply_in_progress_.load(); }
 
+    // LG-038.3 §60: active service state for diagnostics. Reflects the last    // reconciled plan plus actual started_subsystems_ truth.
+    RuntimeServicePlan service_plan() const;
+
+    // LG-038.3 §61-65: deterministic plan for the current state.
+    RuntimeServicePlan compute_plan() const;
+
     RecoveryStatus get_recovery_status() const;
     esp_err_t apply_device_config(const DeviceConfig& old_cfg, const DeviceConfig& new_cfg, const ConfigApplyPlan& plan);
 
@@ -166,6 +176,17 @@ private:
     void stop_network_services();
     esp_err_t start_network_services();
     void rollback_services(StartupStage failed_stage, esp_err_t error);
+
+    // LG-038.3 §7/§8/§10: on-demand network apply worker. One owned pending
+    // request (apply_in_progress_ already serializes applies); the 8 KB task
+    // exists only while an apply runs, then deletes itself.
+    esp_err_t start_network_apply_task();
+
+    // LG-038.3 §64/§65: plan reconciliation for config and network changes.
+    esp_err_t reconcile_services(const DeviceConfig& old_cfg, const DeviceConfig& new_cfg,
+                                 bool network_changed);
+    esp_err_t start_artnet_service(const DeviceConfig& cfg);
+    esp_err_t start_sacn_service(const DeviceConfig& cfg);
 
     OutputController output_;
     ControlSourceManager source_manager_;
@@ -203,6 +224,11 @@ private:
         bool factory = false;
     } started_subsystems_{};
 
+    const StartedSubsystems& started_subsystems() const { return started_subsystems_; }
+    NetworkPlanState network_plan_state() const { return network_plan_state_.load(std::memory_order_acquire); }
+    void set_network_plan_state(NetworkPlanState s) { network_plan_state_.store(s, std::memory_order_release); }
+    CommissioningPlanState commissioning_plan_state() const;
+
     RuntimeLifecycle lifecycle_state_ = RuntimeLifecycle::Constructed;
     bool services_started_ = false;
     // Semaphore signalled by the WiFi callback when network is ready.
@@ -221,10 +247,16 @@ private:
 
     QueueHandle_t net_apply_queue_ = nullptr;
     TaskHandle_t net_apply_task_ = nullptr;
+    // LG-038.3 §10: single owned pending request instead of a permanent
+    // queue + worker. apply_in_progress_ still serializes applies.
+    NetworkApplyRequest pending_apply_{};
     std::atomic<bool> apply_in_progress_{false};
     std::atomic<NetworkApplyState> apply_state_{NetworkApplyState::Idle};
     std::atomic<uint32_t> pending_apply_command_id_{0};
     const char* last_apply_error_ = nullptr;
+
+    // Network state observed by the service planner.
+    std::atomic<NetworkPlanState> network_plan_state_{NetworkPlanState::NoNetwork};
 
     std::atomic<MaintenanceMode> maintenance_mode_{MaintenanceMode::None};
     RestoreState restore_state_ = RestoreState::Idle;

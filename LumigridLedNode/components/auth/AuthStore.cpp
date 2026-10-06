@@ -30,6 +30,8 @@ esp_err_t AuthStore::init() {
         return ESP_OK;
     }
 
+    // Storage faults are not first boot. Fail closed instead of restoring setup access.
+    if (err != ESP_ERR_NVS_NOT_FOUND && err != ESP_ERR_NOT_FOUND) return err;
     // First boot or unformatted: initialize default unprovisioned configuration
     config_ = AuthConfig{};
     config_.schema_version = 1;
@@ -51,9 +53,11 @@ esp_err_t AuthStore::load(AuthConfig& out_cfg) {
     AuthConfig candidate{};
     size_t size = sizeof(candidate);
     bool primary_ok = false;
+    bool stored_data = false;
 
     // 1. Try primary slot
     err = nvs_get_blob(handle, kKeyPrimary, &candidate, &size);
+    stored_data = err != ESP_ERR_NVS_NOT_FOUND;
     if (err == ESP_OK && size == sizeof(candidate)) {
         if (candidate.schema_version == 1 && candidate.checksum == calc_auth_config_crc(candidate)) {
             primary_ok = true;
@@ -68,6 +72,7 @@ esp_err_t AuthStore::load(AuthConfig& out_cfg) {
     if (!primary_ok) {
         size = sizeof(candidate);
         err = nvs_get_blob(handle, kKeyBackup, &candidate, &size);
+        stored_data = stored_data || err != ESP_ERR_NVS_NOT_FOUND;
         if (err == ESP_OK && size == sizeof(candidate)) {
             if (candidate.schema_version == 1 && candidate.checksum == calc_auth_config_crc(candidate)) {
                 backup_ok = true;
@@ -89,7 +94,7 @@ esp_err_t AuthStore::load(AuthConfig& out_cfg) {
         return ESP_OK;
     }
 
-    return ESP_ERR_NOT_FOUND;
+    return stored_data ? ESP_ERR_INVALID_STATE : ESP_ERR_NOT_FOUND;
 }
 
 esp_err_t AuthStore::save(const AuthConfig& cfg) {
@@ -106,10 +111,12 @@ esp_err_t AuthStore::save(const AuthConfig& cfg) {
 
     err = nvs_set_blob(handle, kKeyPrimary, &to_save, sizeof(to_save));
     if (err == ESP_OK) {
-        nvs_set_blob(handle, kKeyBackup, &to_save, sizeof(to_save));
-        nvs_commit(handle);
-        config_ = to_save;
-        initialized_ = true;
+        err = nvs_set_blob(handle, kKeyBackup, &to_save, sizeof(to_save));
+        if (err == ESP_OK) err = nvs_commit(handle);
+        if (err == ESP_OK) {
+            config_ = to_save;
+            initialized_ = true;
+        }
     } else {
         ESP_LOGE(TAG, "Failed to save auth config: %s", esp_err_to_name(err));
     }
@@ -122,10 +129,11 @@ esp_err_t AuthStore::erase() {
     nvs_handle_t handle;
     esp_err_t err = nvs_open(kNvsNamespace, NVS_READWRITE, &handle);
     if (err == ESP_OK) {
-        nvs_erase_all(handle);
-        nvs_commit(handle);
+        err = nvs_erase_all(handle);
+        if (err == ESP_OK) err = nvs_commit(handle);
         nvs_close(handle);
     }
+    if (err != ESP_OK) return err;
     config_ = AuthConfig{};
     config_.schema_version = 1;
     config_.provisioned = false;

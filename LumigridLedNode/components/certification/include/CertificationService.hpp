@@ -112,6 +112,12 @@ private:
     uint64_t burn_in_start_ms_ = 0;
     uint32_t burn_in_job_id_ = 0;
 
+    // LG-038.3 §74: 8-bit heap evidence across the burn-in run.
+    uint32_t burn_in_start_free8_ = 0;
+    uint32_t burn_in_min_free8_ = 0;
+    uint32_t burn_in_start_largest8_ = 0;
+    uint32_t burn_in_min_largest8_ = 0;
+
     JobManager* job_mgr_ = nullptr;
     CertificationProbeProvider probe_provider_{};
     uint32_t current_factory_session_id_ = 0;

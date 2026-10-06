@@ -12,6 +12,7 @@ namespace lg::auth {
 
 struct SessionValidationResult {
     bool valid = false;
+    bool factory_setup = false;
     bool expired = false;
     AuthRole role = AuthRole::Operator;
     uint32_t remaining_s = 0;
@@ -32,6 +33,8 @@ public:
 
     // Check if initial admin has been provisioned
     bool is_provisioned() const;
+    static constexpr const char* kFactorySetupCredential = "lumigrid123";
+    bool verify_factory_setup_credential(const char* credential) const;
 
     // Commissioning state ownership (Section 0)
     void set_commissioning_state(CommissioningState state) { commissioning_state_ = state; }
@@ -41,7 +44,7 @@ public:
     }
 
     // Bootstrap initial admin credential (allowed only once when !provisioned && is_bootstrap_allowed())
-    esp_err_t bootstrap(const char* admin_token);
+    esp_err_t bootstrap(const char* admin_token, char* out_session_hex = nullptr, uint32_t* out_expires_in = nullptr);
 
     // Authenticate a long-lived credential and open a new session
     // Returns ESP_OK on success, populating out_session_hex, out_role, out_expires_in
@@ -102,6 +105,7 @@ private:
     void cleanup_expired_sessions_locked(uint64_t now_us);
     void cleanup_expired_tickets_locked(uint64_t now_us);
     bool verify_credential_locked(const char* credential, AuthRole* out_role);
+    bool verify_factory_setup_credential_locked(const char* credential) const;
 };
 
 } // namespace lg::auth

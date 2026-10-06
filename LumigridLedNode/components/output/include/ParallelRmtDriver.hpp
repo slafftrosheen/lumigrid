@@ -25,6 +25,8 @@ namespace lg {
 // ── Deterministic error codes ─────────────────────────────────────────────────
 // Not an ESP-IDF error range; chosen to be unambiguous in logs and telemetry.
 constexpr esp_err_t kErrRmtResourceExhausted = 0x6A01;
+// LG-038.3 §41: explicit memory-admission failure (not a bare ESP_ERR_NO_MEM).
+constexpr esp_err_t kErrInsufficientRuntimeMemory = 0x6A02;
 
 /// Human readable name for output-path errors ("rmt_resource_exhausted", ...).
 const char* output_err_name(esp_err_t err);

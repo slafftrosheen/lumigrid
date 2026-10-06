@@ -7,7 +7,7 @@ or lifecycle regressions are discovered in the codebase:
 1. ESP_ERROR_CHECK in runtime lifecycle code.
 2. Uncontrolled vTaskDelete(task_handle_) outside cooperative shutdown.
 3. Process-global 'static bool services_started'.
-4. Production-accessible hardcoded default passwords ("lumigrid123" outside dev flags).
+4. Universal credentials outside the restricted FactoryFirstBoot setup path.
 5. Unsynchronized direct output mutations outside controlled transactions/factory exceptions.
 6. LG-034: legacy cue endpoints used outside the compat API module.
 """
@@ -299,6 +299,61 @@ for f in backup_files:
         ('cJSON_AddStringToObject(net_json, "password"', "Forbidden backup export of Wi-Fi password"),
         ('"wifiPassword"', "Forbidden backup export of wifiPassword"),
     ])
+
+# LG-038.2: the universal value is owned only by commissioning auth and setup UI.
+setup_literal_owners = {
+    "LumigridLedNode/components/auth/include/AuthManager.hpp",
+    "LumigridLedNode/main/RuntimeHardeningTests.cpp",
+    "lumigrid-lander-main/src/lib/api/auth.ts",
+    "lumigrid-lander-main/src/routes/dashboard/+layout.svelte",
+    "lumigrid-lander-main/embedded/dashboard.html",
+}
+for source_root in (NODE_DIR / "main", NODE_DIR / "components", REPO_ROOT / "lumigrid-lander-main/src", REPO_ROOT / "lumigrid-lander-main/embedded"):
+    for source in source_root.rglob("*"):
+        if source.suffix not in {".cpp", ".hpp", ".ts", ".svelte", ".html"} or source.name.endswith((".test.ts", ".spec.ts")):
+            continue
+        relative = source.relative_to(REPO_ROOT).as_posix()
+        if "lumigrid123" in source.read_text(encoding="utf-8") and relative not in setup_literal_owners:
+            errors.append(f"{relative}: universal setup credential outside its explicit commissioning/UI owner")
+
+auth_manager = (NODE_DIR / "components/auth/AuthManager.cpp").read_text(encoding="utf-8")
+factory_gate = re.search(r"bool AuthManager::verify_factory_setup_credential_locked\([^)]*\) const \{(.*?)\n\}", auth_manager, re.S)
+if not factory_gate or not all(gate in factory_gate.group(1) for gate in ("!store_->is_provisioned()", "CommissioningState::FactoryFirstBoot", "std::strcmp(credential, kFactorySetupCredential) == 0")):
+    errors.append("AuthManager: temporary credential requires both genuine first boot and unprovisioned state")
+
+# LG-038.3 §5/§77: app_main must return after startup; no permanent heartbeat loop.
+main_cpp = (NODE_DIR / "main" / "main.cpp").read_text(encoding="utf-8")
+if re.search(r"while\s*\(\s*(true|1)\s*\)", main_cpp):
+    errors.append("main.cpp: app_main must not contain a permanent heartbeat loop (LG-038.3 §5/§77)")
+if "while" in main_cpp and not re.search(r"return\s*;", main_cpp):
+    errors.append("main.cpp: app_main must return after startup so the main task stack is reclaimed")
+
+# LG-038.3 §13/§78: fresh DeviceConfig protocol defaults must be OFF.
+signage_types = (NODE_DIR / "components" / "config" / "include" / "SignageTypes.hpp").read_text(encoding="utf-8")
+protocol_block = re.search(r"struct ProtocolConfig \{(.*?)\};", signage_types, re.S)
+if not protocol_block or "artnet_enabled       = false" not in protocol_block.group(1) or "sacn_enabled         = false" not in protocol_block.group(1):
+    errors.append("SignageTypes.hpp: fresh ProtocolConfig defaults must be artnet_enabled=false and sacn_enabled=false (LG-038.3 §13)")
+
+# LG-038.3 §7: no permanent net_apply task creation at boot.
+runtime_cpp = (NODE_DIR / "main" / "LumigridRuntime.cpp").read_text(encoding="utf-8")
+init_block = re.search(r"esp_err_t LumigridRuntime::init\(\) \{(.*?)\n\}", runtime_cpp, re.S)
+if init_block and re.search(r"xTaskCreate(PinnedToCore)?\(\s*&?LumigridRuntime::net_apply_worker", init_block.group(1)):
+    errors.append("LumigridRuntime::init(): net_apply worker must not be created permanently at boot (LG-038.3 §7/§8)")
+
+# LG-038.3 §17: factory worker must not start unconditionally at boot.
+if init_block and re.search(r"factory_runner_\.start\(\)", init_block.group(1)):
+    errors.append("LumigridRuntime::init(): factory worker must start lazily, not at boot (LG-038.3 §17/§18)")
+
+# LG-038.3 §11/§12: protocol workers must be config-gated in start_network_services().
+services_block = re.search(r"esp_err_t LumigridRuntime::start_network_services\(\) \{(.*?)\n\}", runtime_cpp, re.S)
+if services_block:
+    svc_text = services_block.group(1)
+    if "artnet_enabled" not in svc_text or "sacn_enabled" not in svc_text:
+        errors.append("LumigridRuntime::start_network_services(): Art-Net/sACN must be gated on cfg.protocol.*_enabled (LG-038.3 §11/§12)")
+
+# LG-038.3 §21/§22: fleet discovery must not start unconditionally (AP-only). 
+if services_block and "network_plan_state_" not in services_block.group(1):
+    errors.append("LumigridRuntime::start_network_services(): FleetDiscovery must be STA-gated (LG-038.3 §21/§22)")
 
 if errors:
     print("\nFAILED: Discovered architectural invariant violations:")
