@@ -1,4 +1,8 @@
 Import("env")
+
+# One bounded PCA bring-up scan in factory/development firmware only.
+if env.subst("$PIOENV") in ("factory", "test", "rollback-test"):
+    env.Append(CPPDEFINES=["LUMIGRID_PCA_BRINGUP_SCAN"])
 import os
 import gzip
 import subprocess

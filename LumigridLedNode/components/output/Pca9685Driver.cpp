@@ -31,7 +31,8 @@ static_assert(kPrescaleFor1kHz >= 3, "PCA9685 prescale below datasheet minimum")
 i2c_master_bus_handle_t s_bus = nullptr;
 i2c_master_dev_handle_t s_dev = nullptr;
 SemaphoreHandle_t s_i2c_mutex = nullptr;
-uint8_t s_detected_addr = lg::board::kPcaAddress;
+uint8_t s_detected_addr = 0;
+bool s_scan_attempted = false;
 std::atomic<bool> s_outputs_enabled{false};
 
 void disable_pwm_outputs() {
@@ -43,6 +44,64 @@ void disable_pwm_outputs() {
 void enable_pwm_outputs() {
     gpio_set_level(lg::board::kPcaOe, 0);
     s_outputs_enabled.store(true, std::memory_order_release);
+}
+
+esp_err_t probe_address(uint8_t address, const char* role) {
+    const esp_err_t err = i2c_master_probe(s_bus, address, 8);
+    if (err == ESP_OK || err == ESP_ERR_NOT_FOUND) {
+        ESP_LOGI(TAG, "PCA9685: %s address 0x%02X %s", role, address,
+                 err == ESP_OK ? "ACK" : "NACK");
+    } else {
+        ESP_LOGE(TAG, "PCA9685: %s address 0x%02X %s (%s)", role, address,
+                 err == ESP_ERR_TIMEOUT ? "bus problem" : "driver error", esp_err_to_name(err));
+    }
+    return err;
+}
+
+esp_err_t resolve_pca_address(uint8_t& address) {
+    address = 0; // No resolved individual address yet.
+    esp_err_t err = probe_address(board::kPcaDefaultAddress, "default");
+    if (err == ESP_OK) {
+        address = board::kPcaDefaultAddress;
+        return ESP_OK;
+    }
+    if (err != ESP_ERR_NOT_FOUND) return err;
+    err = probe_address(board::kPcaAllCallAddress, "all-call");
+    if (err != ESP_OK && err != ESP_ERR_NOT_FOUND) return err;
+    // ALLCALL can have been disabled by an earlier boot; NACK does not rule out a PCA.
+#if defined(LUMIGRID_PCA_BRINGUP_SCAN)
+    if (s_scan_attempted) return ESP_ERR_NOT_FOUND;
+    s_scan_attempted = true;
+    ESP_LOGW(TAG, "PCA9685: scanning individual address once");
+    unsigned devices = 0, candidates = 0;
+    uint8_t candidate = 0;
+    esp_err_t scan_error = ESP_OK;
+    for (uint8_t addr = 0x08; addr <= 0x77; ++addr) {
+        const esp_err_t probe = i2c_master_probe(s_bus, addr, 8);
+        if (probe == ESP_OK) {
+            ESP_LOGW(TAG, "I2C device detected at 0x%02X", addr);
+            if (addr == board::kPcaAllCallAddress) continue; // Never bind the group address.
+            ++devices;
+            if (addr >= 0x40) { ++candidates; candidate = addr; }
+        } else if (probe != ESP_ERR_NOT_FOUND) {
+            ESP_LOGE(TAG, "I2C scan 0x%02X: %s (%s)", addr,
+                     probe == ESP_ERR_TIMEOUT ? "bus problem" : "driver error", esp_err_to_name(probe));
+            scan_error = probe;
+            break; // A bus fault is not evidence of an empty bus.
+        }
+    }
+    if (scan_error != ESP_OK) return scan_error;
+    if (devices == 1 && candidates == 1) {
+        address = candidate;
+        ESP_LOGW(TAG, "PCA9685 discovered at 0x%02X; board address definition needs confirmation", address);
+        return ESP_OK;
+    }
+    if (devices == 0) ESP_LOGW(TAG, "I2C scan: no individual devices found; PWM subsystem unavailable");
+    else ESP_LOGW(TAG, "I2C scan: %u individual devices, %u PCA-range candidates; refusing to guess; PWM unavailable", devices, candidates);
+#else
+    ESP_LOGW(TAG, "PCA9685: individual address unresolved; bring-up scan requires factory/development firmware");
+#endif
+    return ESP_ERR_NOT_FOUND;
 }
 
 esp_err_t init_i2c_once() {
@@ -71,22 +130,7 @@ esp_err_t init_i2c_once() {
         ESP_LOGI(TAG, "I2C bus ready at 100 kHz; external SDA/SCL pull-ups remain recommended");
     }
 
-    // Do not scan arbitrary addresses: another I2C peripheral can ACK and be
-    // mistaken for a PCA9685. Only accept the board-configured address or the
-    // PCA9685 power-on default address.
-    s_detected_addr = lg::board::kPcaAddress;
-    if (i2c_master_probe(s_bus, s_detected_addr, 50) != ESP_OK) {
-        constexpr uint8_t kDefaultAddress = 0x40;
-        if (s_detected_addr == kDefaultAddress ||
-            i2c_master_probe(s_bus, kDefaultAddress, 50) != ESP_OK) {
-            ESP_LOGE(TAG, "PCA9685 not found at configured 0x%02X or default 0x40",
-                     lg::board::kPcaAddress);
-            return ESP_ERR_NOT_FOUND;
-        }
-        s_detected_addr = kDefaultAddress;
-        ESP_LOGW(TAG, "PCA9685 using default address 0x40 instead of configured 0x%02X",
-                 lg::board::kPcaAddress);
-    }
+    ESP_RETURN_ON_ERROR(resolve_pca_address(s_detected_addr), TAG, "resolve PCA9685 address");
 
     const i2c_device_config_t dev_cfg = {
         .dev_addr_length = I2C_ADDR_BIT_LEN_7,
