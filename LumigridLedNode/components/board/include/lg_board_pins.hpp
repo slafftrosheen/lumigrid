@@ -8,9 +8,9 @@ namespace lg::board {
 constexpr gpio_num_t kPcaOe = GPIO_NUM_25;
 constexpr gpio_num_t kI2cSda = GPIO_NUM_21;
 constexpr gpio_num_t kI2cScl = GPIO_NUM_22;
-// Datasheet defaults; the PCB strap address is not established by repository hardware sources.
-constexpr uint8_t kPcaDefaultAddress = 0x40;
-constexpr uint8_t kPcaAllCallAddress = 0x70;
+// PCA9685 A0/A2/A4 tied HIGH; A1/A3/A5 tied LOW.
+// 0x40 + 0x01 + 0x04 + 0x10 = 0x55.
+constexpr uint8_t kPcaAddress = 0x55;
 
 // Addressable outputs: one RMT TX channel per physical line.
 constexpr gpio_num_t kAledPins[] = {

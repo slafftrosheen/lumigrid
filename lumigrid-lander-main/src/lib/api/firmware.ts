@@ -61,6 +61,13 @@ export interface OtaStatus {
   targetVersion?: string;
   rolledBack: boolean;
   reason?: string;
+  maxFirmwareBytes?: number;
+  runningPartition?: string;
+  nextPartition?: string;
+  partitionLayout?: number;
+  imageBytes?: number;
+  verificationStartedMs?: number;
+  verificationDeadlineMs?: number;
 }
 
 // ── Single canonical OTA uploader ─────────────────────────────────────────────
@@ -136,6 +143,24 @@ export function uploadFirmware(
 
 export function getOtaStatus(ip: string): Promise<OtaStatus> {
   return apiJson<OtaStatus>(ip, '/api/v1/ota/status');
+}
+
+export interface StoragePartition { label: string; type: string; address: number; size: number }
+export interface StorageDiagnostics {
+  physicalFlashBytes: number;
+  configuredFlashBytes: number;
+  partitionLayoutVersion: number;
+  health: string;
+  imageBytes: number;
+  running: StoragePartition | null;
+  nextOta: StoragePartition | null;
+  partitions: StoragePartition[];
+}
+export function getStorageDiagnostics(ip: string): Promise<StorageDiagnostics> {
+  return apiJson<StorageDiagnostics>(ip, '/api/v1/diagnostics/storage');
+}
+export function firmwareFitsSlot(imageBytes: number, slotBytes: number): boolean {
+  return imageBytes > 0 && slotBytes > 0 && imageBytes <= slotBytes;
 }
 
 // ── Job queries ────────────────────────────────────────────────────────────────

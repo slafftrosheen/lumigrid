@@ -6,6 +6,9 @@
 #include "esp_ota_ops.h"
 #include "esp_app_format.h"
 #include "OtaBootVerifier.hpp"
+#include "StorageContract.hpp"
+#include "OtaImagePreflight.hpp"
+#include "esp_chip_info.h"
 #include "ApiAuth.hpp"
 #include "AuditLog.hpp"
 #include "DiagnosticLog.hpp"
@@ -71,7 +74,7 @@ esp_err_t send_json(httpd_req_t* request,
 esp_err_t send_json(httpd_req_t* request, cJSON* json, const char* status = "200 OK") {
     char* body = cJSON_PrintUnformatted(json);
     cJSON_Delete(json);
-    if (!body) return ESP_FAIL;
+    if (!body) { note_api_allocation_failure(); return ESP_FAIL; }
     esp_err_t res = send_json(request, body, status);
     cJSON_free(body);
     return res;
@@ -89,6 +92,15 @@ esp_err_t send_error(httpd_req_t* request,
 esp_err_t send_error_json(httpd_req_t* request, const char* status, cJSON* body) {
     esp_err_t res = send_json(request, body, status);
     return res;
+}
+
+esp_err_t send_memory_admission_error(httpd_req_t* request, uint32_t required) {
+    char body[192];
+    snprintf(body, sizeof(body),
+             "{\"error\":\"insufficient_runtime_memory\",\"requiredBytes\":%u,\"freeBytes\":%u,\"reserveBytes\":%u}",
+             (unsigned)required, (unsigned)capture_runtime_memory().free_8bit,
+             (unsigned)kPostTopologyHeapReserveBytes);
+    return send_json(request, body, "507 Insufficient Storage");
 }
 
 #include <cmath>
@@ -142,16 +154,31 @@ static bool is_sync_follower_read_only(FactoryApi* api_ptr, char* out_leader, si
     return false;
 }
 
+// Count the cJSON value nodes before allocating its tree. Object colons and
+// array elements each own one node; punctuation inside strings is ignored.
+// Strings cannot expand beyond their encoded input plus allocator overhead.
+static cJSON* parse_admitted_json(const char* body, size_t length) {
+    const auto budget = json_scratch_budget(body, length, sizeof(cJSON));
+    if (!budget.bounded) return nullptr;
+    if (!check_memory_admission_snapshot(capture_runtime_memory(), budget.scratch_bytes,
+                                        kPostTopologyHeapReserveBytes, length + 1).accepted) {
+        note_api_allocation_failure();
+        return nullptr;
+    }
+    return cJSON_ParseWithLength(body, length);
+}
+
 esp_err_t read_json(httpd_req_t* request, cJSON** out) {
     if (request->content_len <= 0 ||
         request->content_len > kMaxBodyBytes) {
         return ESP_ERR_INVALID_SIZE;
     }
 
-    std::unique_ptr<char[]> body(new (std::nothrow) char[kMaxBodyBytes + 1]());
-    if (!body) return ESP_ERR_NO_MEM;
+    std::unique_ptr<char[]> body(new (std::nothrow) char[request->content_len + 1]());
+    if (!body) { note_api_allocation_failure(); return ESP_ERR_NO_MEM; }
 
     int received = 0;
+    unsigned timeouts = 0;
 
     while (received < request->content_len) {
         const int result = httpd_req_recv(
@@ -160,14 +187,14 @@ esp_err_t read_json(httpd_req_t* request, cJSON** out) {
             request->content_len - received
         );
 
-        if (result == HTTPD_SOCK_ERR_TIMEOUT) continue;
+        if (result == HTTPD_SOCK_ERR_TIMEOUT) { if (++timeouts >= 3) return ESP_ERR_TIMEOUT; continue; }
         if (result <= 0) return ESP_FAIL;
 
         received += result;
     }
 
     body[received] = '\0';
-    *out = cJSON_ParseWithLength(body.get(), received);
+    *out = parse_admitted_json(body.get(), received);
 
     return *out != nullptr ? ESP_OK : ESP_ERR_INVALID_ARG;
 }
@@ -823,6 +850,44 @@ esp_err_t ws_handler(httpd_req_t* request) {
     return ESP_OK;
 }
 
+static cJSON* storage_json(bool detailed = false) {
+    const auto snap = capture_storage();
+    cJSON* root = cJSON_CreateObject();
+    if (!root) return nullptr;
+    cJSON_AddNumberToObject(root, "physicalFlashBytes", snap.physical_bytes);
+    cJSON_AddNumberToObject(root, "configuredFlashBytes", snap.configured_bytes);
+    cJSON_AddNumberToObject(root, "physicalBytes", snap.physical_bytes);
+    cJSON_AddNumberToObject(root, "configuredBytes", snap.configured_bytes);
+    cJSON_AddNumberToObject(root, "flashMb", snap.physical_bytes / 1048576);
+    cJSON_AddNumberToObject(root, "partitionLayoutVersion", kPartitionLayoutVersion);
+    cJSON_AddNumberToObject(root, "partitionLayout", kPartitionLayoutVersion);
+    cJSON_AddNumberToObject(root, "layout", kPartitionLayoutVersion);
+    cJSON_AddStringToObject(root, "health", storage_health_name(snap.health));
+    cJSON_AddStringToObject(root, "runningPartition", snap.running ? snap.running->label : "unknown");
+    cJSON_AddNumberToObject(root, "appSlotBytes", snap.running ? snap.running->size : 0);
+    cJSON_AddNumberToObject(root, "imageBytes", snap.image_bytes);
+    if (detailed) {
+        auto partition_json = [](const esp_partition_t* p) -> cJSON* {
+            if (!p) return cJSON_CreateNull();
+            cJSON* object = cJSON_CreateObject();
+            cJSON_AddStringToObject(object, "label", p->label);
+            cJSON_AddStringToObject(object, "type", p->type == ESP_PARTITION_TYPE_APP ? "app" : "data");
+            cJSON_AddNumberToObject(object, "address", p->address);
+            cJSON_AddNumberToObject(object, "size", p->size);
+            return object;
+        };
+        cJSON_AddItemToObject(root, "running", partition_json(snap.running));
+        cJSON_AddItemToObject(root, "nextOta", partition_json(snap.next));
+        cJSON* parts = cJSON_AddArrayToObject(root, "partitions");
+        auto iterator = esp_partition_find(ESP_PARTITION_TYPE_ANY, ESP_PARTITION_SUBTYPE_ANY, nullptr);
+        while (iterator) {
+            cJSON_AddItemToArray(parts, partition_json(esp_partition_get(iterator)));
+            iterator = esp_partition_next(iterator);
+        }
+    }
+    return root;
+}
+
 esp_err_t get_info(httpd_req_t* request) {
     FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
     DeviceConfig cfg;
@@ -831,11 +896,21 @@ esp_err_t get_info(httpd_req_t* request) {
         dev_name = cfg.device_name;
     }
     NodeIdentity id = get_node_identity(dev_name);
-    char body[384];
-    snprintf(body, sizeof(body),
-        "{\"id\":\"%s\",\"name\":\"%s\",\"family\":\"%s\",\"model\":\"%s\",\"hardwareRevision\":\"%s\",\"firmwareVersion\":\"%s\"}",
-        id.id, id.name, id.family, id.model, id.hw_revision, id.fw_version);
-    return send_json(request, body);
+    cJSON* root = cJSON_CreateObject();
+    if (!root) return send_error(request, "500 Internal Server Error", "json_encode_failed");
+    cJSON_AddStringToObject(root, "id", id.id);
+    cJSON_AddStringToObject(root, "name", id.name);
+    cJSON_AddStringToObject(root, "family", id.family);
+    cJSON_AddStringToObject(root, "model", id.model);
+    cJSON_AddStringToObject(root, "hardwareRevision", id.hw_revision);
+    cJSON_AddStringToObject(root, "firmwareVersion", id.fw_version);
+    cJSON_AddItemToObject(root, "storage", storage_json());
+    char* body = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (!body) return send_error(request, "500 Internal Server Error", "json_encode_failed");
+    const auto err = send_json(request, body);
+    cJSON_free(body);
+    return err;
 }
 
 } // namespace
@@ -935,6 +1010,7 @@ cJSON* RuntimeHealthSnapshot::to_json() const {
     if (!root) return nullptr;
 
     cJSON_AddNumberToObject(root, "schema_version", kSchemaVersion);
+    cJSON_AddItemToObject(root, "flash", storage_json());
 
     cJSON* sys = cJSON_AddObjectToObject(root, "system");
     cJSON_AddNumberToObject(sys, "uptime_s", system.uptime_s);
@@ -1027,6 +1103,18 @@ esp_err_t get_health(httpd_req_t* request) {
     esp_err_t ret = send_json(request, json);
     cJSON_free(json);
     return ret;
+}
+
+esp_err_t get_diagnostics_storage(httpd_req_t* request) {
+    if (!api::authorize(request, api::ApiRole::Installer)) return ESP_OK;
+    cJSON* root = storage_json(true);
+    if (!root) return send_error(request, "500 Internal Server Error", "json_encode_failed");
+    char* body = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (!body) return send_error(request, "500 Internal Server Error", "json_encode_failed");
+    const auto err = send_json(request, body);
+    cJSON_free(body);
+    return err;
 }
 
 esp_err_t get_diagnostics_output(httpd_req_t* request) {
@@ -1266,6 +1354,7 @@ esp_err_t post_auth_bootstrap(httpd_req_t* request) {
     }
 
     api::AuditLog::instance().log(api::ApiRole::Admin, "auth_bootstrap", "Admin credential bootstrapped");
+    if (auto* api_ptr = static_cast<FactoryApi*>(request->user_ctx)) api_ptr->queue_service_reconcile();
 
     cJSON* resp = cJSON_CreateObject();
     cJSON_AddBoolToObject(resp, "success", true);
@@ -4234,27 +4323,16 @@ esp_err_t post_config_validate(httpd_req_t* request) {
                 required += ccfg.pixel_count * (bpp + 4u) + 256u;
             }
         }
-        uint32_t current_held = 0;
-        DeviceConfig running_cfg{};
-        api_ptr->config()->load_config(running_cfg);
-        for (uint8_t ch = 0; ch < 8; ++ch) {
-            const ChannelConfig& ccfg = running_cfg.channels[ch];
-            if (ccfg.enabled && ccfg.pixel_count > 0) {
-                const uint32_t bpp = (ccfg.addressable_type == AddressableType::SK6812) ? 4u : 3u;
-                current_held += ccfg.pixel_count * (bpp + 4u);
-            }
-        }
         const RuntimeMemorySnapshot mem = capture_runtime_memory();
-        const uint32_t projected_free = (mem.free_8bit + current_held > required)
-                                            ? (mem.free_8bit + current_held - required)
-                                            : 0;
+        const auto admission = check_memory_admission_snapshot(mem, required);
+        const uint32_t projected_free = admission.accepted ? admission.projected_free_bytes : 0;
         if (required > 0) {
             char warn[128];
             snprintf(warn, sizeof(warn),
                      "topology_estimated_remaining_heap_bytes:%u_reserve_bytes:%u",
                      (unsigned)projected_free, (unsigned)kPostTopologyHeapReserveBytes);
             cJSON_AddItemToArray(warnings, cJSON_CreateString(warn));
-            if (projected_free < kPostTopologyHeapReserveBytes) {
+            if (!admission.accepted) {
                 cJSON_AddBoolToObject(resp, "valid", false);
                 cJSON_AddStringToObject(resp, "error", "insufficient_runtime_memory");
                 cJSON_AddNumberToObject(resp, "requiredBytes", required);
@@ -4304,12 +4382,19 @@ esp_err_t put_device_config(httpd_req_t* request) {
     cJSON_Delete(root);
 
     ConfigApplyPlan plan = diff_device_config(old_cfg, candidate_cfg);
+    const uint32_t topology_bytes = addressable_candidate_bytes(candidate_cfg);
+    if (plan.requires_output_reconfigure() && !check_memory_admission(topology_bytes).accepted)
+        return send_memory_admission_error(request, topology_bytes);
     uint32_t cmd_id = api_ptr->command_journal().accept(CommandDomain::Config);
 
     // Apply candidate to runtime first (LG-036 §18, §19)
     if (api_ptr->runtime_apply_func()) {
         esp_err_t apply_err = api_ptr->runtime_apply_func()(old_cfg, candidate_cfg, plan);
         if (apply_err != ESP_OK) {
+            if (apply_err == kErrInsufficientRuntimeMemory) {
+                api_ptr->command_journal().failed(cmd_id, apply_err);
+                return send_memory_admission_error(request, topology_bytes);
+            }
             api_ptr->runtime_apply_func()(candidate_cfg, old_cfg, plan); // rollback
             api_ptr->command_journal().failed(cmd_id, apply_err);
             api::AuditLog::instance().log(api::ApiRole::Admin, "config_apply_failed", "Runtime apply failed, rolled back");
@@ -4339,9 +4424,8 @@ esp_err_t put_device_config(httpd_req_t* request) {
     }
 
     // Read back and verify checksum
-    DeviceConfig verified_cfg{};
-    api_ptr->config()->load_config(verified_cfg);
-    uint32_t resulting_crc = ConfigStore::compute_device_crc(verified_cfg);
+    api_ptr->config()->load_config(old_cfg);
+    uint32_t resulting_crc = ConfigStore::compute_device_crc(old_cfg);
 
     api_ptr->command_journal().applied(cmd_id);
     api_ptr->notify_status_async();
@@ -5628,12 +5712,32 @@ esp_err_t post_ota(httpd_req_t* request) {
     if (request->content_len > update_partition->size) {
         char err_body[128];
         snprintf(err_body, sizeof(err_body),
-                 "{\"error\":\"firmware_image_too_large\",\"maxBytes\":%" PRIu32 "}",
-                 update_partition->size);
-        httpd_resp_set_status(request, "400 Bad Request");
+                 "{\"error\":\"firmware_too_large\",\"firmwareBytes\":%u,\"maxFirmwareBytes\":%" PRIu32 "}",
+                 (unsigned)request->content_len, update_partition->size);
+        httpd_resp_set_status(request, "413 Payload Too Large");
         httpd_resp_set_type(request, "application/json");
         return httpd_resp_sendstr(request, err_body);
     }
+
+    const auto storage = capture_storage();
+    if (storage.health != StorageHealth::Healthy)
+        return send_error(request, "409 Conflict", storage_health_name(storage.health));
+    if (request->content_len < kOtaDescriptorPrefixBytes)
+        return send_error(request, "400 Bad Request", "invalid_image_descriptor");
+    uint8_t prefix[kOtaDescriptorPrefixBytes];
+    size_t prefix_received = 0;
+    unsigned prefix_timeouts = 0;
+    while (prefix_received < sizeof(prefix)) {
+        const int received = httpd_req_recv(request, reinterpret_cast<char*>(prefix) + prefix_received, sizeof(prefix) - prefix_received);
+        if (received == HTTPD_SOCK_ERR_TIMEOUT && ++prefix_timeouts < 3) continue;
+        if (received <= 0) return send_error(request, "400 Bad Request", "ota_receive_failed");
+        prefix_received += received;
+    }
+    esp_app_desc_t candidate{};
+    esp_chip_info_t chip{};
+    esp_chip_info(&chip);
+    if (!ota_image_prefix_valid(prefix, sizeof(prefix), chip.revision, &candidate))
+        return send_error(request, "400 Bad Request", "invalid_image_descriptor");
 
     uint32_t cmd_id = api_ptr->command_journal().accept(CommandDomain::Ota);
     uint32_t job_id = 0;
@@ -5653,16 +5757,22 @@ esp_err_t post_ota(httpd_req_t* request) {
         return send_error(request, "500 Internal Server Error", "OTA begin failed");
     }
 
+    err = esp_ota_write(update_handle, prefix, sizeof(prefix));
+    if (err != ESP_OK) {
+        esp_ota_abort(update_handle);
+        api_ptr->job_manager().fail_job(job_id, err, "OTA prefix write failed");
+        api_ptr->command_journal().failed(cmd_id, err);
+        return send_error(request, "500 Internal Server Error", "ota_write_failed");
+    }
     char buf[1024];
     int received = 0;
-    int remaining = request->content_len;
-    int total = (remaining > 0) ? remaining : 1;
+    int remaining = request->content_len - sizeof(prefix);
+    int total = request->content_len;
+    unsigned timeouts = 0;
 
     while (remaining > 0) {
         if ((received = httpd_req_recv(request, buf, std::min(remaining, (int)sizeof(buf)))) <= 0) {
-            if (received == HTTPD_SOCK_ERR_TIMEOUT) {
-                continue;
-            }
+            if (received == HTTPD_SOCK_ERR_TIMEOUT && ++timeouts < 3) continue;
             esp_ota_abort(update_handle);
             api_ptr->job_manager().fail_job(job_id, ESP_FAIL, "OTA receive failed");
             api_ptr->command_journal().failed(cmd_id, ESP_FAIL);
@@ -5675,6 +5785,7 @@ esp_err_t post_ota(httpd_req_t* request) {
             api_ptr->command_journal().failed(cmd_id, err);
             return send_error(request, "500 Internal Server Error", "OTA write failed");
         }
+        timeouts = 0;
         remaining -= received;
         uint8_t pct = static_cast<uint8_t>(std::min(90, 5 + (int)(((float)(total - remaining) / total) * 85)));
         api_ptr->job_manager().update_progress(job_id, JobState::Running, pct);
@@ -5690,7 +5801,6 @@ esp_err_t post_ota(httpd_req_t* request) {
     }
 
     // Validate OTA image descriptor (§52)
-    esp_app_desc_t candidate{};
     err = esp_ota_get_partition_description(update_partition, &candidate);
     if (err != ESP_OK || strcmp(candidate.project_name, "lumigrid_led_node") != 0 || strlen(candidate.version) == 0) {
         api_ptr->job_manager().fail_job(job_id, ESP_ERR_INVALID_ARG, "Invalid project descriptor");
@@ -5712,7 +5822,18 @@ esp_err_t post_ota(httpd_req_t* request) {
     strncpy(ota_st.previous_version, OtaBootVerifier::instance().running_version(), sizeof(ota_st.previous_version) - 1);
     strncpy(ota_st.target_version, candidate.version, sizeof(ota_st.target_version) - 1);
     strncpy(ota_st.target_partition, update_partition->label, sizeof(ota_st.target_partition) - 1);
-    OtaBootVerifier::instance().save_state(ota_st);
+    ota_st.last_reason[0] = 0;
+    ota_st.last_error = 0;
+    ota_st.candidate_boot_ms = 0;
+    ota_st.verification_started_ms = 0;
+    ota_st.verification_deadline_ms = 0;
+    if (OtaBootVerifier::instance().save_state(ota_st) != ESP_OK) {
+        // Do not reboot into a candidate whose verification journal was not saved.
+        esp_ota_set_boot_partition(esp_ota_get_running_partition());
+        api_ptr->job_manager().fail_job(job_id, ESP_FAIL, "OTA journal persistence failed");
+        api_ptr->command_journal().failed(cmd_id, ESP_FAIL);
+        return send_error(request, "500 Internal Server Error", "ota_state_persistence_failed");
+    }
 
     api_ptr->command_journal().applied(cmd_id);
     api_ptr->notify_status_async();
@@ -5734,13 +5855,23 @@ esp_err_t get_ota_status(httpd_req_t* request) {
 
     const auto& verifier = OtaBootVerifier::instance();
     cJSON* root = cJSON_CreateObject();
-    cJSON_AddStringToObject(root, "state", ota_boot_state_to_name(verifier.boot_state()));
+    const auto persisted = verifier.state();
+    const auto storage = capture_storage();
+    cJSON_AddNumberToObject(root, "maxFirmwareBytes", storage.next ? storage.next->size : 0);
+    cJSON_AddStringToObject(root, "runningPartition", storage.running ? storage.running->label : "unknown");
+    cJSON_AddStringToObject(root, "nextPartition", storage.next ? storage.next->label : "unknown");
+    cJSON_AddNumberToObject(root, "partitionLayout", kPartitionLayoutVersion);
+    cJSON_AddNumberToObject(root, "imageBytes", storage.image_bytes);
+    cJSON_AddNumberToObject(root, "verificationStartedMs", persisted.verification_started_ms);
+    cJSON_AddNumberToObject(root, "verificationDeadlineMs", persisted.verification_deadline_ms);
+    cJSON_AddNumberToObject(root, "candidateBootMs", persisted.candidate_boot_ms);
+    cJSON_AddStringToObject(root, "state", ota_boot_state_to_name(persisted.state));
     cJSON_AddStringToObject(root, "runningVersion", verifier.running_version());
-    cJSON_AddStringToObject(root, "previousVersion", verifier.previous_version());
-    cJSON_AddStringToObject(root, "targetVersion", verifier.target_version());
+    cJSON_AddStringToObject(root, "previousVersion", persisted.previous_version);
+    cJSON_AddStringToObject(root, "targetVersion", persisted.target_version);
     cJSON_AddBoolToObject(root, "rolledBack", verifier.rolled_back());
-    if (strlen(verifier.last_reason()) > 0) {
-        cJSON_AddStringToObject(root, "reason", verifier.last_reason());
+    if (strlen(persisted.last_reason) > 0) {
+        cJSON_AddStringToObject(root, "reason", persisted.last_reason);
     }
 
     char* json_str = cJSON_PrintUnformatted(root);
@@ -6300,6 +6431,8 @@ esp_err_t get_backup(httpd_req_t* request) {
     cJSON_AddStringToObject(src, "model", identity.model);
     cJSON_AddStringToObject(src, "firmwareVersion", identity.fw_version);
     cJSON_AddStringToObject(src, "hardwareRevision", identity.hw_revision);
+    cJSON_AddNumberToObject(src, "partitionLayoutVersion", kPartitionLayoutVersion);
+    cJSON_AddNumberToObject(src, "configuredFlashBytes", capture_storage().configured_bytes);
     cJSON_AddItemToObject(hdr, "source", src);
     cJSON* pol = cJSON_CreateObject();
     cJSON_AddBoolToObject(pol, "authIncluded", false);
@@ -6420,7 +6553,7 @@ struct ParsedBackupPackage {
 static constexpr size_t kMaxRestoreRecordSize = 16384;
 
 static esp_err_t ingest_backup_package(httpd_req_t* request, ParsedBackupPackage& pkg, ConfigStore* store) {
-    if (request->content_len <= 0) {
+    if (request->content_len <= 0 || request->content_len > 1024 * 1024) {
         snprintf(pkg.error, sizeof(pkg.error), "empty_payload");
         return ESP_ERR_INVALID_ARG;
     }
@@ -6437,13 +6570,17 @@ static esp_err_t ingest_backup_package(httpd_req_t* request, ParsedBackupPackage
     int remaining = request->content_len;
     size_t line_pos = 0;
     bool is_first_line = true;
+    unsigned timeouts = 0;
     bool is_legacy_v3 = false;
     std::string v3_payload;
 
     while (remaining > 0) {
         char ch = 0;
         int ret = httpd_req_recv(request, &ch, 1);
-        if (ret == HTTPD_SOCK_ERR_TIMEOUT) continue;
+        if (ret == HTTPD_SOCK_ERR_TIMEOUT) {
+            if (++timeouts >= 3) { snprintf(pkg.error, sizeof(pkg.error), "receive_timeout"); return ESP_ERR_TIMEOUT; }
+            continue;
+        }
         if (ret <= 0) {
             snprintf(pkg.error, sizeof(pkg.error), "receive_error");
             return ESP_FAIL;
@@ -6456,7 +6593,11 @@ static esp_err_t ingest_backup_package(httpd_req_t* request, ParsedBackupPackage
 
         if (ch == '\n' || remaining == 0) {
             if (ch != '\n' && remaining == 0) {
-                if (line_pos < kMaxRecordSize) line_buf[line_pos++] = ch;
+                if (line_pos >= kMaxRecordSize) {
+                    snprintf(pkg.error, sizeof(pkg.error), "record_too_large");
+                    return ESP_ERR_INVALID_SIZE;
+                }
+                line_buf[line_pos++] = ch;
             }
             line_buf[line_pos] = '\0';
 
@@ -6482,7 +6623,7 @@ static esp_err_t ingest_backup_package(httpd_req_t* request, ParsedBackupPackage
                 }
 
                 // Parse v4 NDJSON record
-                cJSON* rec = cJSON_Parse(line_buf.get());
+                cJSON* rec = parse_admitted_json(line_buf.get(), line_pos);
                 if (!rec) {
                     snprintf(pkg.error, sizeof(pkg.error), "malformed_record");
                     return ESP_ERR_INVALID_ARG;
@@ -6587,7 +6728,7 @@ static esp_err_t ingest_backup_package(httpd_req_t* request, ParsedBackupPackage
     // Handle legacy v3 if detected (§86)
     if (is_legacy_v3) {
         pkg.schema = 3;
-        cJSON* v3_root = cJSON_Parse(v3_payload.c_str());
+        cJSON* v3_root = parse_admitted_json(v3_payload.c_str(), v3_payload.size());
         if (!v3_root) {
             snprintf(pkg.error, sizeof(pkg.error), "malformed_v3_json");
             return ESP_ERR_INVALID_ARG;
@@ -6718,7 +6859,11 @@ esp_err_t post_restore_validate(httpd_req_t* request) {
         return send_error(request, "500 Internal Server Error", "ConfigStore not available");
     }
 
-    ParsedBackupPackage pkg{};
+    constexpr uint32_t scratch = sizeof(ParsedBackupPackage) + kMaxRestoreRecordSize + 32768u;
+    if (!check_memory_admission(scratch).accepted) return send_memory_admission_error(request, scratch);
+    std::unique_ptr<ParsedBackupPackage> storage(new (std::nothrow) ParsedBackupPackage{});
+    if (!storage) { note_api_allocation_failure(); return send_memory_admission_error(request, scratch); }
+    auto& pkg = *storage;
     esp_err_t err = ingest_backup_package(request, pkg, api_ptr->config());
     if (err != ESP_OK) {
         cJSON* err_resp = cJSON_CreateObject();
@@ -6795,7 +6940,7 @@ esp_err_t post_restore(httpd_req_t* request) {
     // allocatable while preserving the post-operation reserve.
     {
         const MemoryAdmissionResult admission =
-            check_memory_admission(kMaxRestoreRecordSize + 2048);
+            check_memory_admission(sizeof(ParsedBackupPackage) + sizeof(RestoreRollbackSnapshot) + kMaxRestoreRecordSize + 32768u);
         if (!admission.accepted) {
             char err_body[192];
             snprintf(err_body, sizeof(err_body),
@@ -6820,7 +6965,14 @@ esp_err_t post_restore(httpd_req_t* request) {
     api_ptr->job_manager().update_progress(job_id, JobState::Preparing, 5);
 
     // Ingest and validate package
-    ParsedBackupPackage pkg{};
+    std::unique_ptr<ParsedBackupPackage> package_storage(new (std::nothrow) ParsedBackupPackage{});
+    if (!package_storage) {
+        note_api_allocation_failure();
+        api_ptr->job_manager().fail_job(job_id, ESP_ERR_NO_MEM, "out_of_memory");
+        api_ptr->command_journal().failed(cmd_id, ESP_ERR_NO_MEM);
+        return send_memory_admission_error(request, sizeof(ParsedBackupPackage));
+    }
+    auto& pkg = *package_storage;
     esp_err_t parse_err = ingest_backup_package(request, pkg, api_ptr->config());
     if (parse_err != ESP_OK) {
         api_ptr->job_manager().fail_job(job_id, parse_err, pkg.error);
@@ -7228,18 +7380,34 @@ static esp_err_t get_certification_report(httpd_req_t* request) {
         return send_error(request, "503 Service Unavailable", "CertificationService not available");
     }
 
-    // LG-038.3 §43: report generation builds a full cJSON tree; admit it
-    // against the operation's scratch requirement instead of failing halfway.
-    {
-        const MemoryAdmissionResult admission =
-            check_memory_admission(4096 /* report tree scratch */);
-        if (!admission.accepted) {
-            return send_error(request, "507 Insufficient Storage", "insufficient_runtime_memory");
-        }
+    // Fixed report headers plus one test tree/string at a time. Never retain
+    // all test objects and their serialized document simultaneously.
+    constexpr uint32_t scratch = 8192;
+    if (!check_memory_admission(scratch).accepted) return send_memory_admission_error(request, scratch);
+    auto* service = api_ptr->certification_service();
+    cJSON* headers = service->generate_report_json(false);
+    char* body = cJSON_PrintUnformatted(headers);
+    cJSON_Delete(headers);
+    if (!body) { note_api_allocation_failure(); return ESP_ERR_NO_MEM; }
+    std::unique_ptr<char, decltype(&cJSON_free)> owned_body(body, cJSON_free);
+    char* tests = strstr(body, "\"tests\":[]");
+    if (!tests) return ESP_FAIL;
+    char* suffix = tests + strlen("\"tests\":[");
+    httpd_resp_set_type(request, "application/json");
+    httpd_resp_set_hdr(request, "Cache-Control", "no-store");
+    if (httpd_resp_send_chunk(request, body, suffix - body) != ESP_OK) return ESP_FAIL;
+    const size_t count = service->record().result_count;
+    for (size_t i = 0; i < count; ++i) {
+        cJSON* result = service->generate_report_result_json(i);
+        char* json = cJSON_PrintUnformatted(result);
+        cJSON_Delete(result);
+        if (!json) { note_api_allocation_failure(); return ESP_ERR_NO_MEM; }
+        std::unique_ptr<char, decltype(&cJSON_free)> owned_result(json, cJSON_free);
+        if (i && httpd_resp_send_chunk(request, ",", 1) != ESP_OK) return ESP_FAIL;
+        if (httpd_resp_send_chunk(request, json, strlen(json)) != ESP_OK) return ESP_FAIL;
     }
-
-    cJSON* report = api_ptr->certification_service()->generate_report_json();
-    return send_json(request, report, "200 OK");
+    if (httpd_resp_send_chunk(request, suffix, strlen(suffix)) != ESP_OK) return ESP_FAIL;
+    return httpd_resp_send_chunk(request, nullptr, 0);
 }
 
 struct WsBroadcastArg {
@@ -7281,7 +7449,7 @@ inline void preview_sample_lane(uint8_t* out, size_t out_cap,
     const auto& ch_frame = frame.channels[lane];
     for (uint16_t s = 0; s < kPreviewSamplesPerLane; ++s) {
         const uint16_t px = static_cast<uint16_t>(
-            (static_cast<uint32_t>(s) * configured_pixels) / kPreviewSamplesPerLane);
+            (static_cast<uint32_t>(s) * (configured_pixels - 1)) / (kPreviewSamplesPerLane - 1));
         if (px >= MAX_PIXELS) break;
         const auto& lv = ch_frame.pixels[px];
         const size_t off = static_cast<size_t>(s) * 3;
@@ -7405,6 +7573,7 @@ esp_err_t FactoryApi::start(
         { .uri = "/api/v1/palettes",          .method = HTTP_GET,  .handler = get_palettes,       .user_ctx = nullptr },
         { .uri = "/api/v1/health",            .method = HTTP_GET,  .handler = get_health,         .user_ctx = nullptr },
         { .uri = "/api/v1/diagnostics/output",.method = HTTP_GET,  .handler = get_diagnostics_output, .user_ctx = nullptr },
+        { .uri = "/api/v1/diagnostics/storage", .method = HTTP_GET, .handler = get_diagnostics_storage, .user_ctx = nullptr },
         { .uri = "/api/v1/diagnostics/memory", .method = HTTP_GET,  .handler = get_diagnostics_memory, .user_ctx = nullptr },
         { .uri = "/api/v1/logs",              .method = HTTP_GET,  .handler = get_logs,           .user_ctx = nullptr },
         { .uri = "/api/v1/sequence",          .method = HTTP_GET,  .handler = get_sequence,     .user_ctx = nullptr },
@@ -7452,6 +7621,7 @@ esp_err_t FactoryApi::start(
     http_config.server_port = signage_port;
     http_config.uri_match_fn = httpd_uri_match_wildcard;
     ESP_RETURN_ON_ERROR(httpd_start(&signage_server_, &http_config), "factory-api", "start server");
+    task_stack_registry().register_task("httpd", http_config.stack_size);
     factory_server_ = signage_server_;
 
     for (const auto& endpoint : factory_routes) {
@@ -7522,7 +7692,7 @@ esp_err_t FactoryApi::start(
             arg->api = this;
 
             // Fixed-size bounded payload (§54): no vector, no resize, no
-            // per-frame heap churn. Header declares the sampling contract.
+            // variable-size payload. One coalesced allocation owns the queued frame.
             arg->len = static_cast<uint16_t>(kPreviewMaxBytes);
             arg->payload[0] = kPreviewSchema;                       // schema
             arg->payload[1] = kPreviewLanes;                        // lane count
@@ -7595,7 +7765,7 @@ void FactoryApi::ws_broadcast_work(void* arg) {
 
 void FactoryApi::ws_broadcast_preview_work(void* arg) {
     std::unique_ptr<WsPreviewArg> msg(static_cast<WsPreviewArg*>(arg));
-    msg->api->preview_pending_ = false;
+    struct Complete { FactoryApi* api; ~Complete() { api->preview_pending_.store(false); } } complete{msg->api};
 
     // LG-038.3 §55/§82: fixed bounded array; no heap vector per broadcast.
     int client_fds[kMaxClientListFds];
@@ -7639,6 +7809,17 @@ void FactoryApi::notify_status_async() {
         status_pending_.store(false);
         delete arg;
     }
+}
+
+void FactoryApi::queue_service_reconcile() {
+    if (!factory_server_ || !service_reconcile_callback_) return;
+    bool expected = false;
+    if (!service_reconcile_pending_.compare_exchange_strong(expected, true)) return;
+    if (httpd_queue_work(factory_server_, [](void* arg) {
+        auto* self = static_cast<FactoryApi*>(arg);
+        self->service_reconcile_pending_.store(false);
+        if (self->service_reconcile_callback_) self->service_reconcile_callback_();
+    }, this) != ESP_OK) service_reconcile_pending_.store(false);
 }
 
 void FactoryApi::stop() {

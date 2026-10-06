@@ -90,6 +90,12 @@ export interface BurnInReportMetrics {
   startFreeHeap: number;
   minFreeHeap: number;
   endFreeHeap: number;
+  startFree8?: number;
+  minFree8?: number;
+  endFree8?: number;
+  startLargest8?: number;
+  minLargest8?: number;
+  endLargest8?: number;
   networkDisconnects: number;
   watchdogResets: number;
 }

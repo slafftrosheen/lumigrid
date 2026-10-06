@@ -59,9 +59,7 @@ uint32_t clamp_duration(uint32_t duration_ms, bool is_burn_in = false) {
 } // namespace
 
 FactoryRunner::FactoryRunner(ControlSourceManager& source_manager, OutputController& controller)
-    : source_manager_(source_manager), controller_(controller) {
-    shutdown_sem_ = xSemaphoreCreateBinary();
-}
+    : source_manager_(source_manager), controller_(controller) {}
 
 FactoryRunner::~FactoryRunner() {
     stop();
@@ -100,11 +98,18 @@ esp_err_t FactoryRunner::start() {
         ESP_LOGW("FactoryRunner", "start() rejected: previous factory task has not terminated");
         return ESP_ERR_INVALID_STATE;
     }
-    lifecycle_state_.store(LifecycleState::Starting, std::memory_order_release);
+    if (!lifecycle_state_.compare_exchange_strong(current, LifecycleState::Starting)) {
+        return ESP_ERR_INVALID_STATE;
+    }
     shutting_down_.store(false, std::memory_order_release);
 
     if (shutdown_sem_ == nullptr) {
         shutdown_sem_ = xSemaphoreCreateBinary();
+    }
+    if (!shutdown_sem_) {
+        lifecycle_state_.store(LifecycleState::Faulted, std::memory_order_release);
+        note_factory_task_start_failure();
+        return ESP_ERR_NO_MEM;
     }
 
     queue_ = xQueueCreate(kQueueDepth, sizeof(FactoryCommand));
@@ -167,10 +172,10 @@ esp_err_t FactoryRunner::start() {
 
 bool FactoryRunner::ensure_worker_started() {
     const LifecycleState current = lifecycle_state_.load(std::memory_order_acquire);
-    if (current == LifecycleState::Running ||
-        current == LifecycleState::Starting) {
+    if (current == LifecycleState::Running) {
         return true;
     }
+    if (current == LifecycleState::Starting) return false;
     if (current == LifecycleState::Stopping) {
         return false;
     }
@@ -953,6 +958,7 @@ void FactoryRunner::task() {
         vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(kFramePeriodMs));
     }
     blackout();
+    task_stack_registry().unregister_task("lg_factory");
     if (shutdown_sem_) xSemaphoreGive(shutdown_sem_);
     vTaskDelete(NULL);
 }

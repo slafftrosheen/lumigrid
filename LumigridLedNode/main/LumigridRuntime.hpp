@@ -153,11 +153,11 @@ public:
     const char* last_apply_error() const { return last_apply_error_; }
     bool is_network_apply_in_progress() const { return apply_in_progress_.load(); }
 
-    // LG-038.3 §60: active service state for diagnostics. Reflects the last    // reconciled plan plus actual started_subsystems_ truth.
+    // LG-038.3 §60: active service state for diagnostics. Reflects the last
+    // reconciled plan plus actual started_subsystems_ truth.
     RuntimeServicePlan service_plan() const;
 
     // LG-038.3 §61-65: deterministic plan for the current state.
-    RuntimeServicePlan compute_plan() const;
 
     RecoveryStatus get_recovery_status() const;
     esp_err_t apply_device_config(const DeviceConfig& old_cfg, const DeviceConfig& new_cfg, const ConfigApplyPlan& plan);
@@ -169,6 +169,7 @@ public:
     void set_restore_state(RestoreState s) { restore_state_ = s; }
 
 private:
+    void write_serial_diagnostics();
 
     static void recovery_task(void* arg);
     static void net_apply_worker(void* arg);
@@ -211,17 +212,17 @@ private:
     CertificationService cert_service_;
 
     struct StartedSubsystems {
-        bool wifi = false;
-        bool api = false;
-        bool mdns = false;
-        bool fleet_discovery = false;
-        bool artnet = false;
-        bool sacn = false;
-        bool scheduler = false;
-        bool node_sync = false;
-        bool mqtt = false;
-        bool lighting = false;
-        bool factory = false;
+        std::atomic<bool> wifi = false;
+        std::atomic<bool> api = false;
+        std::atomic<bool> mdns = false;
+        std::atomic<bool> fleet_discovery = false;
+        std::atomic<bool> artnet = false;
+        std::atomic<bool> sacn = false;
+        std::atomic<bool> scheduler = false;
+        std::atomic<bool> node_sync = false;
+        std::atomic<bool> mqtt = false;
+        std::atomic<bool> lighting = false;
+        std::atomic<bool> factory = false;
     } started_subsystems_{};
 
     const StartedSubsystems& started_subsystems() const { return started_subsystems_; }
@@ -230,7 +231,8 @@ private:
     CommissioningPlanState commissioning_plan_state() const;
 
     RuntimeLifecycle lifecycle_state_ = RuntimeLifecycle::Constructed;
-    bool services_started_ = false;
+    std::atomic<bool> services_started_{false};
+    SemaphoreHandle_t services_mutex_ = nullptr;
     // Semaphore signalled by the WiFi callback when network is ready.
     // Declared atomic so the event-loop task always observes the correct
     // pointer with acquire/release ordering (no data race with creator task).
@@ -245,8 +247,8 @@ private:
     uint32_t configuration_error_count_ = 0;
     char configuration_first_error_[128] = {0};
 
-    QueueHandle_t net_apply_queue_ = nullptr;
-    TaskHandle_t net_apply_task_ = nullptr;
+    std::atomic<TaskHandle_t> net_apply_task_{nullptr};
+    std::atomic<bool> network_apply_stopping_{false};
     // LG-038.3 §10: single owned pending request instead of a permanent
     // queue + worker. apply_in_progress_ still serializes applies.
     NetworkApplyRequest pending_apply_{};

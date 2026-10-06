@@ -23,6 +23,7 @@ constexpr uint8_t kRegLed0OnL  = 0x06;
 constexpr uint8_t kRegPrescale = 0xFE;
 constexpr uint8_t kMode1AutoInc = (1u << 5);
 constexpr uint8_t kMode1Sleep   = (1u << 4);
+constexpr uint8_t kMode1Restart = (1u << 7);
 constexpr uint8_t kMode2OutDrv  = (1u << 2);
 constexpr uint8_t kPrescaleFor1kHz = 5;
 
@@ -31,8 +32,6 @@ static_assert(kPrescaleFor1kHz >= 3, "PCA9685 prescale below datasheet minimum")
 i2c_master_bus_handle_t s_bus = nullptr;
 i2c_master_dev_handle_t s_dev = nullptr;
 SemaphoreHandle_t s_i2c_mutex = nullptr;
-uint8_t s_detected_addr = 0;
-bool s_scan_attempted = false;
 std::atomic<bool> s_outputs_enabled{false};
 
 void disable_pwm_outputs() {
@@ -44,64 +43,6 @@ void disable_pwm_outputs() {
 void enable_pwm_outputs() {
     gpio_set_level(lg::board::kPcaOe, 0);
     s_outputs_enabled.store(true, std::memory_order_release);
-}
-
-esp_err_t probe_address(uint8_t address, const char* role) {
-    const esp_err_t err = i2c_master_probe(s_bus, address, 8);
-    if (err == ESP_OK || err == ESP_ERR_NOT_FOUND) {
-        ESP_LOGI(TAG, "PCA9685: %s address 0x%02X %s", role, address,
-                 err == ESP_OK ? "ACK" : "NACK");
-    } else {
-        ESP_LOGE(TAG, "PCA9685: %s address 0x%02X %s (%s)", role, address,
-                 err == ESP_ERR_TIMEOUT ? "bus problem" : "driver error", esp_err_to_name(err));
-    }
-    return err;
-}
-
-esp_err_t resolve_pca_address(uint8_t& address) {
-    address = 0; // No resolved individual address yet.
-    esp_err_t err = probe_address(board::kPcaDefaultAddress, "default");
-    if (err == ESP_OK) {
-        address = board::kPcaDefaultAddress;
-        return ESP_OK;
-    }
-    if (err != ESP_ERR_NOT_FOUND) return err;
-    err = probe_address(board::kPcaAllCallAddress, "all-call");
-    if (err != ESP_OK && err != ESP_ERR_NOT_FOUND) return err;
-    // ALLCALL can have been disabled by an earlier boot; NACK does not rule out a PCA.
-#if defined(LUMIGRID_PCA_BRINGUP_SCAN)
-    if (s_scan_attempted) return ESP_ERR_NOT_FOUND;
-    s_scan_attempted = true;
-    ESP_LOGW(TAG, "PCA9685: scanning individual address once");
-    unsigned devices = 0, candidates = 0;
-    uint8_t candidate = 0;
-    esp_err_t scan_error = ESP_OK;
-    for (uint8_t addr = 0x08; addr <= 0x77; ++addr) {
-        const esp_err_t probe = i2c_master_probe(s_bus, addr, 8);
-        if (probe == ESP_OK) {
-            ESP_LOGW(TAG, "I2C device detected at 0x%02X", addr);
-            if (addr == board::kPcaAllCallAddress) continue; // Never bind the group address.
-            ++devices;
-            if (addr >= 0x40) { ++candidates; candidate = addr; }
-        } else if (probe != ESP_ERR_NOT_FOUND) {
-            ESP_LOGE(TAG, "I2C scan 0x%02X: %s (%s)", addr,
-                     probe == ESP_ERR_TIMEOUT ? "bus problem" : "driver error", esp_err_to_name(probe));
-            scan_error = probe;
-            break; // A bus fault is not evidence of an empty bus.
-        }
-    }
-    if (scan_error != ESP_OK) return scan_error;
-    if (devices == 1 && candidates == 1) {
-        address = candidate;
-        ESP_LOGW(TAG, "PCA9685 discovered at 0x%02X; board address definition needs confirmation", address);
-        return ESP_OK;
-    }
-    if (devices == 0) ESP_LOGW(TAG, "I2C scan: no individual devices found; PWM subsystem unavailable");
-    else ESP_LOGW(TAG, "I2C scan: %u individual devices, %u PCA-range candidates; refusing to guess; PWM unavailable", devices, candidates);
-#else
-    ESP_LOGW(TAG, "PCA9685: individual address unresolved; bring-up scan requires factory/development firmware");
-#endif
-    return ESP_ERR_NOT_FOUND;
 }
 
 esp_err_t init_i2c_once() {
@@ -127,14 +68,15 @@ esp_err_t init_i2c_once() {
             .flags = { .enable_internal_pullup = true },
         };
         ESP_RETURN_ON_ERROR(i2c_new_master_bus(&bus_cfg, &s_bus), TAG, "i2c bus create");
-        ESP_LOGI(TAG, "I2C bus ready at 100 kHz; external SDA/SCL pull-ups remain recommended");
+        ESP_LOGI(TAG, "I2C bus created SDA=%d SCL=%d 100kHz",
+                 (int)lg::board::kI2cSda, (int)lg::board::kI2cScl);
     }
 
-    ESP_RETURN_ON_ERROR(resolve_pca_address(s_detected_addr), TAG, "resolve PCA9685 address");
-
+    // Bind directly; presence is decided by real register transactions, not i2c_master_probe().
+    ESP_LOGI(TAG, "binding PCA9685 at board address 0x%02X", lg::board::kPcaAddress);
     const i2c_device_config_t dev_cfg = {
         .dev_addr_length = I2C_ADDR_BIT_LEN_7,
-        .device_address = s_detected_addr,
+        .device_address = lg::board::kPcaAddress,
         .scl_speed_hz = 100000,
     };
     ESP_RETURN_ON_ERROR(i2c_master_bus_add_device(s_bus, &dev_cfg, &s_dev), TAG, "add PCA9685");
@@ -200,7 +142,33 @@ esp_err_t Pca9685Driver::init() {
     disable_pwm_outputs();
 
     ESP_RETURN_ON_ERROR(init_i2c_once(), TAG, "I2C init");
-    ESP_LOGI(TAG, "Initialising PCA9685 at 0x%02X, target PWM ~1017 Hz", s_detected_addr);
+
+    // Detection = a real PCA transaction. First try a MODE1 read.
+    {
+        uint8_t reg = kRegMode1;
+        uint8_t mode1_probe = 0;
+        xSemaphoreTake(s_i2c_mutex, portMAX_DELAY);
+        esp_err_t rerr = i2c_master_transmit_receive(s_dev, &reg, 1, &mode1_probe, 1, 100);
+        xSemaphoreGive(s_i2c_mutex);
+        if (rerr == ESP_OK) {
+            ESP_LOGI(TAG, "MODE1 initial read at 0x%02X = 0x%02X", lg::board::kPcaAddress, mode1_probe);
+        } else {
+            ESP_LOGW(TAG, "MODE1 read failed: %s", esp_err_to_name(rerr));
+            // Reproduce the known-working native sequence: a direct register write.
+            const esp_err_t werr = write_register(kRegMode1, kMode1Sleep | kMode1AutoInc);
+            if (werr != ESP_OK) {
+                ESP_LOGE(TAG, "direct MODE1 write failed: %s", esp_err_to_name(werr));
+                disable_pwm_outputs();
+                // Release the binding so a later init retries a fresh bind.
+                i2c_master_bus_rm_device(s_dev);
+                s_dev = nullptr;
+                return werr;
+            }
+            ESP_LOGI(TAG, "direct MODE1 write succeeded; PCA9685 present");
+        }
+    }
+
+    ESP_LOGI(TAG, "configuring PCA9685 at 0x%02X, target PWM ~1017 Hz", lg::board::kPcaAddress);
 
     // PRE_SCALE may only be changed while SLEEP=1.
     ESP_RETURN_ON_ERROR(write_register(kRegMode1, kMode1Sleep | kMode1AutoInc), TAG, "sleep");
@@ -208,6 +176,7 @@ esp_err_t Pca9685Driver::init() {
     ESP_RETURN_ON_ERROR(write_register(kRegMode2, kMode2OutDrv), TAG, "mode2");
     ESP_RETURN_ON_ERROR(write_register(kRegMode1, kMode1AutoInc), TAG, "wake");
     vTaskDelay(pdMS_TO_TICKS(2)); // datasheet oscillator wake-up is <= 500 us
+    ESP_RETURN_ON_ERROR(write_register(kRegMode1, kMode1AutoInc | kMode1Restart), TAG, "restart");
 
     // Read back MODE1, MODE2, PRE_SCALE to verify correct hardware state
     uint8_t reg_m1 = kRegMode1;
@@ -245,7 +214,7 @@ esp_err_t Pca9685Driver::init() {
     }
 
     initialized_ = true;
-    ESP_LOGI(TAG, "PCA9685 verified (MODE1=0x%02X, MODE2=0x%02X, PRE_SCALE=%u) and initialized to zero",
+    ESP_LOGI(TAG, "verified MODE1=0x%02X MODE2=0x%02X PRE_SCALE=%u; initialized to zero",
              m1, m2, pre);
     return ESP_OK;
 }
@@ -304,7 +273,7 @@ PcaDiagnostics Pca9685Driver::diagnostics() const {
     PcaDiagnostics diag;
     diag.initialized = initialized_;
     diag.outputs_enabled = is_outputs_enabled();
-    diag.address = s_detected_addr;
+    diag.address = lg::board::kPcaAddress;
     diag.i2c_hz = 100000;
     diag.pwm_hz = 1017;
     diag.mode1 = mode1_;

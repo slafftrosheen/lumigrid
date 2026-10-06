@@ -1,6 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { gunzipSync } from 'node:zlib';
 
 const key = 'MyChosenAdminAccessKey2026!';
 const session = 'a'.repeat(64);
@@ -15,7 +16,9 @@ async function nodeFixture(page: Page, provisioned = false, allowed = true) {
     const body = request.postData() ? request.postDataJSON() : undefined;
     calls.push({ path, body, headers: request.headers() });
     if (path === '/') {
-      return route.fulfill({ contentType: 'text/html', body: readFileSync(resolve('embedded/dashboard.html'), 'utf8') });
+      const asset = readFileSync(resolve('../LumigridLedNode/generated/dashboard_assets.hpp'), 'utf8');
+      const bytes = asset.match(/0x[0-9a-f]{2}/g)!.map(value => parseInt(value, 16));
+      return route.fulfill({ contentType: 'text/html', body: gunzipSync(Buffer.from(bytes)).toString('utf8') });
     }
     let response: any = {};
     if (path === '/api/v1/auth/status') response = { provisioned, bootstrapAllowed: !provisioned && allowed, factorySetupAllowed: !provisioned && allowed };

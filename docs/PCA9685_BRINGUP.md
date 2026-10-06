@@ -1,14 +1,16 @@
 # PCA9685 bring-up contract
 
-SDA GPIO21, SCL GPIO22, /OE GPIO25; synchronous ESP-IDF master transactions at 100 kHz. The standard unstrapped address is 0x40. All Call is 0x70 and is enabled at chip power-up, but earlier configuration can disable it. Neither is a confirmed PCB strap address. Repository hardware sources do not establish the PCB strap address.
+SDA GPIO21, SCL GPIO22, /OE GPIO25; synchronous ESP-IDF master transactions (`trans_queue_depth = 0`) at 100 kHz. The PCB address is **0x55** (hardware fact): A0/A2/A4 tied HIGH, A1/A3/A5 tied LOW, so 0x40 + 0x01 + 0x04 + 0x10 = 0x55.
 
-Factory/development initialization first probes 0x40, then 0x70. If the default is absent, one bounded 0x08–0x77 scan logs responses and selects only a single individual device in the PCA range. All Call is excluded, multiple devices are ambiguous, and bus/driver errors remain distinct from NACK. The existing register initialization/readback then verifies the candidate. The resolved address is reported by PcaDiagnostics.address; zero means unresolved. Nothing is persisted to NVS.
+Initialization binds directly to 0x55 with no `i2c_master_probe()` gate, no 0x40/0x70 probe, and no bus scan or address auto-discovery. Presence is decided by real PCA transactions: a MODE1 read, and if that fails a direct MODE1 write (`SLEEP | AI`). Either succeeding means the PCA is present. Then the native sequence runs: MODE1=SLEEP|AI, PRE_SCALE=5, MODE2=OUTDRV, MODE1=AI, wait 2 ms, MODE1=AI|RESTART, read back, zero all channels. The address is reported by PcaDiagnostics.address.
 
-On detection or initialization failure, /OE stays HIGH and PWM remains unavailable while addressable outputs continue. Successful initialization makes eight PWM channels available through the existing runtime capability plumbing.
+On failure, /OE stays HIGH and PWM remains unavailable while addressable outputs continue. /OE is HIGH before init and on failure, a known-zero frame is written before enable, and OutputController exclusively owns normal /OE enable. Successful initialization makes eight PWM channels available.
 
 Safety hardware: software/runtime E-stop, PCA /OE cutoff, no dedicated physical E-stop input GPIO, no addressable power gate.
 
-Reference: [NXP PCA9685 datasheet](https://www.nxp.com/docs/en/data-sheet/PCA9685.pdf). Historical 0x55 probe logs are evidence of the previous assumption, not proof of PCB strapping. They are preserved unchanged.
+Reference: [NXP PCA9685 datasheet](https://www.nxp.com/docs/en/data-sheet/PCA9685.pdf). If direct transactions still fail, the next A/B step is swapping only the transport to legacy `driver/i2c.h` (same pins, 100 kHz, 0x55).
+
+> The section below is historical evidence from a build that gated on `i2c_master_probe()` (0x40/0x70/scan). Its conclusions about an unknown address are superseded; the log is preserved unchanged.
 
 ## Physical result — 2026-10-06
 

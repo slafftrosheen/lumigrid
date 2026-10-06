@@ -28,6 +28,17 @@ constexpr esp_err_t kErrRmtResourceExhausted = 0x6A01;
 // LG-038.3 §41: explicit memory-admission failure (not a bare ESP_ERR_NO_MEM).
 constexpr esp_err_t kErrInsufficientRuntimeMemory = 0x6A02;
 
+inline uint32_t addressable_candidate_bytes(const DeviceConfig& cfg) {
+    uint32_t bytes = 0;
+    for (uint8_t lane = 0; lane < MAX_RMT_LANES; ++lane) {
+        const auto& cc = cfg.channels[lane];
+        if (cc.enabled && cc.pixel_count) {
+            bytes += cc.pixel_count * (cc.addressable_type == AddressableType::SK6812 ? 8u : 7u) + 256u;
+        }
+    }
+    return bytes;
+}
+
 /// Human readable name for output-path errors ("rmt_resource_exhausted", ...).
 const char* output_err_name(esp_err_t err);
 
@@ -85,6 +96,15 @@ public:
     virtual esp_err_t wait(uint8_t lane, uint32_t timeout_us) = 0;
     /// Disable + delete channel and encoder.
     virtual esp_err_t destroy(uint8_t lane) = 0;
+    // Prepare resources without disturbing the live channel. Existing channels
+    // retain their GPIO and replace only their encoder on commit.
+    virtual esp_err_t prepare(uint8_t lane, int gpio, bool rgbw, bool existing) {
+        return existing ? ESP_ERR_NOT_SUPPORTED : create(lane, gpio, rgbw);
+    }
+    virtual void commit_prepared(uint8_t lane) {}
+    virtual void cancel_prepared(uint8_t lane, bool existing) {
+        if (!existing) destroy(lane);
+    }
 };
 
 /// Production transport backed by the public ESP-IDF RMT TX driver.
@@ -107,6 +127,7 @@ public:
     /// Allocate resources for one lane. `rgbw` selects 4 bytes/pixel (SK6812).
     /// Returns kErrRmtResourceExhausted when RMT channel/memory cannot be allocated.
     esp_err_t configure_lane(uint8_t lane, int gpio, bool rgbw, PixelOrder order, uint16_t pixels);
+    esp_err_t reconfigure(const DeviceConfig& cfg, uint32_t reserve_bytes);
     void release_lane(uint8_t lane);
     void release_all();
 

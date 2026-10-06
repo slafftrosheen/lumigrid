@@ -19,6 +19,8 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "sdkconfig.h"
+#include "esp_heap_caps.h"
+#include "lg_board_pins.hpp"
 
 namespace lg {
 
@@ -154,6 +156,24 @@ esp_err_t new_strip_encoder(bool rgbw, rmt_encoder_handle_t* out) {
 // ── Production transport ──────────────────────────────────────────────────────
 class EspRmtTransport final : public IRmtTransport {
 public:
+    esp_err_t prepare(uint8_t lane, int gpio, bool rgbw, bool existing) override {
+        if (!existing) return create(lane, gpio, rgbw);
+        if (lane >= ParallelRmtDriver::kLanes || !chan_[lane] || pending_[lane])
+            return ESP_ERR_INVALID_STATE;
+        return new_strip_encoder(rgbw, &pending_[lane]);
+    }
+    void commit_prepared(uint8_t lane) override {
+        if (pending_[lane]) {
+            rmt_del_encoder(enc_[lane]);
+            enc_[lane] = pending_[lane];
+            pending_[lane] = nullptr;
+        }
+    }
+    void cancel_prepared(uint8_t lane, bool existing) override {
+        if (pending_[lane]) rmt_del_encoder(pending_[lane]);
+        pending_[lane] = nullptr;
+        if (!existing) destroy(lane);
+    }
     esp_err_t create(uint8_t lane, int gpio, bool rgbw) override {
         if (lane >= ParallelRmtDriver::kLanes) return ESP_ERR_INVALID_ARG;
         if (chan_[lane] != nullptr) return ESP_ERR_INVALID_STATE;
@@ -208,6 +228,7 @@ public:
 private:
     rmt_channel_handle_t chan_[ParallelRmtDriver::kLanes] = {};
     rmt_encoder_handle_t enc_[ParallelRmtDriver::kLanes] = {};
+    rmt_encoder_handle_t pending_[ParallelRmtDriver::kLanes] = {};
 };
 
 EspRmtTransport s_production_transport;
@@ -285,6 +306,53 @@ void ParallelRmtDriver::release_lane(uint8_t lane) {
 
 void ParallelRmtDriver::release_all() {
     for (uint8_t i = 0; i < kLanes; ++i) release_lane(i);
+}
+
+esp_err_t ParallelRmtDriver::reconfigure(const DeviceConfig& cfg, uint32_t reserve_bytes) {
+    for (uint8_t lane = 0; lane < kLanes; ++lane) {
+        if (!configured(lane)) continue;
+        const esp_err_t err = tx().wait(lane, addressable_timeout_us(lanes_[lane].pixels, lanes_[lane].rgbw));
+        if (err != ESP_OK) return err;
+    }
+    Lane candidate[kLanes]{};
+    bool prepared[kLanes]{};
+    esp_err_t err = ESP_OK;
+    for (uint8_t lane = 0; lane < kLanes; ++lane) {
+        const auto& cc = cfg.channels[lane];
+        if (!cc.enabled || !cc.pixel_count) continue;
+        if (cc.pixel_count > MAX_PIXELS) { err = ESP_ERR_INVALID_ARG; break; }
+        auto& next = candidate[lane];
+        next.rgbw = cc.addressable_type == AddressableType::SK6812;
+        next.pixels = cc.pixel_count;
+        next.wire_len = next.pixels * (next.rgbw ? 4u : 3u);
+        next.wire = static_cast<uint8_t*>(calloc(1, next.wire_len));
+        if (!next.wire) { err = kErrInsufficientRuntimeMemory; break; }
+        const bool grb = cc.pixel_order == PixelOrder::GRB || cc.pixel_order == PixelOrder::GRBW;
+        next.pos[0] = grb ? 1 : 0;
+        next.pos[1] = grb ? 0 : 1;
+        next.state = LaneState::Ready;
+        err = tx().prepare(lane, board::kAledPins[lane], next.rgbw, configured(lane));
+        if (err != ESP_OK) { err = map_create_error(err); break; }
+        prepared[lane] = true;
+    }
+    // Old resources remain live until all candidate allocations and the reserve
+    // gate pass. Cancelling the candidate requires no replacement allocation.
+    if (err == ESP_OK && heap_caps_get_free_size(MALLOC_CAP_8BIT) < reserve_bytes)
+        err = kErrInsufficientRuntimeMemory;
+    if (err != ESP_OK) {
+        for (uint8_t lane = 0; lane < kLanes; ++lane) {
+            if (prepared[lane]) tx().cancel_prepared(lane, configured(lane));
+            free(candidate[lane].wire);
+        }
+        return err;
+    }
+    for (uint8_t lane = 0; lane < kLanes; ++lane) {
+        if (prepared[lane]) tx().commit_prepared(lane);
+        else if (configured(lane)) tx().destroy(lane);
+        free(lanes_[lane].wire);
+        lanes_[lane] = candidate[lane];
+    }
+    return ESP_OK;
 }
 
 void ParallelRmtDriver::stage_pixel(uint8_t lane, uint16_t pixel, uint8_t r, uint8_t g, uint8_t b, uint8_t w) {

@@ -16,7 +16,7 @@ cmd = [
     "write_flash", "-z",
     "--flash_mode", "dio",
     "--flash_freq", "40m",
-    "--flash_size", "detect",
+    "--flash_size", "8MB",
     "0x1000", r".pio\build\factory\bootloader.bin",
     "0x8000", r".pio\build\factory\partitions.bin",
     "0xd000", r".pio\build\factory\ota_data_initial.bin",

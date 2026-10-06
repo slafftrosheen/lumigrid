@@ -309,12 +309,12 @@ describe('unified dashboard node live state and lifecycle', () => {
       expect(['online', 'connected']).toContain(getNodeLiveSnapshot().connection);
     });
 
-    it('processes valid binary pixel frame with header 1', async () => {
+    it('processes a valid schema 2 preview frame', async () => {
       await connect('192.168.1.50');
       const ws = MockWebSocket.instances[0];
       ws.triggerOpen();
 
-      const frame = new Uint8Array([1, 100, 150, 200]);
+      const frame = new Uint8Array([2, 1, 1, 0, 100, 150, 200]);
       ws.triggerMessage(frame.buffer);
 
       const snap = getNodeLiveSnapshot();
@@ -337,7 +337,7 @@ describe('unified dashboard node live state and lifecycle', () => {
       expect(snap.pixels[0]).toBe(0);
     });
 
-    it('handles oversized binary pixel frames gracefully', async () => {
+    it('rejects oversized binary pixel frames', async () => {
       await connect('192.168.1.50');
       const ws = MockWebSocket.instances[0];
       ws.triggerOpen();
@@ -349,8 +349,8 @@ describe('unified dashboard node live state and lifecycle', () => {
       ws.triggerMessage(big.buffer);
 
       const snap = getNodeLiveSnapshot();
-      expect(snap.frameCount).toBe(1);
-      expect(snap.pixels[0]).toBe(42);
+      expect(snap.frameCount).toBe(0);
+      expect(snap.pixels[0]).toBe(0);
       expect(snap.pixels.length).toBe(BUF_SIZE);
     });
   });

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
+  import { getStorageDiagnostics, type StorageDiagnostics } from '$lib/api/firmware';
   import { getHealth, getLogs, getAuditLog } from '$lib/api/node';
   import type { HealthSnapshot, AuditEvent } from '$lib/api/node';
   import { evaluateActionableIssues, getOutputDiagnostics, getMemoryDiagnostics } from '$lib/api/diagnostics';
@@ -12,6 +13,7 @@
   let error = $state('');
   let health = $state<HealthSnapshot | null>(null);
   let outputDiag = $state<OutputDiagnosticsResponse | null>(null);
+  let storageDiag = $state<StorageDiagnostics | null>(null);
   let memoryDiag = $state<MemoryDiagnosticsResponse | null>(null);
   let showAdvancedMemory = $state(false);
   let rawLogs = $state('');
@@ -84,12 +86,13 @@
     }
     error = '';
     try {
-      const [h, l, a, od, md] = await Promise.all([
+      const [h, l, a, od, md, sd] = await Promise.all([
         getHealth(targetIp).catch(() => null),
         getLogs(targetIp).catch(() => ''),
         getAuditLog(targetIp).catch(() => [] as AuditEvent[]),
         getOutputDiagnostics(targetIp).catch(() => null),
         getMemoryDiagnostics(targetIp).catch(() => null),
+        getStorageDiagnostics(targetIp).catch(() => null),
       ]);
       if (gen !== loadGen) return;
       health = h;
@@ -97,6 +100,7 @@
       audit = a;
       outputDiag = od;
       memoryDiag = md;
+      storageDiag = sd;
     } catch (e) {
       if (gen !== loadGen) return;
       error = String(e);
@@ -199,11 +203,13 @@
           memoryDiag.allocationFailures.networkTaskStartFailures
       : 0
   );
-  const memoryHealthName = $derived(memoryDiag?.health ?? health?.memory?.health ?? 'HEALTHY');
+  const memoryHealthName = $derived(memoryDiag?.health ?? health?.memory?.health ?? 'UNMEASURED');
   const memoryHealthy = $derived(memoryHealthName === 'HEALTHY');
   const memoryFragmentedOnly = $derived(memoryHealthName === 'HEAP_FRAGMENTED');
   const memoryStatusLabel = $derived(
-    memoryHealthName === 'HEALTHY'
+    memoryHealthName === 'UNMEASURED'
+      ? 'Not measured'
+      : memoryHealthName === 'HEALTHY'
       ? 'Healthy'
       : memoryHealthName === 'LOW_RUNTIME_MEMORY'
         ? 'Low Memory'
@@ -454,6 +460,19 @@
           </div>
         </div>
 
+        {#if storageDiag}
+          <section class="diag-card">
+            <h3>Storage</h3>
+            <p>Flash {(storageDiag.physicalFlashBytes / 1048576).toFixed(0)} MB · Layout v{storageDiag.partitionLayoutVersion}</p>
+            <p>Running {storageDiag.running?.label ?? 'Unknown'} · {storageDiag.health}</p>
+            <p>Firmware {(storageDiag.imageBytes / 1048576).toFixed(2)} MB / {((storageDiag.running?.size ?? 0) / 1048576).toFixed(2)} MB</p>
+            <details><summary>Partition details</summary>
+              {#each storageDiag.partitions as partition}
+                <p>{partition.label}: {partition.size} bytes at 0x{partition.address.toString(16)}</p>
+              {/each}
+            </details>
+          </section>
+        {/if}
         <!-- Runtime Memory (LG-038.3 §58/§59) -->
         <div class="stat-card">
           <div class="card-head">

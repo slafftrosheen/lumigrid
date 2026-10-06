@@ -49,3 +49,22 @@ The software architecture and endpoints for factory validation, physical output 
 
 See [`docs/HARDWARE_CERTIFICATION.md`](file:///c:/Users/slavd/lumigrid/docs/HARDWARE_CERTIFICATION.md) for full certification catalog, evidence rules, and bench execution plan. Physical certification remains dependent on executing the plan on real reference hardware with oscilloscopes and meters.
 
+
+## LG-038.3 memory and service lifecycle acceptance
+
+All physical gates for this change are **UNMEASURED**. Software compilation and fixture tests do not certify heap headroom, stack margins, maximum loaded topology, or 30-minute stability. See [RUNTIME_MEMORY_BUDGET.md](RUNTIME_MEMORY_BUDGET.md) for scratch costs, task lifetimes, unchanged engineering gates and the complete measurement record.
+
+| Gate | Acceptance | Evidence |
+| --- | --- | --- |
+| First Setup, fresh NVS, settle 30 s | free8 >= 32768; largest8 >= 16384; main reclaimed; no lighting/scheduler/Factory/net_apply/protocol/fleet workers | UNMEASURED |
+| Provisioned minimal Ready, settle 60 s | free8 >= 24576; largest8 >= 12288; optional workers reflect config/network | UNMEASURED |
+| Eight lanes, 256 RGBW pixels | free8 >= 16384; largest8 >= 8192; loaded outputs and traffic remain stable | UNMEASURED |
+| Protocol toggle and allocation failure | Off creates no task; on/off actually starts/stops; failed starts preserve previous protocol state | UNMEASURED |
+| Wi-Fi apply and STA route/loss | One apply at a time; worker retires; fleet stops without STA and rebinds with unchanged identity | UNMEASURED |
+| Factory/Certification lazy use | No Factory task for automatic probes; first physical command starts it and exposes its stack minimum | UNMEASURED |
+| Topology failure injection | No persistence or half-configured lanes; original lengths/format/order remain intact; structured memory error | UNMEASURED |
+| Heavy-operation pressure | OTA/restore/validation/report refuse before mutation; measure actual peak scratch, minimum free8 and largest8 | UNMEASURED |
+| WebSocket soak, 30 min | Bounded 64-sample schema; no monotonic heap/largest-block loss after reconnect cycles | UNMEASURED |
+| Burn-in soak, 30 min | Capture start/min/end free8 and largest8, per-task minima, faults, deadlines and resets | UNMEASURED |
+
+Capture `/api/v1/diagnostics/memory` with Installer/Admin authority at each stage. Per-task watermarks are bytes on the pinned Xtensa port. Retain raw logs and timestamped snapshots with the controller identity, image checksum, topology and active services. Do not flash the development test image onto a production unit: it deliberately enables test credentials and its assertion suite.

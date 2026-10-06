@@ -134,7 +134,7 @@
 
       ctx.font = '12px ui-monospace, SFMono-Regular, Menlo, monospace';
       ctx.fillStyle = '#8e8e93';
-      ctx.fillText(`${lit}/${PIXELS_PER_LANE} px active`, x + 48, y + previewH + 20);
+      ctx.fillText(`${lit}/${PIXELS_PER_LANE} samples active`, x + 48, y + previewH + 20);
       ctx.font = '600 18px ui-monospace, SFMono-Regular, Menlo, monospace';
     }
   }

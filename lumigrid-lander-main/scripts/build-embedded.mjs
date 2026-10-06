@@ -8,6 +8,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
+import { transformSync } from 'esbuild';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -27,7 +28,15 @@ if (!fs.existsSync(inputHtmlPath)) {
 }
 
 console.log(`Reading embedded dashboard source from: ${inputHtmlPath}`);
-const htmlContent = fs.readFileSync(inputHtmlPath);
+// Keep the readable source, but avoid spending firmware flash on JS/CSS
+// whitespace and comments. The parser preserves strings and inline handler names.
+const source = fs.readFileSync(inputHtmlPath, 'utf-8');
+const compact = source
+  .replace(/<script>([\s\S]*?)<\/script>/g, (_, code) =>
+    `<script>${transformSync(code, { loader: 'js', minify: true, target: 'es2020' }).code}</script>`)
+  .replace(/<style>([\s\S]*?)<\/style>/g, (_, code) =>
+    `<style>${transformSync(code, { loader: 'css', minify: true }).code}</style>`);
+const htmlContent = Buffer.from(compact);
 const compressed = zlib.gzipSync(htmlContent, { level: 9 });
 
 const bytesPerLine = 16;

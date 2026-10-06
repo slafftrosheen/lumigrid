@@ -36,6 +36,8 @@
 #include "RecoveryTypes.hpp"
 #include "ConfigApplyPlan.hpp"
 #include "OtaBootVerifier.hpp"
+#include "StorageContract.hpp"
+#include "OtaImagePreflight.hpp"
 #include "CertificationTypes.hpp"
 #include "CertificationPlan.hpp"
 #include "CertificationStore.hpp"
@@ -5419,6 +5421,33 @@ bool test_lg029_node_backed_authentication() {
 
         // 6. OTA Boot Verification & Rollback Semantics (§97-§98 BA..BM)
         {
+            assert(evaluate_storage_health(0x800000, 0x800000, true, 0x250000) == StorageHealth::Healthy);
+            assert(evaluate_storage_health(0x400000, 0x800000, true, 0x250000) == StorageHealth::FlashCapacityMismatch);
+            assert(evaluate_storage_health(0x800000, 0x800000, false, 0x250000) == StorageHealth::PartitionLayoutMismatch);
+            assert(evaluate_storage_health(0x800000, 0x800000, true, 0x140000) == StorageHealth::OtaSlotTooSmall);
+            assert(ota_verification_action(true, false, false, 9999, 0, 0, true) == OtaVerificationAction::Wait);
+            assert(ota_verification_action(true, false, false, 10000, 0, 0, true) == OtaVerificationAction::Confirm);
+            assert(ota_verification_action(false, false, false, 10000, 0, 0, true) == OtaVerificationAction::Wait);
+            assert(ota_verification_action(true, true, false, 10000, 0, 0, true) == OtaVerificationAction::RollbackStartup);
+            assert(ota_verification_action(true, false, true, 10000, 0, 0, true) == OtaVerificationAction::RollbackMemory);
+            assert(ota_verification_action(false, false, false, 60000, 0, 0, false) == OtaVerificationAction::RollbackTimeout);
+            uint8_t prefix[kOtaDescriptorPrefixBytes]{};
+            esp_image_header_t header{};
+            header.magic = ESP_IMAGE_HEADER_MAGIC; header.segment_count = 1;
+            header.chip_id = ESP_CHIP_ID_ESP32; header.spi_size = ESP_IMAGE_FLASH_SIZE_8MB;
+            header.max_chip_rev_full = 0xffff;
+            esp_image_segment_header_t segment{}; segment.data_len = sizeof(esp_app_desc_t);
+            esp_app_desc_t descriptor{}; descriptor.magic_word = ESP_APP_DESC_MAGIC_WORD;
+            strcpy(descriptor.project_name, "lumigrid_led_node"); strcpy(descriptor.version, "test-candidate");
+            memcpy(prefix, &header, sizeof(header)); memcpy(prefix + sizeof(header), &segment, sizeof(segment));
+            memcpy(prefix + sizeof(header) + sizeof(segment), &descriptor, sizeof(descriptor));
+            esp_app_desc_t parsed{};
+            assert(ota_image_prefix_valid(prefix, sizeof(prefix), 301, &parsed));
+            assert(!ota_image_prefix_valid(prefix, sizeof(prefix)-1, 301, &parsed));
+            prefix[0] = 0; assert(!ota_image_prefix_valid(prefix, sizeof(prefix), 301, &parsed)); prefix[0] = ESP_IMAGE_HEADER_MAGIC;
+            strcpy(descriptor.project_name, "another_project");
+            memcpy(prefix + sizeof(header) + sizeof(segment), &descriptor, sizeof(descriptor));
+            assert(!ota_image_prefix_valid(prefix, sizeof(prefix), 301, &parsed));
             OtaBootVerifier& verifier = OtaBootVerifier::instance();
             verifier.init();
             assert(verifier.running_version() != nullptr && strlen(verifier.running_version()) > 0);
@@ -5696,7 +5725,13 @@ bool test_lg029_node_backed_authentication() {
                 };
                 std::vector<Action> actions;
                 int fail_lane = -1;
+                int prepare_fail_lane = -1;
+                unsigned cancellations = 0;
 
+                esp_err_t prepare(uint8_t lane, int, bool, bool) override {
+                    return lane == prepare_fail_lane ? ESP_ERR_NO_MEM : ESP_OK;
+                }
+                void cancel_prepared(uint8_t, bool) override { ++cancellations; }
                 esp_err_t create(uint8_t, int, bool) override {
                     return ESP_OK;
                 }
@@ -5743,6 +5778,25 @@ bool test_lg029_node_backed_authentication() {
             }
 
             // 2. Parallel RMT Failure on Lane Timeout (§80)
+            std::unique_ptr<DeviceConfig> candidate(new DeviceConfig{});
+            for (uint8_t lane = 0; lane < 8; ++lane) {
+                candidate->channels[lane].enabled = true;
+                candidate->channels[lane].pixel_count = 144;
+                candidate->channels[lane].addressable_type = AddressableType::SK6812;
+                candidate->channels[lane].pixel_order = PixelOrder::RGBW;
+            }
+            driver.stage_pixel(0, 0, 11, 22, 33, 0);
+            const uint8_t* original = driver.wire_data(0);
+            fake_transport.prepare_fail_lane = 3;
+            assert(driver.reconfigure(*candidate, 0) == kErrRmtResourceExhausted);
+            assert(driver.wire_data(0) == original);
+            assert(driver.pixels(0) == 256 && !driver.has_white(0));
+            assert(driver.pos_r(0) == 1 && driver.wire_data(0)[1] == 11);
+            assert(fake_transport.cancellations == 3);
+            fake_transport.prepare_fail_lane = -1;
+            assert(driver.reconfigure(*candidate, UINT32_MAX) == kErrInsufficientRuntimeMemory);
+            assert(driver.wire_data(0) == original && driver.pixels(0) == 256);
+
             fake_transport.actions.clear();
             fake_transport.fail_lane = 3; // Lane A4 fails
             outcome = driver.commit();
@@ -5932,6 +5986,21 @@ bool test_lg029_node_backed_authentication() {
             check_memory_admission(now.free_8bit, 1);
         assert(!too_big.accepted);
 
+        RuntimeMemorySnapshot reserve_test{};
+        reserve_test.free_8bit = 32768;
+        reserve_test.largest_8bit = 8192;
+        assert(check_memory_admission_snapshot(reserve_test, 4096, 16384).accepted);
+        assert(!check_memory_admission_snapshot(reserve_test, 9000, 16384).accepted);
+        assert(!check_memory_admission_snapshot(reserve_test, UINT32_MAX, 16384).accepted);
+
+        const char* json_shape = R"({"text":"[,]{}:","a":[0,{},[true,false]]})";
+        const auto shape = json_scratch_budget(json_shape, std::strlen(json_shape), sizeof(cJSON));
+        assert(shape.bounded && shape.nodes == 8);
+        assert(json_scratch_budget("[]", 2, sizeof(cJSON)).nodes == 1);
+        char deep[66]{};
+        for (unsigned i = 0; i < 33; ++i) { deep[i] = '['; deep[33 + i] = ']'; }
+        assert(!json_scratch_budget(deep, sizeof(deep), sizeof(cJSON)).bounded);
+
         // Fragmentation ratio: largest/free in (0, 1].
         const float frag = fragmentation_ratio(now);
         assert(frag > 0.0f && frag <= 1.0f);
@@ -5969,7 +6038,7 @@ bool test_lg029_node_backed_authentication() {
                 assert(info[i].configured_bytes == 4096);
             }
         }
-        assert(found);
+        assert(!found); // Registered names are not evidence of a live task.
         task_stack_registry().unregister_task("lg0383_test_task");
         task_stack_registry().sample_all();
         const size_t n2 = task_stack_registry().copy(info, 4);
@@ -6007,6 +6076,7 @@ bool test_lg029_node_backed_authentication() {
             cfg.protocol.sacn_enabled = true;
             cfg.sync_enabled = true;
             cfg.mqtt_enabled = true;
+            std::strcpy(cfg.mqtt_broker, "192.0.2.1");
             PlanInputs in{};
             in.safe_mode = false;
             in.commissioning = CommissioningPlanState::Provisioned;

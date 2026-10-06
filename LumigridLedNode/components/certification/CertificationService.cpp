@@ -314,6 +314,8 @@ esp_err_t CertificationService::start_test(const char* test_id) {
                 burn_in_min_free8_ = burn_in_mem.free_8bit;
                 burn_in_start_largest8_ = burn_in_mem.largest_8bit;
                 burn_in_min_largest8_ = burn_in_mem.largest_8bit;
+                burn_in_end_free8_ = 0;
+                burn_in_end_largest8_ = 0;
                 rec.burn_in.duration_s = 0;
                 res.state = CertificationTestState::Running;
             } else {
@@ -689,6 +691,10 @@ void CertificationService::update_burn_in_tick(uint32_t elapsed_s, uint32_t comm
 
 void CertificationService::finish_burn_in(bool passed, const char* reason) {
     if (!burn_in_active_) return;
+    update_burn_in_tick(store_.current_record().burn_in.duration_s, store_.current_record().burn_in.commit_failures, store_.current_record().burn_in.output_faults);
+    const auto mem = capture_runtime_memory();
+    burn_in_end_free8_ = mem.free_8bit;
+    burn_in_end_largest8_ = mem.largest_8bit;
     burn_in_active_ = false;
     CertificationRecord& rec = store_.current_record();
     rec.burn_in.end_free_heap = static_cast<uint32_t>(esp_get_free_heap_size());
@@ -751,6 +757,7 @@ void CertificationService::tick(uint64_t now_ms) {
 
     // 2. Burn-In Job state tracking (LG-038 §61-§63)
     if (burn_in_active_ && job_mgr_) {
+        update_burn_in_tick(static_cast<uint32_t>((now_ms - burn_in_start_ms_) / 1000), rec.burn_in.commit_failures, rec.burn_in.output_faults);
         OperationJob job{};
         if (job_mgr_->get_job(burn_in_job_id_, job)) {
             int burn_idx = find_result_index("BURN-001");
@@ -789,6 +796,9 @@ void CertificationService::tick(uint64_t now_ms) {
                         snprintf(bres.note, sizeof(bres.note), "Burn-in fault: fails=%lu faults=%lu err=%ld",
                                  (unsigned long)commit_fails, (unsigned long)out_faults, (long)job.error_code);
                     }
+                    const auto end_mem = capture_runtime_memory();
+                    burn_in_end_free8_ = end_mem.free_8bit;
+                    burn_in_end_largest8_ = end_mem.largest_8bit;
                     burn_in_active_ = false;
                     if (strcmp(current_test_, "BURN-001") == 0) {
                         current_test_[0] = '\0';
@@ -800,6 +810,9 @@ void CertificationService::tick(uint64_t now_ms) {
                     bres.completed_ms = now_ms;
                     bres.error_code = job.error_code;
                     snprintf(bres.note, sizeof(bres.note), "Burn-in job failed (%ld)", (long)job.error_code);
+                    const auto end_mem = capture_runtime_memory();
+                    burn_in_end_free8_ = end_mem.free_8bit;
+                    burn_in_end_largest8_ = end_mem.largest_8bit;
                     burn_in_active_ = false;
                     if (strcmp(current_test_, "BURN-001") == 0) {
                         current_test_[0] = '\0';
@@ -810,6 +823,9 @@ void CertificationService::tick(uint64_t now_ms) {
                     bres.state = CertificationTestState::Blocked;
                     bres.completed_ms = now_ms;
                     snprintf(bres.note, sizeof(bres.note), "Burn-in job cancelled");
+                    const auto end_mem = capture_runtime_memory();
+                    burn_in_end_free8_ = end_mem.free_8bit;
+                    burn_in_end_largest8_ = end_mem.largest_8bit;
                     burn_in_active_ = false;
                     if (strcmp(current_test_, "BURN-001") == 0) {
                         current_test_[0] = '\0';
@@ -835,7 +851,31 @@ CertificationStatusSummary CertificationService::get_status_summary() const {
     return summary;
 }
 
-cJSON* CertificationService::generate_report_json() const {
+cJSON* CertificationService::generate_report_result_json(size_t index) const {
+    const auto& rec = store_.current_record();
+    if (index >= rec.result_count) return nullptr;
+    const auto& r = rec.results[index];
+    const auto* def = CertificationPlan::find_test(r.test_id);
+    cJSON* t_obj = cJSON_CreateObject();
+    cJSON_AddStringToObject(t_obj, "id", r.test_id);
+    if (def) {
+        cJSON_AddStringToObject(t_obj, "category", def->category);
+        cJSON_AddStringToObject(t_obj, "title", def->title);
+        cJSON_AddStringToObject(t_obj, "requirement", requirement_level_to_string(def->requirement_for_profile(rec.session.profile)));
+    }
+    cJSON_AddStringToObject(t_obj, "state", cert_test_state_to_string(r.state));
+    cJSON_AddStringToObject(t_obj, "evidenceSource", evidence_source_to_string(r.evidence_source));
+    cJSON_AddNumberToObject(t_obj, "startedMs", static_cast<double>(r.started_ms));
+    cJSON_AddNumberToObject(t_obj, "completedMs", static_cast<double>(r.completed_ms));
+    cJSON_AddNumberToObject(t_obj, "errorCode", r.error_code);
+    cJSON_AddNumberToObject(t_obj, "measuredValue", r.measured_value);
+    cJSON_AddStringToObject(t_obj, "unit", r.unit);
+    cJSON_AddStringToObject(t_obj, "note", r.note);
+    cJSON_AddNumberToObject(t_obj, "attempts", r.attempts);
+    return t_obj;
+}
+
+cJSON* CertificationService::generate_report_json(bool include_results) const {
     const auto& rec = store_.current_record();
     cJSON* root = cJSON_CreateObject();
 
@@ -875,26 +915,9 @@ cJSON* CertificationService::generate_report_json() const {
 
     // Tests array
     cJSON* tests_arr = cJSON_CreateArray();
-    for (size_t i = 0; i < rec.result_count; ++i) {
-        const auto& r = rec.results[i];
-        const auto* def = CertificationPlan::find_test(r.test_id);
-        cJSON* t_obj = cJSON_CreateObject();
-        cJSON_AddStringToObject(t_obj, "id", r.test_id);
-        if (def) {
-            cJSON_AddStringToObject(t_obj, "category", def->category);
-            cJSON_AddStringToObject(t_obj, "title", def->title);
-            cJSON_AddStringToObject(t_obj, "requirement", requirement_level_to_string(def->requirement_for_profile(rec.session.profile)));
-        }
-        cJSON_AddStringToObject(t_obj, "state", cert_test_state_to_string(r.state));
-        cJSON_AddStringToObject(t_obj, "evidenceSource", evidence_source_to_string(r.evidence_source));
-        cJSON_AddNumberToObject(t_obj, "startedMs", static_cast<double>(r.started_ms));
-        cJSON_AddNumberToObject(t_obj, "completedMs", static_cast<double>(r.completed_ms));
-        cJSON_AddNumberToObject(t_obj, "errorCode", r.error_code);
-        cJSON_AddNumberToObject(t_obj, "measuredValue", r.measured_value);
-        cJSON_AddStringToObject(t_obj, "unit", r.unit);
-        cJSON_AddStringToObject(t_obj, "note", r.note);
-        cJSON_AddNumberToObject(t_obj, "attempts", r.attempts);
-        cJSON_AddItemToArray(tests_arr, t_obj);
+    if (include_results) {
+        for (size_t i = 0; i < rec.result_count; ++i)
+            cJSON_AddItemToArray(tests_arr, generate_report_result_json(i));
     }
     cJSON_AddItemToObject(root, "tests", tests_arr);
 
@@ -909,9 +932,10 @@ cJSON* CertificationService::generate_report_json() const {
     // LG-038.3 §74: canonical 8-bit heap evidence.
     cJSON_AddNumberToObject(burn_obj, "startFree8", burn_in_start_free8_);
     cJSON_AddNumberToObject(burn_obj, "minFree8", burn_in_min_free8_);
-    cJSON_AddNumberToObject(burn_obj, "endFree8", capture_runtime_memory().free_8bit);
+    cJSON_AddNumberToObject(burn_obj, "endFree8", burn_in_end_free8_);
     cJSON_AddNumberToObject(burn_obj, "startLargest8", burn_in_start_largest8_);
     cJSON_AddNumberToObject(burn_obj, "minLargest8", burn_in_min_largest8_);
+    cJSON_AddNumberToObject(burn_obj, "endLargest8", burn_in_end_largest8_);
     cJSON_AddNumberToObject(burn_obj, "networkDisconnects", rec.burn_in.network_disconnects);
     cJSON_AddNumberToObject(burn_obj, "watchdogResets", rec.burn_in.watchdog_resets);
     cJSON_AddItemToObject(root, "burnIn", burn_obj);

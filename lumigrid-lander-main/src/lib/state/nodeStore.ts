@@ -25,8 +25,38 @@ export { commandTracker };
 export type { RuntimeSnapshotV3 };
 
 export const LANES = 8;
-export const PIXELS_PER_LANE = 144;
+// Preview samples span the complete physical lane, including 256-pixel lanes.
+export const PIXELS_PER_LANE = 64;
 export const BUF_SIZE = LANES * PIXELS_PER_LANE * 3;
+
+/** Validate the bounded wire contract before reading any lane samples. */
+export function decodePreviewFrame(frame: Uint8Array): Uint8Array | null {
+  let header: number;
+  let lanes: number;
+  let samples: number;
+  if (frame[0] === 2) {
+    header = 4;
+    lanes = frame[1];
+    samples = frame[2];
+    if (frame[3] !== 0 || lanes < 1 || lanes > LANES || samples < 1 || samples > 64) return null;
+  } else if (frame[0] === 1 || frame[0] === 76) {
+    header = 1;
+    lanes = LANES;
+    samples = 144; // Historical wire format, resampled into the bounded preview.
+  } else {
+    return null;
+  }
+  if (frame.length !== header + lanes * samples * 3) return null;
+  const pixels = new Uint8Array(BUF_SIZE);
+  for (let lane = 0; lane < lanes; lane++) {
+    for (let sample = 0; sample < PIXELS_PER_LANE; sample++) {
+      const sourceSample = Math.round(sample * (samples - 1) / (PIXELS_PER_LANE - 1));
+      const source = header + (lane * samples + sourceSample) * 3;
+      pixels.set(frame.subarray(source, source + 3), (lane * PIXELS_PER_LANE + sample) * 3);
+    }
+  }
+  return pixels;
+}
 
 export type NodeConnection =
   | 'idle'
@@ -539,11 +569,8 @@ export async function connect(nodeIp = getSelectedNodeIp()): Promise<void> {
       // Binary Pixel Frame: isolated high-frequency rendering path (Requirement 32)
       if (event.data instanceof ArrayBuffer) {
         const arr = new Uint8Array(event.data);
-        if (arr.length > 1 && (arr[0] === 1 || arr[0] === 76)) {
-          const raw = arr.subarray(1);
-          const len = Math.min(raw.length, BUF_SIZE);
-          const pixels = new Uint8Array(BUF_SIZE);
-          pixels.set(raw.subarray(0, len));
+        const pixels = decodePreviewFrame(arr);
+        if (pixels) {
 
           nodePixelStore.set(pixels);
           nodeFrameCount.update((n) => n + 1);

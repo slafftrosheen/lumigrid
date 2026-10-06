@@ -908,8 +908,10 @@
 
                     <article class="product-card">
                         <h4>Firmware OTA Update</h4>
+                        <p id="storage-summary" class="help">Storage not measured</p>
+                        <p id="ota-capacity" class="help"></p>
                         <p class="help" style="margin-bottom:0.75rem;">Upload a compiled .bin image to update node firmware.</p>
-                        <input type="file" id="ota-file" accept=".bin" style="margin-bottom:0.75rem;">
+                        <input type="file" id="ota-file" accept=".bin" onchange="lg.checkOtaCapacity()" style="margin-bottom:0.75rem;">
                         <button class="button-primary" style="width:100%" onclick="lg.uploadOta()">Flash Firmware</button>
                         <div id="ota-status" class="help" style="margin-top:0.5rem;"></div>
                     </article>
@@ -1048,8 +1050,8 @@ window.lg = (() => {
         visualizerMode: 'lanes', // 'lanes' | 'zones'
         cueLists: [],
         dmxData: new Uint8Array(512),
-        // Live stream buffer (8 lanes × 144 pixels × 3 RGB = 3456 bytes)
-        liveBuffer: new Uint8Array(8 * 144 * 3),
+        // Bounded preview samples (8 lanes × 64 samples × RGB)
+        liveBuffer: new Uint8Array(8 * 64 * 3),
         liveFrameCount: 0,
         lastFpsTimestamp: performance.now(),
         currentFps: 0,
@@ -1137,14 +1139,22 @@ window.lg = (() => {
             ws.onmessage = (event) => {
                 if (event.data instanceof ArrayBuffer) {
                     const arr = new Uint8Array(event.data);
-                    // Handle 0x01 or 76 ('L') preview packet
-                    if (arr.length > 1 && (arr[0] === 1 || arr[0] === 76)) {
-                        const rawRgb = arr.subarray(1);
-                        state.liveBuffer.set(rawRgb.subarray(0, state.liveBuffer.length));
-                        state.liveFrameCount++;
-                        state.totalPackets++;
-                        state.dirty = true;
+                    let lanes = 0, samples = 0, offset = 0;
+                    if (arr.length >= 4 && arr[0] === 2) {
+                        lanes = arr[1]; samples = arr[2]; offset = 4;
+                        if (lanes < 1 || lanes > 8 || samples < 1 || samples > 64 || arr[3] !== 0 || arr.length !== 4 + lanes * samples * 3) return;
+                    } else if ((arr[0] === 1 || arr[0] === 76) && arr.length > 1 && (arr.length - 1) % (144 * 3) === 0) {
+                        lanes = (arr.length - 1) / (144 * 3); samples = 144; offset = 1;
+                        if (lanes > 8) return;
+                    } else return;
+                    state.liveBuffer.fill(0);
+                    for (let lane = 0; lane < lanes; lane++) {
+                        for (let sample = 0; sample < 64; sample++) {
+                            const from = offset + (lane * samples + Math.floor(sample * (samples - 1) / 63)) * 3;
+                            state.liveBuffer.set(arr.subarray(from, from + 3), (lane * 64 + sample) * 3);
+                        }
                     }
+                    state.liveFrameCount++; state.totalPackets++; state.dirty = true;
                 } else if (typeof event.data === 'string') {
                     try {
                         const payload = JSON.parse(event.data);
@@ -1204,7 +1214,7 @@ window.lg = (() => {
         if (!canvas) return;
         const ctx = canvas.getContext('2d');
         const numLanes = 8;
-        const pixelsPerLane = 144;
+        const pixelsPerLane = 64;
         const totalPixels = numLanes * pixelsPerLane;
         if (canvas.width !== totalPixels) canvas.width = totalPixels;
 
@@ -1232,7 +1242,7 @@ window.lg = (() => {
         ctx.fillRect(0, 0, w, h);
 
         const lanes = 8;
-        const pixels = 144;
+        const pixels = 64;
         const laneH = h / lanes;
         const pipRadius = Math.max(1.8, (w / pixels) * 0.35);
 
@@ -1298,7 +1308,7 @@ window.lg = (() => {
             const mouseY = e.clientY - rect.top;
 
             const lanes = 8;
-            const pixels = 144;
+            const pixels = 64;
             const scaleX = canvas.width / rect.width;
             const scaleY = canvas.height / rect.height;
 
@@ -1487,7 +1497,23 @@ window.lg = (() => {
         } catch (e) { message.textContent = 'Network change could not be confirmed: ' + e.message; }
     }
 
+    async function loadStorage() {
+        try {
+            const status = await api('/api/v1/ota/status');
+            state.otaCapacity = status.maxFirmwareBytes || 0;
+            const info = await api('/api/v1/info');
+            const storage = info.storage;
+            if (storage) byId('storage-summary').textContent = `Flash ${storage.flashMb} MB · Layout v${storage.layout} · Running ${storage.runningPartition} · Firmware ${(storage.imageBytes / 1048576).toFixed(2)} / ${(storage.appSlotBytes / 1048576).toFixed(2)} MB`;
+            checkOtaCapacity();
+        } catch (_) {}
+    }
+    function checkOtaCapacity() {
+        const file = byId('ota-file')?.files[0];
+        byId('ota-capacity').textContent = file && state.otaCapacity
+            ? (file.size <= state.otaCapacity ? 'Fits OTA slot ✓' : 'Image exceeds OTA slot capacity') : '';
+    }
     async function loadAccess() {
+        await loadStorage();
         byId('system-access').hidden = state.role !== 'admin';
         if (state.role !== 'admin') return;
         try {
@@ -2693,6 +2719,8 @@ window.lg = (() => {
         const fileInput = byId('ota-file');
         const file = fileInput?.files[0];
         if (!file) return toast('Select a .bin file first.', true);
+        if (!state.otaCapacity) await loadStorage();
+        if (state.otaCapacity && file.size > state.otaCapacity) return toast('Image exceeds OTA slot capacity.', true);
 
         const statusEl = byId('ota-status');
         statusEl.textContent = 'Uploading firmware... please wait.';
@@ -2703,9 +2731,20 @@ window.lg = (() => {
                 body: file
             });
             if (!res.ok) throw new Error(`Upload failed (${res.statusText})`);
-            statusEl.textContent = 'Upload successful! Rebooting node...';
-            toast('OTA Flash successful. Node restarting.');
-            setTimeout(() => location.reload(), 6000);
+            statusEl.textContent = 'Image accepted. Waiting for local verification…';
+            const deadline = Date.now() + 90000;
+            while (Date.now() < deadline) {
+                await new Promise(resolve => setTimeout(resolve, 2000));
+                let status;
+                try { status = await api('/api/v1/ota/status'); } catch (_) { continue; }
+                if (status.state === 'confirmed' && status.targetVersion && status.runningVersion === status.targetVersion) {
+                    statusEl.textContent = 'Firmware update confirmed';
+                    await loadStorage(); return;
+                }
+                if (status.state === 'rolled_back' || status.state === 'failed') throw new Error(status.reason || 'Firmware update rolled back');
+                statusEl.textContent = 'Candidate pending verification…';
+            }
+            throw new Error('Verification timeout. Check node status.');
         } catch (e) {
             statusEl.textContent = 'Error: ' + e.message;
             toast(e.message, true);
@@ -2840,7 +2879,7 @@ window.lg = (() => {
         setBpm, setTimelineEnabled, saveTimeline, selectTimelineStep, assignTimelinePreset, setTimelineStepLength, addTimelineStep, removeTimelineStep,
         saveSchedules,
         cueStart, cueControl, cueRestart, cueFadePreview, cueFadeCommit,
-        loadCommissioning, switchDiagTab, loadLogs, loadAudit, runTestSequence, stopBurnIn, uploadOta, downloadBackup, uploadRestore, refreshCertStatus
+        loadCommissioning, switchDiagTab, loadLogs, loadAudit, runTestSequence, stopBurnIn, uploadOta, checkOtaCapacity, downloadBackup, uploadRestore, refreshCertStatus
     };
 })();
 </script>

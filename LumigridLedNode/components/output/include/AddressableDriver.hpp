@@ -20,6 +20,7 @@ struct AddressableShadowPixel {
 /// every active lane is submitted before any lane is waited on.
 class AddressableDriver {
 public:
+    esp_err_t reconfigure(const DeviceConfig& cfg, uint32_t reserve_bytes);
     static constexpr uint8_t kLanes = MAX_RMT_LANES;
     /// Same canonical product maximum as config validation. There is no separate limit.
     static constexpr uint16_t kPixels = MAX_PIXELS;

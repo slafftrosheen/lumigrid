@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { uploadFirmware, getOtaStatus, isOtaSuccess, isOtaRolledBack } from '$lib/api/firmware';
+  import { onMount } from 'svelte';
+  import { uploadFirmware, getOtaStatus, isOtaSuccess, isOtaRolledBack, firmwareFitsSlot } from '$lib/api/firmware';
   import type { OtaUploadResponse, OtaStatus } from '$lib/api/firmware';
 
   interface Props {
@@ -26,6 +27,11 @@
   let uploadResult = $state<OtaUploadResponse | null>(null);
   let otaStatus = $state<OtaStatus | null>(null);
   let error = $state('');
+  let capacity = $state<OtaStatus | null>(null);
+  const fits = $derived(selectedFile && capacity?.maxFirmwareBytes
+    ? firmwareFitsSlot(selectedFile.size, capacity.maxFirmwareBytes) : null);
+  const mb = (bytes: number) => (bytes / 1048576).toFixed(2) + ' MB';
+  onMount(() => { getOtaStatus(nodeIp).then(status => { capacity = status; }).catch(() => {}); });
 
   function reset() {
     phase = 'select';
@@ -53,7 +59,7 @@
   }
 
   async function startUpload() {
-    if (!selectedFile || phase !== 'select') return;
+    if (!selectedFile || phase !== 'select' || fits === false) return;
     phase = 'uploading';
     progress = 0;
     error = '';
@@ -111,6 +117,11 @@
 
 <div class="ota-panel">
   <h2 class="panel-title">Install Firmware</h2>
+  {#if capacity?.maxFirmwareBytes}
+    <p class="instruction">Firmware storage — Running: {capacity.runningPartition ?? 'Unknown'} ·
+      Slot: {mb(capacity.maxFirmwareBytes)} · Image: {capacity.imageBytes ? mb(capacity.imageBytes) : 'Not measured'} ·
+      Available: {capacity.imageBytes ? mb(Math.max(0, capacity.maxFirmwareBytes - capacity.imageBytes)) : 'Not measured'}</p>
+  {/if}
 
   {#if phase === 'select'}
     <p class="instruction">
@@ -134,12 +145,13 @@
       </label>
       {#if selectedFile}
         <span class="file-name">{selectedFile.name} ({(selectedFile.size / 1024).toFixed(0)} KB)</span>
+        {#if fits !== null}<span>{fits ? 'Fits OTA slot ✓' : 'Image exceeds OTA slot capacity'}</span>{/if}
       {/if}
     </div>
 
     {#if selectedFile}
       <div class="upload-row">
-        <button type="button" class="btn-upload" onclick={startUpload} id="ota-upload-btn">
+        <button type="button" class="btn-upload" onclick={startUpload} id="ota-upload-btn" disabled={fits === false}>
           Upload Firmware
         </button>
       </div>

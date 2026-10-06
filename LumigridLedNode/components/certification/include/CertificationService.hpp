@@ -87,7 +87,8 @@ public:
 
     // Report generation (cJSON root object, caller frees with cJSON_Delete)
     // NEVER contains secrets/tokens (Spec §124)
-    cJSON* generate_report_json() const;
+    cJSON* generate_report_json(bool include_results = true) const;
+    cJSON* generate_report_result_json(size_t index) const;
 
     // Helper: compute hardware-relevant configuration fingerprint
     static uint32_t compute_hardware_fingerprint(const DeviceConfig& cfg, const char* hw_rev);
@@ -117,6 +118,8 @@ private:
     uint32_t burn_in_min_free8_ = 0;
     uint32_t burn_in_start_largest8_ = 0;
     uint32_t burn_in_min_largest8_ = 0;
+    uint32_t burn_in_end_free8_ = 0;
+    uint32_t burn_in_end_largest8_ = 0;
 
     JobManager* job_mgr_ = nullptr;
     CertificationProbeProvider probe_provider_{};

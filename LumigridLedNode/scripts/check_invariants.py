@@ -38,6 +38,23 @@ def check_file_contains(filepath: Path, forbidden_patterns: list, exception_patt
 
 print("=== Running LumiGrid Certification Invariant Checks ===")
 
+# Production hardware/storage contract, including generated configuration.
+from verify_partition_layout import read_layout, validate_layout
+try:
+    validate_layout(read_layout(NODE_DIR / "partitions.factory.csv"))
+except ValueError as exc:
+    errors.append(str(exc))
+for name in ("sdkconfig.defaults", "sdkconfig.factory.defaults", "sdkconfig.factory"):
+    text = (NODE_DIR / name).read_text()
+    if "CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y" not in text or 'CONFIG_ESPTOOLPY_FLASHSIZE="8MB"' not in text or "CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y" in text:
+        errors.append(name + ": production flash must be 8 MB")
+import configparser
+pio_config = configparser.ConfigParser()
+pio_config.read_string((NODE_DIR / "platformio.ini").read_text())
+for section in ("env:factory", "env:test"):
+    if pio_config.get(section, "board_upload.flash_size", fallback="") != "8MB":
+        errors.append(section + ": board flash target must be 8 MB")
+
 # 1. No ESP_ERROR_CHECK in runtime lifecycle
 lifecycle_files = [
     NODE_DIR / "main" / "LumigridRuntime.cpp",
@@ -348,12 +365,20 @@ if init_block and re.search(r"factory_runner_\.start\(\)", init_block.group(1)):
 services_block = re.search(r"esp_err_t LumigridRuntime::start_network_services\(\) \{(.*?)\n\}", runtime_cpp, re.S)
 if services_block:
     svc_text = services_block.group(1)
-    if "artnet_enabled" not in svc_text or "sacn_enabled" not in svc_text:
-        errors.append("LumigridRuntime::start_network_services(): Art-Net/sACN must be gated on cfg.protocol.*_enabled (LG-038.3 §11/§12)")
+    planner = (NODE_DIR / "components" / "factory" / "include" / "RuntimeServices.hpp").read_text(encoding="utf-8")
+    reconcile = re.search(r"esp_err_t LumigridRuntime::reconcile_services\(.*?\n\}", runtime_cpp, re.S)
+    if ("reconcile_services(current_cfg, current_cfg" not in svc_text or
+        "in.cfg->protocol.artnet_enabled" not in planner or
+        "in.cfg->protocol.sacn_enabled" not in planner or not reconcile or
+        "compute_service_plan(" not in reconcile.group(0) or
+        "!desired.artnet" not in reconcile.group(0) or "!desired.sacn" not in reconcile.group(0)):
+        errors.append("Runtime startup must reconcile the config-gated protocol service plan (LG-038.3 §11/§12)")
 
 # LG-038.3 §21/§22: fleet discovery must not start unconditionally (AP-only). 
-if services_block and "network_plan_state_" not in services_block.group(1):
-    errors.append("LumigridRuntime::start_network_services(): FleetDiscovery must be STA-gated (LG-038.3 §21/§22)")
+if services_block and ("set_network_plan_state(wifi_.state()" not in services_block.group(1) or
+                       "plan.fleet_discovery = (in.network == NetworkPlanState::StaConnected)" not in planner or
+                       not reconcile or "if (desired.fleet_discovery)" not in reconcile.group(0)):
+    errors.append("Runtime network reconciliation must use the STA-gated FleetDiscovery plan (LG-038.3 §21/§22)")
 
 if errors:
     print("\nFAILED: Discovered architectural invariant violations:")

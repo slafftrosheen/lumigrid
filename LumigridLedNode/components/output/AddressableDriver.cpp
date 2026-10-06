@@ -28,6 +28,28 @@ void AddressableDriver::free_shadow(uint8_t lane) {
     shadow_[lane] = nullptr;
 }
 
+esp_err_t AddressableDriver::reconfigure(const DeviceConfig& cfg, uint32_t reserve_bytes) {
+    AddressableShadowPixel* candidate[kLanes]{};
+    esp_err_t err = ESP_OK;
+    for (uint8_t lane = 0; lane < kLanes; ++lane) {
+        const auto& cc = cfg.channels[lane];
+        if (!cc.enabled || !cc.pixel_count) continue;
+        if (cc.pixel_count > kPixels) { err = ESP_ERR_INVALID_ARG; break; }
+        candidate[lane] = static_cast<AddressableShadowPixel*>(calloc(cc.pixel_count, sizeof(AddressableShadowPixel)));
+        if (!candidate[lane]) { err = kErrInsufficientRuntimeMemory; break; }
+    }
+    if (err == ESP_OK) err = rmt_.reconfigure(cfg, reserve_bytes);
+    if (err != ESP_OK) {
+        for (auto* shadow : candidate) free(shadow);
+        return err;
+    }
+    for (uint8_t lane = 0; lane < kLanes; ++lane) {
+        free_shadow(lane);
+        shadow_[lane] = candidate[lane];
+    }
+    return ESP_OK;
+}
+
 // ── Lifecycle ─────────────────────────────────────────────────────────────────
 
 esp_err_t AddressableDriver::init() {

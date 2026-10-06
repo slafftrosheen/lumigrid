@@ -73,7 +73,7 @@ inline RuntimeServicePlan compute_service_plan(const PlanInputs& in) {
     // Recovery / safe mode plan (LG-038.3 §63): outputs safe, API + mDNS kept,
     // all network-dependent services off. Recovery Wi-Fi is handled outside
     // the plan (it is always permitted, never optional).
-    if (in.safe_mode) {
+    if (in.safe_mode || in.commissioning == CommissioningPlanState::PhysicalRecovery) {
         plan.lighting = false;
         plan.scheduler = false;
         plan.api = true;
@@ -104,7 +104,7 @@ inline RuntimeServicePlan compute_service_plan(const PlanInputs& in) {
     // carry it, so only a genuinely connected STA satisfies the plan (§65).
     plan.node_sync = has_cfg && in.cfg->sync_enabled &&
                      in.network == NetworkPlanState::StaConnected;
-    plan.mqtt      = has_cfg && in.cfg->mqtt_enabled;
+    plan.mqtt      = has_cfg && in.cfg->mqtt_enabled && in.cfg->mqtt_broker[0] != '\0';
 
     plan.factory_worker = false;       // lazy (§18-19)
     plan.network_apply_worker = false; // lazy (§8)

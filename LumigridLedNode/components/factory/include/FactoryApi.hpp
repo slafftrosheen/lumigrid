@@ -180,6 +180,10 @@ public:
     uint64_t show_clock_now_ms() const { return show_clock_provider_ ? show_clock_provider_() : (esp_timer_get_time() / 1000ULL); }
 
     using RuntimeConfigApplyCallback = std::function<esp_err_t(const DeviceConfig& old_cfg, const DeviceConfig& new_cfg)>;
+    void set_service_reconcile_callback(std::function<void()> callback) {
+        service_reconcile_callback_ = std::move(callback);
+    }
+    void queue_service_reconcile();
     void set_config_apply_callback(RuntimeConfigApplyCallback callback) {
         config_apply_callback_ = std::move(callback);
     }
@@ -260,6 +264,8 @@ public:
     ShowClockProvider show_clock_provider_{};
     std::function<StartupDiagnostics()> diagnostics_provider_{};
     RuntimeConfigApplyCallback config_apply_callback_{};
+    std::function<void()> service_reconcile_callback_{};
+    std::atomic<bool> service_reconcile_pending_{false};
     httpd_handle_t signage_server_ = nullptr;
     httpd_handle_t factory_server_ = nullptr;
     size_t max_open_sockets_ = 0;
