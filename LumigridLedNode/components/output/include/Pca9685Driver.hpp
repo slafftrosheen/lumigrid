@@ -37,9 +37,11 @@ public:
     static void force_disable_outputs();
 
     // Output enable control: owned by OutputController safety state
-    static void enable_outputs();
+    esp_err_t enable_outputs();
     static void disable_outputs();
     static bool is_outputs_enabled();
+
+    bool zero_confirmed() const { return zero_confirmed_; }
 
     PcaDiagnostics diagnostics() const;
 
@@ -53,6 +55,8 @@ private:
 
     std::array<uint16_t, kChannels> values_{};
     bool initialized_ = false;
+    bool zero_confirmed_ = false;
+    bool valid_frame_confirmed_ = false;
     uint8_t mode1_ = 0;
     uint8_t mode2_ = 0;
     uint8_t prescale_ = 0;

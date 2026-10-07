@@ -63,6 +63,10 @@ struct FrameSnapshot {
 struct OutputSnapshot {
     bool enabled = false;
     uint32_t power_mw = 0;
+    uint32_t estimated_requested_mw = 0;
+    uint32_t estimated_limited_mw = 0;
+    bool estimate_complete = false;
+    uint32_t limit_mw = 0;
     char state[16] = {0}; // "healthy", "armed", "fault", "estop"
     bool fault = false;
     uint32_t fault_count = 0;

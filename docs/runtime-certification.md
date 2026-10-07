@@ -179,7 +179,7 @@ The software architecture and simulation boundaries are fully hardened. The runt
   - Verify IGMPv2/v3 multicast group membership joining and leaving on physical managed switch.
   - Test multi-console priority preemption (Priority 100 vs Priority 150).
 - [ ] **Hardware Emergency Stop**:
-  - Verify physical GPIO interruption line latching.
+  - Runtime/software E-stop + direct PCA /OE cutoff (no dedicated physical E-stop GPIO on current board revision).
   - Assert zero PWM output immediately (<1 µs via direct GPIO `/OE` cutoff).
   - Addressable blackout is protocol-bound to serial frame wire transmission (~7.68 ms WS2812 / ~10.24 ms SK6812 for 256 pixels); physical $< 5\text{ms}$ addressable cutoff requires future hardware power-gate / load switch.
 - [ ] **Factory Hardware Test Output**:

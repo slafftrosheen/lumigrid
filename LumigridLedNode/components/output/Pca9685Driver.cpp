@@ -86,8 +86,13 @@ void Pca9685Driver::force_disable_outputs() {
     disable_pwm_outputs();
 }
 
-void Pca9685Driver::enable_outputs() {
+esp_err_t Pca9685Driver::enable_outputs() {
+    if (!initialized_ || !valid_frame_confirmed_) {
+        disable_pwm_outputs();
+        return ESP_ERR_INVALID_STATE;
+    }
     enable_pwm_outputs();
+    return ESP_OK;
 }
 
 void Pca9685Driver::disable_outputs() {
@@ -105,7 +110,11 @@ esp_err_t Pca9685Driver::write_register(uint8_t reg, uint8_t value) {
     const esp_err_t ret = i2c_master_write_to_device(
         kI2cPort, lg::board::kPcaAddress, packet, sizeof(packet), pdMS_TO_TICKS(100));
     xSemaphoreGive(s_i2c_mutex);
-    if (ret != ESP_OK) disable_pwm_outputs();
+    if (ret != ESP_OK) {
+        disable_pwm_outputs();
+        zero_confirmed_ = false;
+        valid_frame_confirmed_ = false;
+    }
     return ret;
 }
 
@@ -122,12 +131,18 @@ esp_err_t Pca9685Driver::write_bytes(uint8_t start_reg, const uint8_t* data, siz
     const esp_err_t ret = i2c_master_write_to_device(
         kI2cPort, lg::board::kPcaAddress, packet, len + 1, pdMS_TO_TICKS(100));
     xSemaphoreGive(s_i2c_mutex);
-    if (ret != ESP_OK) disable_pwm_outputs();
+    if (ret != ESP_OK) {
+        disable_pwm_outputs();
+        zero_confirmed_ = false;
+        valid_frame_confirmed_ = false;
+    }
     return ret;
 }
 
 esp_err_t Pca9685Driver::init() {
     initialized_ = false;
+    zero_confirmed_ = false;
+    valid_frame_confirmed_ = false;
     // Keep hardware disabled until the controller is configured, verified and a
     // known-safe frame has been written. This prevents boot-time PWM flashes.
     const gpio_config_t oe_conf = {
@@ -191,6 +206,8 @@ esp_err_t Pca9685Driver::init() {
     }
 
     initialized_ = true;
+    zero_confirmed_ = true;
+    valid_frame_confirmed_ = true;
     ESP_LOGI(TAG, "verified MODE1=0x%02X MODE2=0x%02X PRE_SCALE=%u; initialized to zero",
              m1, m2, pre);
     return ESP_OK;
@@ -210,12 +227,22 @@ esp_err_t Pca9685Driver::set_all(uint16_t duty) {
 
 esp_err_t Pca9685Driver::clear() {
     values_.fill(0);
-    return commit();
+    const esp_err_t err = commit();
+    if (err == ESP_OK) {
+        zero_confirmed_ = true;
+        valid_frame_confirmed_ = true;
+    } else {
+        zero_confirmed_ = false;
+        valid_frame_confirmed_ = false;
+    }
+    return err;
 }
 
 esp_err_t Pca9685Driver::commit() {
     if (!s_i2c_initialized || s_i2c_mutex == nullptr) {
         disable_pwm_outputs();
+        zero_confirmed_ = false;
+        valid_frame_confirmed_ = false;
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -237,9 +264,21 @@ esp_err_t Pca9685Driver::commit() {
     if (err != ESP_OK) {
         commit_failures_++;
         disable_pwm_outputs();
+        zero_confirmed_ = false;
+        valid_frame_confirmed_ = false;
         ESP_LOGE(TAG, "PWM commit failed; /OE latched HIGH (%s)", esp_err_to_name(err));
         return err;
     }
+
+    valid_frame_confirmed_ = true;
+    bool all_zero = true;
+    for (uint8_t ch = 0; ch < kChannels; ++ch) {
+        if (values_[ch] != 0) {
+            all_zero = false;
+            break;
+        }
+    }
+    zero_confirmed_ = all_zero;
 
     // Note: Do NOT automatically lower /OE here.
     // Physical OE enable is controlled exclusively by OutputController safety state.

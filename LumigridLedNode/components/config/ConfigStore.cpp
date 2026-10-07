@@ -753,6 +753,11 @@ esp_err_t ConfigStore::validate_config(const DeviceConfig& config, ConfigValidat
                 add_error("channel[%u].pixel_count (%u) exceeds MAX_PIXELS (%u)",
                           (unsigned)ch, (unsigned)c.pixel_count, (unsigned)MAX_PIXELS);
             }
+            if (!pixel_order_valid(c.addressable_type, c.pixel_order)) {
+                add_error("channel[%u] invalid pixel order %s for addressable type %s",
+                          (unsigned)ch, pixel_order_name(c.pixel_order),
+                          c.addressable_type == AddressableType::WS2812 ? "WS2812" : "SK6812");
+            }
         }
 
         if (c.dmx_start_channel > 0) {

@@ -333,7 +333,7 @@ FrameResult LightingRuntime::render_frame(uint32_t current_ms) {
         estop_state_.store(EstopState::ReArmedBlackout, std::memory_order_release);
         return FrameResult::EstopBlackout;
     } else if (es == EstopState::ReArmedBlackout) {
-        controller_.clear_estop();
+        const esp_err_t err = controller_.clear_estop();
         if (preview_cb_) {
             for (auto& ch : current_render_frame_.channels) {
                 ch.pixels.fill(LightValue{0, 0, 0, 0});
@@ -341,8 +341,15 @@ FrameResult LightingRuntime::render_frame(uint32_t current_ms) {
             }
             preview_cb_(current_render_frame_, current_local_cfg_);
         }
-        estop_state_.store(EstopState::Inactive, std::memory_order_release);
-        ESP_LOGI(TAG, "EMERGENCY STOP RESET: Controller re-armed, resuming output on subsequent frame");
+        if (err == ESP_OK) {
+            estop_state_.store(EstopState::Inactive, std::memory_order_release);
+            restart_soft_start();
+            ESP_LOGI(TAG, "EMERGENCY STOP RESET: Controller re-armed, resuming output on subsequent frame");
+        } else {
+            estop_state_.store(EstopState::Tripped, std::memory_order_release);
+            report_output_fault(err);
+            ESP_LOGE(TAG, "EMERGENCY STOP RESET FAILED: Hardware clear error %s; re-tripping E-stop", esp_err_to_name(err));
+        }
         return FrameResult::EstopBlackout;
     }
 
@@ -598,9 +605,16 @@ bool LightingRuntime::submit_live_frame(const LiveDmxFrame& frame) {
 
 esp_err_t LightingRuntime::clear_output_fault() {
     if (controller_.is_estop_latched() || is_estop_active()) return ESP_ERR_INVALID_STATE;
-    controller_.blackout(); output_state_.store(OutputState::Armed, std::memory_order_release);
+    controller_.blackout();
+    output_state_.store(OutputState::Armed, std::memory_order_release);
+    restart_soft_start();
     ESP_LOGI(TAG, "Output fault cleared: output state is ARMED awaiting next rendered frame commit");
     return ESP_OK;
+}
+
+void LightingRuntime::restart_soft_start() {
+    enable_ms_ = now_ms();
+    power_budget_.on_enable();
 }
 
 DeviceConfig LightingRuntime::get_config_snapshot() const {
@@ -698,6 +712,7 @@ void LightingRuntime::reload_device_config() {
     power_budget_.set_soft_start(device_cfg_.soft_start_enabled, device_cfg_.soft_start_ms);
     ColorPipeline::set_gamma(device_cfg_.gamma_x10);
     scene_manager_.update_device_config(device_cfg_);
+    restart_soft_start();
     if (config_reload_cb_) {
         config_reload_cb_(device_cfg_);
     }

@@ -82,8 +82,7 @@ esp_err_t OutputController::reconfigure(const DeviceConfig& cfg) {
     lock();
     ESP_LOGI("output", "Reconfiguring OutputController drivers based on DeviceConfig...");
 
-    // LG-038.3 §39: refuse a topology that would violate the runtime heap
-    // reserve BEFORE mutating any driver state (§70: reject before OOM).
+    // Phase 1: Validate admission, PWM availability, channel configs
     const TopologyAdmission admission = check_topology_admission(cfg);
     if (!admission.ok) {
         ESP_LOGE("output",
@@ -98,7 +97,7 @@ esp_err_t OutputController::reconfigure(const DeviceConfig& cfg) {
 
     const bool pwm_ok = pwm_available_.load(std::memory_order_acquire);
 
-    // 0. PWM Availability Validation
+    // PWM Availability Validation
     if (!pwm_ok) {
         for (uint8_t ch = 8; ch < 16; ++ch) {
             if (cfg.channels[ch].enabled) {
@@ -109,32 +108,67 @@ esp_err_t OutputController::reconfigure(const DeviceConfig& cfg) {
         }
     }
 
-    // 1. Validate addressable channels
+    // Validate addressable channels
     for (uint8_t ch = 0; ch < 8; ++ch) {
         const ChannelConfig& ccfg = cfg.channels[ch];
-        if (ccfg.enabled && ccfg.pixel_count > MAX_PIXELS) {
-            ESP_LOGE("output", "Reconfigure validation: channel[%u] pixel_count (%u) > MAX_PIXELS", ch, ccfg.pixel_count);
-            unlock();
-            return ESP_ERR_INVALID_ARG;
+        if (ccfg.enabled) {
+            if (ccfg.pixel_count > MAX_PIXELS) {
+                ESP_LOGE("output", "Reconfigure validation: channel[%u] pixel_count (%u) > MAX_PIXELS", ch, ccfg.pixel_count);
+                unlock();
+                return ESP_ERR_INVALID_ARG;
+            }
+            if (!pixel_order_valid(ccfg.addressable_type, ccfg.pixel_order)) {
+                ESP_LOGE("output", "Reconfigure validation: channel[%u] invalid pixel order for type", ch);
+                unlock();
+                return ESP_ERR_INVALID_ARG;
+            }
         }
     }
 
-    // Prepare candidate buffers/encoders, then swap only after every allocation
-    // succeeds. Failure leaves the live topology and its pixel order intact.
+    // Phase 2: Gate PWM
+    Pca9685Driver::disable_outputs();
+
+    // Phase 3: Clear old hardware state before changing topology
+    AddressableCommitResult old_blackout = pixels_.blackout();
+    if (old_blackout.result != ESP_OK) {
+        ESP_LOGE("output", "Old topology blackout failed: %s (aborting reconfigure to protect hardware)",
+                 output_err_name(old_blackout.result));
+        topology_valid_.store(false, std::memory_order_release);
+        last_blackout_result_ = old_blackout;
+        unlock();
+        return old_blackout.result;
+    }
+
+    // Phase 4: Prepare candidate buffers/encoders, then swap only after every allocation succeeds.
     const esp_err_t topology_err = pixels_.reconfigure(cfg, kPostTopologyHeapReserveBytes);
     if (topology_err != ESP_OK) {
         note_rmt_allocation_failure();
+        topology_valid_.store(false, std::memory_order_release);
         unlock();
         return topology_err;
     }
 
     log_output_heap_stage("addressable_topology");
 
-    // 3. Hardware Configuration: PWM channels (PCA9685 channels P1..P8)
+    // Phase 5: Blackout new addressable topology
+    AddressableCommitResult new_blackout = pixels_.blackout();
+    if (new_blackout.result != ESP_OK) {
+        ESP_LOGE("output", "New topology blackout failed: %s", output_err_name(new_blackout.result));
+        topology_valid_.store(false, std::memory_order_release);
+        last_blackout_result_ = new_blackout;
+        unlock();
+        return new_blackout.result;
+    }
+
+    // Phase 6: Confirm PCA zero (fatal if clear fails)
     if (pwm_ok) {
-        esp_err_t pwm_clr = pwm_.clear();
+        const esp_err_t pwm_clr = pwm_.clear();
         if (pwm_clr != ESP_OK) {
-            ESP_LOGW("output", "PWM clear after reconfigure failed: %s (non-fatal, channels may retain stale state)", esp_err_to_name(pwm_clr));
+            Pca9685Driver::disable_outputs();
+            topology_valid_.store(false, std::memory_order_release);
+            ESP_LOGE("output", "PWM clear after reconfigure failed: %s (fatal hardware error)", esp_err_to_name(pwm_clr));
+            unlock();
+            return pwm_clr;
         }
         for (uint8_t ch = 8; ch < 16; ++ch) {
             const ChannelConfig& ccfg = cfg.channels[ch];
@@ -144,13 +178,13 @@ esp_err_t OutputController::reconfigure(const DeviceConfig& cfg) {
         }
     }
 
+    // Phase 7: Publish topology valid
     topology_valid_.store(true, std::memory_order_release);
     if (!estop_latched_.load(std::memory_order_acquire)) {
         output_enabled_.store(true, std::memory_order_release);
-        if (pwm_ok) {
-            Pca9685Driver::enable_outputs();
-        }
     }
+
+    // Phase 8: Leave output gated (/OE remains HIGH) until first valid frame commit
     unlock();
     return ESP_OK;
 }
@@ -165,6 +199,7 @@ BlackoutResult OutputController::blackout_locked() {
     res.pwm_result = p_err;
     res.addressable_confirmed = (a_res.result == ESP_OK);
     res.pwm_confirmed = (p_err == ESP_OK);
+    last_blackout_result_ = res;
     return res;
 }
 
@@ -189,7 +224,7 @@ void OutputController::latch_estop() {
     unlock();
 }
 
-void OutputController::clear_estop() {
+esp_err_t OutputController::clear_estop() {
     // Clearing the physical latch only re-arms the controller with known-zero outputs.
     // It must NOT immediately restore previous or stale output.
     lock();
@@ -199,17 +234,25 @@ void OutputController::clear_estop() {
     pixels_.clear();
     AddressableCommitResult a_res = pixels_.blackout();
 
-    if (p_err == ESP_OK && a_res.result == ESP_OK) {
+    BlackoutResult b_res;
+    b_res.addressable_result = a_res.result;
+    b_res.pwm_result = p_err;
+    b_res.addressable_confirmed = (a_res.result == ESP_OK);
+    b_res.pwm_confirmed = (p_err == ESP_OK);
+    last_blackout_result_ = b_res;
+
+    const esp_err_t err = (a_res.result != ESP_OK) ? a_res.result : p_err;
+
+    if (err == ESP_OK) {
         estop_latched_.store(false, std::memory_order_release);
         output_enabled_.store(true, std::memory_order_release);
-        if (topology_valid_.load(std::memory_order_acquire)) {
-            Pca9685Driver::enable_outputs();
-        }
+        // Leave /OE HIGH! The next successful commit exposes PWM.
     } else {
         ESP_LOGE("output", "clear_estop failed to zero hardware cleanly (addr=%s, pwm=%s)",
                  output_err_name(a_res.result), esp_err_to_name(p_err));
     }
     unlock();
+    return err;
 }
 
 void OutputController::set_output_enabled(bool enabled) {
@@ -218,9 +261,9 @@ void OutputController::set_output_enabled(bool enabled) {
     if (!enabled) {
         Pca9685Driver::disable_outputs();
         blackout_locked();
-    } else if (topology_valid_.load(std::memory_order_acquire) && !estop_latched_.load(std::memory_order_acquire)) {
-        Pca9685Driver::enable_outputs();
     }
+    // When enabling: arm controller, KEEP /OE HIGH.
+    // Next successful commit will expose PWM.
     unlock();
 }
 
@@ -313,11 +356,6 @@ esp_err_t OutputController::try_commit_locked() {
         pwm_err = pwm_.commit();
         const int64_t t_pwm_end = esp_timer_get_time();
         pwm_us = static_cast<uint32_t>(t_pwm_end - t_pwm_start);
-        if (pwm_err == ESP_OK) {
-            Pca9685Driver::enable_outputs();
-        } else {
-            Pca9685Driver::disable_outputs();
-        }
     }
 
     const int64_t t_total_end = esp_timer_get_time();
@@ -362,6 +400,9 @@ esp_err_t OutputController::try_commit_locked() {
         Pca9685Driver::disable_outputs();
         blackout_locked(); // Deterministic blackout on failed commit!
     } else {
+        if (pwm_available_.load(std::memory_order_acquire)) {
+            pwm_.enable_outputs();
+        }
         commit_metrics_.successful++;
     }
 

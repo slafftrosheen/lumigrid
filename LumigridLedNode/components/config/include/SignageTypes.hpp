@@ -35,6 +35,16 @@ enum class PixelOrder : uint8_t {
     GRBW = 3
 };
 
+constexpr bool pixel_order_valid(AddressableType type, PixelOrder order) {
+    if (type == AddressableType::WS2812) {
+        return order == PixelOrder::RGB || order == PixelOrder::GRB;
+    }
+    if (type == AddressableType::SK6812) {
+        return order == PixelOrder::RGBW || order == PixelOrder::GRBW;
+    }
+    return false;
+}
+
 inline const char* pixel_order_name(PixelOrder order) {
     switch (order) {
         case PixelOrder::RGB: return "RGB";

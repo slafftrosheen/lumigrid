@@ -44,6 +44,13 @@ struct BlackoutResult {
     bool addressable_confirmed = false;
     bool pwm_confirmed = false;
 
+    BlackoutResult() = default;
+    BlackoutResult(const AddressableCommitResult& a)
+        : addressable_result(a.result),
+          pwm_result(ESP_OK),
+          addressable_confirmed(a.result == ESP_OK),
+          pwm_confirmed(false) {}
+
     operator esp_err_t() const {
         return (addressable_result != ESP_OK) ? addressable_result : pwm_result;
     }
@@ -116,11 +123,12 @@ public:
     void set_pwm_available(bool available) { pwm_available_.store(available, std::memory_order_release); }
 
     void latch_estop();
-    void clear_estop();
+    esp_err_t clear_estop();
     bool is_estop_latched() const { return estop_latched_.load(std::memory_order_acquire); }
     uint32_t failed_commit_count() const { return failed_commit_count_.load(std::memory_order_relaxed); }
     esp_err_t last_commit_error() const { return last_commit_error_.load(std::memory_order_acquire); }
     uint32_t last_commit_time_ms() const { return last_commit_time_ms_.load(std::memory_order_acquire); }
+    BlackoutResult last_blackout_result() const { return last_blackout_result_; }
 
     OutputCommitMetrics commit_metrics() const { return commit_metrics_; }
 
@@ -154,6 +162,7 @@ private:
     std::atomic<esp_err_t> last_commit_error_{ESP_OK};
     std::atomic<uint32_t> last_commit_time_ms_{0};
 
+    BlackoutResult last_blackout_result_{};
     OutputCommitMetrics commit_metrics_{};
 
 #if defined(CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS) && CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS

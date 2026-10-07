@@ -183,6 +183,7 @@ public:
     static FrameBudgetEstimate preflight_frame_budget(const DeviceConfig& cfg);
     void set_beat_period(uint16_t period_ms);
     void reload_device_config();
+    void restart_soft_start();
 
     bool acquire_control(ControlSource source, uint32_t lease_ms = 0, uint8_t zone_mask = 0xFF, uint8_t layer_mask = 0x07, uint16_t channel_mask = 0, bool takeover = false);
     void release_control(ControlSource source);

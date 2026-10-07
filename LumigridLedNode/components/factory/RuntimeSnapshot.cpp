@@ -154,8 +154,13 @@ RuntimeSnapshot collect_runtime_snapshot(FactoryApi* api, uint32_t stream_seq) {
         const auto& ctrl = api->signage()->controller();
         const auto m = ctrl.commit_metrics();
         const auto ftm = api->signage()->frame_timing_metrics();
+        const auto& pb = api->signage()->power_budget();
         snap.output.enabled = ctrl.output_enabled();
-        snap.output.power_mw = api->signage()->power_budget().current_power_mw();
+        snap.output.power_mw = pb.current_power_mw();
+        snap.output.estimated_requested_mw = pb.requested_power_mw();
+        snap.output.estimated_limited_mw = pb.limited_power_mw();
+        snap.output.estimate_complete = pb.estimate_complete();
+        snap.output.limit_mw = pb.limit_mw();
         snprintf(snap.output.state, sizeof(snap.output.state), "%s",
                  output_state_to_str(api->signage()->output_state()));
         snap.output.fault = api->signage()->output_fault();
@@ -174,6 +179,10 @@ RuntimeSnapshot collect_runtime_snapshot(FactoryApi* api, uint32_t stream_seq) {
     } else {
         snap.output.enabled = api->runner().status().outputs_enabled;
         snap.output.power_mw = 0;
+        snap.output.estimated_requested_mw = 0;
+        snap.output.estimated_limited_mw = 0;
+        snap.output.estimate_complete = false;
+        snap.output.limit_mw = 0;
         snprintf(snap.output.state, sizeof(snap.output.state), "healthy");
         snap.output.fault = false;
         snap.output.fault_count = 0;
@@ -496,11 +505,17 @@ bool serialize_runtime_snapshot(const RuntimeSnapshot& snap, FixedJsonWriter& wr
 
     // Output
     writer.append_printf(
-        "\"output\":{\"enabled\":%s,\"powerMw\":%" PRIu32 ",\"state\":\"%s\",\"fault\":%s,\"faultCount\":%" PRIu32 ",\"estopActive\":%s,"
+        "\"output\":{\"enabled\":%s,\"powerMw\":%" PRIu32 ","
+        "\"power\":{\"estimatedRequestedMw\":%" PRIu32 ",\"estimatedLimitedMw\":%" PRIu32 ",\"estimateComplete\":%s,\"limitMw\":%" PRIu32 "},"
+        "\"state\":\"%s\",\"fault\":%s,\"faultCount\":%" PRIu32 ",\"estopActive\":%s,"
         "\"commitUs\":%" PRIu32 ",\"maxCommitUs\":%" PRIu32 ",\"addressableUs\":%" PRIu32 ",\"pwmUs\":%" PRIu32 ",\"commitFailures\":%" PRIu32 ","
         "\"frame\":{\"loopFps\":%.1f,\"committedFps\":%.1f,\"deadlineMisses\":%" PRIu32 "}},",
         snap.output.enabled ? "true" : "false",
         snap.output.power_mw,
+        snap.output.estimated_requested_mw,
+        snap.output.estimated_limited_mw,
+        snap.output.estimate_complete ? "true" : "false",
+        snap.output.limit_mw,
         snap.output.state,
         snap.output.fault ? "true" : "false",
         snap.output.fault_count,

@@ -255,9 +255,20 @@ esp_err_t ParallelRmtDriver::set_transport(IRmtTransport* transport) {
     return ESP_OK;
 }
 
+void ParallelRmtDriver::configure_pixel_order(Lane& lane, PixelOrder order) {
+    const bool grb = (order == PixelOrder::GRB || order == PixelOrder::GRBW);
+    lane.pos[0] = grb ? 1 : 0;
+    lane.pos[1] = grb ? 0 : 1;
+    lane.pos[2] = 2;
+    lane.pos[3] = 3;
+}
+
 esp_err_t ParallelRmtDriver::configure_lane(uint8_t lane, int gpio, bool rgbw,
                                             PixelOrder order, uint16_t pixels) {
     if (lane >= kLanes || pixels > MAX_PIXELS) return ESP_ERR_INVALID_ARG;
+    if (!pixel_order_valid(rgbw ? AddressableType::SK6812 : AddressableType::WS2812, order)) {
+        return ESP_ERR_INVALID_ARG;
+    }
     release_lane(lane);
     if (pixels == 0) return ESP_OK;
 
@@ -271,14 +282,7 @@ esp_err_t ParallelRmtDriver::configure_lane(uint8_t lane, int gpio, bool rgbw,
         return kErrRmtResourceExhausted;
     }
 
-    // Wire byte order is the configured order; W (when present) is last.
-    // RGB/GRB are accepted for RGBW hardware and RGBW/GRBW for RGB hardware: the
-    // R/G swap decides the order, the lane hardware decides the byte count.
-    const bool grb = (order == PixelOrder::GRB || order == PixelOrder::GRBW);
-    L.pos[0] = grb ? 1 : 0;
-    L.pos[1] = grb ? 0 : 1;
-    L.pos[2] = 2;
-    L.pos[3] = 3;
+    configure_pixel_order(L, order);
     L.rgbw = rgbw;
     L.pixels = pixels;
 
@@ -321,15 +325,14 @@ esp_err_t ParallelRmtDriver::reconfigure(const DeviceConfig& cfg, uint32_t reser
         const auto& cc = cfg.channels[lane];
         if (!cc.enabled || !cc.pixel_count) continue;
         if (cc.pixel_count > MAX_PIXELS) { err = ESP_ERR_INVALID_ARG; break; }
+        if (!pixel_order_valid(cc.addressable_type, cc.pixel_order)) { err = ESP_ERR_INVALID_ARG; break; }
         auto& next = candidate[lane];
         next.rgbw = cc.addressable_type == AddressableType::SK6812;
         next.pixels = cc.pixel_count;
         next.wire_len = next.pixels * (next.rgbw ? 4u : 3u);
         next.wire = static_cast<uint8_t*>(calloc(1, next.wire_len));
         if (!next.wire) { err = kErrInsufficientRuntimeMemory; break; }
-        const bool grb = cc.pixel_order == PixelOrder::GRB || cc.pixel_order == PixelOrder::GRBW;
-        next.pos[0] = grb ? 1 : 0;
-        next.pos[1] = grb ? 0 : 1;
+        configure_pixel_order(next, cc.pixel_order);
         next.state = LaneState::Ready;
         err = tx().prepare(lane, board::kAledPins[lane], next.rgbw, configured(lane));
         if (err != ESP_OK) { err = map_create_error(err); break; }

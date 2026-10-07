@@ -43,3 +43,16 @@ The node tracks system health and physical timing comprehensively:
 - DMX statistics (drops, unpatched)
 - Watchdog fallback & sync packet loss
 
+## Power Limiting & Electrical Safety
+
+The node incorporates an in-place software power estimator and limiter (`PowerBudget`):
+- Models quiescent idle power (5 mW/pixel) and full active power (295 mW/pixel for WS2812 RGB, 380 mW/pixel for SK6812 RGBW).
+- Supports auxiliary PWM power modeling via per-channel `max_milliwatts` load configuration.
+- Enforces local channel constraints and the global device power supply budget (`max_power_mw`) via proportional scaling and soft-start ramp.
+- Telemetry exposes requested vs limited estimated power and complete model status (`estimateComplete`).
+
+> [!CAUTION]
+> **Power Estimation Disclaimer:**
+> Power limiting is an estimated software brightness limiter (WLED-style empirical modeling). It does **NOT** replace a correctly sized power supply unit (PSU), adequate wiring gauges, fuses, MOSFET thermal ratings, or physical branch circuit protection. Hardware installations must always be electrically safe regardless of software state.
+
+

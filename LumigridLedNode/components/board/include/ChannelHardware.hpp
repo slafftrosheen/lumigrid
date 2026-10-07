@@ -34,6 +34,8 @@ inline void channel_port_name(uint8_t index, char* out, size_t len) {
     }
 }
 
+constexpr uint8_t kPwmHardwareMap[8] = {0, 1, 2, 3, 4, 5, 6, 7};
+
 inline ChannelHardwareDescriptor channel_hardware(uint8_t index) {
     static const char* const kPortNames[16] = {
         "A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8",
@@ -53,7 +55,7 @@ inline ChannelHardwareDescriptor channel_hardware(uint8_t index) {
         return ChannelHardwareDescriptor{
             index,
             ChannelKind::Pwm,
-            static_cast<uint8_t>(index - 8),
+            kPwmHardwareMap[index - 8],
             -1,
             kPortNames[index]
         };

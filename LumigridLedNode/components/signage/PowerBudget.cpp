@@ -33,6 +33,7 @@ uint32_t PowerBudget::enforce(RenderFrame& frame, const DeviceConfig& cfg, uint3
     uint32_t total_idle_mw = 0;
     uint32_t total_active_mw = 0;
     bool throttled = false;
+    estimate_complete_ = true;
 
     // 2. Per-channel power calculation and local channel limit enforcement
     for (uint8_t ch = 0; ch < kChannelCount; ++ch) {
@@ -47,11 +48,17 @@ uint32_t PowerBudget::enforce(RenderFrame& frame, const DeviceConfig& cfg, uint3
 
         if (hw.kind == ChannelKind::Addressable) {
             uint16_t pcount = std::min<uint16_t>(ccfg.pixel_count, MAX_PIXELS);
-            channel_idle_mw = static_cast<uint32_t>(pcount) * kPixelIdleMw;
+            channel_idle_mw = static_cast<uint32_t>(pcount) * kPixelModel.idle_mw;
+            const bool is_rgbw = (ccfg.addressable_type == AddressableType::SK6812);
             for (uint16_t p = 0; p < pcount; ++p) {
                 const LightValue& lv = cf.pixels[p];
-                uint32_t sum = uint32_t(lv.r) + lv.g + lv.b + lv.w;
-                channel_active_mw += (sum * kPixelActiveMw) / 765;
+                if (is_rgbw) {
+                    uint32_t sum = uint32_t(lv.r) + lv.g + lv.b + lv.w;
+                    channel_active_mw += (sum * kPixelModel.max_rgbw_mw) / 1020;
+                } else {
+                    uint32_t sum = uint32_t(lv.r) + lv.g + lv.b;
+                    channel_active_mw += (sum * kPixelModel.max_rgb_mw) / 765;
+                }
             }
 
             // Enforce local channel limit if configured
@@ -79,8 +86,14 @@ uint32_t PowerBudget::enforce(RenderFrame& frame, const DeviceConfig& cfg, uint3
                 }
             }
         } else {
-            // PWM channels have negligible quiescent consumption; single dimmer channel
-            channel_active_mw = (uint32_t(cf.pwm) * kPwmChannelMaxMw) / 4095;
+            // PWM channels: modelled only when max_milliwatts > 0.
+            // If max_milliwatts == 0, power model is unknown/incomplete.
+            if (ccfg.max_milliwatts > 0) {
+                channel_active_mw = (uint64_t(cf.pwm) * ccfg.max_milliwatts) / 4095;
+            } else {
+                channel_active_mw = 0;
+                estimate_complete_ = false;
+            }
 
             // Enforce local channel limit if configured
             if (ccfg.max_milliwatts > 0 && channel_active_mw > ccfg.max_milliwatts && channel_active_mw > 0) {
@@ -101,7 +114,7 @@ uint32_t PowerBudget::enforce(RenderFrame& frame, const DeviceConfig& cfg, uint3
     }
 
     const uint32_t total_mw = total_idle_mw + total_active_mw;
-    last_power_mw_ = total_mw;
+    requested_power_mw_ = total_mw;
 
     // 3. Determine if global scaling is needed
     uint8_t power_scale = 255;
@@ -148,6 +161,10 @@ uint32_t PowerBudget::enforce(RenderFrame& frame, const DeviceConfig& cfg, uint3
                 lv.w = static_cast<uint8_t>((uint16_t(lv.w) * final_scale) / 255);
             }
         }
+        uint32_t limited_active_mw = (uint64_t(total_active_mw) * final_scale) / 255;
+        limited_power_mw_ = total_idle_mw + limited_active_mw;
+    } else {
+        limited_power_mw_ = requested_power_mw_;
     }
 
     return total_mw;

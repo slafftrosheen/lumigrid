@@ -168,6 +168,8 @@ private:
         size_t    wire_len = 0;
     };
 
+    static void configure_pixel_order(Lane& lane, PixelOrder order);
+
     IRmtTransport& tx() const;
 
     IRmtTransport* transport_ = nullptr;

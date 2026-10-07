@@ -43,6 +43,7 @@
 #include "CertificationStore.hpp"
 #include "CertificationService.hpp"
 #include "ParallelRmtDriver.hpp"
+#include "PowerBudget.hpp"
 #include "lg_board_pins.hpp"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -6186,6 +6187,189 @@ bool test_lg029_node_backed_authentication() {
         return true;
     }
 
+    // ==========================================================================
+    // LG-038.6: Physical Output State Integrity & Power Safety
+    // ==========================================================================
+    bool test_lg0386_physical_output_integrity_and_safety() {
+        ESP_LOGI(TAG, "Testing LG-038.6 Physical Output State Integrity & Power Safety...");
+
+        // 1. Candidate reconfigure pos[2] == 2 and pos[3] == 3 bug fix
+        {
+            class DummyRmtTransport : public IRmtTransport {
+            public:
+                esp_err_t create(uint8_t, int, bool) override { return ESP_OK; }
+                esp_err_t prepare(uint8_t, int, bool, bool) override { return ESP_OK; }
+                void cancel_prepared(uint8_t, bool) override {}
+                esp_err_t submit(uint8_t, const uint8_t*, size_t) override { return ESP_OK; }
+                esp_err_t wait(uint8_t, uint32_t) override { return ESP_OK; }
+                esp_err_t destroy(uint8_t) override { return ESP_OK; }
+            };
+            DummyRmtTransport transport;
+            ParallelRmtDriver driver(&transport);
+            assert(driver.configure_lane(0, board::kAledPins[0], false, PixelOrder::GRB, 10) == ESP_OK);
+            assert(driver.pos_r(0) == 1);
+            assert(driver.pos_g(0) == 0);
+            assert(driver.pos_b(0) == 2);
+            assert(driver.pos_w(0) == 3);
+
+            DeviceConfig candidate{};
+            candidate.channels[0].enabled = true;
+            candidate.channels[0].pixel_count = 10;
+            candidate.channels[0].addressable_type = AddressableType::SK6812;
+            candidate.channels[0].pixel_order = PixelOrder::RGBW;
+
+            esp_err_t err = driver.reconfigure(candidate, 0);
+            assert(err == ESP_OK);
+            assert(driver.pos_r(0) == 0);
+            assert(driver.pos_g(0) == 1);
+            assert(driver.pos_b(0) == 2); // Preserved B index (fixed LG-038.6 reconfigure bug)
+            assert(driver.pos_w(0) == 3); // Preserved W index (fixed LG-038.6 reconfigure bug)
+
+            driver.stage_pixel(0, 0, 0x11, 0x22, 0x33, 0x44);
+            const uint8_t* wire = driver.wire_data(0);
+            assert(wire != nullptr);
+            assert(wire[0] == 0x11); // R at 0
+            assert(wire[1] == 0x22); // G at 1
+            assert(wire[2] == 0x33); // B at 2 (not 0)
+            assert(wire[3] == 0x44); // W at 3 (not 0)
+        }
+
+        // 2. Reject impossible pixel order & addressable type combinations
+        {
+            assert(pixel_order_valid(AddressableType::WS2812, PixelOrder::RGB) == true);
+            assert(pixel_order_valid(AddressableType::WS2812, PixelOrder::GRB) == true);
+            assert(pixel_order_valid(AddressableType::WS2812, PixelOrder::RGBW) == false);
+            assert(pixel_order_valid(AddressableType::WS2812, PixelOrder::GRBW) == false);
+
+            assert(pixel_order_valid(AddressableType::SK6812, PixelOrder::RGBW) == true);
+            assert(pixel_order_valid(AddressableType::SK6812, PixelOrder::GRBW) == true);
+            assert(pixel_order_valid(AddressableType::SK6812, PixelOrder::RGB) == false);
+            assert(pixel_order_valid(AddressableType::SK6812, PixelOrder::GRB) == false);
+
+            class DummyRmtTransport : public IRmtTransport {
+            public:
+                esp_err_t create(uint8_t, int, bool) override { return ESP_OK; }
+                esp_err_t prepare(uint8_t, int, bool, bool) override { return ESP_OK; }
+                void cancel_prepared(uint8_t, bool) override {}
+                esp_err_t submit(uint8_t, const uint8_t*, size_t) override { return ESP_OK; }
+                esp_err_t wait(uint8_t, uint32_t) override { return ESP_OK; }
+                esp_err_t destroy(uint8_t) override { return ESP_OK; }
+            };
+            DummyRmtTransport transport;
+            ParallelRmtDriver driver(&transport);
+            assert(driver.configure_lane(0, board::kAledPins[0], false, PixelOrder::RGBW, 10) == ESP_ERR_INVALID_ARG);
+
+            ConfigStore::ConfigValidationResult res;
+            DeviceConfig bad_cfg{};
+            bad_cfg.channels[0].enabled = true;
+            bad_cfg.channels[0].pixel_count = 50;
+            bad_cfg.channels[0].addressable_type = AddressableType::WS2812;
+            bad_cfg.channels[0].pixel_order = PixelOrder::RGBW;
+            assert(ConfigStore::validate_config(bad_cfg, &res) == ESP_ERR_INVALID_ARG);
+            assert(!res.valid);
+
+            bad_cfg.channels[0].addressable_type = AddressableType::SK6812;
+            bad_cfg.channels[0].pixel_order = PixelOrder::GRB;
+            assert(ConfigStore::validate_config(bad_cfg, &res) == ESP_ERR_INVALID_ARG);
+            assert(!res.valid);
+        }
+
+        // 3. Old topology blackout on shrink/disable
+        {
+            class RecordingRmtTransport : public IRmtTransport {
+            public:
+                esp_err_t create(uint8_t, int, bool) override { return ESP_OK; }
+                esp_err_t prepare(uint8_t, int, bool, bool) override { return ESP_OK; }
+                void cancel_prepared(uint8_t, bool) override {}
+                esp_err_t submit(uint8_t, const uint8_t*, size_t) override { return ESP_OK; }
+                esp_err_t wait(uint8_t, uint32_t) override { return ESP_OK; }
+                esp_err_t destroy(uint8_t) override { return ESP_OK; }
+            };
+            RecordingRmtTransport transport;
+            ParallelRmtDriver driver(&transport);
+            assert(driver.configure_lane(0, board::kAledPins[0], false, PixelOrder::GRB, 50) == ESP_OK);
+            driver.stage_pixel(0, 40, 255, 0, 0, 0);
+            assert(driver.wire_data(0)[40 * 3 + driver.pos_r(0)] == 255);
+
+            // Blackout old topology before shrinking
+            driver.stage_clear_all();
+            AddressableCommitResult bo_res = driver.commit(true);
+            assert(bo_res.result == ESP_OK);
+            assert(driver.wire_data(0)[40 * 3 + driver.pos_r(0)] == 0); // Tail pixels are zeroed
+
+            DeviceConfig shrunk{};
+            shrunk.channels[0].enabled = true;
+            shrunk.channels[0].pixel_count = 20;
+            shrunk.channels[0].addressable_type = AddressableType::WS2812;
+            shrunk.channels[0].pixel_order = PixelOrder::GRB;
+            assert(driver.reconfigure(shrunk, 0) == ESP_OK);
+            assert(driver.pixels(0) == 20);
+            assert(driver.wire_len(0) == 60);
+        }
+
+        // 4. Failed PCA zero never lowers /OE & uninitialized /OE remains HIGH
+        {
+            Pca9685Driver uninit_pca;
+            assert(uninit_pca.enable_outputs() == ESP_ERR_INVALID_STATE);
+            assert(!uninit_pca.zero_confirmed());
+        }
+
+        // 5. E-stop clear verified return value & latch semantics
+        {
+            OutputController ctrl;
+            ctrl.latch_estop();
+            assert(ctrl.is_estop_latched());
+            esp_err_t res = ctrl.clear_estop();
+            assert(res == ESP_OK);
+            assert(!ctrl.is_estop_latched());
+            assert(ctrl.last_blackout_result().addressable_confirmed);
+        }
+
+        // 6. Power budget: WS2812 / SK6812 calculation and PWM load model
+        {
+            PowerBudget budget;
+            DeviceConfig cfg{};
+            cfg.channels[0].enabled = true;
+            cfg.channels[0].pixel_count = 10;
+            cfg.channels[0].addressable_type = AddressableType::WS2812;
+            cfg.channels[0].pixel_order = PixelOrder::GRB;
+
+            cfg.channels[1].enabled = true;
+            cfg.channels[1].pixel_count = 10;
+            cfg.channels[1].addressable_type = AddressableType::SK6812;
+            cfg.channels[1].pixel_order = PixelOrder::RGBW;
+
+            cfg.channels[8].enabled = true;
+            cfg.channels[8].max_milliwatts = 0; // Incomplete model
+
+            RenderFrame frame{};
+            uint32_t req = budget.enforce(frame, cfg, 1000);
+            // Quiescent: 10 * 5 mW + 10 * 5 mW = 100 mW
+            assert(req == 100);
+            assert(!budget.estimate_complete());
+
+            // Set max_milliwatts on PWM channel
+            cfg.channels[8].max_milliwatts = 4000;
+            frame.channels[8].pwm = 4095; // 100% duty
+            req = budget.enforce(frame, cfg, 2000);
+            // 100 mW idle + 4000 mW PWM = 4100 mW
+            assert(req == 4100);
+            assert(budget.estimate_complete());
+            assert(budget.requested_power_mw() == 4100);
+            assert(budget.limited_power_mw() == 4100);
+
+            // Global budget clamping
+            budget.set_limit_mw(2000);
+            budget.enforce(frame, cfg, 3000);
+            assert(budget.requested_power_mw() == 4100);
+            assert(budget.limited_power_mw() <= 2000);
+            assert(budget.throttling_events() > 0);
+        }
+
+        ESP_LOGI(TAG, "[PASS] LG-038.6 Physical Output State Integrity & Power Safety tests passed.");
+        return true;
+    }
+
 } // namespace
 
 bool run_runtime_hardening_tests() {
@@ -6311,6 +6495,9 @@ bool run_runtime_hardening_tests() {
     all_ok &= test_lg0383_runtime_memory_helpers();
     all_ok &= test_lg0383_service_plan();
     all_ok &= test_lg0383_lazy_workers();
+
+    // LG-038.6 Physical Output State Integrity & Power Safety
+    all_ok &= test_lg0386_physical_output_integrity_and_safety();
 
     if (all_ok) {
         ESP_LOGI(TAG, "==================================================");
