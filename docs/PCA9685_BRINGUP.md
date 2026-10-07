@@ -1,14 +1,34 @@
 # PCA9685 bring-up contract
 
-SDA GPIO21, SCL GPIO22, /OE GPIO25; synchronous ESP-IDF master transactions (`trans_queue_depth = 0`) at 100 kHz. The PCB address is **0x55** (hardware fact): A0/A2/A4 tied HIGH, A1/A3/A5 tied LOW, so 0x40 + 0x01 + 0x04 + 0x10 = 0x55.
+SDA GPIO21, SCL GPIO22, /OE GPIO25; **ESP-IDF legacy synchronous I2C driver** (`driver/i2c.h`) at **100 kHz**. The PCB address is **0x55** (hardware fact): A0/A2/A4 HIGH, A1/A3/A5 LOW, so 0x40 + 0x01 + 0x04 + 0x10 = 0x55.
 
-Initialization binds directly to 0x55 with no `i2c_master_probe()` gate, no 0x40/0x70 probe, and no bus scan or address auto-discovery. Presence is decided by real PCA transactions: a MODE1 read, and if that fails a direct MODE1 write (`SLEEP | AI`). Either succeeding means the PCA is present. Then the native sequence runs: MODE1=SLEEP|AI, PRE_SCALE=5, MODE2=OUTDRV, MODE1=AI, wait 2 ms, MODE1=AI|RESTART, read back, zero all channels. The address is reported by PcaDiagnostics.address.
+The transport changed because the new `i2c_master` path under ESP-IDF 5.2.1 produced `ESP_ERR_INVALID_STATE` / `ESP_ERR_TIMEOUT` on this controller. PlatformIO remains `espressif32@6.7.0`, ESP-IDF 5.2.1. Only the PCA I2C transport changes.
+
+Initialization installs the legacy master on I2C_NUM_0, with internal pull-ups and no asynchronous callbacks, device handles, transaction queue, probe or scanner. A single MODE1 read at 0x55 decides presence; failure returns immediately with /OE HIGH. Every register read and write uses mutex-serialized synchronous helpers with a 100 ms timeout.
+
+The existing sequence remains: MODE1=SLEEP|AI, PRE_SCALE=5, MODE2=OUTDRV, MODE1=AI, wait 2 ms, MODE1=AI|RESTART, read MODE1/MODE2/PRE_SCALE, zero all channels. The address is reported by PcaDiagnostics.address.
+
+## Failed new-driver evidence
+
+The user supplied these observed failures; existing raw captures remain unchanged:
+
+```text
+i2c_master_transmit_receive -> ESP_ERR_INVALID_STATE
+i2c_master_transmit         -> ESP_ERR_TIMEOUT
+i2c_master_bus_rm_device    -> Wrong I2C status
+```
+
+## Legacy transport validation — 2026-10-07
+
+`python LumigridLedNode/scripts/check_invariants.py` passed. `pio run -d LumigridLedNode -e factory` passed with espressif32 6.7.0 / ESP-IDF 5.2.1, including linked boot-stack and partition-budget checks. Firmware binary: 1,313,856 bytes, 54.2% of the factory slot. Linked-symbol inspection found the two legacy transfer helpers and no `i2c_acquire_bus_handle`, `i2c_new_master_bus` or `i2c_master_transmit` implementation, avoiding IDF's legacy/new-driver startup conflict.
+
+No ESP32 USB serial port was present (only Bluetooth COM8/COM9), so no flash or physical boot/P1/P8 test was performed. The regression remains physically unverified until the expected detection/readback boot and existing Factory PWM P1/P8 checks succeed.
 
 On failure, /OE stays HIGH and PWM remains unavailable while addressable outputs continue. /OE is HIGH before init and on failure, a known-zero frame is written before enable, and OutputController exclusively owns normal /OE enable. Successful initialization makes eight PWM channels available.
 
 Safety hardware: software/runtime E-stop, PCA /OE cutoff, no dedicated physical E-stop input GPIO, no addressable power gate.
 
-Reference: [NXP PCA9685 datasheet](https://www.nxp.com/docs/en/data-sheet/PCA9685.pdf). If direct transactions still fail, the next A/B step is swapping only the transport to legacy `driver/i2c.h` (same pins, 100 kHz, 0x55).
+Reference: [NXP PCA9685 datasheet](https://www.nxp.com/docs/en/data-sheet/PCA9685.pdf).
 
 > The section below is historical evidence from a build that gated on `i2c_master_probe()` (0x40/0x70/scan). Its conclusions about an unknown address are superseded; the log is preserved unchanged.
 

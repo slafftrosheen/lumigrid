@@ -1,10 +1,10 @@
 // components/output/Pca9685Driver.cpp
 // PCA9685 16-channel, 12-bit PWM controller driver.
-// Reference: NXP PCA9685 datasheet Rev.4; ESP-IDF 5.x i2c_master API.
+// Reference: NXP PCA9685 datasheet Rev.4; ESP-IDF legacy synchronous I2C driver.
 #include "Pca9685Driver.hpp"
 #include "lg_board_pins.hpp"
 
-#include "driver/i2c_master.h"
+#include "driver/i2c.h"
 #include "driver/gpio.h"
 #include "esp_check.h"
 #include "esp_log.h"
@@ -29,8 +29,9 @@ constexpr uint8_t kPrescaleFor1kHz = 5;
 
 static_assert(kPrescaleFor1kHz >= 3, "PCA9685 prescale below datasheet minimum");
 
-i2c_master_bus_handle_t s_bus = nullptr;
-i2c_master_dev_handle_t s_dev = nullptr;
+constexpr i2c_port_t kI2cPort = I2C_NUM_0;
+constexpr uint32_t kI2cHz = 100000;
+bool s_i2c_initialized = false;
 SemaphoreHandle_t s_i2c_mutex = nullptr;
 std::atomic<bool> s_outputs_enabled{false};
 
@@ -46,41 +47,37 @@ void enable_pwm_outputs() {
 }
 
 esp_err_t init_i2c_once() {
-    if (s_bus != nullptr && s_dev != nullptr) return ESP_OK;
+    if (s_i2c_initialized) return ESP_OK;
 
     if (s_i2c_mutex == nullptr) {
         s_i2c_mutex = xSemaphoreCreateMutex();
         if (s_i2c_mutex == nullptr) return ESP_ERR_NO_MEM;
     }
 
-    if (s_bus == nullptr) {
-        const i2c_master_bus_config_t bus_cfg = {
-            .i2c_port = I2C_NUM_0,
-            .sda_io_num = lg::board::kI2cSda,
-            .scl_io_num = lg::board::kI2cScl,
-            .clk_source = I2C_CLK_SRC_DEFAULT,
-            .glitch_ignore_cnt = 7,
-            .intr_priority = 0,
-            // IDF 5.2.1 enables async transfers for any nonzero queue depth.
-            // Register readback and writes use stack buffers and require completion
-            // before returning and releasing s_i2c_mutex.
-            .trans_queue_depth = 0,
-            .flags = { .enable_internal_pullup = true },
-        };
-        ESP_RETURN_ON_ERROR(i2c_new_master_bus(&bus_cfg, &s_bus), TAG, "i2c bus create");
-        ESP_LOGI(TAG, "I2C bus created SDA=%d SCL=%d 100kHz",
-                 (int)lg::board::kI2cSda, (int)lg::board::kI2cScl);
-    }
-
-    // Bind directly; presence is decided by real register transactions, not i2c_master_probe().
-    ESP_LOGI(TAG, "binding PCA9685 at board address 0x%02X", lg::board::kPcaAddress);
-    const i2c_device_config_t dev_cfg = {
-        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
-        .device_address = lg::board::kPcaAddress,
-        .scl_speed_hz = 100000,
-    };
-    ESP_RETURN_ON_ERROR(i2c_master_bus_add_device(s_bus, &dev_cfg, &s_dev), TAG, "add PCA9685");
+    i2c_config_t cfg{};
+    cfg.mode = I2C_MODE_MASTER;
+    cfg.sda_io_num = lg::board::kI2cSda;
+    cfg.scl_io_num = lg::board::kI2cScl;
+    cfg.sda_pullup_en = GPIO_PULLUP_ENABLE;
+    cfg.scl_pullup_en = GPIO_PULLUP_ENABLE;
+    cfg.master.clk_speed = kI2cHz;
+    cfg.clk_flags = 0;
+    ESP_RETURN_ON_ERROR(i2c_param_config(kI2cPort, &cfg), TAG, "legacy I2C config");
+    ESP_RETURN_ON_ERROR(i2c_driver_install(kI2cPort, I2C_MODE_MASTER, 0, 0, 0),
+                        TAG, "legacy I2C install");
+    s_i2c_initialized = true;
+    ESP_LOGI(TAG, "legacy I2C ready SDA=%d SCL=%d 100kHz",
+             static_cast<int>(lg::board::kI2cSda), static_cast<int>(lg::board::kI2cScl));
     return ESP_OK;
+}
+
+esp_err_t read_register(uint8_t reg, uint8_t& value) {
+    if (!s_i2c_initialized || s_i2c_mutex == nullptr) return ESP_ERR_INVALID_STATE;
+    xSemaphoreTake(s_i2c_mutex, portMAX_DELAY);
+    const esp_err_t err = i2c_master_write_read_device(
+        kI2cPort, lg::board::kPcaAddress, &reg, 1, &value, 1, pdMS_TO_TICKS(100));
+    xSemaphoreGive(s_i2c_mutex);
+    return err;
 }
 
 } // namespace
@@ -102,17 +99,18 @@ bool Pca9685Driver::is_outputs_enabled() {
 }
 
 esp_err_t Pca9685Driver::write_register(uint8_t reg, uint8_t value) {
-    if (s_dev == nullptr || s_i2c_mutex == nullptr) return ESP_ERR_INVALID_STATE;
+    if (!s_i2c_initialized || s_i2c_mutex == nullptr) return ESP_ERR_INVALID_STATE;
     xSemaphoreTake(s_i2c_mutex, portMAX_DELAY);
     const uint8_t packet[] = {reg, value};
-    const esp_err_t ret = i2c_master_transmit(s_dev, packet, sizeof(packet), 50);
+    const esp_err_t ret = i2c_master_write_to_device(
+        kI2cPort, lg::board::kPcaAddress, packet, sizeof(packet), pdMS_TO_TICKS(100));
     xSemaphoreGive(s_i2c_mutex);
     if (ret != ESP_OK) disable_pwm_outputs();
     return ret;
 }
 
 esp_err_t Pca9685Driver::write_bytes(uint8_t start_reg, const uint8_t* data, size_t len) {
-    if (s_dev == nullptr || s_i2c_mutex == nullptr) return ESP_ERR_INVALID_STATE;
+    if (!s_i2c_initialized || s_i2c_mutex == nullptr) return ESP_ERR_INVALID_STATE;
     constexpr size_t kMaxPayload = kChannels * 4;
     if (data == nullptr || len == 0 || len > kMaxPayload) return ESP_ERR_INVALID_ARG;
 
@@ -121,7 +119,8 @@ esp_err_t Pca9685Driver::write_bytes(uint8_t start_reg, const uint8_t* data, siz
     memcpy(packet + 1, data, len);
 
     xSemaphoreTake(s_i2c_mutex, portMAX_DELAY);
-    const esp_err_t ret = i2c_master_transmit(s_dev, packet, len + 1, 50);
+    const esp_err_t ret = i2c_master_write_to_device(
+        kI2cPort, lg::board::kPcaAddress, packet, len + 1, pdMS_TO_TICKS(100));
     xSemaphoreGive(s_i2c_mutex);
     if (ret != ESP_OK) disable_pwm_outputs();
     return ret;
@@ -143,30 +142,14 @@ esp_err_t Pca9685Driver::init() {
 
     ESP_RETURN_ON_ERROR(init_i2c_once(), TAG, "I2C init");
 
-    // Detection = a real PCA transaction. First try a MODE1 read.
-    {
-        uint8_t reg = kRegMode1;
-        uint8_t mode1_probe = 0;
-        xSemaphoreTake(s_i2c_mutex, portMAX_DELAY);
-        esp_err_t rerr = i2c_master_transmit_receive(s_dev, &reg, 1, &mode1_probe, 1, 100);
-        xSemaphoreGive(s_i2c_mutex);
-        if (rerr == ESP_OK) {
-            ESP_LOGI(TAG, "MODE1 initial read at 0x%02X = 0x%02X", lg::board::kPcaAddress, mode1_probe);
-        } else {
-            ESP_LOGW(TAG, "MODE1 read failed: %s", esp_err_to_name(rerr));
-            // Reproduce the known-working native sequence: a direct register write.
-            const esp_err_t werr = write_register(kRegMode1, kMode1Sleep | kMode1AutoInc);
-            if (werr != ESP_OK) {
-                ESP_LOGE(TAG, "direct MODE1 write failed: %s", esp_err_to_name(werr));
-                disable_pwm_outputs();
-                // Release the binding so a later init retries a fresh bind.
-                i2c_master_bus_rm_device(s_dev);
-                s_dev = nullptr;
-                return werr;
-            }
-            ESP_LOGI(TAG, "direct MODE1 write succeeded; PCA9685 present");
-        }
+    uint8_t initial_mode1 = 0;
+    const esp_err_t err = read_register(kRegMode1, initial_mode1);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "PCA9685 MODE1 read at 0x55 failed: %s", esp_err_to_name(err));
+        disable_pwm_outputs();
+        return err;
     }
+    ESP_LOGI(TAG, "PCA9685 detected at 0x55, MODE1=0x%02X", initial_mode1);
 
     ESP_LOGI(TAG, "configuring PCA9685 at 0x%02X, target PWM ~1017 Hz", lg::board::kPcaAddress);
 
@@ -179,16 +162,10 @@ esp_err_t Pca9685Driver::init() {
     ESP_RETURN_ON_ERROR(write_register(kRegMode1, kMode1AutoInc | kMode1Restart), TAG, "restart");
 
     // Read back MODE1, MODE2, PRE_SCALE to verify correct hardware state
-    uint8_t reg_m1 = kRegMode1;
-    uint8_t reg_m2 = kRegMode2;
-    uint8_t reg_pre = kRegPrescale;
     uint8_t m1 = 0, m2 = 0, pre = 0;
-
-    xSemaphoreTake(s_i2c_mutex, portMAX_DELAY);
-    esp_err_t r1 = i2c_master_transmit_receive(s_dev, &reg_m1, 1, &m1, 1, 50);
-    esp_err_t r2 = (r1 == ESP_OK) ? i2c_master_transmit_receive(s_dev, &reg_m2, 1, &m2, 1, 50) : r1;
-    esp_err_t r3 = (r2 == ESP_OK) ? i2c_master_transmit_receive(s_dev, &reg_pre, 1, &pre, 1, 50) : r2;
-    xSemaphoreGive(s_i2c_mutex);
+    const esp_err_t r1 = read_register(kRegMode1, m1);
+    const esp_err_t r2 = (r1 == ESP_OK) ? read_register(kRegMode2, m2) : r1;
+    const esp_err_t r3 = (r2 == ESP_OK) ? read_register(kRegPrescale, pre) : r2;
 
     if (r1 != ESP_OK || r2 != ESP_OK || r3 != ESP_OK ||
         (m1 & kMode1Sleep) != 0 ||
@@ -237,7 +214,7 @@ esp_err_t Pca9685Driver::clear() {
 }
 
 esp_err_t Pca9685Driver::commit() {
-    if (s_dev == nullptr || s_i2c_mutex == nullptr) {
+    if (!s_i2c_initialized || s_i2c_mutex == nullptr) {
         disable_pwm_outputs();
         return ESP_ERR_INVALID_STATE;
     }

@@ -297,13 +297,30 @@ if factory_sdk.exists():
     if "# CONFIG_FREERTOS_USE_TIMERS is not set" in factory_text or "CONFIG_FREERTOS_USE_TIMERS=n" in factory_text:
         errors.append("sdkconfig.factory: timer service must remain enabled")
 
-# LG-038.1: PCA9685 stack buffers require synchronous I2C completion.
+# PCA9685 stack buffers require the legacy synchronous I2C transport.
 pca_driver = NODE_DIR / "components" / "output" / "Pca9685Driver.cpp"
 if pca_driver.exists():
     pca_text = pca_driver.read_text(encoding="utf-8")
-    if not re.search(r"\.trans_queue_depth\s*=\s*0\s*,", pca_text):
-        errors.append("Pca9685Driver.cpp: stack buffers require synchronous I2C (trans_queue_depth=0)")
-    check_file_contains(pca_driver, [("i2c_master_register_event_callbacks(", "Asynchronous PCA9685 callbacks invalidate stack buffer lifetime")])
+    for required in ('#include "driver/i2c.h"', 'kI2cPort = I2C_NUM_0',
+                     'kI2cHz = 100000', 'cfg.master.clk_speed = kI2cHz',
+                     'cfg.sda_io_num = lg::board::kI2cSda',
+                     'cfg.scl_io_num = lg::board::kI2cScl',
+                     'i2c_param_config(', 'i2c_driver_install(',
+                     'i2c_master_write_to_device(', 'i2c_master_write_read_device(',
+                     'kI2cPort, lg::board::kPcaAddress', 'pdMS_TO_TICKS(100)'):
+        if required not in pca_text:
+            errors.append("Pca9685Driver.cpp: missing legacy synchronous I2C contract: " + required)
+    check_file_contains(pca_driver, [(pattern, "PCA9685 must use legacy synchronous I2C without discovery or async callbacks")
+        for pattern in ('driver/i2c_master.h', 'trans_queue_depth',
+                        'i2c_master_register_event_callbacks(', 'i2c_new_master_bus(',
+                        'i2c_master_bus_add_device(', 'i2c_master_transmit(',
+                        'i2c_master_transmit_receive(', 'i2c_master_probe(',
+                        'i2c_master_bus_rm_device(', 'i2c_del_master_bus(')])
+    board_text = (NODE_DIR / "components" / "board" / "include" / "lg_board_pins.hpp").read_text()
+    for name, value in (("kPcaAddress", "0x55"), ("kI2cSda", "GPIO_NUM_21"), ("kI2cScl", "GPIO_NUM_22")):
+        if not re.search(r"\b" + name + r"\s*=\s*" + value + r"\s*;", board_text):
+            errors.append("lg_board_pins.hpp: PCA hardware contract requires " + name + "=" + value)
+
 
 # 17. LG-036: Backup export must not contain syncToken or Wi-Fi passwords
 backup_files = [
