@@ -168,6 +168,9 @@ public:
     RestoreState restore_state() const { return restore_state_; }
     void set_restore_state(RestoreState s) { restore_state_ = s; }
 
+    int boot_count() const { return boot_count_; }
+    void request_service_reconcile();
+
 private:
     void write_serial_diagnostics();
 
@@ -263,6 +266,9 @@ private:
     std::atomic<MaintenanceMode> maintenance_mode_{MaintenanceMode::None};
     RestoreState restore_state_ = RestoreState::Idle;
     char recovery_reason_[64] = {0};
+    int boot_count_ = 0;
+    std::atomic<bool> service_reconcile_pending_{false};
+    std::atomic<bool> reconcile_worker_running_{false};
 };
 
 

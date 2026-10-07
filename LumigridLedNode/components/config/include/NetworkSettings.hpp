@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstring>
 #include "esp_rom_crc.h"
+#include "esp_random.h"
 
 namespace lg {
 
@@ -36,8 +37,30 @@ inline bool parse_network_mode(const char* str, NetworkMode& out_mode) {
     return false;
 }
 
-struct NetworkSettings {
+struct NetworkSettingsV1 {
     uint16_t schema_version = 1;
+    NetworkMode mode = NetworkMode::ApOnly;
+    char sta_ssid[33] = {};
+    char sta_password[65] = {};
+    char ap_name[33] = {};
+    uint8_t ap_channel = 1;
+    uint32_t checksum = 0;
+};
+
+inline uint32_t calc_network_settings_v1_crc(const NetworkSettingsV1& s) {
+    uint32_t crc = 0;
+    crc = esp_rom_crc32_le(crc, reinterpret_cast<const uint8_t*>(&s.schema_version), sizeof(s.schema_version));
+    const uint8_t mode = static_cast<uint8_t>(s.mode);
+    crc = esp_rom_crc32_le(crc, &mode, sizeof(mode));
+    crc = esp_rom_crc32_le(crc, reinterpret_cast<const uint8_t*>(s.sta_ssid), sizeof(s.sta_ssid));
+    crc = esp_rom_crc32_le(crc, reinterpret_cast<const uint8_t*>(s.sta_password), sizeof(s.sta_password));
+    crc = esp_rom_crc32_le(crc, reinterpret_cast<const uint8_t*>(s.ap_name), sizeof(s.ap_name));
+    crc = esp_rom_crc32_le(crc, reinterpret_cast<const uint8_t*>(&s.ap_channel), sizeof(s.ap_channel));
+    return crc;
+}
+
+struct NetworkSettings {
+    uint16_t schema_version = 2;
 
     NetworkMode mode = NetworkMode::ApOnly;
 
@@ -45,6 +68,7 @@ struct NetworkSettings {
     char sta_password[65] = {};
 
     char ap_name[33] = {};
+    char ap_password[65] = {};
     uint8_t ap_channel = 1;
 
     uint32_t checksum = 0;
@@ -90,11 +114,35 @@ inline uint32_t calc_network_settings_crc(const NetworkSettings& s) {
 
     crc = esp_rom_crc32_le(
         crc,
+        reinterpret_cast<const uint8_t*>(s.ap_password),
+        sizeof(s.ap_password)
+    );
+
+    crc = esp_rom_crc32_le(
+        crc,
         reinterpret_cast<const uint8_t*>(&s.ap_channel),
         sizeof(s.ap_channel)
     );
 
     return crc;
+}
+
+/**
+ * Generates a cryptographically strong random printable URL-safe SoftAP password.
+ * Never derived from MAC, serial, node ID, or chip ID.
+ */
+inline void generate_random_ap_password(char* out, size_t max_len) {
+    if (!out || max_len < 17) return;
+    static constexpr char charset[] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    constexpr size_t charset_len = sizeof(charset) - 1;
+    constexpr size_t key_len = 20; // 20 printable characters
+    size_t target_len = (max_len - 1 < key_len) ? (max_len - 1) : key_len;
+    uint8_t rand_buf[32];
+    esp_fill_random(rand_buf, sizeof(rand_buf));
+    for (size_t i = 0; i < target_len; ++i) {
+        out[i] = charset[rand_buf[i] % charset_len];
+    }
+    out[target_len] = '\0';
 }
 
 enum class NetworkApplyState : uint8_t {

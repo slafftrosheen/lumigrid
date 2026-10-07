@@ -235,6 +235,7 @@ esp_err_t LumigridRuntime::init() {
     s_boot_count = 0;
   }
   s_boot_count++;
+  boot_count_ = s_boot_count;
 
   const auto storage = capture_storage();
   ESP_LOGI("lumigrid", "STORAGE physical=%lu configured=%lu layout=v%u health=%s",
@@ -344,13 +345,9 @@ esp_err_t LumigridRuntime::init() {
     return apply_device_config(old_cfg, new_cfg, plan);
   });
   api_.set_maintenance_mode_func([this]() { return maintenance_mode(); });
-  // LG-038.3 В§60: observable service state for RuntimeSnapshot/diagnostics.
+  // LG-038.3/LG-038.7: observable service state for RuntimeSnapshot/diagnostics.
   api_.set_service_reconcile_callback([this]() {
-    if (!services_started_.load() || apply_in_progress_.load() || network_apply_stopping_.load()) return;
-    std::unique_ptr<DeviceConfig> cfg(new (std::nothrow) DeviceConfig{});
-    if (!cfg || config_.load_config(*cfg) != ESP_OK) { note_api_allocation_failure(); return; }
-    const esp_err_t result = reconcile_services(*cfg, *cfg, true);
-    if (result != ESP_OK) ESP_LOGE("lumigrid", "Service reconciliation failed: %s", esp_err_to_name(result));
+    request_service_reconcile();
   });
   api_.set_service_state_provider([this]() -> ServiceStateTruth {
     const RuntimeServicePlan actual = service_plan();
@@ -684,22 +681,26 @@ esp_err_t LumigridRuntime::start() {
   uint8_t mac[6] = {};
   esp_read_mac(mac, ESP_MAC_WIFI_STA);
 
+  NetworkSettings net_settings;
+  config_.load_network_settings(net_settings);
+  if (net_settings.ap_password[0] == '\0') {
+    generate_random_ap_password(net_settings.ap_password, sizeof(net_settings.ap_password));
+    net_settings.checksum = calc_network_settings_crc(net_settings);
+    config_.save_network_settings(net_settings);
+  }
+
   const bool factory_setup = !auth_manager_.is_provisioned() &&
       auth_manager_.commissioning_state() == auth::CommissioningState::FactoryFirstBoot;
-  std::string ap_pass;
+  std::string ap_pass = net_settings.ap_password;
   if (factory_setup) {
-    ap_pass = auth::AuthManager::kFactorySetupCredential;
     ESP_LOGI("lumigrid", "\n==================================================\n"
         "LUMIGRID FIRST SETUP\n==================================================\n"
-        "Wi-Fi:      LumiGrid-Setup\nPassword:   %s\n\nOpen:\nhttp://192.168.4.1\n\n"
-        "Temporary setup key:\n%s\n\nYou will be required to create a new Admin key.\n"
+        "Wi-Fi:       LumiGrid-Setup\n"
+        "Wi-Fi key:   %s\n"
+        "Web:         http://192.168.4.1\n\n"
+        "Create a permanent Admin Access Key in the setup UI.\n"
         "==================================================",
-        auth::AuthManager::kFactorySetupCredential, auth::AuthManager::kFactorySetupCredential);
-  } else {
-    // Preserve deliberate recovery/network AP policy; never restore setup auth on STA failure.
-    char mac_pass[32];
-    snprintf(mac_pass, sizeof(mac_pass), "lg_%02x%02x%02x%02x", mac[2], mac[3], mac[4], mac[5]);
-    ap_pass = mac_pass;
+        net_settings.ap_password);
   }
 
   // Derive AP SSID:
@@ -719,8 +720,6 @@ esp_err_t LumigridRuntime::start() {
     ap_ssid = "LumiGrid-Factory";
   }
 
-  NetworkSettings net_settings;
-  config_.load_network_settings(net_settings);
   if (!factory_setup && !safe_mode_ && net_settings.ap_name[0] != '\0') {
     ap_ssid = net_settings.ap_name;
   }
@@ -1260,13 +1259,16 @@ void LumigridRuntime::execute_network_apply(const NetworkApplyRequest &req) {
     ap_ssid = "LumiGrid-Factory";
   }
 
-  // Network apply requires permanent Admin authority; this is the existing AP policy.
-  std::string ap_pass;
-  uint8_t mac[6] = {};
-  esp_read_mac(mac, ESP_MAC_WIFI_STA);
-  char mac_pass[32];
-  snprintf(mac_pass, sizeof(mac_pass), "lg_%02x%02x%02x%02x", mac[2], mac[3], mac[4], mac[5]);
-  ap_pass = mac_pass;
+  // Network apply uses the desired/persisted AP password
+  std::string ap_pass = req.desired.ap_password;
+  if (ap_pass.empty()) {
+    ap_pass = req.previous.ap_password;
+  }
+  if (ap_pass.empty()) {
+    NetworkSettings cur_net;
+    config_.load_network_settings(cur_net);
+    ap_pass = cur_net.ap_password;
+  }
 
   WifiMode target_wifi_mode = WifiMode::ApOnly;
   switch (req.desired.mode) {
@@ -1845,6 +1847,48 @@ esp_err_t LumigridRuntime::apply_device_config(const DeviceConfig &old_cfg,
                                    api_.identity().fw_version);
 
   return ESP_OK;
+}
+
+void LumigridRuntime::request_service_reconcile() {
+  service_reconcile_pending_.store(true, std::memory_order_release);
+  if (!services_started_.load(std::memory_order_acquire) ||
+      apply_in_progress_.load(std::memory_order_acquire) ||
+      network_apply_stopping_.load(std::memory_order_acquire)) {
+    return;
+  }
+
+  bool expected = false;
+  if (!reconcile_worker_running_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+    return; // Already running; it will observe pending flag before exiting
+  }
+
+  BaseType_t ret = xTaskCreate([](void* arg) {
+    auto* self = static_cast<LumigridRuntime*>(arg);
+    while (self->service_reconcile_pending_.exchange(false, std::memory_order_acq_rel)) {
+      if (self->services_started_.load(std::memory_order_acquire) &&
+          !self->apply_in_progress_.load(std::memory_order_acquire) &&
+          !self->network_apply_stopping_.load(std::memory_order_acquire)) {
+        std::unique_ptr<DeviceConfig> cfg(new (std::nothrow) DeviceConfig{});
+        if (cfg && self->config_.load_config(*cfg) == ESP_OK) {
+          const esp_err_t result = self->reconcile_services(*cfg, *cfg, true);
+          if (result != ESP_OK) {
+            ESP_LOGE("lumigrid", "Service reconciliation failed: %s", esp_err_to_name(result));
+          }
+        } else {
+          note_api_allocation_failure();
+        }
+      }
+    }
+    UBaseType_t watermark = uxTaskGetStackHighWaterMark(nullptr);
+    ESP_LOGD("lumigrid", "runtime_svc finished, stack watermark: %u", (unsigned)watermark);
+    self->reconcile_worker_running_.store(false, std::memory_order_release);
+    vTaskDelete(nullptr);
+  }, "runtime_svc", 4096, this, 3, nullptr);
+
+  if (ret != pdPASS) {
+    reconcile_worker_running_.store(false, std::memory_order_release);
+    ESP_LOGE("lumigrid", "Failed to create runtime_svc task");
+  }
 }
 
 } // namespace lg

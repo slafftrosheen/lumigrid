@@ -33,8 +33,6 @@ public:
 
     // Check if initial admin has been provisioned
     bool is_provisioned() const;
-    static constexpr const char* kFactorySetupCredential = "lumigrid123";
-    bool verify_factory_setup_credential(const char* credential) const;
 
     // Commissioning state ownership (Section 0)
     void set_commissioning_state(CommissioningState state) { commissioning_state_ = state; }
@@ -105,7 +103,6 @@ private:
     void cleanup_expired_sessions_locked(uint64_t now_us);
     void cleanup_expired_tickets_locked(uint64_t now_us);
     bool verify_credential_locked(const char* credential, AuthRole* out_role);
-    bool verify_factory_setup_credential_locked(const char* credential) const;
 };
 
 } // namespace lg::auth

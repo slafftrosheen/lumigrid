@@ -1525,17 +1525,43 @@ esp_err_t ConfigStore::load_network_settings(NetworkSettings& settings) {
         if (err == ESP_OK && len == sizeof(NetworkSettings)) {
             err = nvs_get_blob(handle_, k, &out, &len);
             if (err == ESP_OK) {
-                if (out.schema_version != 1) {
-                    ESP_LOGW(TAG, "NetworkSettings %s unsupported schema %u", k, out.schema_version);
-                    return ESP_ERR_INVALID_VERSION;
+                if (out.schema_version == 2) {
+                    if (out.checksum != calc_network_settings_crc(out)) {
+                        ESP_LOGW(TAG, "NetworkSettings %s CRC mismatch", k);
+                        return ESP_ERR_NVS_INVALID_STATE;
+                    }
+                    if (out.ap_password[0] == '\0') {
+                        generate_random_ap_password(out.ap_password, sizeof(out.ap_password));
+                        out.checksum = calc_network_settings_crc(out);
+                        save_network_settings(out);
+                    }
+                    return ESP_OK;
                 }
-                if (out.checksum != calc_network_settings_crc(out)) {
-                    ESP_LOGW(TAG, "NetworkSettings %s CRC mismatch", k);
-                    return ESP_ERR_NVS_INVALID_STATE;
-                }
-                return ESP_OK;
             }
         }
+
+        // Migration check: schema v1
+        if (err == ESP_OK && (len == sizeof(NetworkSettingsV1) || len == sizeof(NetworkSettings))) {
+            NetworkSettingsV1 v1{};
+            size_t v1_len = sizeof(NetworkSettingsV1);
+            if (nvs_get_blob(handle_, k, &v1, &v1_len) == ESP_OK && v1_len == sizeof(NetworkSettingsV1)) {
+                if (v1.schema_version == 1 && v1.checksum == calc_network_settings_v1_crc(v1)) {
+                    out = NetworkSettings{};
+                    out.schema_version = 2;
+                    out.mode = v1.mode;
+                    std::strncpy(out.sta_ssid, v1.sta_ssid, sizeof(out.sta_ssid));
+                    std::strncpy(out.sta_password, v1.sta_password, sizeof(out.sta_password));
+                    std::strncpy(out.ap_name, v1.ap_name, sizeof(out.ap_name));
+                    out.ap_channel = v1.ap_channel;
+                    generate_random_ap_password(out.ap_password, sizeof(out.ap_password));
+                    out.checksum = calc_network_settings_crc(out);
+                    ESP_LOGI(TAG, "Migrated NetworkSettings %s from v1 to v2 with random per-device AP key", k);
+                    save_network_settings(out);
+                    return ESP_OK;
+                }
+            }
+        }
+
         return (err == ESP_OK) ? ESP_ERR_NVS_INVALID_LENGTH : err;
     };
 
@@ -1555,13 +1581,14 @@ esp_err_t ConfigStore::load_network_settings(NetworkSettings& settings) {
         return ESP_OK;
     }
 
-    // Neither slot valid -> populate default NetworkSettings
+    // Neither slot valid -> populate default NetworkSettings v2
     settings = NetworkSettings{};
-    settings.schema_version = 1;
+    settings.schema_version = 2;
     settings.mode = NetworkMode::ApOnly;
     settings.sta_ssid[0] = '\0';
     settings.sta_password[0] = '\0';
     settings.ap_name[0] = '\0';
+    generate_random_ap_password(settings.ap_password, sizeof(settings.ap_password));
     settings.ap_channel = 1;
     settings.checksum = calc_network_settings_crc(settings);
 

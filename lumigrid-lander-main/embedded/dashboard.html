@@ -470,9 +470,9 @@
         <form id="first-setup" hidden onsubmit="lg.secureNode(); return false;">
             <h1>Welcome to LumiGrid</h1>
             <p>This controller has not been set up yet.</p>
-            <p id="setup-defaults">Wi-Fi: <strong>LumiGrid-Setup</strong><br>Wi-Fi password: <strong>lumigrid123</strong><br>Open: http://192.168.4.1<br>Temporary setup key: <strong>lumigrid123</strong></p>
+            <p id="setup-defaults">Wi-Fi: <strong>LumiGrid-Setup</strong><br>Wi-Fi key: (printed on device serial console)<br>Open: http://192.168.4.1</p>
             <h2>Secure your LumiGrid</h2>
-            <p>Create an Admin Access Key (16–64 characters). This replaces the temporary setup key.</p>
+            <p>Create an Admin Access Key (16–64 characters) to secure your node.</p>
             <label for="setup-admin">New Admin Access Key</label>
             <input id="setup-admin" type="password" autocomplete="new-password" minlength="16" maxlength="64" required>
             <label for="setup-confirm">Confirm Admin Access Key</label>
@@ -1407,16 +1407,33 @@ window.lg = (() => {
         }
     }
 
+    let animationLoopStarted = false;
+    let canvasInteractionsSetup = false;
+
     async function openDashboard() {
             const status = await api('/api/v1/status');
             state.status = status;
-            await refresh();
+
+            // Reveal dashboard shell immediately after status
             byId('experience-auth').hidden = true;
             byId('product-app').hidden = false;
-            initWebSocket();
-            startAnimationLoop();
-            setupCanvasInteractions();
+            updateTelemetryUI();
+            renderDashboard();
             nav('dashboard', document.querySelector('[data-page=dashboard]'));
+
+            // Load remaining dashboard data sequentially
+            await refresh();
+
+            // Connect WebSocket and initialize loops idempotently
+            initWebSocket();
+            if (!animationLoopStarted) {
+                animationLoopStarted = true;
+                startAnimationLoop();
+            }
+            if (!canvasInteractionsSetup) {
+                canvasInteractionsSetup = true;
+                setupCanvasInteractions();
+            }
     }
 
     let setupStatus = null;
@@ -1431,7 +1448,7 @@ window.lg = (() => {
             if (!setupStatus.provisioned) {
                 byId('normal-login').hidden = true;
                 byId('first-setup').hidden = !setupStatus.bootstrapAllowed;
-                byId('setup-defaults').hidden = !setupStatus.factorySetupAllowed;
+                byId('setup-defaults').hidden = false;
                 byId('setup-unavailable').hidden = setupStatus.bootstrapAllowed;
             } else if (state.token) {
                 try {
@@ -1467,10 +1484,6 @@ window.lg = (() => {
         button.disabled = true;
         try {
             if (!setupStatus || setupStatus.provisioned || !setupStatus.bootstrapAllowed) throw new Error('First setup is unavailable.');
-            if (setupStatus.factorySetupAllowed) {
-                const temporary = await api('/api/v1/auth/session', 'POST', { token: 'lumigrid123' });
-                state.token = temporary.sessionToken;
-            }
             const session = await api('/api/v1/auth/bootstrap', 'POST', { adminToken: key });
             state.token = session.sessionToken;
             state.role = session.role;
@@ -1568,11 +1581,11 @@ window.lg = (() => {
 
     // ── Data Sync ──
     async function refresh() {
+        const status = state.status || await api('/api/v1/status').catch(() => ({}));
+        const config = await api('/api/v1/config').catch(() => ({}));
         const effects = await api('/api/v1/effects').catch(() => fallbackEffects);
         const presets = await api('/api/v1/presets').catch(() => []);
-        const status = state.status || await api('/api/v1/status').catch(() => ({}));
         const sequence = await api('/api/v1/sequence').catch(() => ({ bpm: 120, enabled: false, tracks: [] }));
-        const config = await api('/api/v1/config').catch(() => ({}));
         const health = await api('/api/v1/health').catch(() => ({}));
         const schedules = await api('/api/v1/schedules').catch(() => []);
         const cueLists = await api('/api/v1/cue-lists').catch(() => []);

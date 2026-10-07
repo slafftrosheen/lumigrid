@@ -6,7 +6,10 @@ export default defineConfig({
   retries: process.env.CI ? 1 : 0,
   use: {
     baseURL: 'http://127.0.0.1:4173',
-    trace: 'on-first-retry'
+    trace: 'on-first-retry',
+    launchOptions: {
+      executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH
+    }
   },
   webServer: {
     command: 'npm run dev -- --host 0.0.0.0 --port 4173',

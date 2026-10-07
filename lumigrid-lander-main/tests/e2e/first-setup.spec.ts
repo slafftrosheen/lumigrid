@@ -21,8 +21,9 @@ async function nodeFixture(page: Page, provisioned = false, allowed = true) {
       return route.fulfill({ contentType: 'text/html', body: gunzipSync(Buffer.from(bytes)).toString('utf8') });
     }
     let response: any = {};
-    if (path === '/api/v1/auth/status') response = { provisioned, bootstrapAllowed: !provisioned && allowed, factorySetupAllowed: !provisioned && allowed };
+    if (path === '/api/v1/auth/status') response = { provisioned, bootstrapAllowed: !provisioned && allowed };
     if (path === '/api/v1/auth/session') response = { authenticated: true, role: 'admin', sessionToken: session, expiresIn: 1800, setupRequired: !provisioned };
+    if (path === '/api/v1/status') response = { state: 'Online', uptimeMs: 12000, fps: 40, frameDrops: 0, networkState: 'StaConnected', staIp: '192.168.4.1', apIp: '192.168.4.1', freeHeapBytes: 150000, minimumHeapBytes: 120000, largestBlockBytes: 80000 };
     if (path === '/api/v1/auth/bootstrap') {
       expect(body.adminToken).toBe(key);
       provisioned = true;
@@ -46,7 +47,6 @@ test('embedded first setup: visible defaults, confirmation, direct Admin session
   await expect(page.locator('#first-setup')).toBeVisible();
   await expect(page.locator('#normal-login')).toBeHidden();
   await expect(page.locator('#setup-defaults')).toContainText('LumiGrid-Setup');
-  await expect(page.locator('#setup-defaults')).toContainText('lumigrid123');
   await expect(page.locator('#setup-defaults')).toContainText('192.168.4.1');
   await expect(page.locator('#first-setup')).not.toContainText(/MAC|bootstrap/i);
   await page.locator('#setup-admin').fill(key);
@@ -59,7 +59,7 @@ test('embedded first setup: visible defaults, confirmation, direct Admin session
   await expect(page.locator('#setup-wizard')).toBeVisible();
   await expect(page.locator('#experience-auth')).toBeHidden();
   expect(await page.evaluate(() => sessionStorage.getItem('lg_node_token'))).toBe(session);
-  expect(calls.filter(c => c.path.endsWith('/session')).map(c => c.body?.token)).toEqual(['lumigrid123']);
+  expect(calls.filter(c => c.path.endsWith('/session') && c.body?.token === 'lumigrid123')).toHaveLength(0);
   expect(calls.filter(c => c.path.endsWith('/bootstrap'))).toHaveLength(1);
   expect(await page.locator('#setup-admin').inputValue()).toBe('');
 });
@@ -92,7 +92,6 @@ test('Svelte first setup asks for a new confirmed key and enters the wizard (K-N
   await expect(page.getByText('Secure your LumiGrid')).toBeVisible();
   await expect(page.getByPlaceholder('Node Access Key', { exact: true })).toHaveCount(0);
   await expect(page.locator('.pin-card')).toContainText('LumiGrid-Setup');
-  await expect(page.locator('.pin-card')).toContainText('lumigrid123');
   await expect(page.locator('.pin-card')).toContainText('192.168.4.1');
   await expect(page.locator('.pin-card')).not.toContainText(/MAC|bootstrap/i);
   await page.getByLabel('New Admin Access Key', { exact: true }).fill(key);
@@ -103,7 +102,7 @@ test('Svelte first setup asks for a new confirmed key and enters the wizard (K-N
   await expect(page.getByRole('heading', { name: 'Setup Wizard' })).toBeVisible();
   const requests = calls.filter(c => c.path.endsWith('/bootstrap'));
   expect(requests).toHaveLength(1);
-  expect(requests[0].headers['x-api-key']).toBe('lumigrid123');
+  expect(requests[0].headers['x-api-key']).toBeUndefined();
   expect(calls.filter(c => c.path.endsWith('/session') && c.body?.token === key)).toHaveLength(0);
 });
 
@@ -112,6 +111,53 @@ test('Svelte provisioned node shows normal access-key login (O)', async ({ page 
   await openExternal(page);
   await expect(page.getByPlaceholder('Node Access Key', { exact: true })).toBeVisible();
   await expect(page.getByText('Secure your LumiGrid')).toHaveCount(0);
+});
+
+test('Svelte provisioned node login connects nodeStore and renders dashboard (LG-038.7 §35)', async ({ page }) => {
+  const calls = await nodeFixture(page, true);
+  await openExternal(page);
+  await expect(page.getByPlaceholder('Node Access Key', { exact: true })).toBeVisible();
+  await page.getByPlaceholder('Node Access Key', { exact: true }).fill(key);
+  await page.getByRole('button', { name: 'Sign In' }).click();
+  await expect(page.getByPlaceholder('Node Access Key', { exact: true })).toHaveCount(0);
+  expect(calls.some(c => c.path.endsWith('/session'))).toBe(true);
+});
+
+test('embedded startup reveals dashboard shell immediately after status before secondary calls finish (LG-038.7 §36)', async ({ page }) => {
+  let delaySecondary = true;
+  await page.route('http://192.168.4.1/**', async route => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+    if (path === '/') {
+      const asset = readFileSync(resolve('../LumigridLedNode/generated/dashboard_assets.hpp'), 'utf8');
+      const bytes = asset.match(/0x[0-9a-f]{2}/g)!.map(value => parseInt(value, 16));
+      return route.fulfill({ contentType: 'text/html', body: gunzipSync(Buffer.from(bytes)).toString('utf8') });
+    }
+    if (path === '/api/v1/auth/status') {
+      return route.fulfill({ json: { provisioned: true, bootstrapAllowed: false } });
+    }
+    if (path === '/api/v1/auth/session') {
+      return route.fulfill({ json: { authenticated: true, role: 'admin', sessionToken: session, expiresIn: 1800 } });
+    }
+    if (path === '/api/v1/status') {
+      return route.fulfill({ json: { state: 'Online', uptimeMs: 5000, fps: 40, frameDrops: 0, networkState: 'StaConnected', staIp: '192.168.4.1', apIp: '192.168.4.1', freeHeapBytes: 150000, minimumHeapBytes: 120000, largestBlockBytes: 80000 } });
+    }
+    if (['/api/v1/presets', '/api/v1/effects', '/api/v1/schedules', '/api/v1/cue-lists', '/api/v1/config', '/api/v1/auth/ws-ticket'].includes(path)) {
+      if (delaySecondary) {
+        await new Promise(r => setTimeout(r, 600));
+      }
+      return route.fulfill({ json: path === '/api/v1/auth/ws-ticket' ? { ticket: 'b'.repeat(32), expiresInMs: 15000 } : [] });
+    }
+    return route.fulfill({ json: {} });
+  });
+
+  await page.goto('http://192.168.4.1');
+  await expect(page.locator('#normal-login')).toBeVisible();
+  await page.locator('#experience-token').fill(key);
+  await page.getByRole('button', { name: 'Connect to Node' }).click();
+  // Shell becomes visible immediately after /status even while secondary calls are still pending
+  await expect(page.locator('#product-app')).toBeVisible({ timeout: 400 });
+  delaySecondary = false;
 });
 
 test('embedded System Access creates/disables accounts without displaying saved keys', async ({ page }) => {

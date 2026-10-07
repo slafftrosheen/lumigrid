@@ -41,12 +41,11 @@ export async function getAuthStatus(ip: string): Promise<AuthStatus> {
 
 export async function bootstrapAuth(
   ip: string,
-  adminToken: string,
-  factorySetup = false
+  adminToken: string
 ): Promise<SessionResponse & { provisioned: boolean }> {
   return await apiJson<SessionResponse & { provisioned: boolean }>(ip, '/api/v1/auth/bootstrap', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...(factorySetup ? { 'X-API-Key': 'lumigrid123' } : {}) },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ adminToken }),
   });
 }

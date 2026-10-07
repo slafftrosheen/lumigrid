@@ -71,11 +71,6 @@ AuthPrincipal authenticate(httpd_req_t* request) {
 
             lg::auth::AuthRole role = lg::auth::AuthRole::Operator;
             bool verified = s_auth_manager->verify_api_key(token, &role);
-            if (!verified && s_auth_manager->verify_factory_setup_credential(token)) {
-                role = lg::auth::AuthRole::Admin;
-                principal.factory_setup = true;
-                verified = true;
-            }
             if (verified) {
                 principal.authenticated = true;
                 principal.role = role;
@@ -120,9 +115,8 @@ bool authorize(httpd_req_t* request, ApiRole minimum_role) {
 
     AuthPrincipal principal = authenticate(request);
 
-    // Setup authority can only inspect/end its session or set the initial Admin key.
     // All normal APIs (including network, OTA, restore and WS tickets) require provisioning.
-    if ((principal.factory_setup || !s_auth_manager->is_provisioned()) &&
+    if (!s_auth_manager->is_provisioned() &&
         std::strcmp(request->uri, "/api/v1/auth/session") != 0 &&
         std::strcmp(request->uri, "/api/v1/auth/bootstrap") != 0) {
         httpd_resp_set_status(request, "403 Forbidden");

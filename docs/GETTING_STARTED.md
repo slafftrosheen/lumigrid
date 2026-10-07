@@ -4,7 +4,7 @@ FIRST POWER-ON
    LumiGrid-Setup
 
 2. Password:
-   lumigrid123
+   See serial console on first boot (random per-device WPA2 key)
 
 3. Open:
    http://192.168.4.1
@@ -19,12 +19,10 @@ The dashboard detects a new controller and opens First Setup. Choose a new
 Admin Access Key of 16–64 characters and confirm it. You can also select
 **Generate Secure Key** and save the generated key before continuing.
 Setup saves the key and signs you in as Administrator in one action.
-The temporary setup key is disabled immediately. It is never a saved account.
 
-Wi-Fi password and Node Access Key are separate credentials. During first setup
-both temporary values are deliberately `lumigrid123`; afterwards they may differ.
-The setup AP can remain connected while you finish configuring networking;
-its Wi-Fi password does not grant authenticated access after Admin creation.
+Wi-Fi password and Node Access Key are separate credentials in distinct security domains.
+The setup AP password is a random per-device WPA2 secret printed on the serial console.
+It is never derived from MAC or chip ID. The setup AP password does not grant Admin access.
 
 ## Normal login and accounts
 

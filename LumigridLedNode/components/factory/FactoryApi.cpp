@@ -1317,8 +1317,6 @@ esp_err_t get_auth_status(httpd_req_t* request) {
     cJSON* root = cJSON_CreateObject();
     cJSON_AddBoolToObject(root, "provisioned", prov);
     cJSON_AddBoolToObject(root, "bootstrapAllowed", allowed);
-    cJSON_AddBoolToObject(root, "factorySetupAllowed", allowed &&
-        auth_mgr->commissioning_state() == lg::auth::CommissioningState::FactoryFirstBoot);
     return send_json(request, root, "200 OK");
 }
 
@@ -1330,8 +1328,6 @@ esp_err_t post_auth_bootstrap(httpd_req_t* request) {
     if (!auth_mgr->is_bootstrap_allowed()) {
         return send_error(request, "403 Forbidden", "bootstrap_not_allowed");
     }
-    if (auth_mgr->commissioning_state() == lg::auth::CommissioningState::FactoryFirstBoot &&
-        !api::authorize(request, api::ApiRole::Admin)) return ESP_OK;
 
     cJSON* root = nullptr;
     if (read_json(request, &root) != ESP_OK || !root) {
@@ -1354,7 +1350,6 @@ esp_err_t post_auth_bootstrap(httpd_req_t* request) {
     }
 
     api::AuditLog::instance().log(api::ApiRole::Admin, "auth_bootstrap", "Admin credential bootstrapped");
-    if (auto* api_ptr = static_cast<FactoryApi*>(request->user_ctx)) api_ptr->queue_service_reconcile();
 
     cJSON* resp = cJSON_CreateObject();
     cJSON_AddBoolToObject(resp, "success", true);
@@ -4455,6 +4450,7 @@ esp_err_t get_network_config(httpd_req_t* request) {
     cJSON_AddBoolToObject(response, "passwordSet", (net_settings.sta_password[0] != '\0'));
     cJSON_AddStringToObject(response, "apName", net_settings.ap_name);
     cJSON_AddNumberToObject(response, "apChannel", net_settings.ap_channel);
+    cJSON_AddBoolToObject(response, "apPasswordSet", (net_settings.ap_password[0] != '\0'));
 
     char* json = cJSON_PrintUnformatted(response);
     cJSON_Delete(response);
@@ -4589,6 +4585,32 @@ esp_err_t put_network_config(httpd_req_t* request) {
             return send_error(request, "400 Bad Request", "invalid_ap_channel");
         }
         desired.ap_channel = static_cast<uint8_t>(ch);
+    }
+
+    // apPassword validation (8..63 chars)
+    const cJSON* ap_pwd_item = cJSON_GetObjectItemCaseSensitive(root, "apPassword");
+    if (ap_pwd_item) {
+        if (!cJSON_IsString(ap_pwd_item)) {
+            cJSON_Delete(root);
+            return send_error(request, "400 Bad Request", "invalid_ap_password");
+        }
+        const char* ap_pwd_str = ap_pwd_item->valuestring;
+        if (ap_pwd_str != nullptr && ap_pwd_str[0] != '\0') {
+            size_t len = std::strlen(ap_pwd_str);
+            if (len < 8 || len > 63) {
+                cJSON_Delete(root);
+                return send_error(request, "400 Bad Request", "invalid_ap_password");
+            }
+            std::strncpy(desired.ap_password, ap_pwd_str, sizeof(desired.ap_password) - 1);
+            desired.ap_password[sizeof(desired.ap_password) - 1] = '\0';
+        }
+    }
+
+    // AP modes require a valid password
+    if ((desired.mode == NetworkMode::ApOnly || desired.mode == NetworkMode::StaWithApFallback) &&
+        desired.ap_password[0] == '\0') {
+        cJSON_Delete(root);
+        return send_error(request, "400 Bad Request", "invalid_ap_password");
     }
 
     // Ensure queue handler is available
@@ -4843,41 +4865,76 @@ esp_err_t post_channel_test(httpd_req_t* request) {
     }
 }
 
+struct RuntimeSnapshotScratch {
+    RuntimeSnapshot snapshot{};
+    std::array<char, kRuntimeSnapshotMaxBytes> payload{};
+};
+
 esp_err_t get_signage_status(httpd_req_t* request) {
     if (!api::authorize(request, api::ApiRole::Operator)) return ESP_OK;
 
     FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
 
-    // Schema 3 Canonical RuntimeSnapshot: HTTP uses streamSeq = 0
-    RuntimeSnapshot snapshot = collect_runtime_snapshot(api_ptr, 0);
+    constexpr uint32_t required = sizeof(RuntimeSnapshotScratch);
+    if (!check_memory_admission(required).accepted) {
+        return send_memory_admission_error(request, required);
+    }
 
-    char payload[kRuntimeSnapshotMaxBytes];
-    FixedJsonWriter writer(payload, sizeof(payload));
-    if (!serialize_runtime_snapshot(snapshot, writer)) {
+    auto scratch = std::unique_ptr<RuntimeSnapshotScratch>(new (std::nothrow) RuntimeSnapshotScratch{});
+    if (!scratch) {
+        note_api_allocation_failure();
+        return send_error(request, "503 Service Unavailable", "runtime_snapshot_memory_unavailable");
+    }
+
+    // Schema 3 Canonical RuntimeSnapshot: HTTP uses streamSeq = 0
+    scratch->snapshot = collect_runtime_snapshot(api_ptr, 0);
+
+    FixedJsonWriter writer(scratch->payload.data(), scratch->payload.size());
+    if (!serialize_runtime_snapshot(scratch->snapshot, writer)) {
         return send_error(request, "500 Internal Server Error", "snapshot_serialization_failed");
     }
 
-    return send_json(request, payload);
+    // Stack and memory telemetry on authenticated /status (first call & every 20 invocations)
+    static uint32_t s_status_invocations = 0;
+    if (++s_status_invocations == 1 || (s_status_invocations % 20) == 0) {
+        UBaseType_t stack_free = uxTaskGetStackHighWaterMark(nullptr);
+        const RuntimeMemorySnapshot mem = capture_runtime_memory();
+        ESP_LOGI("httpd", "HTTPD status: stackFree=%lu free8=%lu largest8=%lu payload=%u",
+                 (unsigned long)(stack_free * sizeof(StackType_t)),
+                 (unsigned long)mem.free_8bit,
+                 (unsigned long)mem.largest_8bit,
+                 (unsigned)strlen(scratch->payload.data()));
+    }
+
+    return send_json(request, scratch->payload.data());
 }
 
 esp_err_t get_dmx_frame(httpd_req_t* request) {
     if (!api::authorize(request, api::ApiRole::Installer)) return ESP_OK;
 
     FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
-    char dmx_hex[1025];
+    struct DmxScratch {
+        char dmx_hex[1025];
+        char body[1152];
+    };
+    auto scratch = std::unique_ptr<DmxScratch>(new (std::nothrow) DmxScratch{});
+    if (!scratch) {
+        note_api_allocation_failure();
+        return send_error(request, "503 Service Unavailable", "dmx_scratch_memory_unavailable");
+    }
+
     if (api_ptr->signage()) {
         const auto& dmx = api_ptr->signage()->last_dmx_data();
         for (int i = 0; i < 512; ++i) {
-            snprintf(dmx_hex + i * 2, 3, "%02x", dmx[i]);
+            snprintf(scratch->dmx_hex + i * 2, 3, "%02x", dmx[i]);
         }
     } else {
-        memset(dmx_hex, '0', 1024);
+        memset(scratch->dmx_hex, '0', 1024);
     }
-    dmx_hex[1024] = '\0';
+    scratch->dmx_hex[1024] = '\0';
 
-    char body[1152];
-    snprintf(body, sizeof(body), "{\"universe\":1,\"dataHex\":\"%s\"}", dmx_hex);
-    return send_json(request, body);
+    snprintf(scratch->body, sizeof(scratch->body), "{\"universe\":1,\"dataHex\":\"%s\"}", scratch->dmx_hex);
+    return send_json(request, scratch->body);
 }
 
 esp_err_t get_identity(httpd_req_t* request) {
@@ -4929,28 +4986,42 @@ esp_err_t get_fleet_nodes(httpd_req_t* request) {
     // Discovered nodes
     cJSON* nodes_arr = cJSON_CreateArray();
     if (api_ptr->fleet_discovery()) {
-        discovery::DiscoveredNode snap[discovery::FleetDiscoveryService::kMaxDiscoveredNodes];
-        size_t n = api_ptr->fleet_discovery()->get_snapshot(snap, discovery::FleetDiscoveryService::kMaxDiscoveredNodes, now_ms);
+        using FleetSnapshot = std::array<discovery::DiscoveredNode, discovery::FleetDiscoveryService::kMaxDiscoveredNodes>;
+        constexpr uint32_t required = sizeof(FleetSnapshot);
+        if (!check_memory_admission(required).accepted) {
+            cJSON_Delete(root);
+            return send_memory_admission_error(request, required);
+        }
+
+        auto snap = std::unique_ptr<FleetSnapshot>(new (std::nothrow) FleetSnapshot{});
+        if (!snap) {
+            cJSON_Delete(root);
+            note_api_allocation_failure();
+            return send_error(request, "503 Service Unavailable", "fleet_snapshot_memory_unavailable");
+        }
+
+        size_t n = api_ptr->fleet_discovery()->get_snapshot(snap->data(), snap->size(), now_ms);
 
         for (size_t i = 0; i < n; ++i) {
+            const auto& item = (*snap)[i];
             cJSON* node_obj = cJSON_CreateObject();
-            cJSON_AddStringToObject(node_obj, "id", snap[i].id);
-            cJSON_AddStringToObject(node_obj, "name", snap[i].name);
-            cJSON_AddStringToObject(node_obj, "hostname", snap[i].hostname);
+            cJSON_AddStringToObject(node_obj, "id", item.id);
+            cJSON_AddStringToObject(node_obj, "name", item.name);
+            cJSON_AddStringToObject(node_obj, "hostname", item.hostname);
 
             char ip_str[16];
-            discovery::FleetDiscoveryService::format_ipv4(snap[i].ipv4, ip_str);
+            discovery::FleetDiscoveryService::format_ipv4(item.ipv4, ip_str);
             cJSON_AddStringToObject(node_obj, "ip", ip_str);
-            cJSON_AddNumberToObject(node_obj, "port", snap[i].port);
-            cJSON_AddStringToObject(node_obj, "family", snap[i].family);
-            cJSON_AddStringToObject(node_obj, "model", snap[i].model);
-            cJSON_AddStringToObject(node_obj, "firmware", snap[i].firmware);
+            cJSON_AddNumberToObject(node_obj, "port", item.port);
+            cJSON_AddStringToObject(node_obj, "family", item.family);
+            cJSON_AddStringToObject(node_obj, "model", item.model);
+            cJSON_AddStringToObject(node_obj, "firmware", item.firmware);
 
-            uint32_t age_ms = (now_ms >= snap[i].last_seen_ms) ? (now_ms - snap[i].last_seen_ms) : 0;
-            cJSON_AddNumberToObject(node_obj, "lastSeenMs", snap[i].last_seen_ms);
+            uint32_t age_ms = (now_ms >= item.last_seen_ms) ? (now_ms - item.last_seen_ms) : 0;
+            cJSON_AddNumberToObject(node_obj, "lastSeenMs", item.last_seen_ms);
             cJSON_AddNumberToObject(node_obj, "ageMs", age_ms);
 
-            discovery::NodePresence presence = discovery::FleetDiscoveryService::determine_presence(snap[i].last_seen_ms, now_ms);
+            discovery::NodePresence presence = discovery::FleetDiscoveryService::determine_presence(item.last_seen_ms, now_ms);
             cJSON_AddStringToObject(node_obj, "status", discovery::FleetDiscoveryService::presence_to_string(presence));
 
             cJSON_AddItemToArray(nodes_arr, node_obj);
@@ -4970,8 +5041,12 @@ esp_err_t get_capabilities(httpd_req_t* request) {
         dev_name = cfg.device_name;
     }
     NodeIdentity id = get_node_identity(dev_name);
-    char body[1536];
-    snprintf(body, sizeof(body),
+    auto body = std::unique_ptr<std::array<char, 1536>>(new (std::nothrow) std::array<char, 1536>());
+    if (!body) {
+        note_api_allocation_failure();
+        return send_error(request, "503 Service Unavailable", "out_of_memory");
+    }
+    snprintf(body->data(), body->size(),
         "{\"schema\":%u,"
         "\"node\":{\"family\":\"%s\",\"model\":\"%s\",\"firmware\":\"%s\",\"hardwareRevision\":\"%s\"},"
         "\"limits\":{\"channels\":16,\"groups\":8,\"pixelLanes\":%u,\"pwmChannels\":%u,\"zones\":%u,\"layersPerZone\":%u,\"presets\":%u,\"timelineSteps\":%u,\"cueLists\":%u,\"cuesPerList\":%u,\"automationTracks\":%u,\"automationPoints\":%u,\"syncPeers\":%u,\"syncProtocol\":%u},"
@@ -5010,7 +5085,7 @@ esp_err_t get_capabilities(httpd_req_t* request) {
         CapabilitiesManifest::kProtocolSync,
         CapabilitiesManifest::kProtocolDiscovery
     );
-    return send_json(request, body);
+    return send_json(request, body->data());
 }
 
 esp_err_t get_current_job(httpd_req_t* request) {
@@ -5764,7 +5839,7 @@ esp_err_t post_ota(httpd_req_t* request) {
         api_ptr->command_journal().failed(cmd_id, err);
         return send_error(request, "500 Internal Server Error", "ota_write_failed");
     }
-    char buf[1024];
+    char buf[512];
     int received = 0;
     int remaining = request->content_len - sizeof(prefix);
     int total = request->content_len;
@@ -7812,14 +7887,9 @@ void FactoryApi::notify_status_async() {
 }
 
 void FactoryApi::queue_service_reconcile() {
-    if (!factory_server_ || !service_reconcile_callback_) return;
-    bool expected = false;
-    if (!service_reconcile_pending_.compare_exchange_strong(expected, true)) return;
-    if (httpd_queue_work(factory_server_, [](void* arg) {
-        auto* self = static_cast<FactoryApi*>(arg);
-        self->service_reconcile_pending_.store(false);
-        if (self->service_reconcile_callback_) self->service_reconcile_callback_();
-    }, this) != ESP_OK) service_reconcile_pending_.store(false);
+    if (service_reconcile_callback_) {
+        service_reconcile_callback_();
+    }
 }
 
 void FactoryApi::stop() {

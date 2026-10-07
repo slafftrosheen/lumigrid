@@ -2,8 +2,8 @@
 
 | Situation | Access |
 | --- | --- |
-| First boot | Connect `LumiGrid-Setup`, Wi-Fi password `lumigrid123`, open `http://192.168.4.1`. Create and confirm a new 16–64 character Admin Access Key. |
-| Temporary setup | `lumigrid123` is accepted only on a genuinely unprovisioned FactoryFirstBoot node. It permits securing the node, not networking, lighting, OTA, restore or credential management. |
+| First boot | Connect `LumiGrid-Setup`, Wi-Fi password printed on serial console (random per-device), open `http://192.168.4.1`. Create and confirm a new 16–64 character Admin Access Key. |
+| Initial bootstrap | `POST /api/v1/auth/bootstrap` is state-gated: open only on unprovisioned nodes (`bootstrapAllowed == true`). No universal password, no MAC-derived secret. |
 | Normal login | Enter the permanent Node Access Key in the dashboard; the node returns a browser session. |
 | Recovery | Existing permanent keys and deliberate recovery policy apply. No universal setup authentication on provisioned nodes. |
 | Factory reset | Physical BOOT/GPIO 0 hold for five seconds, then release to reboot. Erases access/configuration/network settings and restores genuine first boot. |
@@ -27,10 +27,8 @@ all browser sessions. Secrets are never displayed after saving.
 | Session Token | Temporary browser token | `Authorization: Bearer <session-token>`. Memory/sessionStorage only. 30-minute idle timeout and eight-hour absolute timeout. |
 | WS Ticket | Internal one-use WebSocket credential | Authenticated `POST /api/v1/auth/ws-ticket`; consumed on connection, expires after 15 seconds. The dashboard handles it internally. |
 
-The first-boot temporary setup key is a special commissioning path, not an
-AuthStore account. Admin creation revokes temporary sessions and issues the
-permanent Admin session in the same request. The temporary key then fails for
-login, API-key authentication and privileged APIs. Wi-Fi failure, reboot,
-configuration errors and OTA rollback do not restore it.
+Bootstrap is a state-gated one-time commissioning path. Admin creation issues
+the permanent Admin session in the same request. Once provisioned, bootstrap is
+closed. Wi-Fi failure, reboot, configuration errors and OTA rollback do not reopen it.
 
 For step-by-step setup, see [GETTING_STARTED.md](GETTING_STARTED.md).

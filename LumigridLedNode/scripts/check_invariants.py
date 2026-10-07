@@ -334,26 +334,48 @@ for f in backup_files:
         ('"wifiPassword"', "Forbidden backup export of wifiPassword"),
     ])
 
-# LG-038.2: the universal value is owned only by commissioning auth and setup UI.
-setup_literal_owners = {
-    "LumigridLedNode/components/auth/include/AuthManager.hpp",
-    "LumigridLedNode/main/RuntimeHardeningTests.cpp",
-    "lumigrid-lander-main/src/lib/api/auth.ts",
-    "lumigrid-lander-main/src/routes/dashboard/+layout.svelte",
-    "lumigrid-lander-main/embedded/dashboard.html",
-}
-for source_root in (NODE_DIR / "main", NODE_DIR / "components", REPO_ROOT / "lumigrid-lander-main/src", REPO_ROOT / "lumigrid-lander-main/embedded"):
-    for source in source_root.rglob("*"):
-        if source.suffix not in {".cpp", ".hpp", ".ts", ".svelte", ".html"} or source.name.endswith((".test.ts", ".spec.ts")):
+# LG-038.7: Reject universal credentials and MAC-derived credentials in production code
+credential_forbidden = [
+    ("lumigrid123", "Forbidden universal credential 'lumigrid123'"),
+    ("mac_pass", "Forbidden MAC-derived password variable 'mac_pass'"),
+    ("lg_%02x%02x%02x%02x", "Forbidden MAC-derived password format 'lg_%02x%02x%02x%02x'"),
+]
+cred_check_dirs = [
+    REPO_ROOT / "lumigrid-lander-main" / "src",
+    REPO_ROOT / "lumigrid-lander-main" / "embedded",
+    NODE_DIR / "main",
+    NODE_DIR / "components" / "auth",
+    NODE_DIR / "components" / "network",
+    NODE_DIR / "components" / "config",
+    NODE_DIR / "components" / "factory",
+]
+for cred_dir in cred_check_dirs:
+    if not cred_dir.exists():
+        continue
+    for f in cred_dir.rglob("*"):
+        if f.suffix not in {".cpp", ".hpp", ".ts", ".svelte", ".html", ".js", ".mjs"} or f.name.endswith((".test.ts", ".spec.ts", ".test.js")):
             continue
-        relative = source.relative_to(REPO_ROOT).as_posix()
-        if "lumigrid123" in source.read_text(encoding="utf-8") and relative not in setup_literal_owners:
-            errors.append(f"{relative}: universal setup credential outside its explicit commissioning/UI owner")
+        if f.name == "RuntimeHardeningTests.cpp":
+            continue
+        check_file_contains(f, credential_forbidden)
 
-auth_manager = (NODE_DIR / "components/auth/AuthManager.cpp").read_text(encoding="utf-8")
-factory_gate = re.search(r"bool AuthManager::verify_factory_setup_credential_locked\([^)]*\) const \{(.*?)\n\}", auth_manager, re.S)
-if not factory_gate or not all(gate in factory_gate.group(1) for gate in ("!store_->is_provisioned()", "CommissioningState::FactoryFirstBoot", "std::strcmp(credential, kFactorySetupCredential) == 0")):
-    errors.append("AuthManager: temporary credential requires both genuine first boot and unprovisioned state")
+# LG-038.7: HTTP task stack bounding and scratch allocation invariants
+factory_api = NODE_DIR / "components" / "factory" / "FactoryApi.cpp"
+if factory_api.exists():
+    fa_text = factory_api.read_text(encoding="utf-8")
+    status_handler = re.search(r"esp_err_t FactoryApi::get_signage_status\(.*?\n\}", fa_text, re.S)
+    if status_handler and "char payload[kRuntimeSnapshotMaxBytes];" in status_handler.group(0):
+        errors.append("FactoryApi.cpp: forbidden 'char payload[kRuntimeSnapshotMaxBytes];' on HTTPD stack in get_signage_status")
+    fleet_handler = re.search(r"esp_err_t FactoryApi::get_fleet_nodes\(.*?\n\}", fa_text, re.S)
+    if fleet_handler and re.search(r"DiscoveredNode\s+snap\s*\[\s*(discovery::)?FleetDiscoveryService::kMaxDiscoveredNodes\s*\];", fleet_handler.group(0)):
+        errors.append("FactoryApi.cpp: forbidden 'DiscoveredNode snap[...]' on HTTPD stack in get_fleet_nodes")
+    match_stack = re.search(r"http_config\.stack_size\s*=\s*(\d+);", fa_text)
+    if match_stack and int(match_stack.group(1)) > 8192:
+        errors.append(f"FactoryApi.cpp: http_config.stack_size={match_stack.group(1)} exceeds maximum allowed 8192 bytes")
+    if "RuntimeSnapshotScratch" not in fa_text:
+        errors.append("FactoryApi.cpp: missing heap-backed RuntimeSnapshotScratch for status handler")
+    if "FleetSnapshot" not in fa_text:
+        errors.append("FactoryApi.cpp: missing heap-backed FleetSnapshot for fleet nodes handler")
 
 # LG-038.3 §5/§77: app_main must return after startup; no permanent heartbeat loop.
 main_cpp = (NODE_DIR / "main" / "main.cpp").read_text(encoding="utf-8")

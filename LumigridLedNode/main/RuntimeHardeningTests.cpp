@@ -3848,65 +3848,101 @@ bool test_lg028_network_commissioning_and_lifecycle() {
     return true;
 }
 
-bool test_lg0382_factory_setup_credentials() {
+bool test_lg0387_bootstrap_and_credentials() {
     auth::AuthStore store;
     auth::AuthManager mgr(&store);
     assert(mgr.init() == ESP_OK);
     assert(mgr.factory_reset() == ESP_OK);
-    const char* temporary = "lumigrid123";
+    const char* invalid_short = "short";
     const char* permanent = "MyPermanentAdminAccessKey2026!";
-    char setup_session[65] = {}, admin_session[65] = {};
+    char admin_session[65] = {};
     auth::AuthRole role;
     uint32_t expires = 0;
-    // A: first boot uses special commissioning authority, never a saved credential.
-    assert(mgr.verify_factory_setup_credential(temporary));
-    assert(mgr.migrate_legacy_tokens(temporary, temporary, temporary) == ESP_OK);
+
+    // A: Fresh/reset node is unprovisioned. No backdoor or temporary universal password exists.
     assert(!mgr.is_provisioned());
     assert(!store.config().admin.enabled);
-    assert(mgr.create_session(temporary, setup_session, &role, &expires) == ESP_OK);
-    assert(role == auth::AuthRole::Admin);
-    assert(mgr.validate_session(setup_session).factory_setup);
-    // B/C: no recovery/normal backdoor and no permanent short key.
-    for (auto state : {auth::CommissioningState::None, auth::CommissioningState::PhysicalRecovery}) {
-        mgr.set_commissioning_state(state);
-        assert(!mgr.verify_factory_setup_credential(temporary));
-        assert(mgr.create_session(temporary, admin_session, &role, &expires) != ESP_OK);
-        assert(!mgr.verify_api_key(temporary, &role));
-    }
+    assert(mgr.create_session("any_password", admin_session, &role, &expires) != ESP_OK);
+    assert(!mgr.verify_api_key(permanent, &role));
+
+    // B: Bootstrap is gated by commissioning state: only FactoryFirstBoot or PhysicalRecovery.
+    mgr.set_commissioning_state(auth::CommissioningState::None);
+    assert(!mgr.is_bootstrap_allowed());
+    assert(mgr.bootstrap(permanent, admin_session, &expires) == ESP_ERR_INVALID_STATE);
+
     mgr.set_commissioning_state(auth::CommissioningState::FactoryFirstBoot);
-    assert(mgr.bootstrap(temporary) == ESP_ERR_INVALID_ARG);
-    assert(mgr.rotate_credential(auth::AuthRole::Admin, permanent) == ESP_ERR_INVALID_STATE);
-    // D/E: durable save returns an Admin session and revokes setup authority.
+    assert(mgr.is_bootstrap_allowed());
+
+    // C: Bootstrap rejects short credentials (< 16 chars).
+    assert(mgr.bootstrap(invalid_short, admin_session, &expires) == ESP_ERR_INVALID_ARG);
+    assert(!mgr.is_provisioned());
+
+    // D: Valid bootstrap creates permanent Admin credential and returns valid Admin session.
     assert(mgr.bootstrap(permanent, admin_session, &expires) == ESP_OK);
+    assert(mgr.is_provisioned());
+    assert(store.config().admin.enabled);
     assert(mgr.validate_session(admin_session).valid);
-    assert(!mgr.validate_session(admin_session).factory_setup);
-    assert(!mgr.validate_session(setup_session).valid);
-    assert(!mgr.verify_factory_setup_credential(temporary));
-    assert(mgr.create_session(temporary, setup_session, &role, &expires) != ESP_OK);
-    assert(!mgr.verify_api_key(temporary, &role));
-    assert(mgr.create_session(permanent, admin_session, &role, &expires) == ESP_OK);
-    assert(mgr.rotate_credential(auth::AuthRole::Admin, temporary) == ESP_ERR_INVALID_ARG);
-    // F/H: reconstruct managers over persistent NVS as boot/rollback does.
+    assert(mgr.validate_session(admin_session).role == auth::AuthRole::Admin);
+
+    // E: Once provisioned, bootstrap is disallowed even if commissioning state remains FactoryFirstBoot.
+    assert(!mgr.is_bootstrap_allowed());
+    assert(mgr.bootstrap("AnotherPermanentKey2026!", admin_session, &expires) == ESP_ERR_INVALID_STATE);
+
+    // F: Admin can authenticate and create sessions with permanent key.
+    char second_session[65] = {};
+    assert(mgr.create_session(permanent, second_session, &role, &expires) == ESP_OK);
+    assert(role == auth::AuthRole::Admin);
+    assert(mgr.validate_session(second_session).valid);
+
+    // G: Reconstructing manager over persistent NVS retains provisioned credential across boots.
     for (int boot = 0; boot < 2; ++boot) {
         auth::AuthStore reboot_store;
         auth::AuthManager reboot(&reboot_store);
         assert(reboot.init() == ESP_OK);
         assert(reboot.is_provisioned());
-        // G/J: even an accidental state assertion after Wi-Fi loss cannot restore auth.
-        for (auto state : {auth::CommissioningState::None, auth::CommissioningState::PhysicalRecovery,
-                           auth::CommissioningState::FactoryFirstBoot}) {
-            reboot.set_commissioning_state(state);
-            assert(!reboot.verify_factory_setup_credential(temporary));
-            assert(reboot.create_session(temporary, setup_session, &role, &expires) != ESP_OK);
-            assert(!reboot.verify_api_key(temporary, &role));
-        }
+        assert(!reboot.is_bootstrap_allowed());
         assert(reboot.create_session(permanent, admin_session, &role, &expires) == ESP_OK);
+        assert(reboot.create_session("wrong_key", admin_session, &role, &expires) != ESP_OK);
     }
-    // I: explicit full-reset ownership restores factory behavior.
+
+    // H: Factory reset restores unprovisioned state and re-enables bootstrap in FactoryFirstBoot.
     assert(mgr.factory_reset() == ESP_OK);
-    assert(mgr.verify_factory_setup_credential(temporary));
-    assert(mgr.create_session(temporary, setup_session, &role, &expires) == ESP_OK);
-    ESP_LOGI(TAG, "[PASS] LG-038.2 factory setup credential regressions A-J");
+    assert(!mgr.is_provisioned());
+    assert(mgr.is_bootstrap_allowed());
+
+    // I: Verify random AP password generation (no MAC derivation, printable >= 16 chars).
+    char ap_pass[65] = {};
+    generate_random_ap_password(ap_pass, sizeof(ap_pass));
+    assert(std::strlen(ap_pass) >= 16);
+    for (size_t i = 0; i < std::strlen(ap_pass); ++i) {
+        assert(ap_pass[i] >= 33 && ap_pass[i] <= 126); // printable ASCII
+    }
+
+    // J: Verify NetworkSettings v1 -> v2 migration generates non-empty random AP password.
+    NetworkSettingsV1 v1{};
+    v1.schema_version = 1;
+    std::strncpy(v1.sta_ssid, "MyHomeWifi", sizeof(v1.sta_ssid) - 1);
+    std::strncpy(v1.sta_password, "SecretWifi123", sizeof(v1.sta_password) - 1);
+    std::strncpy(v1.ap_name, "LumiGrid-Migrate", sizeof(v1.ap_name) - 1);
+    v1.ap_channel = 6;
+    v1.checksum = calc_network_settings_v1_crc(v1);
+
+    NetworkSettings v2{};
+    v2.schema_version = 2;
+    std::memcpy(v2.sta_ssid, v1.sta_ssid, sizeof(v2.sta_ssid));
+    std::memcpy(v2.sta_password, v1.sta_password, sizeof(v2.sta_password));
+    std::memcpy(v2.ap_name, v1.ap_name, sizeof(v2.ap_name));
+    v2.ap_channel = v1.ap_channel;
+    generate_random_ap_password(v2.ap_password, sizeof(v2.ap_password));
+    v2.checksum = calc_network_settings_crc(v2);
+
+    assert(v2.schema_version == 2);
+    assert(std::strcmp(v2.sta_ssid, "MyHomeWifi") == 0);
+    assert(std::strcmp(v2.ap_name, "LumiGrid-Migrate") == 0);
+    assert(std::strlen(v2.ap_password) >= 16);
+    assert(v2.checksum == calc_network_settings_crc(v2));
+
+    ESP_LOGI(TAG, "[PASS] LG-038.7 bootstrap, credential, and NetworkSettings v2 migration regressions");
     return true;
 }
 
@@ -6460,7 +6496,7 @@ bool run_runtime_hardening_tests() {
     all_ok &= test_lg028_network_commissioning_and_lifecycle();
 
     // LG-029 Node-Backed Authentication & Sessions Regressions (A..AC)
-    all_ok &= test_lg0382_factory_setup_credentials();
+    all_ok &= test_lg0387_bootstrap_and_credentials();
     all_ok &= test_lg029_node_backed_authentication();
 
     // LG-030 Fleet Discovery, Presence & Immutable Identity

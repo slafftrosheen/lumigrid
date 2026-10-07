@@ -6,7 +6,26 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+static const char* reset_reason_to_name(esp_reset_reason_t reason) {
+  switch (reason) {
+    case ESP_RST_POWERON:   return "POWERON";
+    case ESP_RST_EXT:       return "EXT_PIN";
+    case ESP_RST_SW:        return "SW";
+    case ESP_RST_PANIC:     return "PANIC";
+    case ESP_RST_INT_WDT:   return "INT_WDT";
+    case ESP_RST_TASK_WDT:  return "TASK_WDT";
+    case ESP_RST_WDT:       return "OTHER_WDT";
+    case ESP_RST_DEEPSLEEP: return "DEEPSLEEP";
+    case ESP_RST_BROWNOUT:  return "BROWNOUT";
+    case ESP_RST_SDIO:      return "SDIO";
+    default:                return "UNKNOWN";
+  }
+}
+
 extern "C" void app_main(void) {
+  const esp_reset_reason_t rst = esp_reset_reason();
+  ESP_LOGI("lumigrid", "RESET reason=%d name=%s", (int)rst, reset_reason_to_name(rst));
+
   // LG-038.1/038.3: boot memory telemetry. The 8-bit allocatable heap is the
   // product metric; internal/DMA figures are diagnostics only (§59).
   const lg::RuntimeMemorySnapshot boot_mem = lg::capture_runtime_memory();
@@ -23,6 +42,12 @@ extern "C" void app_main(void) {
   static lg::LumigridRuntime runtime;
 
   esp_err_t boot_err = runtime.init();
+  ESP_LOGI("lumigrid",
+           "BOOT_DIAG: reason=%d name=%s bootCount=%d free8=%lu largest8=%lu minFree=%lu",
+           (int)rst, reset_reason_to_name(rst), runtime.boot_count(),
+           (unsigned long)boot_mem.free_8bit,
+           (unsigned long)boot_mem.largest_8bit,
+           (unsigned long)boot_mem.minimum_free_heap);
   if (boot_err == ESP_OK) {
     boot_err = runtime.start();
   }

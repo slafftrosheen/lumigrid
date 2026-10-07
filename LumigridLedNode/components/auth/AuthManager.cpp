@@ -49,19 +49,6 @@ bool AuthManager::is_provisioned() const {
     return prov;
 }
 
-bool AuthManager::verify_factory_setup_credential_locked(const char* credential) const {
-    return credential && !store_->is_provisioned() &&
-        commissioning_state_ == CommissioningState::FactoryFirstBoot &&
-        std::strcmp(credential, kFactorySetupCredential) == 0;
-}
-
-bool AuthManager::verify_factory_setup_credential(const char* credential) const {
-    if (mutex_) xSemaphoreTake(mutex_, portMAX_DELAY);
-    bool valid = verify_factory_setup_credential_locked(credential);
-    if (mutex_) xSemaphoreGive(mutex_);
-    return valid;
-}
-
 esp_err_t AuthManager::bootstrap(const char* admin_token, char* out_session_hex, uint32_t* out_expires_in) {
     if (!admin_token) {
         return ESP_ERR_INVALID_ARG;
@@ -121,8 +108,7 @@ esp_err_t AuthManager::bootstrap(const char* admin_token, char* out_session_hex,
 }
 
 bool AuthManager::verify_credential_locked(const char* credential, AuthRole* out_role) {
-    if (!credential || credential[0] == '\0' || !store_->is_provisioned() ||
-        std::strcmp(credential, kFactorySetupCredential) == 0) {
+    if (!credential || credential[0] == '\0' || !store_->is_provisioned()) {
         return false;
     }
 
@@ -219,9 +205,7 @@ esp_err_t AuthManager::create_session(const char* credential, char out_session_h
     cleanup_expired_sessions_locked(now_us);
 
     AuthRole derived_role = AuthRole::Operator;
-    bool factory_setup = verify_factory_setup_credential_locked(credential);
-    if (factory_setup) derived_role = AuthRole::Admin;
-    if (!factory_setup && !verify_credential_locked(credential, &derived_role)) {
+    if (!verify_credential_locked(credential, &derived_role)) {
         if (mutex_) xSemaphoreGive(mutex_);
         ESP_LOGW(TAG, "auth_login_failed");
         return ESP_ERR_NOT_FOUND;
@@ -249,7 +233,7 @@ esp_err_t AuthManager::create_session(const char* credential, char out_session_h
 
     AuthSession& s = sessions_[target_idx];
     s.active = true;
-    s.factory_setup = factory_setup;
+    s.factory_setup = false;
     s.role = derived_role;
     esp_fill_random(s.token, sizeof(s.token));
     bytes_to_hex(s.token, sizeof(s.token), s.token_hex);
@@ -279,10 +263,6 @@ SessionValidationResult AuthManager::validate_session(const char* session_hex) {
 
     for (size_t i = 0; i < kMaxSessions; ++i) {
         if (sessions_[i].active && std::strcmp(sessions_[i].token_hex, session_hex) == 0) {
-            if (sessions_[i].factory_setup && !verify_factory_setup_credential_locked(kFactorySetupCredential)) {
-                sessions_[i].active = false;
-                break;
-            }
             if ((now_us - sessions_[i].created_us > kAbsoluteTimeoutUs) ||
                 (now_us - sessions_[i].last_seen_us > kIdleTimeoutUs)) {
                 sessions_[i].active = false;
@@ -294,7 +274,7 @@ SessionValidationResult AuthManager::validate_session(const char* session_hex) {
             // Refresh last seen
             sessions_[i].last_seen_us = now_us;
             res.valid = true;
-            res.factory_setup = sessions_[i].factory_setup;
+            res.factory_setup = false;
             res.role = sessions_[i].role;
 
             uint64_t idle_rem = (kIdleTimeoutUs > (now_us - sessions_[i].last_seen_us))
@@ -321,14 +301,13 @@ SessionValidationResult AuthManager::inspect_session(const char* session_hex) {
 
     for (size_t i = 0; i < kMaxSessions; ++i) {
         if (sessions_[i].active && std::strcmp(sessions_[i].token_hex, session_hex) == 0) {
-            if (sessions_[i].factory_setup && !verify_factory_setup_credential_locked(kFactorySetupCredential)) break;
             if ((now_us - sessions_[i].created_us > kAbsoluteTimeoutUs) ||
                 (now_us - sessions_[i].last_seen_us > kIdleTimeoutUs)) {
                 res.expired = true;
                 res.valid = false;
             } else {
                 res.valid = true;
-                res.factory_setup = sessions_[i].factory_setup;
+                res.factory_setup = false;
                 res.role = sessions_[i].role;
                 uint64_t idle_rem = (kIdleTimeoutUs > (now_us - sessions_[i].last_seen_us))
                                     ? (kIdleTimeoutUs - (now_us - sessions_[i].last_seen_us)) : 0;
@@ -529,12 +508,9 @@ esp_err_t AuthManager::migrate_legacy_tokens(const char* legacy_admin, const cha
     }
 
     // Check Case A: legacy config contains universal defaults
-    bool is_universal_admin = legacy_admin &&
-        (std::strcmp(legacy_admin, "lumigrid_admin") == 0 || std::strcmp(legacy_admin, kFactorySetupCredential) == 0);
-    bool is_universal_installer = legacy_installer &&
-        (std::strcmp(legacy_installer, "lumigrid_install") == 0 || std::strcmp(legacy_installer, kFactorySetupCredential) == 0);
-    bool is_universal_op = legacy_op &&
-        (std::strcmp(legacy_op, "lumigrid_op") == 0 || std::strcmp(legacy_op, kFactorySetupCredential) == 0);
+    bool is_universal_admin = legacy_admin && (std::strcmp(legacy_admin, "lumigrid_admin") == 0);
+    bool is_universal_installer = legacy_installer && (std::strcmp(legacy_installer, "lumigrid_install") == 0);
+    bool is_universal_op = legacy_op && (std::strcmp(legacy_op, "lumigrid_op") == 0);
 
     if (is_universal_admin && is_universal_installer && is_universal_op) {
         // Case A: treat as unprovisioned!

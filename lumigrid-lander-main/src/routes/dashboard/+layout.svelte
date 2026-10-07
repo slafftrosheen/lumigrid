@@ -22,6 +22,7 @@
   } from '$lib/api/auth';
   import {
     connect,
+    disconnect,
     selectNode as selectLiveNode,
     getNodeLiveState,
     getNodeLiveSnapshot,
@@ -141,7 +142,7 @@
     authSubmitting = true;
     authError = '';
     try {
-      const res = await bootstrapAuth(nodeIp, key, authStatus?.factorySetupAllowed === true);
+      const res = await bootstrapAuth(nodeIp, key);
       nodeAuthStore.setSession({
         address: nodeIp,
         nodeId: liveState.nodeId || '',
@@ -153,6 +154,8 @@
       confirmAdminKey = '';
       generatedAdminKey = false;
       showFirstInstallWizard = true;
+      await connect(nodeIp);
+      await pollRecovery(nodeIp);
     } catch (err) {
       authError = 'Unable to secure the node. Check your connection and retry. If the key was already saved, sign in with your new Admin Access Key.';
       try {
@@ -191,6 +194,8 @@
         expiresAt: Date.now() + res.expiresIn * 1000,
       });
       loginKeyInput = '';
+      await connect(nodeIp);
+      await pollRecovery(nodeIp);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       authError = msg.includes('401') || msg.includes('invalid') ? 'Invalid credentials' : msg;
@@ -201,6 +206,7 @@
   }
 
   async function signOutNode() {
+    disconnect();
     if (nodeIp) {
       await deleteSession(nodeIp).catch(() => {});
       nodeAuthStore.clearSession(nodeIp);
@@ -426,10 +432,7 @@
       <!-- First-Boot Provisioning Surface -->
       <p class="pin-sub">New LumiGrid detected — Set Up Node</p>
       <h2>Secure your LumiGrid</h2>
-      <p class="auth-desc">Create an Admin Access Key (16–64 characters).</p>
-      {#if authStatus.factorySetupAllowed}
-        <p class="auth-desc">Wi-Fi: LumiGrid-Setup · Wi-Fi password: lumigrid123<br />Open http://192.168.4.1<br />This replaces the temporary setup key “lumigrid123”. Your Wi-Fi password and Node Access Key may be different after setup.</p>
-      {/if}
+      <p class="auth-desc">Wi-Fi: <strong>LumiGrid-Setup</strong> (use per-device Wi-Fi key printed on serial console)<br />Open http://192.168.4.1<br />Create an Admin Access Key (16–64 characters) to secure your node.</p>
       
       <div class="key-input-row">
         <input
