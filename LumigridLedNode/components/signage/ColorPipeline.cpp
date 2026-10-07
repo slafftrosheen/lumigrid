@@ -27,8 +27,8 @@ void ColorPipeline::set_gamma(uint8_t gamma_x10) {
     // gamma_x10 encodes γ as an integer × 10.
     //   gamma_x10 = 10  → γ = 1.0 (linear, pass-through)
     //   gamma_x10 = 22  → γ = 2.2 (perceptually uniform, default)
-    //   gamma_x10 =  0  → treat as unset, fall back to hardware default (γ=2.2)
-    if (gamma_x10 == 10) {
+    //   gamma_x10 = 0 or 10 → linear, pass-through
+    if (gamma_x10 == 0 || gamma_x10 == 10) {
         // Linear path: no correction, 8-bit → 8-bit identity, 8-bit → 12-bit linear scale.
         for (int i = 0; i < 256; ++i) {
             gamma8_lut_[i]  = static_cast<uint8_t>(i);
