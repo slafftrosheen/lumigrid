@@ -63,6 +63,7 @@ const char* effect_name(FactoryEffect effect) {
         case FactoryEffect::PwmFade: return "pwm_fade";
         case FactoryEffect::CombinedPulse: return "combined_pulse";
         case FactoryEffect::StressCycle: return "stress_cycle";
+        case FactoryEffect::HardwareCoexistence: return "hardware_coexistence";
         case FactoryEffect::Manual: return "manual";
     }
     return "unknown";
@@ -186,6 +187,94 @@ void render_effect(FactoryEffect effect,
                 ));
             }
             break;
+
+        case FactoryEffect::HardwareCoexistence: {
+            // LG-HW-001 Section 10: Hardware coexistence stress mode.
+            // Continuously exercises all 8 RMT channels (synthetic 256-pixel payload)
+            // with 6 rapidly changing sparse + dense patterns to detect WS2812 latch errors,
+            // while simultaneously driving all 8 PCA channels with dynamic duty cycles.
+            // Deterministic, zero per-frame dynamic allocation.
+
+            // 1. PCA9685: All 8 channels active with continuously changing duty cycles
+            const uint16_t pca_phase = static_cast<uint16_t>((elapsed_ms * 4) % 4096);
+            for (uint8_t ch = 0; ch < 8; ++ch) {
+                uint32_t duty = (pca_phase + ch * 512) % 4096;
+                duty = (duty * brightness) / 255;
+                output.pwm().set(ch, static_cast<uint16_t>(duty));
+            }
+
+            // 2. Addressable: All 8 lanes active, 256 pixels per lane, cycling 6 patterns
+            const uint8_t pattern = (elapsed_ms / 1000) % 6;
+            constexpr uint16_t kCoexPixels = 256;
+
+            switch (pattern) {
+                case 0: {
+                    // Pattern 1: One moving pixel (sparse WS2812 latch detector)
+                    const uint16_t moving_base = static_cast<uint16_t>((elapsed_ms / 16) % kCoexPixels);
+                    for (uint8_t lane = 0; lane < 8; ++lane) {
+                        const uint16_t px = (moving_base + lane * 32) % kCoexPixels;
+                        set_rgb(output, lane, px, scale(kIdentityColors[lane], brightness));
+                    }
+                    break;
+                }
+                case 1: {
+                    // Pattern 2: Alternating pixels (odd/even alternating)
+                    const bool flip = ((elapsed_ms / 250) % 2) != 0;
+                    for (uint8_t lane = 0; lane < 8; ++lane) {
+                        const Rgb c = scale(kIdentityColors[lane], brightness);
+                        for (uint16_t px = 0; px < kCoexPixels; ++px) {
+                            if (((px % 2) != 0) ^ flip) {
+                                set_rgb(output, lane, px, c);
+                            }
+                        }
+                    }
+                    break;
+                }
+                case 2: {
+                    // Pattern 3: Checker pattern
+                    const uint8_t phase_check = static_cast<uint8_t>((elapsed_ms / 250) % 2);
+                    for (uint8_t lane = 0; lane < 8; ++lane) {
+                        const Rgb c = scale(kIdentityColors[lane], brightness);
+                        for (uint16_t px = 0; px < kCoexPixels; ++px) {
+                            if ((((px / 8) + lane + phase_check) % 2) == 0) {
+                                set_rgb(output, lane, px, c);
+                            }
+                        }
+                    }
+                    break;
+                }
+                case 3: {
+                    // Pattern 4: Full white / color (dense full payload)
+                    for (uint8_t lane = 0; lane < 8; ++lane) {
+                        const Rgb c = scale(wheel((phase8 + lane * 32) & 0xFF), brightness);
+                        fill_rgb(output, lane, c);
+                    }
+                    break;
+                }
+                case 4: {
+                    // Pattern 5: All black (verify zero transmission integrity)
+                    // (clear_pixels already executed at start of render_effect)
+                    break;
+                }
+                case 5: {
+                    // Pattern 6: Random deterministic PRNG pattern (reproducible seed)
+                    uint32_t seed = static_cast<uint32_t>((elapsed_ms / 200) * 0x9E3779B9u + 0x1234567u);
+                    for (uint8_t lane = 0; lane < 8; ++lane) {
+                        for (uint16_t px = 0; px < kCoexPixels; ++px) {
+                            seed = seed * 1664525u + 1013904223u;
+                            const uint8_t r = scale8(static_cast<uint8_t>((seed >> 16) & 0xFF), brightness);
+                            seed = seed * 1664525u + 1013904223u;
+                            const uint8_t g = scale8(static_cast<uint8_t>((seed >> 16) & 0xFF), brightness);
+                            seed = seed * 1664525u + 1013904223u;
+                            const uint8_t b = scale8(static_cast<uint8_t>((seed >> 16) & 0xFF), brightness);
+                            set_rgb(output, lane, px, {r, g, b});
+                        }
+                    }
+                    break;
+                }
+            }
+            break;
+        }
 
         case FactoryEffect::Manual:
             break;

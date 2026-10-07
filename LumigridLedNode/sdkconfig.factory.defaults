@@ -25,3 +25,13 @@ CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 # CONFIG_FREERTOS_SUPPORT_STATIC_ALLOCATION is not set
 # On-demand kernel snapshots for race-free stack telemetry; no monitor task.
 CONFIG_FREERTOS_USE_TRACE_FACILITY=y
+
+# LG-HW-001: CPU Coexistence Architecture
+# CPU0 = network/system side
+# CPU1 = deterministic lighting/output side
+CONFIG_ESP_WIFI_TASK_PINNED_TO_CORE_0=y
+CONFIG_ESP_MAIN_TASK_AFFINITY_CPU0=y
+
+# LG-HW-001: RMT IRAM-safe operation
+CONFIG_RMT_ISR_IRAM_SAFE=y
+

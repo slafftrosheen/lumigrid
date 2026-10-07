@@ -100,6 +100,7 @@ esp_err_t WifiService::start(const WifiConfig& config,
 
         wifi_init_config_t init_cfg = WIFI_INIT_CONFIG_DEFAULT();
         ESP_RETURN_ON_ERROR(esp_wifi_init(&init_cfg), kTag, "wifi init");
+        ESP_LOGI("wifi", "WiFi/network domain CPU0");
 
         if (!wifi_event_instance_) {
             ESP_RETURN_ON_ERROR(

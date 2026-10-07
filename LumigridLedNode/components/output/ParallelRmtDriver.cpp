@@ -20,6 +20,8 @@
 #include "esp_timer.h"
 #include "sdkconfig.h"
 #include "esp_heap_caps.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "lg_board_pins.hpp"
 
 namespace lg {
@@ -97,7 +99,7 @@ esp_err_t strip_del(rmt_encoder_t* encoder) {
     auto* enc = reinterpret_cast<StripEncoder*>(encoder);
     if (enc->bytes_encoder) rmt_del_encoder(enc->bytes_encoder);
     if (enc->copy_encoder)  rmt_del_encoder(enc->copy_encoder);
-    free(enc);
+    heap_caps_free(enc);
     return ESP_OK;
 }
 
@@ -111,7 +113,9 @@ esp_err_t strip_reset(rmt_encoder_t* encoder) {
 }
 
 esp_err_t new_strip_encoder(bool rgbw, rmt_encoder_handle_t* out) {
-    auto* enc = static_cast<StripEncoder*>(calloc(1, sizeof(StripEncoder)));
+    // LG-HW-001: Explicitly allocate custom StripEncoder in internal DRAM
+    auto* enc = static_cast<StripEncoder*>(
+        heap_caps_calloc(1, sizeof(StripEncoder), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
     if (!enc) return ESP_ERR_NO_MEM;
     enc->base.encode = strip_encode;
     enc->base.del    = strip_del;
@@ -136,10 +140,10 @@ esp_err_t new_strip_encoder(bool rgbw, rmt_encoder_handle_t* out) {
     cfg.flags.msb_first = 1;
 
     esp_err_t err = rmt_new_bytes_encoder(&cfg, &enc->bytes_encoder);
-    if (err != ESP_OK) { free(enc); return err; }
+    if (err != ESP_OK) { heap_caps_free(enc); return err; }
     rmt_copy_encoder_config_t copy_cfg = {};
     err = rmt_new_copy_encoder(&copy_cfg, &enc->copy_encoder);
-    if (err != ESP_OK) { rmt_del_encoder(enc->bytes_encoder); free(enc); return err; }
+    if (err != ESP_OK) { rmt_del_encoder(enc->bytes_encoder); heap_caps_free(enc); return err; }
 
     // Latch/reset: two equal low halves (each duration is a 15-bit field).
     const uint32_t reset_ticks = res_mhz * kAddressableResetUs / 2;
@@ -178,26 +182,54 @@ public:
         if (lane >= ParallelRmtDriver::kLanes) return ESP_ERR_INVALID_ARG;
         if (chan_[lane] != nullptr) return ESP_ERR_INVALID_STATE;
 
+        static bool s_policy_logged = false;
+        if (!s_policy_logged) {
+            s_policy_logged = true;
+            ESP_LOGI(TAG, "RMT policy lanes=%u symbols=%u resolution=%lu priority=%d iram=%d",
+                     ParallelRmtDriver::kLanes, static_cast<unsigned>(kRmtSymbolsPerLane),
+                     (unsigned long)kRmtResolutionHz, kRmtInterruptPriority,
+                     CONFIG_RMT_ISR_IRAM_SAFE ? 1 : 0);
+        }
+
         rmt_tx_channel_config_t cc = {};
         cc.clk_src = RMT_CLK_SRC_DEFAULT;
         cc.gpio_num = static_cast<gpio_num_t>(gpio);
         cc.mem_block_symbols = 64;       // one ESP32 RMT block per lane (8 lanes = all 8 blocks)
         cc.resolution_hz = kRmtResolutionHz;
         cc.trans_queue_depth = 2;
+        cc.intr_priority = kRmtInterruptPriority;
         cc.flags.with_dma = 0;
         cc.flags.invert_out = 0;
 
+        const int core = xPortGetCoreID();
         esp_err_t err = rmt_new_tx_channel(&cc, &chan_[lane]);
-        if (err != ESP_OK) { chan_[lane] = nullptr; return err; }
+        ESP_LOGI(TAG, "RMT_ALLOC lane=%u gpio=%d core=%d symbols=64 priority=%d result=%s",
+                 lane, gpio, core, kRmtInterruptPriority, esp_err_to_name(err));
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "RMT channel allocation failed at priority %d for lane %u (gpio %d): %s",
+                     kRmtInterruptPriority, lane, gpio, esp_err_to_name(err));
+            chan_[lane] = nullptr;
+            return err;
+        }
+
         err = new_strip_encoder(rgbw, &enc_[lane]);
-        if (err != ESP_OK) { rmt_del_channel(chan_[lane]); chan_[lane] = nullptr; enc_[lane] = nullptr; return err; }
+        if (err != ESP_OK) {
+            rmt_del_channel(chan_[lane]);
+            chan_[lane] = nullptr;
+            enc_[lane] = nullptr;
+            return err;
+        }
+
         err = rmt_enable(chan_[lane]);   // stays enabled between frames
         if (err != ESP_OK) {
             rmt_del_encoder(enc_[lane]);
             rmt_del_channel(chan_[lane]);
-            chan_[lane] = nullptr; enc_[lane] = nullptr;
+            chan_[lane] = nullptr;
+            enc_[lane] = nullptr;
             return err;
         }
+
+        ESP_LOGI(TAG, "lane=%u gpio=%d created core=%d", lane, gpio, core);
         return ESP_OK;
     }
 
@@ -275,7 +307,9 @@ esp_err_t ParallelRmtDriver::configure_lane(uint8_t lane, int gpio, bool rgbw,
     Lane& L = lanes_[lane];
     const size_t bpp = rgbw ? 4u : 3u;
     L.wire_len = bpp * pixels;
-    L.wire = static_cast<uint8_t*>(calloc(1, L.wire_len));
+    // LG-HW-001: Force RMT ISR-accessed wire buffers into internal DRAM
+    L.wire = static_cast<uint8_t*>(
+        heap_caps_calloc(1, L.wire_len, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
     if (!L.wire) {
         L.wire_len = 0;
         ESP_LOGE(TAG, "lane %u: wire buffer alloc failed (%s)", lane, output_err_name(kErrRmtResourceExhausted));
@@ -285,10 +319,11 @@ esp_err_t ParallelRmtDriver::configure_lane(uint8_t lane, int gpio, bool rgbw,
     configure_pixel_order(L, order);
     L.rgbw = rgbw;
     L.pixels = pixels;
+    diagnostics_.allocation_core = xPortGetCoreID();
 
     const esp_err_t err = tx().create(lane, gpio, rgbw);
     if (err != ESP_OK) {
-        free(L.wire);
+        heap_caps_free(L.wire);
         L = Lane{};
         const esp_err_t mapped = map_create_error(err);
         ESP_LOGE(TAG, "lane %u (GPIO %d): channel create failed: %s", lane, gpio, output_err_name(mapped));
@@ -304,7 +339,7 @@ void ParallelRmtDriver::release_lane(uint8_t lane) {
     if (L.state != LaneState::Unconfigured) {
         tx().destroy(lane);
     }
-    free(L.wire);
+    heap_caps_free(L.wire);
     L = Lane{};
 }
 
@@ -330,7 +365,9 @@ esp_err_t ParallelRmtDriver::reconfigure(const DeviceConfig& cfg, uint32_t reser
         next.rgbw = cc.addressable_type == AddressableType::SK6812;
         next.pixels = cc.pixel_count;
         next.wire_len = next.pixels * (next.rgbw ? 4u : 3u);
-        next.wire = static_cast<uint8_t*>(calloc(1, next.wire_len));
+        // LG-HW-001: Internal DRAM wire buffer
+        next.wire = static_cast<uint8_t*>(
+            heap_caps_calloc(1, next.wire_len, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
         if (!next.wire) { err = kErrInsufficientRuntimeMemory; break; }
         configure_pixel_order(next, cc.pixel_order);
         next.state = LaneState::Ready;
@@ -345,14 +382,15 @@ esp_err_t ParallelRmtDriver::reconfigure(const DeviceConfig& cfg, uint32_t reser
     if (err != ESP_OK) {
         for (uint8_t lane = 0; lane < kLanes; ++lane) {
             if (prepared[lane]) tx().cancel_prepared(lane, configured(lane));
-            free(candidate[lane].wire);
+            heap_caps_free(candidate[lane].wire);
         }
         return err;
     }
+    diagnostics_.allocation_core = xPortGetCoreID();
     for (uint8_t lane = 0; lane < kLanes; ++lane) {
         if (prepared[lane]) tx().commit_prepared(lane);
         else if (configured(lane)) tx().destroy(lane);
-        free(lanes_[lane].wire);
+        heap_caps_free(lanes_[lane].wire);
         lanes_[lane] = candidate[lane];
     }
     return ESP_OK;
@@ -404,10 +442,14 @@ AddressableCommitResult ParallelRmtDriver::commit(bool allow_faulted) {
     AddressableCommitResult res;
     const int64_t t0 = esp_timer_get_time();
 
+    diagnostics_.total_frames++;
     bool submitted[kLanes] = {};
     auto note = [&res](esp_err_t err, uint8_t lane) {
         if (res.result == ESP_OK) { res.result = err; res.failed_lane = lane; }
     };
+
+    static esp_err_t s_last_sub_err[kLanes] = {};
+    static esp_err_t s_last_wait_err[kLanes] = {};
 
     // Phase 1: submit EVERY active lane before waiting on ANY lane.
     for (uint8_t lane = 0; lane < kLanes; ++lane) {
@@ -418,13 +460,27 @@ AddressableCommitResult ParallelRmtDriver::commit(bool allow_faulted) {
             note(ESP_ERR_INVALID_STATE, lane);
             continue;
         }
+
+        const int64_t sub_t0 = esp_timer_get_time();
         const esp_err_t err = tx().submit(lane, L.wire, L.wire_len);
+        const uint32_t sub_us = static_cast<uint32_t>(esp_timer_get_time() - sub_t0);
+
+        auto& ldiag = diagnostics_.lanes[lane];
+        ldiag.submissions++;
+        if (sub_us > ldiag.max_submit_us) ldiag.max_submit_us = sub_us;
+
         if (err != ESP_OK) {
             L.state = LaneState::Faulted;
             note(err, lane);
-            ESP_LOGE(TAG, "lane %u submit failed: %s", lane, output_err_name(err));
+            ldiag.submit_failures++;
+            ldiag.last_error = err;
+            if (s_last_sub_err[lane] != err) {
+                s_last_sub_err[lane] = err;
+                ESP_LOGE(TAG, "lane %u submit failed: %s", lane, output_err_name(err));
+            }
             continue;
         }
+        s_last_sub_err[lane] = ESP_OK;
         L.state = LaneState::Transmitting;
         submitted[lane] = true;
     }
@@ -435,13 +491,31 @@ AddressableCommitResult ParallelRmtDriver::commit(bool allow_faulted) {
     for (uint8_t lane = 0; lane < kLanes; ++lane) {
         if (!submitted[lane]) continue;
         Lane& L = lanes_[lane];
+        const int64_t wait_t0 = esp_timer_get_time();
         const esp_err_t err = tx().wait(lane, addressable_timeout_us(L.pixels, L.rgbw));
+        const uint32_t wait_us = static_cast<uint32_t>(esp_timer_get_time() - wait_t0);
+
+        auto& ldiag = diagnostics_.lanes[lane];
+        if (wait_us > ldiag.max_wait_us) ldiag.max_wait_us = wait_us;
+
         if (err != ESP_OK) {
             L.state = LaneState::Faulted;
             note(err, lane);
-            ESP_LOGE(TAG, "lane %u wait failed: %s", lane, output_err_name(err));
+            if (err == ESP_ERR_TIMEOUT) {
+                ldiag.wait_timeouts++;
+            } else {
+                ldiag.other_failures++;
+            }
+            ldiag.last_error = err;
+            if (s_last_wait_err[lane] != err) {
+                s_last_wait_err[lane] = err;
+                ESP_LOGE(TAG, "lane %u wait failed: %s", lane, output_err_name(err));
+            }
         } else {
             L.state = LaneState::Ready;
+            ldiag.completed++;
+            ldiag.last_error = ESP_OK;
+            s_last_wait_err[lane] = ESP_OK;
         }
     }
     const int64_t t2 = esp_timer_get_time();
@@ -449,7 +523,19 @@ AddressableCommitResult ParallelRmtDriver::commit(bool allow_faulted) {
     res.submit_us = static_cast<uint32_t>(t1 - t0);
     res.wait_us   = static_cast<uint32_t>(t2 - t1);
     res.total_us  = static_cast<uint32_t>(t2 - t0);
+
+    if (res.result != ESP_OK) {
+        diagnostics_.failed_frames++;
+    }
+
     return res;
+}
+
+RmtDiagnostics ParallelRmtDriver::diagnostics() const {
+    diagnostics_.active_lanes = active_lanes();
+    diagnostics_.interrupt_priority = kRmtInterruptPriority;
+    diagnostics_.iram_safe = (CONFIG_RMT_ISR_IRAM_SAFE != 0);
+    return diagnostics_;
 }
 
 } // namespace lg

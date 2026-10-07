@@ -19,6 +19,12 @@ struct PcaDiagnostics {
     uint8_t prescale = 0;
 
     uint32_t commit_failures = 0;
+
+    uint32_t transactions = 0;
+    uint32_t transaction_failures = 0;
+    uint32_t consecutive_failures = 0;
+    esp_err_t last_error = ESP_OK;
+    int init_core = -1;
 };
 
 class Pca9685Driver {
@@ -50,6 +56,7 @@ public:
     }
 
 private:
+    esp_err_t read_register(uint8_t reg, uint8_t& value);
     esp_err_t write_register(uint8_t reg, uint8_t value);
     esp_err_t write_bytes(uint8_t start_reg, const uint8_t* data, size_t len);
 
@@ -61,6 +68,12 @@ private:
     uint8_t mode2_ = 0;
     uint8_t prescale_ = 0;
     uint32_t commit_failures_ = 0;
+
+    uint32_t transactions_ = 0;
+    uint32_t transaction_failures_ = 0;
+    uint32_t consecutive_failures_ = 0;
+    esp_err_t last_error_ = ESP_OK;
+    int init_core_ = -1;
 };
 
 } // namespace lg

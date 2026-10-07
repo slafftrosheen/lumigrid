@@ -267,6 +267,8 @@ bool parse_effect(const char* value, FactoryEffect& effect) {
         effect = FactoryEffect::CombinedPulse;
     } else if (strcmp(value, "stress_cycle") == 0 || strcmp(value, "burn_in") == 0) {
         effect = FactoryEffect::StressCycle;
+    } else if (strcmp(value, "hardware_coexistence") == 0 || strcmp(value, "coexistence") == 0) {
+        effect = FactoryEffect::HardwareCoexistence;
     } else if (strcmp(value, "blackout") == 0) {
         effect = FactoryEffect::SafeBlackout;
     } else {
@@ -1191,7 +1193,44 @@ esp_err_t get_diagnostics_output(httpd_req_t* request) {
     cJSON_AddNumberToObject(pwm, "pwmHz", pwm_hz);
     cJSON_AddBoolToObject(pwm, "oeEnabled", oe_enabled);
     cJSON_AddNumberToObject(pwm, "commitFailures", pwm_commit_failures);
+    if (api_ptr && api_ptr->signage()) {
+        const auto pca_d = api_ptr->signage()->controller().pwm().diagnostics();
+        cJSON_AddNumberToObject(pwm, "transactions", pca_d.transactions);
+        cJSON_AddNumberToObject(pwm, "transactionFailures", pca_d.transaction_failures);
+        cJSON_AddNumberToObject(pwm, "consecutiveFailures", pca_d.consecutive_failures);
+        cJSON_AddNumberToObject(pwm, "lastError", pca_d.last_error);
+        cJSON_AddNumberToObject(pwm, "initCore", pca_d.init_core);
+    }
     cJSON_AddItemToObject(root, "pwm", pwm);
+
+    cJSON* rmt_obj = cJSON_CreateObject();
+    if (api_ptr && api_ptr->signage()) {
+        const auto rmt_diag = api_ptr->signage()->controller().rmt_diagnostics();
+        cJSON_AddNumberToObject(rmt_obj, "core", rmt_diag.allocation_core);
+        cJSON_AddNumberToObject(rmt_obj, "priority", rmt_diag.interrupt_priority);
+        cJSON_AddBoolToObject(rmt_obj, "iramSafe", rmt_diag.iram_safe);
+        cJSON_AddNumberToObject(rmt_obj, "activeLanes", rmt_diag.active_lanes);
+        cJSON_AddNumberToObject(rmt_obj, "frames", rmt_diag.total_frames);
+        cJSON_AddNumberToObject(rmt_obj, "failedFrames", rmt_diag.failed_frames);
+
+        cJSON* lanes_arr = cJSON_CreateArray();
+        for (size_t l = 0; l < AddressableDriver::kLanes; ++l) {
+            const auto& ld = rmt_diag.lanes[l];
+            cJSON* lane_obj = cJSON_CreateObject();
+            cJSON_AddNumberToObject(lane_obj, "lane", l);
+            cJSON_AddNumberToObject(lane_obj, "submissions", ld.submissions);
+            cJSON_AddNumberToObject(lane_obj, "completed", ld.completed);
+            cJSON_AddNumberToObject(lane_obj, "submitFailures", ld.submit_failures);
+            cJSON_AddNumberToObject(lane_obj, "waitTimeouts", ld.wait_timeouts);
+            cJSON_AddNumberToObject(lane_obj, "otherFailures", ld.other_failures);
+            cJSON_AddNumberToObject(lane_obj, "maxSubmitUs", ld.max_submit_us);
+            cJSON_AddNumberToObject(lane_obj, "maxWaitUs", ld.max_wait_us);
+            cJSON_AddNumberToObject(lane_obj, "lastError", ld.last_error);
+            cJSON_AddItemToArray(lanes_arr, lane_obj);
+        }
+        cJSON_AddItemToObject(rmt_obj, "lanes", lanes_arr);
+    }
+    cJSON_AddItemToObject(root, "rmt", rmt_obj);
 
     cJSON* frame = cJSON_CreateObject();
     cJSON_AddNumberToObject(frame, "targetPeriodUs", target_period_us);

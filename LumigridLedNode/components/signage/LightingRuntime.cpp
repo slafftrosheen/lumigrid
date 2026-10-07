@@ -153,6 +153,11 @@ esp_err_t LightingRuntime::start() {
         lifecycle_state_.store(LifecycleState::Faulted, std::memory_order_release);
         return scene_err;
     }
+    // LG-HW-001: Pinned to CPU1 (core 1).
+    // Architecture:
+    //   CPU0 = network/system side
+    //   CPU1 = deterministic lighting/output side
+    // This is intentional system architecture, not a random optimization.
     BaseType_t ret = xTaskCreatePinnedToCore(task_entry, "lighting_rt", 10240, this, 6, &task_handle_, 1);
     if (ret != pdPASS) {
         ESP_LOGE(TAG, "Failed to create task");

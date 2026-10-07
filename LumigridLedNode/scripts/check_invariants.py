@@ -419,6 +419,47 @@ if services_block and ("set_network_plan_state(wifi_.state()" not in services_bl
                        not reconcile or "if (desired.fleet_discovery)" not in reconcile.group(0)):
     errors.append("Runtime network reconciliation must use the STA-gated FleetDiscovery plan (LG-038.3 §21/§22)")
 
+# LG-HW-001: Hardware coexistence architectural invariants
+for cfg_name in ("sdkconfig.defaults", "sdkconfig.factory.defaults", "sdkconfig.factory"):
+    cfg_text = (NODE_DIR / cfg_name).read_text(encoding="utf-8")
+    if "CONFIG_ESP_WIFI_TASK_PINNED_TO_CORE_0=y" not in cfg_text:
+        errors.append(f"{cfg_name}: Wi-Fi task must be pinned to CPU0 (CONFIG_ESP_WIFI_TASK_PINNED_TO_CORE_0=y)")
+    if "CONFIG_ESP_MAIN_TASK_AFFINITY_CPU0=y" not in cfg_text:
+        errors.append(f"{cfg_name}: Main task must have affinity CPU0 (CONFIG_ESP_MAIN_TASK_AFFINITY_CPU0=y)")
+    if "CONFIG_RMT_ISR_IRAM_SAFE=y" not in cfg_text:
+        errors.append(f"{cfg_name}: RMT ISR must be IRAM safe (CONFIG_RMT_ISR_IRAM_SAFE=y)")
+
+par_rmt_hpp = (NODE_DIR / "components" / "output" / "include" / "ParallelRmtDriver.hpp").read_text(encoding="utf-8")
+if "static_assert(MAX_RMT_LANES == 8" not in par_rmt_hpp:
+    errors.append("ParallelRmtDriver.hpp: RMT lane count must remain 8")
+if "kRmtSymbolsPerLane = 64" not in par_rmt_hpp:
+    errors.append("ParallelRmtDriver.hpp: RMT symbols/lane must remain 64")
+if "kRmtInterruptPriority = 3" not in par_rmt_hpp:
+    errors.append("ParallelRmtDriver.hpp: RMT interrupt priority must remain 3")
+if "!CONFIG_RMT_ISR_IRAM_SAFE" not in par_rmt_hpp:
+    errors.append("ParallelRmtDriver.hpp: compile-time check for CONFIG_RMT_ISR_IRAM_SAFE required")
+
+par_rmt_cpp = (NODE_DIR / "components" / "output" / "ParallelRmtDriver.cpp").read_text(encoding="utf-8")
+if "MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT" not in par_rmt_cpp:
+    errors.append("ParallelRmtDriver.cpp: wire buffers and StripEncoder must use internal DRAM allocation path")
+if "cc.intr_priority = kRmtInterruptPriority" not in par_rmt_cpp:
+    errors.append("ParallelRmtDriver.cpp: RMT TX channel must explicitly configure interrupt priority 3")
+
+out_ctrl_hpp = (NODE_DIR / "components" / "output" / "include" / "OutputController.hpp").read_text(encoding="utf-8")
+if "init_on_output_core" not in out_ctrl_hpp or "reconfigure_on_output_core" not in out_ctrl_hpp:
+    errors.append("OutputController.hpp: must declare init_on_output_core and reconfigure_on_output_core")
+
+exec_hpp = (NODE_DIR / "components" / "output" / "include" / "OutputCoreExecutor.hpp")
+if not exec_hpp.exists():
+    errors.append("OutputCoreExecutor.hpp: hardware lifecycle executor header missing")
+exec_cpp = (NODE_DIR / "components" / "output" / "OutputCoreExecutor.cpp")
+if not exec_cpp.exists():
+    errors.append("OutputCoreExecutor.cpp: hardware lifecycle executor implementation missing")
+else:
+    exec_text = exec_cpp.read_text(encoding="utf-8")
+    if not re.search(r"xTaskCreatePinnedToCore\([^)]*,\s*1\s*(?://[^\n]*)?\)", exec_text, re.S):
+        errors.append("OutputCoreExecutor.cpp: executor worker must be pinned permanently to CPU1")
+
 if errors:
     print("\nFAILED: Discovered architectural invariant violations:")
     for err in errors:

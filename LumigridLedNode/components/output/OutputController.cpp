@@ -1,4 +1,5 @@
 #include "OutputController.hpp"
+#include "OutputCoreExecutor.hpp"
 #include "RuntimeMemory.hpp"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -29,16 +30,29 @@ TopologyAdmission check_topology_admission(const DeviceConfig& candidate) {
 }
 } // namespace
 
-// LG-038.1: Heap telemetry helper for OutputController bring-up
+// LG-038.1 / LG-HW-001: Heap telemetry helper with internal-memory reporting
 void log_output_heap_stage(const char *stage) {
   ESP_LOGI(
-      "lumigrid", "HEAP stage=%s free8=%lu largest8=%lu", stage,
+      "lumigrid", "HEAP stage=%s free8=%lu largest8=%lu internal8=%lu largestInternal8=%lu", stage,
       (unsigned long)heap_caps_get_free_size(MALLOC_CAP_8BIT),
-      (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+      (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+      (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+      (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
 }
 
 esp_err_t OutputController::init() {
-  ESP_LOGI("output", "Initializing OutputController...");
+  return OutputCoreExecutor::instance().execute_init(this);
+}
+
+esp_err_t OutputController::init_on_output_core() {
+  const int core = xPortGetCoreID();
+  ESP_LOGI("output", "Hardware lifecycle executing on core=%d", core);
+  if (core != 1) {
+    ESP_LOGE("output", "Hardware lifecycle called on invalid core=%d (CPU1 required)", core);
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  ESP_LOGI("output", "Initializing OutputController on CPU1...");
 
   if (mutex_ == nullptr) {
     mutex_ = xSemaphoreCreateRecursiveMutex();
@@ -78,9 +92,21 @@ esp_err_t OutputController::init() {
 
   return ESP_OK;
 }
+
 esp_err_t OutputController::reconfigure(const DeviceConfig& cfg) {
+  return OutputCoreExecutor::instance().execute_reconfigure(this, cfg);
+}
+
+esp_err_t OutputController::reconfigure_on_output_core(const DeviceConfig& cfg) {
+    const int core = xPortGetCoreID();
+    ESP_LOGI("output", "Hardware lifecycle executing on core=%d", core);
+    if (core != 1) {
+        ESP_LOGE("output", "Hardware lifecycle called on invalid core=%d (CPU1 required)", core);
+        return ESP_ERR_INVALID_STATE;
+    }
+
     lock();
-    ESP_LOGI("output", "Reconfiguring OutputController drivers based on DeviceConfig...");
+    ESP_LOGI("output", "Reconfiguring OutputController drivers based on DeviceConfig on CPU1...");
 
     // Phase 1: Validate admission, PWM availability, channel configs
     const TopologyAdmission admission = check_topology_admission(cfg);

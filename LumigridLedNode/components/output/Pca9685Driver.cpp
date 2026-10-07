@@ -71,15 +71,6 @@ esp_err_t init_i2c_once() {
     return ESP_OK;
 }
 
-esp_err_t read_register(uint8_t reg, uint8_t& value) {
-    if (!s_i2c_initialized || s_i2c_mutex == nullptr) return ESP_ERR_INVALID_STATE;
-    xSemaphoreTake(s_i2c_mutex, portMAX_DELAY);
-    const esp_err_t err = i2c_master_write_read_device(
-        kI2cPort, lg::board::kPcaAddress, &reg, 1, &value, 1, pdMS_TO_TICKS(100));
-    xSemaphoreGive(s_i2c_mutex);
-    return err;
-}
-
 } // namespace
 
 void Pca9685Driver::force_disable_outputs() {
@@ -103,17 +94,42 @@ bool Pca9685Driver::is_outputs_enabled() {
     return s_outputs_enabled.load(std::memory_order_acquire);
 }
 
+esp_err_t Pca9685Driver::read_register(uint8_t reg, uint8_t& value) {
+    if (!s_i2c_initialized || s_i2c_mutex == nullptr) return ESP_ERR_INVALID_STATE;
+    transactions_++;
+    xSemaphoreTake(s_i2c_mutex, portMAX_DELAY);
+    const esp_err_t err = i2c_master_write_read_device(
+        kI2cPort, lg::board::kPcaAddress, &reg, 1, &value, 1, pdMS_TO_TICKS(100));
+    xSemaphoreGive(s_i2c_mutex);
+    if (err != ESP_OK) {
+        transaction_failures_++;
+        consecutive_failures_++;
+        last_error_ = err;
+    } else {
+        consecutive_failures_ = 0;
+        last_error_ = ESP_OK;
+    }
+    return err;
+}
+
 esp_err_t Pca9685Driver::write_register(uint8_t reg, uint8_t value) {
     if (!s_i2c_initialized || s_i2c_mutex == nullptr) return ESP_ERR_INVALID_STATE;
+    transactions_++;
     xSemaphoreTake(s_i2c_mutex, portMAX_DELAY);
     const uint8_t packet[] = {reg, value};
     const esp_err_t ret = i2c_master_write_to_device(
         kI2cPort, lg::board::kPcaAddress, packet, sizeof(packet), pdMS_TO_TICKS(100));
     xSemaphoreGive(s_i2c_mutex);
     if (ret != ESP_OK) {
+        transaction_failures_++;
+        consecutive_failures_++;
+        last_error_ = ret;
         disable_pwm_outputs();
         zero_confirmed_ = false;
         valid_frame_confirmed_ = false;
+    } else {
+        consecutive_failures_ = 0;
+        last_error_ = ESP_OK;
     }
     return ret;
 }
@@ -123,6 +139,7 @@ esp_err_t Pca9685Driver::write_bytes(uint8_t start_reg, const uint8_t* data, siz
     constexpr size_t kMaxPayload = kChannels * 4;
     if (data == nullptr || len == 0 || len > kMaxPayload) return ESP_ERR_INVALID_ARG;
 
+    transactions_++;
     uint8_t packet[1 + kMaxPayload];
     packet[0] = start_reg;
     memcpy(packet + 1, data, len);
@@ -132,9 +149,15 @@ esp_err_t Pca9685Driver::write_bytes(uint8_t start_reg, const uint8_t* data, siz
         kI2cPort, lg::board::kPcaAddress, packet, len + 1, pdMS_TO_TICKS(100));
     xSemaphoreGive(s_i2c_mutex);
     if (ret != ESP_OK) {
+        transaction_failures_++;
+        consecutive_failures_++;
+        last_error_ = ret;
         disable_pwm_outputs();
         zero_confirmed_ = false;
         valid_frame_confirmed_ = false;
+    } else {
+        consecutive_failures_ = 0;
+        last_error_ = ESP_OK;
     }
     return ret;
 }
@@ -143,6 +166,15 @@ esp_err_t Pca9685Driver::init() {
     initialized_ = false;
     zero_confirmed_ = false;
     valid_frame_confirmed_ = false;
+    init_core_ = xPortGetCoreID();
+
+    ESP_LOGI(TAG, "PCA_INIT core=%d port=%d sda=%d scl=%d addr=0x%02X hz=%lu",
+             init_core_, kI2cPort,
+             static_cast<int>(lg::board::kI2cSda),
+             static_cast<int>(lg::board::kI2cScl),
+             lg::board::kPcaAddress,
+             (unsigned long)kI2cHz);
+
     // Keep hardware disabled until the controller is configured, verified and a
     // known-safe frame has been written. This prevents boot-time PWM flashes.
     const gpio_config_t oe_conf = {
@@ -160,11 +192,12 @@ esp_err_t Pca9685Driver::init() {
     uint8_t initial_mode1 = 0;
     const esp_err_t err = read_register(kRegMode1, initial_mode1);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "PCA9685 MODE1 read at 0x55 failed: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "PCA9685 MODE1 read at 0x%02X failed: %s",
+                 lg::board::kPcaAddress, esp_err_to_name(err));
         disable_pwm_outputs();
         return err;
     }
-    ESP_LOGI(TAG, "PCA9685 detected at 0x55, MODE1=0x%02X", initial_mode1);
+    ESP_LOGI(TAG, "PCA9685 detected at 0x%02X, MODE1=0x%02X", lg::board::kPcaAddress, initial_mode1);
 
     ESP_LOGI(TAG, "configuring PCA9685 at 0x%02X, target PWM ~1017 Hz", lg::board::kPcaAddress);
 
@@ -290,12 +323,17 @@ PcaDiagnostics Pca9685Driver::diagnostics() const {
     diag.initialized = initialized_;
     diag.outputs_enabled = is_outputs_enabled();
     diag.address = lg::board::kPcaAddress;
-    diag.i2c_hz = 100000;
+    diag.i2c_hz = kI2cHz;
     diag.pwm_hz = 1017;
     diag.mode1 = mode1_;
     diag.mode2 = mode2_;
     diag.prescale = prescale_;
     diag.commit_failures = commit_failures_;
+    diag.transactions = transactions_;
+    diag.transaction_failures = transaction_failures_;
+    diag.consecutive_failures = consecutive_failures_;
+    diag.last_error = last_error_;
+    diag.init_core = init_core_;
     return diag;
 }
 

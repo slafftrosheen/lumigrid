@@ -61,6 +61,7 @@ public:
     /// Test seam: install a fake RMT transport. Only valid while no lane is configured.
     esp_err_t use_transport(IRmtTransport* transport) { return rmt_.set_transport(transport); }
     const ParallelRmtDriver& rmt() const { return rmt_; }
+    RmtDiagnostics diagnostics() const { return rmt_.diagnostics(); }
 
 private:
     void free_shadow(uint8_t lane);

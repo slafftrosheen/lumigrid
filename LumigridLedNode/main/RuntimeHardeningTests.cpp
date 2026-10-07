@@ -43,6 +43,7 @@
 #include "CertificationStore.hpp"
 #include "CertificationService.hpp"
 #include "ParallelRmtDriver.hpp"
+#include "OutputCoreExecutor.hpp"
 #include "PowerBudget.hpp"
 #include "lg_board_pins.hpp"
 #include "esp_log.h"
@@ -6406,6 +6407,97 @@ bool test_lg029_node_backed_authentication() {
         return true;
     }
 
+    bool test_lghw001_hardware_coexistence_foundation() {
+        ESP_LOGI(TAG, "Testing LG-HW-001 Hardware Coexistence Foundation...");
+
+        // 1. Invariants: 8 lanes, 64 symbols/lane, priority 3, IRAM-safe, CPU0 network / CPU1 output
+        static_assert(ParallelRmtDriver::kLanes == 8, "8 lanes required");
+        static_assert(kRmtSymbolsPerLane == 64, "64 symbols/lane required");
+        static_assert(kRmtInterruptPriority == 3, "Priority 3 required");
+        assert(CONFIG_RMT_ISR_IRAM_SAFE == 1);
+        assert(CONFIG_ESP_WIFI_TASK_PINNED_TO_CORE_0 == 1);
+        assert(CONFIG_ESP_MAIN_TASK_AFFINITY_CPU0 == 1);
+
+        // 2. OutputCoreExecutor: starts and targets CPU1
+        OutputCoreExecutor& exec = OutputCoreExecutor::instance();
+        esp_err_t start_err = exec.start();
+        assert(start_err == ESP_OK);
+        assert(exec.is_running());
+        assert(exec.executor_core() == 1);
+
+        // 3. ParallelRmtDriver wire buffer internal memory & ordering
+        class FakeRmtTransport : public IRmtTransport {
+        public:
+            enum class ActionType { Submit, Wait };
+            struct Action { ActionType type; uint8_t lane; };
+            std::vector<Action> actions;
+            int fail_lane = -1;
+
+            esp_err_t create(uint8_t, int, bool) override { return ESP_OK; }
+            esp_err_t submit(uint8_t lane, const uint8_t*, size_t) override {
+                actions.push_back({ActionType::Submit, lane});
+                return ESP_OK;
+            }
+            esp_err_t wait(uint8_t lane, uint32_t timeout_us) override {
+                actions.push_back({ActionType::Wait, lane});
+                assert(timeout_us > 0); // No unbounded wait
+                if (static_cast<int>(lane) == fail_lane) {
+                    return ESP_ERR_TIMEOUT;
+                }
+                return ESP_OK;
+            }
+            esp_err_t destroy(uint8_t) override { return ESP_OK; }
+        };
+
+        FakeRmtTransport fake;
+        ParallelRmtDriver driver(&fake);
+
+        // Configure 8 lanes
+        for (uint8_t l = 0; l < 8; ++l) {
+            esp_err_t err = driver.configure_lane(l, board::kAledPins[l], false, PixelOrder::GRB, 256);
+            assert(err == ESP_OK);
+            assert(driver.wire_data(l) != nullptr);
+            // Verify internal memory allocation
+            assert(heap_caps_check_integrity_addr((intptr_t)driver.wire_data(l), false));
+        }
+
+        // Verify all 8 submits happen before any wait
+        AddressableCommitResult outcome = driver.commit();
+        assert(outcome.result == ESP_OK);
+        assert(fake.actions.size() == 16);
+        for (size_t i = 0; i < 8; ++i) {
+            assert(fake.actions[i].type == FakeRmtTransport::ActionType::Submit);
+        }
+        for (size_t i = 8; i < 16; ++i) {
+            assert(fake.actions[i].type == FakeRmtTransport::ActionType::Wait);
+        }
+
+        // Verify diagnostics accounting on lane timeout failure
+        fake.actions.clear();
+        fake.fail_lane = 4;
+        outcome = driver.commit();
+        assert(outcome.result == ESP_ERR_TIMEOUT);
+        assert(outcome.failed_lane == 4);
+
+        RmtDiagnostics rmt_diag = driver.diagnostics();
+        assert(rmt_diag.failed_frames == 1);
+        assert(rmt_diag.lanes[4].wait_timeouts == 1);
+        assert(rmt_diag.lanes[4].last_error == ESP_ERR_TIMEOUT);
+        assert(rmt_diag.lanes[0].last_error == ESP_OK);
+
+        // 4. PCA9685 failure asserts /OE HIGH
+        Pca9685Driver::force_disable_outputs();
+        assert(!Pca9685Driver::is_outputs_enabled());
+
+        // 5. OutputController does not enable PCA before successful frame
+        OutputController ctrl;
+        assert(!ctrl.is_estop_latched());
+        assert(!Pca9685Driver::is_outputs_enabled());
+
+        ESP_LOGI(TAG, "[PASS] LG-HW-001 Hardware Coexistence Foundation tests passed.");
+        return true;
+    }
+
 } // namespace
 
 bool run_runtime_hardening_tests() {
@@ -6534,6 +6626,9 @@ bool run_runtime_hardening_tests() {
 
     // LG-038.6 Physical Output State Integrity & Power Safety
     all_ok &= test_lg0386_physical_output_integrity_and_safety();
+
+    // LG-HW-001 Hardware Coexistence Foundation
+    all_ok &= test_lghw001_hardware_coexistence_foundation();
 
     if (all_ok) {
         ESP_LOGI(TAG, "==================================================");

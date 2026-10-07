@@ -16,6 +16,7 @@ enum class FactoryEffect : uint8_t {
     CombinedPulse,
     StressCycle, // Formerly BurnIn: a 60-second diagnostic stress pattern
     BurnIn = StressCycle, // Retained for wire/enum compatibility
+    HardwareCoexistence, // LG-HW-001: 8-lane RMT + 8-channel PCA continuous coexistence stress
     Manual
 };
 

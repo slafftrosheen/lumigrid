@@ -18,9 +18,23 @@
 #include <cstdint>
 
 #include "esp_err.h"
+#include "sdkconfig.h"
 #include "SignageTypes.hpp"
 
+#if defined(ESP_PLATFORM)
+#if !CONFIG_RMT_ISR_IRAM_SAFE
+#error "LumiGrid 8-lane RMT requires CONFIG_RMT_ISR_IRAM_SAFE"
+#endif
+#endif
+
 namespace lg {
+
+// LG-HW-001 Invariant: 8 lanes x 64 symbols = all 8 classic ESP32 RMT blocks (512 symbols total).
+// Sacrificing symbols or increasing one lane to 128/192 reduces the number of available
+// independent outputs, violating the LumiGrid hardware contract.
+static_assert(MAX_RMT_LANES == 8, "LumiGrid hardware contract requires exactly 8 RMT lanes");
+constexpr size_t kRmtSymbolsPerLane = 64;
+constexpr int kRmtInterruptPriority = 3;
 
 // ── Deterministic error codes ─────────────────────────────────────────────────
 // Not an ESP-IDF error range; chosen to be unambiguous in logs and telemetry.
@@ -81,6 +95,31 @@ struct AddressableCommitResult {
     uint32_t  wait_us      = 0;
     uint32_t  total_us     = 0;
     uint8_t   failed_lane  = kNoFailedLane; // 0xFF when none
+};
+
+struct RmtLaneDiagnostics {
+    uint32_t submissions = 0;
+    uint32_t completed = 0;
+    uint32_t submit_failures = 0;
+    uint32_t wait_timeouts = 0;
+    uint32_t other_failures = 0;
+
+    uint32_t max_submit_us = 0;
+    uint32_t max_wait_us = 0;
+
+    esp_err_t last_error = ESP_OK;
+};
+
+struct RmtDiagnostics {
+    int allocation_core = -1;
+    int interrupt_priority = 0;
+    bool iram_safe = false;
+
+    uint32_t active_lanes = 0;
+    uint32_t total_frames = 0;
+    uint32_t failed_frames = 0;
+
+    RmtLaneDiagnostics lanes[MAX_RMT_LANES];
 };
 
 /// Thin seam over the ESP-IDF RMT TX API. Production implementation lives in
@@ -158,6 +197,8 @@ public:
     /// Clear a Faulted lane back to Ready (after a confirmed good transmit or reconfigure).
     void      clear_faults();
 
+    RmtDiagnostics diagnostics() const;
+
 private:
     struct Lane {
         LaneState state  = LaneState::Unconfigured;
@@ -174,6 +215,7 @@ private:
 
     IRmtTransport* transport_ = nullptr;
     Lane lanes_[kLanes];
+    mutable RmtDiagnostics diagnostics_{};
 };
 
 } // namespace lg

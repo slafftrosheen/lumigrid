@@ -93,10 +93,14 @@ public:
     }
 
     esp_err_t init();
+    esp_err_t init_on_output_core();
     
     // Reconfigures hardware driver layers based on logical configuration
     esp_err_t reconfigure(const DeviceConfig& cfg);
+    esp_err_t reconfigure_on_output_core(const DeviceConfig& cfg);
     
+    RmtDiagnostics rmt_diagnostics() const { return pixels_.diagnostics(); }
+
     BlackoutResult blackout();
 
     /// Unified physical output safety gate
