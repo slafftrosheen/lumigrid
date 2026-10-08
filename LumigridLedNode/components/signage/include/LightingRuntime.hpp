@@ -21,6 +21,17 @@
 
 namespace lg {
 
+struct OutputActivationTiming {
+    uint32_t arm_ms = 0;
+    uint32_t first_zero_black_ms = 0;
+    uint32_t first_nonzero_ms = 0;
+    uint32_t ramp_complete_ms = 0;
+
+    uint32_t last_arm_to_zero_ms = 0;
+    uint32_t last_zero_to_nonzero_ms = 0;
+    uint32_t last_ramp_duration_ms = 0;
+};
+
 class LightingRuntime {
 public:
     enum class LifecycleState : uint8_t {
@@ -211,6 +222,7 @@ public:
         return controller_.is_estop_latched();
     }
     const OutputController& controller() const { return controller_; }
+    OutputActivationTiming activation_timing() const { return activation_timing_; }
 
     enum class OutputState : uint8_t {
         Healthy = 0,
@@ -335,6 +347,10 @@ private:
     uint16_t beat_period_ms_ = 500;
     uint32_t enable_ms_ = 0;
     bool first_frame_ = true;
+
+    OutputActivationTiming activation_timing_{};
+    uint32_t last_observed_topology_generation_ = 0;
+    bool in_abnormal_reset_quarantine_ = false;
 
     SemaphoreHandle_t mutex_ = nullptr;
     TaskHandle_t task_handle_ = nullptr;

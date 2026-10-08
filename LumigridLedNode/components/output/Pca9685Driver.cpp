@@ -3,6 +3,7 @@
 // Reference: NXP PCA9685 datasheet Rev.4; ESP-IDF legacy synchronous I2C driver.
 #include "Pca9685Driver.hpp"
 #include "lg_board_pins.hpp"
+#include "BoardOutputSafety.hpp"
 
 #include "driver/i2c.h"
 #include "driver/gpio.h"
@@ -206,7 +207,7 @@ void Pca9685Driver::force_disable_outputs() {
 }
 
 esp_err_t Pca9685Driver::enable_outputs() {
-    if (!initialized_ || !valid_frame_confirmed_) {
+    if (!initialized_ || !valid_frame_confirmed_ || !zero_confirmed_) {
         disable_pwm_outputs();
         return ESP_ERR_INVALID_STATE;
     }
@@ -401,6 +402,7 @@ esp_err_t Pca9685Driver::init() {
     initialized_ = true;
     zero_confirmed_ = true;
     valid_frame_confirmed_ = true;
+    board::record_first_pwm_zero();
     recovery_required_ = false;
     last_fault_kind_ = PcaFaultKind::None;
     ESP_LOGI(TAG, "verified MODE1=0x%02X MODE2=0x%02X PRE_SCALE=%u; initialized to zero",
@@ -454,6 +456,7 @@ esp_err_t Pca9685Driver::recover() {
     initialized_ = true;
     zero_confirmed_ = true;
     valid_frame_confirmed_ = true;
+    board::record_first_pwm_zero();
     last_fault_kind_ = PcaFaultKind::None;
     consecutive_failures_ = 0;
     ESP_LOGI(TAG, "PCA recovery succeeded (pulses=%lu, zero_frame=ok, /OE latched HIGH)", (unsigned long)pulses);

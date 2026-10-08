@@ -23,6 +23,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "lg_board_pins.hpp"
+#include "BoardOutputSafety.hpp"
 
 namespace lg {
 
@@ -370,6 +371,7 @@ esp_err_t ParallelRmtDriver::configure_lane(uint8_t lane, int gpio, bool rgbw,
         return mapped;
     }
     L.state = LaneState::Ready;
+    first_black_frame_confirmed_ = false;
     return ESP_OK;
 }
 
@@ -381,10 +383,12 @@ void ParallelRmtDriver::release_lane(uint8_t lane) {
     }
     heap_caps_free(L.wire);
     L = Lane{};
+    first_black_frame_confirmed_ = false;
 }
 
 void ParallelRmtDriver::release_all() {
     for (uint8_t i = 0; i < kLanes; ++i) release_lane(i);
+    first_black_frame_confirmed_ = false;
 }
 
 esp_err_t ParallelRmtDriver::prepare_candidate(const DeviceConfig& cfg, uint32_t generic_reserve, uint32_t internal_reserve) {
@@ -452,6 +456,7 @@ esp_err_t ParallelRmtDriver::commit_candidate() {
         candidate_prepared_[lane] = false;
     }
     has_candidate_ = false;
+    first_black_frame_confirmed_ = false;
     return ESP_OK;
 }
 
@@ -516,6 +521,7 @@ void ParallelRmtDriver::clear_faults() {
     for (uint8_t i = 0; i < kLanes; ++i) {
         if (lanes_[i].state == LaneState::Faulted) lanes_[i].state = LaneState::Ready;
     }
+    first_black_frame_confirmed_ = false;
 }
 
 AddressableCommitResult ParallelRmtDriver::commit(bool allow_faulted) {
@@ -530,6 +536,28 @@ AddressableCommitResult ParallelRmtDriver::commit(bool allow_faulted) {
 
     static esp_err_t s_last_sub_err[kLanes] = {};
     static esp_err_t s_last_wait_err[kLanes] = {};
+
+    // HW-004 §8/§25: Gate normal content until the first black frame has been confirmed
+    bool is_black_frame = true;
+    for (uint8_t lane = 0; lane < kLanes; ++lane) {
+        Lane& L = lanes_[lane];
+        if (L.state == LaneState::Unconfigured) continue;
+        for (size_t b = 0; b < L.wire_len; ++b) {
+            if (L.wire[b] != 0) {
+                is_black_frame = false;
+                break;
+            }
+        }
+        if (!is_black_frame) break;
+    }
+
+    if (!first_black_frame_confirmed_) {
+        if (!is_black_frame) {
+            ESP_LOGE(TAG, "Illegal early output commit: normal content rejected before first black frame confirmed");
+            res.result = ESP_ERR_INVALID_STATE;
+            return res;
+        }
+    }
 
     // Phase 1: submit EVERY active lane before waiting on ANY lane.
     for (uint8_t lane = 0; lane < kLanes; ++lane) {
@@ -659,7 +687,12 @@ AddressableCommitResult ParallelRmtDriver::commit(bool allow_faulted) {
     res.wait_us   = static_cast<uint32_t>(t2 - t1);
     res.total_us  = static_cast<uint32_t>(t2 - t0);
 
-    if (res.result != ESP_OK) {
+    if (res.result == ESP_OK) {
+        if (is_black_frame || res.active_lanes == 0) {
+            first_black_frame_confirmed_ = true;
+            board::record_first_addressable_black();
+        }
+    } else {
         diagnostics_.failed_frames++;
     }
 
@@ -670,6 +703,7 @@ RmtDiagnostics ParallelRmtDriver::diagnostics() const {
     diagnostics_.active_lanes = active_lanes();
     diagnostics_.interrupt_priority = kRmtInterruptPriority;
     diagnostics_.iram_safe = (CONFIG_RMT_ISR_IRAM_SAFE != 0);
+    diagnostics_.first_black_frame_confirmed = first_black_frame_confirmed_;
 
     bool has_fault = (diagnostics_.failed_frames > 0);
     for (uint8_t i = 0; i < kLanes; ++i) {

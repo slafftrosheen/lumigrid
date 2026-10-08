@@ -23,6 +23,8 @@
 #include "LightingRuntime.hpp"
 #include "SignageTypes.hpp"
 #include "ChannelHardware.hpp"
+#include "BoardOutputSafety.hpp"
+#include "ResetForensics.hpp"
 #include "Scheduler.hpp"
 #include "NodeSync.hpp"
 #include "DmxRouter.hpp"
@@ -918,6 +920,12 @@ esp_err_t get_info(httpd_req_t* request) {
     cJSON_AddStringToObject(root, "model", id.model);
     cJSON_AddStringToObject(root, "hardwareRevision", id.hw_revision);
     cJSON_AddStringToObject(root, "firmwareVersion", id.fw_version);
+
+    const auto reset_d = lg::board::get_reset_diagnostics();
+    cJSON_AddNumberToObject(root, "bootSessionId", reset_d.boot_session_id);
+    cJSON_AddStringToObject(root, "resetReason", reset_d.reason_str);
+    cJSON_AddNumberToObject(root, "consecutiveAbnormalBoots", reset_d.consecutive_abnormal_boots);
+
     cJSON_AddItemToObject(root, "storage", storage_json());
     char* body = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
@@ -1314,6 +1322,116 @@ esp_err_t get_diagnostics_output(httpd_req_t* request) {
         cJSON_AddNumberToObject(wifi_obj, "lastError", wdiag.last_error);
         cJSON_AddItemToObject(root, "wifi", wifi_obj);
     }
+
+    // Reset Diagnostics (LG-HW-004)
+    const auto reset_d = lg::board::get_reset_diagnostics();
+    cJSON* rst_obj = cJSON_CreateObject();
+    cJSON_AddNumberToObject(rst_obj, "reason", static_cast<int>(reset_d.current_reason));
+    cJSON_AddStringToObject(rst_obj, "reasonStr", reset_d.reason_str);
+    cJSON_AddBoolToObject(rst_obj, "abnormal", reset_d.last_reset_abnormal);
+    cJSON_AddNumberToObject(rst_obj, "consecutiveAbnormalBoots", reset_d.consecutive_abnormal_boots);
+    cJSON_AddNumberToObject(rst_obj, "totalBoots", reset_d.total_boots);
+    cJSON_AddBoolToObject(rst_obj, "previousBootReady", reset_d.previous_boot_reached_ready);
+    cJSON_AddBoolToObject(rst_obj, "currentBootConfirmed", reset_d.current_boot_confirmed);
+    cJSON_AddBoolToObject(rst_obj, "safeModeMandated", lg::board::is_safe_mode_mandated());
+    cJSON_AddBoolToObject(rst_obj, "quarantineActive", lg::board::is_abnormal_reset_quarantine_active(static_cast<uint32_t>(esp_timer_get_time() / 1000ULL)));
+    cJSON_AddNumberToObject(rst_obj, "bootSessionId", reset_d.boot_session_id);
+    cJSON_AddBoolToObject(rst_obj, "brownoutDetectorEnabled",
+#if CONFIG_ESP_BROWNOUT_DET
+        true
+#else
+        false
+#endif
+    );
+    cJSON_AddItemToObject(root, "reset", rst_obj);
+
+    // Boot Output Diagnostics (LG-HW-004)
+    const auto boot_out = lg::board::get_boot_output_diagnostics();
+    cJSON* boot_obj = cJSON_CreateObject();
+    cJSON_AddBoolToObject(boot_obj, "earlySafetyApplied", boot_out.early_safety_applied);
+    cJSON_AddBoolToObject(boot_obj, "pcaOeHighAtBootstrap", boot_out.pca_oe_high_at_bootstrap);
+    cJSON_AddNumberToObject(boot_obj, "aledLowMask", boot_out.aled_low_mask);
+    cJSON_AddBoolToObject(boot_obj, "firstAddressableBlackConfirmed", boot_out.first_addressable_black_confirmed);
+    cJSON_AddBoolToObject(boot_obj, "firstPwmZeroConfirmed", boot_out.first_pwm_zero_confirmed);
+    cJSON_AddNumberToObject(boot_obj, "firstOutputCommitMs", boot_out.first_output_commit_ms);
+    cJSON_AddItemToObject(root, "bootOutput", boot_obj);
+
+    // Power Transient Diagnostics & Activation Timing (LG-HW-004)
+    if (api_ptr && api_ptr->signage()) {
+        const auto pwr_trans = api_ptr->signage()->power_budget().diagnostics();
+        cJSON* pwr_obj = cJSON_CreateObject();
+        cJSON_AddNumberToObject(pwr_obj, "requestedPowerMw", pwr_trans.requested_power_mw);
+        cJSON_AddNumberToObject(pwr_obj, "limitedPowerMw", pwr_trans.limited_power_mw);
+        cJSON_AddNumberToObject(pwr_obj, "previousLimitedPowerMw", pwr_trans.previous_limited_power_mw);
+        cJSON_AddNumberToObject(pwr_obj, "maxObservedStepMw", pwr_trans.max_observed_step_mw);
+        cJSON_AddNumberToObject(pwr_obj, "powerStepClamps", pwr_trans.power_step_clamps);
+        cJSON_AddNumberToObject(pwr_obj, "enableEvents", pwr_trans.enable_events);
+        cJSON_AddNumberToObject(pwr_obj, "rampEvents", pwr_trans.ramp_events);
+        cJSON_AddNumberToObject(pwr_obj, "rampMs", pwr_trans.ramp_ms);
+        cJSON_AddItemToObject(root, "powerTransient", pwr_obj);
+
+        const auto act_timing = api_ptr->signage()->activation_timing();
+        cJSON* act_obj = cJSON_CreateObject();
+        cJSON_AddNumberToObject(act_obj, "armMs", act_timing.arm_ms);
+        cJSON_AddNumberToObject(act_obj, "firstZeroBlackMs", act_timing.first_zero_black_ms);
+        cJSON_AddNumberToObject(act_obj, "firstNonzeroMs", act_timing.first_nonzero_ms);
+        cJSON_AddNumberToObject(act_obj, "rampCompleteMs", act_timing.ramp_complete_ms);
+        cJSON_AddNumberToObject(act_obj, "lastArmToZeroMs", act_timing.last_arm_to_zero_ms);
+        cJSON_AddNumberToObject(act_obj, "lastZeroToNonzeroMs", act_timing.last_zero_to_nonzero_ms);
+        cJSON_AddNumberToObject(act_obj, "lastRampDurationMs", act_timing.last_ramp_duration_ms);
+        cJSON_AddItemToObject(root, "activationTiming", act_obj);
+    }
+
+    char* json = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (!json) {
+        return send_error(request, "500 Internal Server Error", "json_encode_failed");
+    }
+    esp_err_t ret = send_json(request, json);
+    cJSON_free(json);
+    return ret;
+}
+
+// ── LG-HW-004: Boot-safe bench verification endpoint ─────────────────────
+esp_err_t get_boot_safe_verify(httpd_req_t* request) {
+    if (!api::authorize(request, api::ApiRole::Installer)) return ESP_OK;
+
+    auto* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+    cJSON* root = cJSON_CreateObject();
+    if (!root) {
+        return send_error(request, "500 Internal Server Error", "json_encode_failed");
+    }
+
+    const auto reset_d = lg::board::get_reset_diagnostics();
+    const auto boot_out = lg::board::get_boot_output_diagnostics();
+    const int oe_level = lg::board::sample_pca_oe_level();
+    const uint8_t aled_mask = lg::board::sample_addressable_pin_mask();
+    const uint32_t now_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
+
+    bool outputs_armed = false;
+    bool quarantine_active = lg::board::is_abnormal_reset_quarantine_active(now_ms);
+    if (api_ptr && api_ptr->signage()) {
+        outputs_armed = (api_ptr->signage()->output_state() == LightingRuntime::OutputState::Armed ||
+                         api_ptr->signage()->output_state() == LightingRuntime::OutputState::Healthy);
+    }
+
+    cJSON_AddNumberToObject(root, "oeLevel", oe_level);
+    cJSON_AddBoolToObject(root, "oeHigh", oe_level == 1);
+    cJSON_AddNumberToObject(root, "addressableMask", aled_mask);
+    cJSON_AddBoolToObject(root, "addressableAllLow", aled_mask == 0);
+    cJSON_AddStringToObject(root, "resetReason", reset_d.reason_str);
+    cJSON_AddBoolToObject(root, "abnormalReset", reset_d.last_reset_abnormal);
+    cJSON_AddBoolToObject(root, "brownoutDetectorEnabled",
+#if CONFIG_ESP_BROWNOUT_DET
+        true
+#else
+        false
+#endif
+    );
+    cJSON_AddBoolToObject(root, "outputsArmed", outputs_armed);
+    cJSON_AddBoolToObject(root, "quarantineActive", quarantine_active);
+    cJSON_AddBoolToObject(root, "firstBlackConfirmed", boot_out.first_addressable_black_confirmed);
+    cJSON_AddBoolToObject(root, "firstZeroConfirmed", boot_out.first_pwm_zero_confirmed);
 
     char* json = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
@@ -7730,6 +7848,7 @@ esp_err_t FactoryApi::start(
         { .uri = "/api/v1/factory/test/report",    .method = HTTP_GET,  .handler = get_factory_test_report,    .user_ctx = nullptr },
         { .uri = "/api/v1/factory/burn-in/start",  .method = HTTP_POST, .handler = post_factory_burn_in_start,  .user_ctx = nullptr },
         { .uri = "/api/v1/factory/burn-in/stop",   .method = HTTP_POST, .handler = post_factory_burn_in_stop,   .user_ctx = nullptr },
+        { .uri = "/api/v1/factory/boot-safe",      .method = HTTP_GET,  .handler = get_boot_safe_verify,        .user_ctx = nullptr },
     };
 
     static const httpd_uri_t signage_routes[] = {

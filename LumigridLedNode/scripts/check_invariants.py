@@ -530,6 +530,53 @@ if "completion_mismatches" not in par_rmt_cpp or "completion parity mismatch" no
 if "execute_pca_recovery" not in exec_cpp.read_text(encoding="utf-8"):
     errors.append("OutputCoreExecutor.cpp: missing execute_pca_recovery implementation (LG-HW-003 §5)")
 
+# LG-HW-004: Electrical Boot Safety, Power-Step Control, and Reset Forensics
+sdkconfig_defaults = (NODE_DIR / "sdkconfig.defaults").read_text(encoding="utf-8")
+if "CONFIG_ESP_BROWNOUT_DET=y" not in sdkconfig_defaults:
+    errors.append("sdkconfig.defaults: CONFIG_ESP_BROWNOUT_DET=y must be explicitly enabled (LG-HW-004)")
+
+main_cpp = (NODE_DIR / "main" / "main.cpp").read_text(encoding="utf-8")
+if "lg::board::force_outputs_safe_early()" not in main_cpp:
+    errors.append("main.cpp: early output safety force_outputs_safe_early() must be called at app_main entry (LG-HW-004)")
+if "lg::board::init_reset_forensics()" not in main_cpp:
+    errors.append("main.cpp: init_reset_forensics() must be called at app_main entry (LG-HW-004)")
+
+early_call_pos = main_cpp.find("lg::board::force_outputs_safe_early()")
+runtime_init_pos = main_cpp.find("runtime.init()")
+if early_call_pos < 0 or runtime_init_pos < 0 or early_call_pos >= runtime_init_pos:
+    errors.append("main.cpp: force_outputs_safe_early() must execute before runtime.init() (LG-HW-004)")
+
+board_safety_cpp = NODE_DIR / "components" / "board" / "BoardOutputSafety.cpp"
+if not board_safety_cpp.exists():
+    errors.append("BoardOutputSafety.cpp missing (LG-HW-004)")
+else:
+    bs_text = board_safety_cpp.read_text(encoding="utf-8")
+    if "gpio_hold_en" in bs_text:
+        errors.append("BoardOutputSafety.cpp: gpio_hold_en must NOT be used on addressable pins (LG-HW-004)")
+    if "kPcaOe" not in bs_text or "gpio_set_level(kPcaOe, 1)" not in bs_text:
+        errors.append("BoardOutputSafety.cpp: PCA /OE must be driven HIGH immediately (LG-HW-004)")
+    if "kAledPins" not in bs_text or "gpio_set_level(pin, 0)" not in bs_text:
+        errors.append("BoardOutputSafety.cpp: ALED pins must be driven LOW immediately (LG-HW-004)")
+
+reset_forensics_cpp = NODE_DIR / "components" / "board" / "ResetForensics.cpp"
+if not reset_forensics_cpp.exists():
+    errors.append("ResetForensics.cpp missing (LG-HW-004)")
+else:
+    rf_text = reset_forensics_cpp.read_text(encoding="utf-8")
+    if "BOOT_RESET" not in rf_text:
+        errors.append("ResetForensics.cpp: must print early BOOT_RESET banner (LG-HW-004)")
+    if "consecutive_abnormal_boots >= kMaxConsecutiveAbnormalBootsForSafeMode" not in rf_text:
+        errors.append("ResetForensics.cpp: Safe mode must require 3 consecutive abnormal boots (LG-HW-004)")
+
+if "first_black_frame_confirmed_" not in par_rmt_cpp:
+    errors.append("ParallelRmtDriver.cpp: must gate transmission on first_black_frame_confirmed_ (LG-HW-004)")
+
+power_budget_hpp = (NODE_DIR / "components" / "signage" / "include" / "PowerBudget.hpp").read_text(encoding="utf-8")
+if "PowerTransientDiagnostics" not in power_budget_hpp:
+    errors.append("PowerBudget.hpp: must declare PowerTransientDiagnostics (LG-HW-004)")
+if "kDefaultPowerRampMs" not in power_budget_hpp:
+    errors.append("PowerBudget.hpp: must declare kDefaultPowerRampMs (LG-HW-004)")
+
 
 if errors:
     print("\nFAILED: Discovered architectural invariant violations:")

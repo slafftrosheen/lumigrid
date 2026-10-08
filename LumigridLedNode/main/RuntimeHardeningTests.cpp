@@ -46,6 +46,8 @@
 #include "OutputCoreExecutor.hpp"
 #include "PowerBudget.hpp"
 #include "lg_board_pins.hpp"
+#include "BoardOutputSafety.hpp"
+#include "ResetForensics.hpp"
 #include "NvsRuntime.hpp"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -6928,6 +6930,173 @@ bool test_lg029_node_backed_authentication() {
         return true;
     }
 
+    bool test_lghw004_boot_safety_power_and_forensics() {
+        ESP_LOGI(TAG, "Testing LG-HW-004 Boot Safety, Power Steps, and Reset Forensics...");
+
+        // Test 1: Early Electrical Output Safety
+        {
+            esp_err_t err = lg::board::force_outputs_safe_early();
+            assert(err == ESP_OK);
+            auto boot_diag = lg::board::get_boot_output_diagnostics();
+            assert(boot_diag.early_safety_applied);
+            assert(boot_diag.pca_oe_high_at_bootstrap);
+            assert(lg::board::sample_pca_oe_level() == 1);
+            assert(lg::board::sample_addressable_pin_mask() == 0);
+        }
+
+        // Test 2: Reset Reason Classification
+        {
+            assert(lg::board::is_abnormal_reset(ESP_RST_PANIC));
+            assert(lg::board::is_abnormal_reset(ESP_RST_INT_WDT));
+            assert(lg::board::is_abnormal_reset(ESP_RST_TASK_WDT));
+            assert(lg::board::is_abnormal_reset(ESP_RST_WDT));
+            assert(lg::board::is_abnormal_reset(ESP_RST_BROWNOUT));
+            assert(!lg::board::is_abnormal_reset(ESP_RST_POWERON));
+            assert(!lg::board::is_abnormal_reset(ESP_RST_SW));
+            assert(!lg::board::is_abnormal_reset(ESP_RST_DEEPSLEEP));
+
+            assert(strcmp(lg::board::reset_reason_to_str(ESP_RST_BROWNOUT), "brownout") == 0);
+            assert(strcmp(lg::board::reset_reason_to_str(ESP_RST_PANIC), "panic") == 0);
+            assert(strcmp(lg::board::reset_reason_to_str(ESP_RST_TASK_WDT), "task_wdt") == 0);
+            assert(strcmp(lg::board::reset_reason_to_str(ESP_RST_POWERON), "power_on") == 0);
+
+            auto rst_diag = lg::board::get_reset_diagnostics();
+            assert(rst_diag.boot_session_id != 0);
+
+            // Healthy boot confirmation
+            lg::board::confirm_healthy_boot();
+            rst_diag = lg::board::get_reset_diagnostics();
+            assert(rst_diag.current_boot_confirmed);
+        }
+
+        // Test 3: Safe Mode Mandate requires 3 consecutive abnormal boots
+        {
+            // On normal test boots, safe mode should not be mandated unless streak is >= 3
+            assert(!lg::board::is_safe_mode_mandated() || lg::board::get_reset_diagnostics().consecutive_abnormal_boots >= 3);
+        }
+
+        // Test 4: First Black Frame Gating in ParallelRmtDriver
+        {
+            struct TestTransport : public IRmtTransport {
+                bool active[8] = {};
+                uint32_t completions[8] = {};
+                uint32_t symbols[8] = {};
+                bool submit_called = false;
+                uint8_t last_wire_data[256] = {};
+                size_t last_wire_len = 0;
+
+                esp_err_t create(uint8_t lane, int, bool) override {
+                    if (lane < 8) active[lane] = true;
+                    return ESP_OK;
+                }
+                esp_err_t destroy(uint8_t lane) override {
+                    if (lane < 8) active[lane] = false;
+                    return ESP_OK;
+                }
+                esp_err_t submit(uint8_t, const uint8_t* data, size_t len) override {
+                    submit_called = true;
+                    last_wire_len = (len < sizeof(last_wire_data)) ? len : sizeof(last_wire_data);
+                    if (data && last_wire_len > 0) {
+                        memcpy(last_wire_data, data, last_wire_len);
+                    }
+                    return ESP_OK;
+                }
+                esp_err_t wait(uint8_t, uint32_t) override { return ESP_OK; }
+                uint32_t get_completed_count(uint8_t lane) const override {
+                    return lane < 8 ? completions[lane] : 0;
+                }
+                uint32_t get_last_num_symbols(uint8_t lane) const override {
+                    return lane < 8 ? symbols[lane] : 0;
+                }
+            };
+
+            TestTransport trans;
+            ParallelRmtDriver rmt(&trans);
+
+            DeviceConfig cfg{};
+            cfg.channels[0].enabled = true;
+            cfg.channels[0].pixel_count = 4;
+            cfg.channels[0].addressable_type = AddressableType::WS2812;
+            cfg.channels[0].pixel_order = PixelOrder::GRB;
+
+            esp_err_t err = rmt.reconfigure(cfg, 16 * 1024, 12 * 1024);
+            assert(err == ESP_OK);
+            assert(!rmt.first_black_frame_confirmed());
+
+            // 4 pixels WS2812 = 12 bytes wire -> symbols = 12 * 8 + 2 = 98
+            const uint32_t expected_symbols = 12 * 8 + 2;
+            trans.completions[0] = 1;
+            trans.symbols[0] = expected_symbols;
+
+            // Stage nonzero pixel on lane 0
+            rmt.stage_pixel(0, 0, 0x55, 0, 0, 0); // Non-black!
+
+            // Attempt commit with non-black frame before first black frame confirmed
+            AddressableCommitResult res = rmt.commit();
+            assert(res.result == ESP_ERR_INVALID_STATE);
+            assert(!rmt.first_black_frame_confirmed());
+
+            // Now clear all pixels to black
+            rmt.stage_clear_all();
+            res = rmt.commit();
+            assert(res.result == ESP_OK);
+            assert(rmt.first_black_frame_confirmed());
+
+            // Now that first black is confirmed, nonzero frames must be permitted
+            rmt.stage_pixel(0, 0, 0xFF, 0, 0, 0);
+            trans.completions[0] = 2;
+            trans.symbols[0] = expected_symbols;
+            res = rmt.commit();
+            assert(res.result == ESP_OK);
+        }
+
+        // Test 5: Power Step Clamping and Global Proportional Scaling
+        {
+            PowerBudget budget;
+            budget.set_limit_mw(2000); // 2 W budget
+            budget.set_soft_start(true, 750); // 750 ms ramp
+            budget.on_enable();
+
+            DeviceConfig cfg{};
+            cfg.channels[0].enabled = true;
+            cfg.channels[0].pixel_count = 10;
+            cfg.channels[0].addressable_type = AddressableType::WS2812;
+
+            cfg.channels[8].enabled = true;
+            cfg.channels[8].max_milliwatts = 5000;
+
+            RenderFrame frame{};
+            for (int p = 0; p < 10; ++p) {
+                frame.channels[0].pixels[p] = LightValue(255, 255, 255, 0);
+            }
+            frame.channels[8].pwm = 255;
+
+            // Frame 1 at ms = 25:
+            uint32_t req1 = budget.enforce(frame, cfg, 25);
+            auto diag1 = budget.diagnostics();
+            assert(diag1.requested_power_mw > 0);
+            assert(diag1.limited_power_mw <= diag1.requested_power_mw);
+            assert(diag1.power_step_clamps >= 1 || diag1.limited_power_mw < req1);
+
+            // Channel 0 and 8 should be scaled down proportionally
+            assert(frame.channels[0].pixels[0].r < 255);
+            assert(frame.channels[8].pwm < 255);
+
+            // Restart ramp
+            budget.restart_ramp();
+            assert(budget.diagnostics().previous_limited_power_mw == 0);
+        }
+
+        // Test 6: Abnormal Reset Output Quarantine Dwell
+        {
+            // For uptime_ms >= 1000 ms, quarantine is always expired
+            assert(!lg::board::is_abnormal_reset_quarantine_active(1500));
+        }
+
+        ESP_LOGI(TAG, "[PASS] LG-HW-004 Boot Safety, Power Steps, and Reset Forensics passed.");
+        return true;
+    }
+
 } // namespace
 
 bool run_runtime_hardening_tests() {
@@ -7065,6 +7234,9 @@ bool run_runtime_hardening_tests() {
 
     // LG-HW-003 PCA Bus Recovery + RMT Transmission Integrity
     all_ok &= test_lghw003_pca_recovery_and_rmt_integrity();
+
+    // LG-HW-004 Electrical Boot Safety + Power-Step Control + Reset Forensics
+    all_ok &= test_lghw004_boot_safety_power_and_forensics();
 
     if (all_ok) {
         ESP_LOGI(TAG, "==================================================");

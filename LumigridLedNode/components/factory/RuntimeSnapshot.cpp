@@ -16,6 +16,7 @@
 #include "WifiService.hpp"
 #include "CertificationService.hpp"
 #include "ChannelConfiguration.hpp"
+#include "ResetForensics.hpp"
 #include "esp_wifi.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -131,6 +132,7 @@ RuntimeSnapshot collect_runtime_snapshot(FactoryApi* api, uint32_t stream_seq) {
     // 1. Node Identity
     const NodeIdentity& id = api->identity();
     snprintf(snap.node.id, sizeof(snap.node.id), "%s", id.id);
+    snap.node.boot_session_id = lg::board::get_boot_session_id();
 
     // 2. Runtime State
     snprintf(snap.runtime.effect, sizeof(snap.runtime.effect), "%s",
@@ -492,7 +494,8 @@ bool serialize_runtime_snapshot(const RuntimeSnapshot& snap, FixedJsonWriter& wr
                          snap.stream_seq, snap.generated_at_ms);
 
     // Node
-    writer.append_printf("\"node\":{\"id\":\"%s\"},", snap.node.id);
+    writer.append_printf("\"node\":{\"id\":\"%s\",\"bootSessionId\":%" PRIu32 "},",
+                         snap.node.id, snap.node.boot_session_id);
 
     // Runtime
     writer.append_printf(

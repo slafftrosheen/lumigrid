@@ -6,6 +6,8 @@
 
 namespace lg {
 
+constexpr uint16_t kDefaultPowerRampMs = 750;
+
 /// Conservative estimated electrical model per pixel type.
 ///
 /// NOTE (Safety / Architecture Disclaimer):
@@ -18,11 +20,26 @@ struct PixelPowerModel {
     uint16_t max_rgbw_mw = 380;
 };
 
-/// Multi-tier per-frame power limiter with quiescent modeling and soft-start support.
-///
-/// Estimates total LED power draw directly from the newly rendered RenderFrame.
-/// Enforces both local per-channel power limits (ChannelConfig.max_milliwatts)
-/// and the global power supply budget (DeviceConfig.max_power_mw) in-place before output.
+/// Power transient diagnostics structure (LG-HW-004 §22)
+struct PowerTransientDiagnostics {
+    uint32_t enable_events = 0;
+    uint32_t ramp_events = 0;
+
+    uint32_t requested_power_mw = 0;
+    uint32_t limited_power_mw = 0;
+
+    uint32_t previous_limited_power_mw = 0;
+    uint32_t max_observed_step_mw = 0;
+
+    uint32_t power_step_clamps = 0;
+
+    bool estimate_complete = true;
+
+    uint16_t ramp_ms = kDefaultPowerRampMs;
+};
+
+/// Multi-tier per-frame power limiter with quiescent modeling, soft-start,
+/// and bounded power-step transient control.
 class PowerBudget {
 public:
     /// Set the maximum power draw in milliwatts. 0 = unlimited.
@@ -33,15 +50,15 @@ public:
     /// to full over ramp_ms milliseconds after enable().
     void set_soft_start(bool enabled, uint16_t ramp_ms);
 
-    /// Called once when outputs are enabled, to start the soft-start ramp.
+    /// Called when outputs are enabled or on high-risk transitions to start the power ramp.
     void on_enable();
+    void restart_ramp() { on_enable(); }
 
     /// Returns a brightness multiplier (0–255) for soft-start.
-    /// Should be called every frame with the elapsed time since enable.
     uint8_t soft_start_factor(uint32_t ms_since_enable) const;
 
     /// Estimate total power from RenderFrame, apply local fixture clamping,
-    /// soft-start, and global budget clamping in-place.
+    /// soft-start, bounded power-step limiting, and global budget clamping in-place.
     /// Returns estimated mW before global clamping (requested).
     uint32_t enforce(RenderFrame& frame, const DeviceConfig& cfg, uint32_t current_ms);
 
@@ -58,20 +75,41 @@ public:
     uint32_t current_power_mw() const { return limited_power_mw_; }
 
     /// True if all enabled channels have a complete electrical power model.
-    /// Set false if any enabled PWM channel lacks max_milliwatts.
     bool estimate_complete() const { return estimate_complete_; }
+
+    uint32_t enable_events() const { return enable_events_; }
+    uint32_t soft_start_events() const { return soft_start_events_; }
+    uint32_t last_enable_ms() const { return last_enable_ms_; }
+    uint32_t last_soft_start_duration_ms() const { return last_soft_start_duration_ms_; }
+    uint32_t previous_limited_power_mw() const { return previous_limited_power_mw_; }
+    uint32_t max_observed_step_mw() const { return max_observed_step_mw_; }
+    uint32_t power_step_clamps() const { return power_step_clamps_; }
+    uint16_t ramp_ms() const { return ramp_ms_; }
+
+    PowerTransientDiagnostics diagnostics() const;
 
     static constexpr PixelPowerModel kPixelModel{5, 295, 380};
 
 private:
     uint16_t limit_mw_ = 0;
     bool     soft_start_enabled_ = false;
-    uint16_t ramp_ms_ = 500;
+    uint16_t ramp_ms_ = kDefaultPowerRampMs;
     uint32_t enable_ms_ = 0;
+    uint32_t last_enforce_ms_ = 0;
+
     uint32_t throttling_events_ = 0;
     uint32_t requested_power_mw_ = 0;
     uint32_t limited_power_mw_ = 0;
     bool     estimate_complete_ = true;
+
+    // HW-004 telemetry & power-step control
+    uint32_t enable_events_ = 0;
+    uint32_t soft_start_events_ = 0;
+    uint32_t last_enable_ms_ = 0;
+    uint32_t last_soft_start_duration_ms_ = 0;
+    uint32_t previous_limited_power_mw_ = 0;
+    uint32_t max_observed_step_mw_ = 0;
+    uint32_t power_step_clamps_ = 0;
 };
 
 } // namespace lg

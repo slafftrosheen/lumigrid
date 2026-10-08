@@ -210,6 +210,9 @@ struct RmtDiagnostics {
     RmtHealth health = RmtHealth::Healthy;
     uint32_t deadline_near_misses = 0;
 
+    // HW-004 first-black frame state
+    bool first_black_frame_confirmed = false;
+
     RmtLaneDiagnostics lanes[MAX_RMT_LANES];
 };
 
@@ -296,6 +299,8 @@ public:
     /// Clear a Faulted lane back to Ready (after a confirmed good transmit or reconfigure).
     void      clear_faults();
 
+    bool      first_black_frame_confirmed() const { return first_black_frame_confirmed_; }
+
     RmtDiagnostics diagnostics() const;
 
 private:
@@ -318,6 +323,7 @@ private:
     Lane candidate_[kLanes]{};
     bool candidate_prepared_[kLanes]{};
     bool has_candidate_ = false;
+    bool first_black_frame_confirmed_ = false;
     mutable RmtDiagnostics diagnostics_{};
 };
 

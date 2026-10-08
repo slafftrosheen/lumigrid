@@ -9,6 +9,8 @@
 #include "SceneTransition.hpp"
 #include "ParallelRmtDriver.hpp"
 #include "OutputCoreExecutor.hpp"
+#include "BoardOutputSafety.hpp"
+#include "ResetForensics.hpp"
 #include "esp_timer.h"
 #include "esp_log.h"
 #include <algorithm>
@@ -166,6 +168,9 @@ esp_err_t LightingRuntime::start() {
         lifecycle_state_.store(LifecycleState::Faulted, std::memory_order_release);
         return ESP_FAIL;
     }
+    activation_timing_.arm_ms = now_ms();
+    last_observed_topology_generation_ = controller_.topology_generation();
+    restart_soft_start();
     lifecycle_state_.store(LifecycleState::Running, std::memory_order_release);
     ESP_LOGI(TAG, "LightingRuntime started (gamma=%.1f, max_mw=%u)", device_cfg_.gamma_x10 / 10.0f, device_cfg_.max_power_mw);
     return ESP_OK;
@@ -316,6 +321,30 @@ void LightingRuntime::task() {
 }
 
 FrameResult LightingRuntime::render_frame(uint32_t current_ms) {
+    // LG-HW-004 §27: Abnormal reset output quarantine (physical outputs held dark for 1000ms)
+    if (board::is_abnormal_reset_quarantine_active(current_ms)) {
+        in_abnormal_reset_quarantine_ = true;
+        controller_.blackout();
+        if (activation_timing_.first_zero_black_ms == 0) {
+            activation_timing_.first_zero_black_ms = current_ms;
+            if (activation_timing_.arm_ms > 0) {
+                activation_timing_.last_arm_to_zero_ms = (current_ms >= activation_timing_.arm_ms) ? (current_ms - activation_timing_.arm_ms) : 0;
+            }
+        }
+        return FrameResult::NoOutput;
+    } else if (in_abnormal_reset_quarantine_) {
+        in_abnormal_reset_quarantine_ = false;
+        restart_soft_start();
+        ESP_LOGI(TAG, "Abnormal reset output quarantine expired: re-arming output with soft start");
+    }
+
+    // LG-HW-004 §20: Trigger power ramp on successful topology generation change
+    const uint32_t cur_top_gen = controller_.topology_generation();
+    if (cur_top_gen != last_observed_topology_generation_) {
+        last_observed_topology_generation_ = cur_top_gen;
+        restart_soft_start();
+    }
+
     const EstopState es = estop_state_.load(std::memory_order_acquire);
     if (es == EstopState::Tripped) {
         controller_.blackout();
@@ -509,6 +538,23 @@ FrameResult LightingRuntime::render_frame(uint32_t current_ms) {
             }
             frame_committed = true;
             frame_result = FrameResult::Committed;
+
+            // LG-HW-004 §34: Track activation timing milestones
+            if (activation_timing_.first_nonzero_ms == 0) {
+                activation_timing_.first_nonzero_ms = current_ms;
+                if (activation_timing_.first_zero_black_ms > 0) {
+                    activation_timing_.last_zero_to_nonzero_ms = (current_ms >= activation_timing_.first_zero_black_ms) ?
+                        (current_ms - activation_timing_.first_zero_black_ms) : 0;
+                }
+                board::record_first_output_commit(current_ms);
+            }
+            if (activation_timing_.ramp_complete_ms == 0 && current_ms >= enable_ms_ + power_budget_.ramp_ms()) {
+                activation_timing_.ramp_complete_ms = current_ms;
+                if (activation_timing_.arm_ms > 0) {
+                    activation_timing_.last_ramp_duration_ms = (current_ms >= activation_timing_.arm_ms) ?
+                        (current_ms - activation_timing_.arm_ms) : 0;
+                }
+            }
         } else {
             frame_result = FrameResult::NoOutput;
         }
@@ -631,6 +677,8 @@ esp_err_t LightingRuntime::clear_output_fault() {
 
 void LightingRuntime::restart_soft_start() {
     enable_ms_ = now_ms();
+    activation_timing_.arm_ms = enable_ms_;
+    activation_timing_.ramp_complete_ms = 0;
     power_budget_.on_enable();
 }
 
@@ -759,6 +807,9 @@ void LightingRuntime::release_control(ControlSource source) {
     }
     xSemaphoreTake(mutex_, portMAX_DELAY);
     source_manager_.release(source);
+    if (source == ControlSource::Factory) {
+        restart_soft_start();
+    }
     xSemaphoreGive(mutex_);
 }
 

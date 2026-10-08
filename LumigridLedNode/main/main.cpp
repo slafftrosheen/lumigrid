@@ -1,5 +1,7 @@
 #include "LumigridRuntime.hpp"
 #include "RuntimeMemory.hpp"
+#include "BoardOutputSafety.hpp"
+#include "ResetForensics.hpp"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_system.h"
@@ -23,6 +25,11 @@ static const char* reset_reason_to_name(esp_reset_reason_t reason) {
 }
 
 extern "C" void app_main(void) {
+  // LG-HW-004 §3/§4: Board-level early electrical output safety bootstrap
+  lg::board::force_outputs_safe_early();
+  // LG-HW-004 §10/§16: Initialize reset forensics and print concise serial banner
+  lg::board::init_reset_forensics();
+
   const esp_reset_reason_t rst = esp_reset_reason();
   ESP_LOGI("lumigrid", "RESET reason=%d name=%s", (int)rst, reset_reason_to_name(rst));
 

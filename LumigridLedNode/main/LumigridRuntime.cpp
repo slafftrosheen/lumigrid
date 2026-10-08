@@ -9,6 +9,8 @@
 #include "esp_rom_uart.h"
 #include "RecoveryTypes.hpp"
 #include "RuntimeHardeningTests.hpp"
+#include "BoardOutputSafety.hpp"
+#include "ResetForensics.hpp"
 #include "driver/gpio.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -47,8 +49,6 @@ void log_heap_stage(const char *stage) {
 } // namespace
 
 namespace lg {
-
-RTC_DATA_ATTR static int s_boot_count = 0;
 
 LumigridRuntime::LumigridRuntime()
     : source_manager_(), factory_runner_(source_manager_, output_),
@@ -98,6 +98,17 @@ void LumigridRuntime::write_serial_diagnostics() {
   for (size_t i = 0; i < count; ++i)
     ESP_LOGI("serial_diag", "task=%s configured=%lu minimumFree=%lu bytes", tasks[i].name,
         (unsigned long)tasks[i].configured_bytes, (unsigned long)tasks[i].minimum_free_bytes);
+
+  const auto rst_diag = board::get_reset_diagnostics();
+  const auto boot_diag = board::get_boot_output_diagnostics();
+  ESP_LOGI("serial_diag", "reset reason=%s abnormal=%d consecutive=%lu total=%lu confirmed=%d sessionId=0x%08lX",
+      rst_diag.reason_str, rst_diag.last_reset_abnormal ? 1 : 0,
+      (unsigned long)rst_diag.consecutive_abnormal_boots, (unsigned long)rst_diag.total_boots,
+      rst_diag.current_boot_confirmed ? 1 : 0, (unsigned long)rst_diag.boot_session_id);
+  ESP_LOGI("serial_diag", "boot_output safeEarly=%d oeHigh=%d aledMask=0x%02X blackConf=%d zeroConf=%d firstCommitMs=%lu",
+      boot_diag.early_safety_applied ? 1 : 0, boot_diag.pca_oe_high_at_bootstrap ? 1 : 0,
+      boot_diag.aled_low_mask, boot_diag.first_addressable_black_confirmed ? 1 : 0,
+      boot_diag.first_pwm_zero_confirmed ? 1 : 0, (unsigned long)boot_diag.first_output_commit_ms);
 }
 
 void LumigridRuntime::recovery_task(void *arg) {
@@ -156,6 +167,24 @@ void LumigridRuntime::recovery_task(void *arg) {
 #endif
     }
 
+    // LG-HW-004 §13: Confirm healthy boot after 30 seconds continuous Ready state
+    static uint32_t s_ready_since_ms = 0;
+    static bool s_boot_confirmed = false;
+    if (self && !s_boot_confirmed) {
+      if (self->startup_state_ == StartupState::Ready) {
+        if (s_ready_since_ms == 0) {
+          s_ready_since_ms = now_ms;
+        } else if (now_ms - s_ready_since_ms >= board::kHealthyBootConfirmMs) {
+          board::confirm_healthy_boot();
+          s_boot_confirmed = true;
+          ESP_LOGI("lumigrid", "Healthy boot confirmed after %lu ms in Ready state",
+                   (unsigned long)board::kHealthyBootConfirmMs);
+        }
+      } else if (self->startup_state_ == StartupState::Faulted) {
+        s_ready_since_ms = 0;
+      }
+    }
+
     if (self && !boot_diagnostics_sent && now_ms >= 10000) {
       boot_diagnostics_sent = true;
       self->write_serial_diagnostics();
@@ -167,7 +196,7 @@ void LumigridRuntime::recovery_task(void *arg) {
       if (esp_rom_uart_rx_one_char(&ch) != 0) break;
       if (ch == '\n' || ch == '\r') {
         serial_command[serial_length] = 0;
-        if (self && !serial_overflow && (!strcmp(serial_command, "diagnostics") || !strcmp(serial_command, "memory") || !strcmp(serial_command, "storage")))
+        if (self && !serial_overflow && (!strcmp(serial_command, "diagnostics") || !strcmp(serial_command, "memory") || !strcmp(serial_command, "storage") || !strcmp(serial_command, "bootsafe") || !strcmp(serial_command, "boot_verify")))
           self->write_serial_diagnostics();
         serial_length = 0; serial_overflow = false;
       } else if (ch >= 32 && ch <= 126) {
@@ -232,17 +261,15 @@ esp_err_t LumigridRuntime::init() {
   if (!services_mutex_) return ESP_ERR_NO_MEM;
   DiagnosticLog::instance().init();
 
-  if (esp_reset_reason() == ESP_RST_POWERON) {
-    s_boot_count = 0;
-  }
-  s_boot_count++;
-  boot_count_ = s_boot_count;
+  const auto reset_diag = board::get_reset_diagnostics();
+  boot_count_ = static_cast<int>(reset_diag.total_boots);
 
   const auto storage = capture_storage();
   ESP_LOGI("lumigrid", "STORAGE physical=%lu configured=%lu layout=v%u health=%s",
       (unsigned long)storage.physical_bytes, (unsigned long)storage.configured_bytes,
       kPartitionLayoutVersion, storage_health_name(storage.health));
-  safe_mode_ = (s_boot_count >= 3 || storage.health != StorageHealth::Healthy);
+  // LG-HW-004 §10/§12: Safe mode requires 3 consecutive abnormal boots, not merely warm reboots
+  safe_mode_ = (board::is_safe_mode_mandated() || storage.health != StorageHealth::Healthy);
   startup_state_ = safe_mode_ ? StartupState::SafeMode : StartupState::Booting;
   startup_stage_ = StartupStage::None;
   failing_stage_ = StartupStage::None;

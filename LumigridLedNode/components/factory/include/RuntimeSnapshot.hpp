@@ -43,6 +43,7 @@ private:
 
 struct NodeSnapshot {
     char id[32] = {0};
+    uint32_t boot_session_id = 0;
 };
 
 struct RuntimeStateSnapshot {

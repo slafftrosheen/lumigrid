@@ -33,6 +33,9 @@ class SoakMetrics:
         self.errors: Dict[str, int] = {}
         self.reboots_detected = 0
         self.last_uptime_s = -1
+        self.initial_boot_session_id: Optional[int] = None
+        self.current_boot_session_id: Optional[int] = None
+        self.classified_reboot_failures: List[str] = []
 
         # High-water / min metrics
         self.min_free_internal = 999999999
@@ -53,11 +56,41 @@ class SoakMetrics:
             self.failed_requests += 1
             self.errors[error_type] = self.errors.get(error_type, 0) + 1
 
-    def check_reboot(self, current_uptime_s: float):
+    def set_initial_session(self, session_id: Optional[int]):
         with self.lock:
-            if self.last_uptime_s > 0 and current_uptime_s < (self.last_uptime_s - 2):
+            self.initial_boot_session_id = session_id
+            self.current_boot_session_id = session_id
+
+    def check_reboot(self, current_uptime_s: float, current_session_id: Optional[int] = None, reset_reason_str: Optional[str] = None):
+        with self.lock:
+            session_changed = (
+                self.current_boot_session_id is not None
+                and current_session_id is not None
+                and current_session_id != self.current_boot_session_id
+            )
+            uptime_dropped = (self.last_uptime_s > 0 and current_uptime_s < (self.last_uptime_s - 2))
+
+            if session_changed or uptime_dropped:
                 self.reboots_detected += 1
-                print(f"\n[ALERT] Device reboot detected! Previous uptime: {self.last_uptime_s}s, New uptime: {current_uptime_s}s")
+                reason = reset_reason_str or "unknown"
+                reason_lower = reason.lower()
+                if "brownout" in reason_lower:
+                    classification = "FAIL: POWER/BROWNOUT"
+                elif "panic" in reason_lower:
+                    classification = "FAIL: PANIC"
+                elif "task_wdt" in reason_lower or "twdt" in reason_lower:
+                    classification = "FAIL: TASK_WDT"
+                elif "int_wdt" in reason_lower or "iwdt" in reason_lower:
+                    classification = "FAIL: INT_WDT"
+                else:
+                    classification = f"FAIL: UNEXPECTED_REBOOT ({reason})"
+
+                self.classified_reboot_failures.append(classification)
+                print(f"\n[ALERT] Device reboot detected! {classification} (reason={reason}, session={current_session_id}, prev_uptime={self.last_uptime_s}s)")
+
+                if current_session_id is not None:
+                    self.current_boot_session_id = current_session_id
+
             self.last_uptime_s = current_uptime_s
 
     def update_telemetry(self, mem_diag: dict, out_diag: dict):
@@ -240,6 +273,11 @@ def main():
 
     metrics = SoakMetrics()
     metrics.update_telemetry(base_mem, base_out)
+    info_data = fetch_json(base_url, "/api/v1/info", args.admin_key)
+    base_reset = base_out.get("reset", {})
+    init_session = base_reset.get("bootSessionId", info_data.get("bootSessionId"))
+    metrics.set_initial_session(init_session)
+    print(f"[*] Baseline Boot Session ID: {init_session}")
 
     # Step 4: Start hardware coexistence effect
     print("[*] Starting hardware coexistence test effect...")
@@ -307,8 +345,14 @@ def main():
 
                 metrics.update_telemetry(cur_mem, cur_out)
                 uptime_s = cur_stat.get("uptime", cur_stat.get("uptimeSeconds", -1))
-                if uptime_s > 0:
-                    metrics.check_reboot(uptime_s)
+                cur_reset = cur_out.get("reset", {})
+                cur_session = cur_reset.get("bootSessionId")
+                cur_reason = cur_reset.get("reasonStr")
+                if cur_session is None:
+                    cur_info = fetch_json(base_url, "/api/v1/info", args.admin_key)
+                    cur_session = cur_info.get("bootSessionId")
+                    cur_reason = cur_info.get("resetReason")
+                metrics.check_reboot(uptime_s, cur_session, cur_reason)
 
                 with metrics.lock:
                     succ_cnt = metrics.successful_requests
@@ -449,13 +493,35 @@ def main():
     print(f"  Topology Generation Final:   {final_topo_gen}")
     print(f"  Actual Wi-Fi Mode:           {actual_wifi_mode}")
     print("------------------------------------------------------------------")
+    print("RESET FORENSICS & ELECTRICAL BOOT SAFETY (LG-HW-004):")
+    final_reset = final_out.get("reset", {})
+    final_boot_out = final_out.get("bootOutput", {})
+    final_pwr = final_out.get("powerTransient", {})
+    print(f"  Boot Session ID:             {init_session} -> {final_reset.get('bootSessionId', 'N/A')}")
+    print(f"  Reset Reason:                {final_reset.get('reasonStr', 'N/A')} (abnormal: {final_reset.get('abnormal', False)})")
+    print(f"  Consecutive Abnormal Boots:  {final_reset.get('consecutiveAbnormalBoots', 0)}")
+    print(f"  Brownout Detector Enabled:   {final_reset.get('brownoutDetectorEnabled', False)}")
+    print(f"  Safe Mode Mandated:          {final_reset.get('safeModeMandated', False)}")
+    print(f"  Quarantine Active:           {final_reset.get('quarantineActive', False)}")
+    print(f"  Early Safety Applied:        {final_boot_out.get('earlySafetyApplied', False)}")
+    print(f"  PCA /OE High at Bootstrap:   {final_boot_out.get('pcaOeHighAtBootstrap', False)}")
+    print(f"  ALED Low Mask:               0x{final_boot_out.get('aledLowMask', 0):02X}")
+    print(f"  First Black Confirmed:       {final_boot_out.get('firstAddressableBlackConfirmed', False)}")
+    print(f"  First Zero Confirmed:        {final_boot_out.get('firstPwmZeroConfirmed', False)}")
+    print(f"  Power Step Clamps:           {final_pwr.get('stepClamps', 0)}")
+    print(f"  Wi-Fi Transient Clamps:      {final_pwr.get('wifiTransientClamps', 0)}")
+    print(f"  Quarantine Clamps:           {final_pwr.get('quarantineClamps', 0)}")
+    print("------------------------------------------------------------------")
 
     # Qualification classification: PASS, MARGINAL, FAIL
     fail_reasons = []
     marginal_reasons = []
 
     # FAIL conditions
-    if metrics.reboots_detected > 0:
+    if metrics.classified_reboot_failures:
+        for crf in metrics.classified_reboot_failures:
+            fail_reasons.append(crf)
+    elif metrics.reboots_detected > 0:
         fail_reasons.append("Unexpected device reboot")
     if delta_rmt_failures > 0:
         fail_reasons.append(f"RMT failed frames (delta: {delta_rmt_failures})")

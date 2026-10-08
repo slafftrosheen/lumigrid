@@ -10,6 +10,7 @@ idf_component_register(
         "include"
         "../../generated"
     REQUIRES
+        board
         output
         config
         signage

@@ -35,3 +35,6 @@ CONFIG_ESP_MAIN_TASK_AFFINITY_CPU0=y
 # LG-HW-001: RMT IRAM-safe operation
 CONFIG_RMT_ISR_IRAM_SAFE=y
 
+# LG-HW-004: Brownout detector enforcement
+CONFIG_ESP_BROWNOUT_DET=y
+
