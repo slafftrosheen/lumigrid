@@ -307,9 +307,11 @@ if pca_driver.exists():
                      'cfg.scl_io_num = lg::board::kI2cScl',
                      'i2c_param_config(', 'i2c_driver_install(',
                      'i2c_master_write_to_device(', 'i2c_master_write_read_device(',
-                     'kI2cPort, lg::board::kPcaAddress', 'pdMS_TO_TICKS(100)'):
+                     'kI2cPort'):
         if required not in pca_text:
             errors.append("Pca9685Driver.cpp: missing legacy synchronous I2C contract: " + required)
+    if "pdMS_TO_TICKS(100)" in pca_text:
+        errors.append("Pca9685Driver.cpp: pdMS_TO_TICKS(100) must not be used; must use kPcaTransactionTimeoutMs (LG-HW-003 §2)")
     check_file_contains(pca_driver, [(pattern, "PCA9685 must use legacy synchronous I2C without discovery or async callbacks")
         for pattern in ('driver/i2c_master.h', 'trans_queue_depth',
                         'i2c_master_register_event_callbacks(', 'i2c_new_master_bus(',
@@ -489,6 +491,45 @@ if wifi_service_cpp.exists():
         errors.append("WifiService.cpp: missing scheduled exit fallback AP lifecycle methods (LG-HW-002 §10)")
     if "actual_mode" not in ws_text:
         errors.append("WifiService.cpp: missing actual_mode diagnostics reporting (LG-HW-002 §11)")
+
+# LG-HW-003: PCA Bus Recovery & RMT Transmission Integrity
+pca_hpp = (NODE_DIR / "components" / "output" / "include" / "Pca9685Driver.hpp").read_text(encoding="utf-8")
+m = re.search(r"kPcaTransactionTimeoutMs\s*=\s*(\d+)", pca_hpp)
+if not m or int(m.group(1)) > 20:
+    errors.append("Pca9685Driver.hpp: kPcaTransactionTimeoutMs must be <= 20 ms (LG-HW-003 §2)")
+
+pca_cpp = (NODE_DIR / "components" / "output" / "Pca9685Driver.cpp").read_text(encoding="utf-8")
+rec_block = re.search(r"esp_err_t Pca9685Driver::recover\(\)\s*\{(.*?)\n\}", pca_cpp, re.S)
+if rec_block:
+    if "output_enable(true)" in rec_block.group(1) or "gpio_set_level(static_cast<gpio_num_t>(board::kPcaOePin), 0)" in rec_block.group(1):
+        errors.append("Pca9685Driver.cpp: PCA recovery must never lower /OE (LG-HW-003 §8)")
+
+rec_bus_block = re.search(r"esp_err_t LegacyEspI2cTransport::recover_bus\(\)\s*\{(.*?)\n\}", pca_cpp, re.S)
+if rec_bus_block:
+    text_rb = rec_bus_block.group(1)
+    if "SclStuckLow" not in text_rb or "gpio_get_level(static_cast<gpio_num_t>(board::kI2cSclPin)) == 0" not in text_rb:
+        errors.append("Pca9685Driver.cpp: PCA bus recovery must check for SCL low and abort without pulsing (LG-HW-003 §6)")
+
+cb_block = re.search(r"bool\s+IRAM_ATTR\s+on_rmt_tx_done\s*\([^)]*\)\s*\{(.*?)\n\}", par_rmt_cpp, re.S)
+if not cb_block:
+    errors.append("ParallelRmtDriver.cpp: on_rmt_tx_done callback must be declared with IRAM_ATTR (LG-HW-003 §14)")
+else:
+    if "ESP_LOG" in cb_block.group(1):
+        errors.append("ParallelRmtDriver.cpp: on_rmt_tx_done callback must not call ESP_LOG (LG-HW-003 §14)")
+    if "malloc" in cb_block.group(1) or "free" in cb_block.group(1) or "new" in cb_block.group(1):
+        errors.append("ParallelRmtDriver.cpp: on_rmt_tx_done callback must not allocate/free memory (LG-HW-003 §14)")
+
+if "DRAM_ATTR static RmtIsrLedger s_ledgers" not in par_rmt_cpp:
+    errors.append("ParallelRmtDriver.cpp: RMT callback context must use internal SRAM (DRAM_ATTR) (LG-HW-003 §13/§14)")
+
+if "symbol_count_mismatches" not in par_rmt_cpp or "symbol count mismatch" not in par_rmt_cpp.lower():
+    errors.append("ParallelRmtDriver.cpp: RMT symbol mismatch validation missing (LG-HW-003 §15)")
+if "completion_mismatches" not in par_rmt_cpp or "completion parity mismatch" not in par_rmt_cpp.lower():
+    errors.append("ParallelRmtDriver.cpp: RMT completion parity validation missing (LG-HW-003 §16)")
+
+if "execute_pca_recovery" not in exec_cpp.read_text(encoding="utf-8"):
+    errors.append("OutputCoreExecutor.cpp: missing execute_pca_recovery implementation (LG-HW-003 §5)")
+
 
 if errors:
     print("\nFAILED: Discovered architectural invariant violations:")

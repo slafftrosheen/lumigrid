@@ -1207,9 +1207,23 @@ esp_err_t get_diagnostics_output(httpd_req_t* request) {
     cJSON_AddNumberToObject(pwm, "commitFailures", pwm_commit_failures);
     if (api_ptr && api_ptr->signage()) {
         const auto pca_d = api_ptr->signage()->controller().pwm().diagnostics();
+        cJSON_AddBoolToObject(pwm, "healthy", pca_d.healthy);
+        cJSON_AddBoolToObject(pwm, "recoveryRequired", pca_d.recovery_required);
+        cJSON_AddStringToObject(pwm, "lastFaultKind", pca_fault_kind_name(pca_d.last_fault_kind));
         cJSON_AddNumberToObject(pwm, "transactions", pca_d.transactions);
         cJSON_AddNumberToObject(pwm, "transactionFailures", pca_d.transaction_failures);
         cJSON_AddNumberToObject(pwm, "consecutiveFailures", pca_d.consecutive_failures);
+        cJSON_AddNumberToObject(pwm, "recoveryAttempts", pca_d.recovery_attempts);
+        cJSON_AddNumberToObject(pwm, "recoverySuccesses", pca_d.recovery_successes);
+        cJSON_AddNumberToObject(pwm, "recoveryFailures", pca_d.recovery_failures);
+        cJSON_AddNumberToObject(pwm, "busClearAttempts", pca_d.bus_clear_attempts);
+        cJSON_AddNumberToObject(pwm, "busClearSuccesses", pca_d.bus_clear_successes);
+        cJSON_AddNumberToObject(pwm, "busClearFailures", pca_d.bus_clear_failures);
+        cJSON_AddNumberToObject(pwm, "driverReinstalls", pca_d.driver_reinstalls);
+        cJSON_AddBoolToObject(pwm, "lastSdaHigh", pca_d.last_sda_high);
+        cJSON_AddBoolToObject(pwm, "lastSclHigh", pca_d.last_scl_high);
+        cJSON_AddNumberToObject(pwm, "lastTransactionUs", pca_d.last_transaction_us);
+        cJSON_AddNumberToObject(pwm, "maxTransactionUs", pca_d.max_transaction_us);
         cJSON_AddNumberToObject(pwm, "lastError", pca_d.last_error);
         cJSON_AddNumberToObject(pwm, "initCore", pca_d.init_core);
     }
@@ -1218,12 +1232,14 @@ esp_err_t get_diagnostics_output(httpd_req_t* request) {
     cJSON* rmt_obj = cJSON_CreateObject();
     if (api_ptr && api_ptr->signage()) {
         const auto rmt_diag = api_ptr->signage()->controller().rmt_diagnostics();
+        cJSON_AddStringToObject(rmt_obj, "health", rmt_health_name(rmt_diag.health));
         cJSON_AddNumberToObject(rmt_obj, "core", rmt_diag.allocation_core);
         cJSON_AddNumberToObject(rmt_obj, "priority", rmt_diag.interrupt_priority);
         cJSON_AddBoolToObject(rmt_obj, "iramSafe", rmt_diag.iram_safe);
         cJSON_AddNumberToObject(rmt_obj, "activeLanes", rmt_diag.active_lanes);
         cJSON_AddNumberToObject(rmt_obj, "frames", rmt_diag.total_frames);
         cJSON_AddNumberToObject(rmt_obj, "failedFrames", rmt_diag.failed_frames);
+        cJSON_AddNumberToObject(rmt_obj, "deadlineNearMisses", rmt_diag.deadline_near_misses);
 
         cJSON* lanes_arr = cJSON_CreateArray();
         for (size_t l = 0; l < AddressableDriver::kLanes; ++l) {
@@ -1232,11 +1248,18 @@ esp_err_t get_diagnostics_output(httpd_req_t* request) {
             cJSON_AddNumberToObject(lane_obj, "lane", l);
             cJSON_AddNumberToObject(lane_obj, "submissions", ld.submissions);
             cJSON_AddNumberToObject(lane_obj, "completed", ld.completed);
+            cJSON_AddNumberToObject(lane_obj, "txDoneCallbacks", ld.tx_done_callbacks);
+            cJSON_AddNumberToObject(lane_obj, "completionMismatches", ld.completion_mismatches);
+            cJSON_AddNumberToObject(lane_obj, "symbolMismatches", ld.symbol_count_mismatches);
+            cJSON_AddNumberToObject(lane_obj, "lastExpectedSymbols", ld.last_expected_symbols);
+            cJSON_AddNumberToObject(lane_obj, "lastActualSymbols", ld.last_actual_symbols);
             cJSON_AddNumberToObject(lane_obj, "submitFailures", ld.submit_failures);
             cJSON_AddNumberToObject(lane_obj, "waitTimeouts", ld.wait_timeouts);
             cJSON_AddNumberToObject(lane_obj, "otherFailures", ld.other_failures);
+            cJSON_AddNumberToObject(lane_obj, "deadlineNearMisses", ld.deadline_near_misses);
             cJSON_AddNumberToObject(lane_obj, "maxSubmitUs", ld.max_submit_us);
             cJSON_AddNumberToObject(lane_obj, "maxWaitUs", ld.max_wait_us);
+            cJSON_AddNumberToObject(lane_obj, "maxWaitOverWireUs", ld.max_wait_over_wire_us);
             cJSON_AddNumberToObject(lane_obj, "lastError", ld.last_error);
             cJSON_AddItemToArray(lanes_arr, lane_obj);
         }
@@ -1254,6 +1277,7 @@ esp_err_t get_diagnostics_output(httpd_req_t* request) {
     cJSON* out_obj = cJSON_CreateObject();
     if (api_ptr && api_ptr->signage()) {
         const auto& ctrl = api_ptr->signage()->controller();
+        cJSON_AddStringToObject(out_obj, "faultDomain", output_fault_domain_name(ctrl.last_fault_domain()));
         cJSON_AddBoolToObject(out_obj, "topologyValid", ctrl.is_topology_valid());
         cJSON_AddNumberToObject(out_obj, "topologyGeneration", ctrl.topology_generation());
         cJSON_AddNumberToObject(out_obj, "reconfigureAttempts", ctrl.topology_reconfigure_attempts());

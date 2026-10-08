@@ -8,6 +8,7 @@
 #include "ColorPipeline.hpp"
 #include "SceneTransition.hpp"
 #include "ParallelRmtDriver.hpp"
+#include "OutputCoreExecutor.hpp"
 #include "esp_timer.h"
 #include "esp_log.h"
 #include <algorithm>
@@ -611,6 +612,17 @@ bool LightingRuntime::submit_live_frame(const LiveDmxFrame& frame) {
 esp_err_t LightingRuntime::clear_output_fault() {
     if (controller_.is_estop_latched() || is_estop_active()) return ESP_ERR_INVALID_STATE;
     controller_.blackout();
+
+    // LG-HW-003 §12: When fault domain is PcaI2c, perform PCA recovery on OutputCoreExecutor
+    if (controller_.last_fault_domain() == OutputFaultDomain::PcaI2c) {
+        esp_err_t rec_err = OutputCoreExecutor::instance().execute_pca_recovery(&controller_);
+        if (rec_err != ESP_OK || !controller_.pwm().zero_confirmed()) {
+            ESP_LOGE(TAG, "PCA recovery failed during fault clear: %s", esp_err_to_name(rec_err));
+            return (rec_err != ESP_OK) ? rec_err : ESP_FAIL;
+        }
+    }
+
+    controller_.clear_fault_domain();
     output_state_.store(OutputState::Armed, std::memory_order_release);
     restart_soft_start();
     ESP_LOGI(TAG, "Output fault cleared: output state is ARMED awaiting next rendered frame commit");

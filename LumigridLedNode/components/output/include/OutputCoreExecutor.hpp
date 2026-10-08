@@ -20,6 +20,7 @@ class OutputController;
 enum class OutputCoreCommandType : uint8_t {
     Init,
     Reconfigure,
+    RecoverPca,
 };
 
 struct OutputCoreCommand {
@@ -45,6 +46,7 @@ public:
 
     esp_err_t execute_init(OutputController* controller);
     esp_err_t execute_reconfigure(OutputController* controller, const DeviceConfig& cfg);
+    esp_err_t execute_pca_recovery(OutputController* controller);
 
     int executor_core() const { return executor_core_; }
 

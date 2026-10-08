@@ -249,6 +249,7 @@ esp_err_t OutputController::reconfigure_on_output_core(const DeviceConfig& cfg) 
         pixels_.cancel_candidate();
         topology_valid_.store(previous_topology_valid, std::memory_order_release);
         output_enabled_.store(previous_output_enabled, std::memory_order_release);
+        last_fault_domain_.store(OutputFaultDomain::Topology, std::memory_order_release);
         // Note: Do not change /OE here; next normal frame may resume old topology
         topology_reconfigure_failures_++;
         ESP_LOGE("output", "OUTPUT_RECONFIG candidate_failed_preswap (%s): %s", reason, output_err_name(err));
@@ -311,6 +312,7 @@ esp_err_t OutputController::reconfigure_on_output_core(const DeviceConfig& cfg) 
     if (commit_err != ESP_OK) {
         ESP_LOGE("output", "OUTPUT_RECONFIG candidate_failed_postswap: commit_candidate failed: %s", output_err_name(commit_err));
         topology_reconfigure_failures_++;
+        last_fault_domain_.store(OutputFaultDomain::Topology, std::memory_order_release);
         esp_err_t rb_err = rollback_to_last_good_topology();
         unlock();
         return (rb_err == ESP_OK) ? commit_err : rb_err;
@@ -336,6 +338,7 @@ esp_err_t OutputController::reconfigure_on_output_core(const DeviceConfig& cfg) 
             Pca9685Driver::force_disable_outputs();
             ESP_LOGE("output", "OUTPUT_RECONFIG candidate_failed_postswap: PWM clear failed: %s", esp_err_to_name(pwm_clr));
             topology_reconfigure_failures_++;
+            last_fault_domain_.store(OutputFaultDomain::Topology, std::memory_order_release);
             esp_err_t rb_err = rollback_to_last_good_topology();
             unlock();
             return (rb_err == ESP_OK) ? pwm_clr : rb_err;
@@ -361,6 +364,7 @@ esp_err_t OutputController::reconfigure_on_output_core(const DeviceConfig& cfg) 
     }
 
     topology_valid_.store(true, std::memory_order_release);
+    last_fault_domain_.store(OutputFaultDomain::None, std::memory_order_release);
     if (!estop_latched_.load(std::memory_order_acquire)) {
         output_enabled_.store(true, std::memory_order_release);
     }
@@ -401,6 +405,7 @@ void OutputController::latch_estop() {
     // 1. Atomically latch state
     estop_latched_.store(true, std::memory_order_release);
     output_enabled_.store(false, std::memory_order_release);
+    last_fault_domain_.store(OutputFaultDomain::Safety, std::memory_order_release);
 
     // 2. Assert PCA /OE HIGH immediately without waiting on output lock or RMT
     Pca9685Driver::force_disable_outputs();
@@ -433,10 +438,36 @@ esp_err_t OutputController::clear_estop() {
     if (err == ESP_OK) {
         estop_latched_.store(false, std::memory_order_release);
         output_enabled_.store(true, std::memory_order_release);
+        last_fault_domain_.store(OutputFaultDomain::None, std::memory_order_release);
         // Leave /OE HIGH! The next successful commit exposes PWM.
     } else {
         ESP_LOGE("output", "clear_estop failed to zero hardware cleanly (addr=%s, pwm=%s)",
                  output_err_name(a_res.result), esp_err_to_name(p_err));
+    }
+    unlock();
+    return err;
+}
+
+esp_err_t OutputController::recover_pca() {
+    return OutputCoreExecutor::instance().execute_pca_recovery(this);
+}
+
+esp_err_t OutputController::recover_pca_on_output_core() {
+    const int core = xPortGetCoreID();
+    if (core != 1) {
+        ESP_LOGE("output", "PCA recovery called on invalid core=%d (CPU1 required)", core);
+        return ESP_ERR_INVALID_STATE;
+    }
+    lock();
+    Pca9685Driver::disable_outputs();
+    esp_err_t err = pwm_.recover();
+    if (err != ESP_OK) {
+        last_fault_domain_.store(OutputFaultDomain::PcaI2c, std::memory_order_release);
+        Pca9685Driver::disable_outputs();
+    } else {
+        if (last_fault_domain_.load(std::memory_order_relaxed) == OutputFaultDomain::PcaI2c) {
+            last_fault_domain_.store(OutputFaultDomain::None, std::memory_order_release);
+        }
     }
     unlock();
     return err;
@@ -584,9 +615,17 @@ esp_err_t OutputController::try_commit_locked() {
     if (final_err != ESP_OK) {
         commit_metrics_.failed++;
         failed_commit_count_.fetch_add(1, std::memory_order_relaxed);
+        if (err1 != ESP_OK) {
+            last_fault_domain_.store(OutputFaultDomain::AddressableRmt, std::memory_order_release);
+        } else if (err2 != ESP_OK) {
+            last_fault_domain_.store(OutputFaultDomain::PcaI2c, std::memory_order_release);
+        }
         Pca9685Driver::disable_outputs();
         blackout_locked(); // Deterministic blackout on failed commit!
     } else {
+        if (last_fault_domain_.load(std::memory_order_relaxed) != OutputFaultDomain::Safety) {
+            last_fault_domain_.store(OutputFaultDomain::None, std::memory_order_release);
+        }
         if (pwm_available_.load(std::memory_order_acquire)) {
             pwm_.enable_outputs();
         }

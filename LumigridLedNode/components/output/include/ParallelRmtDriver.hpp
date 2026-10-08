@@ -14,6 +14,7 @@
 // This header intentionally has no ESP-IDF RMT dependency.
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 
@@ -131,6 +132,9 @@ constexpr uint32_t addressable_timeout_us(uint16_t pixels, bool rgbw) {
     return addressable_wire_time_us(pixels, rgbw) + kAddressableWaitMarginUs;
 }
 
+/// Margin in microseconds before timeout that counts as a near deadline miss (HW-003)
+constexpr uint32_t kRmtNearDeadlineMarginUs = 3000;
+
 enum class LaneState : uint8_t {
     Unconfigured = 0,
     Ready,
@@ -139,6 +143,28 @@ enum class LaneState : uint8_t {
 };
 
 const char* lane_state_name(LaneState s);
+
+enum class RmtHealth : uint8_t {
+    Healthy = 0,
+    Marginal,
+    Faulted,
+};
+
+inline const char* rmt_health_name(RmtHealth h) {
+    switch (h) {
+        case RmtHealth::Healthy:  return "healthy";
+        case RmtHealth::Marginal: return "marginal";
+        case RmtHealth::Faulted:  return "faulted";
+    }
+    return "unknown";
+}
+
+struct RmtIsrLedger {
+    std::atomic<uint32_t> completions{0};
+    std::atomic<uint32_t> last_num_symbols{0};
+};
+
+static_assert(std::atomic<uint32_t>::is_always_lock_free, "32-bit atomic must be lock-free on ESP32");
 
 struct AddressableCommitResult {
     esp_err_t result       = ESP_OK;
@@ -160,6 +186,15 @@ struct RmtLaneDiagnostics {
     uint32_t max_wait_us = 0;
 
     esp_err_t last_error = ESP_OK;
+
+    // HW-003 RMT telemetry
+    uint32_t tx_done_callbacks = 0;
+    uint32_t completion_mismatches = 0;
+    uint32_t symbol_count_mismatches = 0;
+    uint32_t deadline_near_misses = 0;
+    uint32_t max_wait_over_wire_us = 0;
+    uint32_t last_expected_symbols = 0;
+    uint32_t last_actual_symbols = 0;
 };
 
 struct RmtDiagnostics {
@@ -170,6 +205,10 @@ struct RmtDiagnostics {
     uint32_t active_lanes = 0;
     uint32_t total_frames = 0;
     uint32_t failed_frames = 0;
+
+    // HW-003 RMT telemetry
+    RmtHealth health = RmtHealth::Healthy;
+    uint32_t deadline_near_misses = 0;
 
     RmtLaneDiagnostics lanes[MAX_RMT_LANES];
 };
@@ -196,6 +235,10 @@ public:
     virtual void cancel_prepared(uint8_t lane, bool existing) {
         if (!existing) destroy(lane);
     }
+
+    /// Inspection methods for completion telemetry (HW-003)
+    virtual uint32_t get_completed_count(uint8_t lane) const { return 0; }
+    virtual uint32_t get_last_num_symbols(uint8_t lane) const { return 0; }
 };
 
 /// Production transport backed by the public ESP-IDF RMT TX driver.
@@ -263,6 +306,7 @@ private:
         uint8_t   pos[4] = {0, 1, 2, 3}; // r,g,b,w -> wire byte index
         uint8_t*  wire   = nullptr;
         size_t    wire_len = 0;
+        uint32_t  submitted_generation = 0;
     };
 
     static void configure_pixel_order(Lane& lane, PixelOrder order);

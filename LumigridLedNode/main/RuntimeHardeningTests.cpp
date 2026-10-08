@@ -6682,6 +6682,252 @@ bool test_lg029_node_backed_authentication() {
         return true;
     }
 
+    bool test_lghw003_pca_recovery_and_rmt_integrity() {
+        ESP_LOGI(TAG, "Running LG-HW-003 PCA Bus Recovery + RMT Transmission Integrity tests...");
+
+        // 1. Symbol count formula validation (RGB & RGBW)
+        {
+            // 256 pixels RGB: 768 wire bytes -> 768 * 8 + 2 = 6146
+            constexpr size_t rgb_len = 256 * 3;
+            constexpr uint32_t expected_rgb_symbols = rgb_len * 8 + 2;
+            assert(expected_rgb_symbols == 6146);
+
+            // 256 pixels RGBW: 1024 wire bytes -> 1024 * 8 + 2 = 8194
+            constexpr size_t rgbw_len = 256 * 4;
+            constexpr uint32_t expected_rgbw_symbols = rgbw_len * 8 + 2;
+            assert(expected_rgbw_symbols == 8194);
+        }
+
+        // 2. PCA timeout constant and timing bounds
+        {
+            static_assert(kPcaTransactionTimeoutMs == 10, "PCA transaction timeout must be 10 ms");
+            static_assert(kPcaTransactionTimeoutMs <= 20, "PCA transaction timeout must be <= 20 ms");
+        }
+
+        // 3. Fake PCA Transport: Commit timeout immediately gates /OE & records fault
+        {
+            class FakePcaTransport final : public IPcaTransport {
+            public:
+                bool bus_init = true;
+                bool sda = true;
+                bool scl = true;
+                bool fail_with_timeout = false;
+                uint32_t timeout_used = 0;
+                uint32_t write_count = 0;
+                uint32_t clocks_sent = 0;
+                bool release_on_clock = false;
+                uint32_t release_clock_num = 0;
+
+                esp_err_t init_bus() override { bus_init = true; return ESP_OK; }
+                esp_err_t deinit_bus() override { bus_init = false; return ESP_OK; }
+                bool is_bus_initialized() const override { return bus_init; }
+                bool sda_high() const override { return sda; }
+                bool scl_high() const override { return scl; }
+
+                esp_err_t recover_bus(uint32_t& pulses_sent, bool& sda_released) override {
+                    pulses_sent = 0;
+                    sda_released = sda;
+                    if (!scl) {
+                        return ESP_ERR_TIMEOUT; // SCL low abort: do not pulse
+                    }
+                    if (sda) {
+                        sda_released = true;
+                        return ESP_OK;
+                    }
+                    for (unsigned p = 0; p < 9; ++p) {
+                        clocks_sent++;
+                        pulses_sent++;
+                        if (release_on_clock && clocks_sent >= release_clock_num) {
+                            sda = true;
+                            break;
+                        }
+                    }
+                    sda_released = sda;
+                    if (sda) {
+                        bus_init = true;
+                        return ESP_OK;
+                    }
+                    return ESP_ERR_TIMEOUT;
+                }
+
+                esp_err_t write(uint8_t, const uint8_t*, size_t, uint32_t timeout_ms) override {
+                    timeout_used = timeout_ms;
+                    write_count++;
+                    if (fail_with_timeout) return ESP_ERR_TIMEOUT;
+                    return ESP_OK;
+                }
+
+                esp_err_t write_read(uint8_t, const uint8_t* wd, size_t, uint8_t* rd, size_t, uint32_t timeout_ms) override {
+                    timeout_used = timeout_ms;
+                    if (fail_with_timeout) return ESP_ERR_TIMEOUT;
+                    if (rd) {
+                        if (wd && wd[0] == 0x00) *rd = 0x20; // MODE1 (AI=1, SLEEP=0)
+                        else if (wd && wd[0] == 0x01) *rd = 0x04; // MODE2 (OUTDRV=1)
+                        else if (wd && wd[0] == 0xFE) *rd = 0x05; // PRE_SCALE
+                    }
+                    return ESP_OK;
+                }
+            };
+
+            FakePcaTransport fake;
+            Pca9685Driver pca(&fake);
+            pca.init();
+            assert(fake.bus_init);
+
+            // Turn on OE
+            pca.enable_outputs();
+            assert(Pca9685Driver::is_outputs_enabled());
+
+            // Induce commit timeout
+            fake.fail_with_timeout = true;
+            pca.set(0, 100);
+            esp_err_t commit_err = pca.commit();
+            assert(commit_err == ESP_ERR_TIMEOUT);
+
+            // Must immediately gate /OE HIGH
+            assert(!Pca9685Driver::is_outputs_enabled());
+            assert(pca.last_fault_kind() == PcaFaultKind::Timeout);
+            assert(fake.timeout_used == kPcaTransactionTimeoutMs);
+
+            // Test SDA-low recovery with release after 3 clocks
+            fake.fail_with_timeout = false;
+            fake.sda = false;
+            fake.scl = true;
+            fake.release_on_clock = true;
+            fake.release_clock_num = 3;
+            fake.clocks_sent = 0;
+
+            esp_err_t rec_err = pca.recover();
+            assert(rec_err == ESP_OK);
+            assert(fake.clocks_sent == 3);
+            assert(fake.clocks_sent <= 9);
+            assert(!Pca9685Driver::is_outputs_enabled()); // /OE remains HIGH after recovery!
+            assert(pca.diagnostics().healthy);
+            assert(!pca.recovery_required());
+
+            // Test SDA remaining low after 9 clocks fails safely
+            fake.sda = false;
+            fake.scl = true;
+            fake.release_on_clock = false;
+            fake.clocks_sent = 0;
+            rec_err = pca.recover();
+            assert(rec_err != ESP_OK);
+            assert(fake.clocks_sent == 9);
+            assert(!Pca9685Driver::is_outputs_enabled()); // /OE remains HIGH!
+            assert(!pca.diagnostics().healthy);
+            assert(pca.recovery_required());
+
+            // Test SCL stuck low aborts without pulsing SCL
+            fake.sda = false;
+            fake.scl = false;
+            fake.clocks_sent = 0;
+            rec_err = pca.recover();
+            assert(rec_err != ESP_OK);
+            assert(fake.clocks_sent == 0); // No clocks pulsed!
+            assert(!Pca9685Driver::is_outputs_enabled()); // /OE remains HIGH!
+            assert(pca.last_fault_kind() == PcaFaultKind::SclStuckLow);
+        }
+
+        // 4. OutputController Fault Domain Classification & Recovery Integration
+        {
+            OutputController ctrl;
+            assert(ctrl.last_fault_domain() == OutputFaultDomain::None);
+
+            // E-stop triggers Safety fault domain
+            ctrl.latch_estop();
+            assert(ctrl.last_fault_domain() == OutputFaultDomain::Safety);
+            assert(ctrl.is_estop_latched());
+
+            ctrl.clear_estop();
+            ctrl.clear_fault_domain();
+            assert(ctrl.last_fault_domain() == OutputFaultDomain::None);
+        }
+
+        // 5. RMT Transmission Integrity: Callbacks, Parity & Symbol Validation
+        {
+            class IntegrityTestRmtTransport final : public IRmtTransport {
+            public:
+                bool active[8] = {};
+                uint32_t completions[8] = {};
+                uint32_t symbols[8] = {};
+                bool submit_call_seen = false;
+                bool wait_call_seen = false;
+                bool order_valid = true;
+
+                esp_err_t create(uint8_t lane, int, bool) override {
+                    if (lane < 8) active[lane] = true;
+                    return ESP_OK;
+                }
+                esp_err_t destroy(uint8_t lane) override {
+                    if (lane < 8) active[lane] = false;
+                    return ESP_OK;
+                }
+                esp_err_t submit(uint8_t, const uint8_t*, size_t) override {
+                    if (wait_call_seen) order_valid = false;
+                    submit_call_seen = true;
+                    return ESP_OK;
+                }
+                esp_err_t wait(uint8_t, uint32_t) override {
+                    wait_call_seen = true;
+                    return ESP_OK;
+                }
+                uint32_t get_completed_count(uint8_t lane) const override {
+                    return lane < 8 ? completions[lane] : 0;
+                }
+                uint32_t get_last_num_symbols(uint8_t lane) const override {
+                    return lane < 8 ? symbols[lane] : 0;
+                }
+            };
+
+            IntegrityTestRmtTransport trans;
+            ParallelRmtDriver rmt(&trans);
+
+            DeviceConfig cfg{};
+            cfg.channels[0].enabled = true;
+            cfg.channels[0].pixel_count = 10;
+            cfg.channels[0].addressable_type = AddressableType::WS2812;
+            cfg.channels[0].pixel_order = PixelOrder::GRB;
+
+            esp_err_t cfg_err = rmt.reconfigure(cfg, 16 * 1024, 12 * 1024);
+            assert(cfg_err == ESP_OK);
+
+            // 10 pixels WS2812 -> 30 bytes wire -> expected symbols = 30 * 8 + 2 = 242
+            const uint32_t expected_symbols = 30 * 8 + 2;
+            trans.completions[0] = 1;
+            trans.symbols[0] = expected_symbols;
+
+            AddressableCommitResult res = rmt.commit();
+            assert(res.result == ESP_OK);
+            assert(trans.order_valid);
+            assert(rmt.lane_state(0) == LaneState::Ready);
+            assert(rmt.diagnostics().lanes[0].completion_mismatches == 0);
+            assert(rmt.diagnostics().lanes[0].symbol_count_mismatches == 0);
+            assert(rmt.diagnostics().health == RmtHealth::Healthy);
+
+            // Test completion generation mismatch
+            // Advance commit without advancing transport completion counter
+            res = rmt.commit();
+            // submitted was incremented to 2, but completions remains 1 -> mismatch!
+            assert(res.result != ESP_OK);
+            assert(rmt.lane_state(0) == LaneState::Faulted);
+            assert(rmt.diagnostics().lanes[0].completion_mismatches == 1);
+            assert(rmt.diagnostics().health == RmtHealth::Faulted);
+
+            // Clear fault and test symbol count mismatch
+            rmt.clear_faults();
+            trans.completions[0] = 3;
+            trans.symbols[0] = 999; // Corrupted symbol count!
+            res = rmt.commit();
+            assert(res.result != ESP_OK);
+            assert(rmt.lane_state(0) == LaneState::Faulted);
+            assert(rmt.diagnostics().lanes[0].symbol_count_mismatches == 1);
+            assert(rmt.diagnostics().health == RmtHealth::Faulted);
+        }
+
+        ESP_LOGI(TAG, "[PASS] LG-HW-003 PCA Bus Recovery + RMT Transmission Integrity tests passed.");
+        return true;
+    }
+
 } // namespace
 
 bool run_runtime_hardening_tests() {
@@ -6816,6 +7062,9 @@ bool run_runtime_hardening_tests() {
 
     // LG-HW-002 Transactional Output + Wi-Fi Fault Containment
     all_ok &= test_lghw002_transactional_output_and_wifi();
+
+    // LG-HW-003 PCA Bus Recovery + RMT Transmission Integrity
+    all_ok &= test_lghw003_pca_recovery_and_rmt_integrity();
 
     if (all_ok) {
         ESP_LOGI(TAG, "==================================================");

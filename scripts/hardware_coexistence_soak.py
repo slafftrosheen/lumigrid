@@ -362,19 +362,48 @@ def main():
 
     delta_rmt_frames = final_rmt.get("frames", 0) - base_rmt_frames
     delta_rmt_failures = final_rmt.get("failedFrames", 0) - base_rmt_fails
+    delta_rmt_near_misses = final_rmt.get("deadlineNearMisses", 0) - base_rmt.get("deadlineNearMisses", 0)
+
     delta_pca_tx = final_pwm.get("transactions", 0) - base_pca_tx
     delta_pca_failures = final_pwm.get("transactionFailures", 0) - base_pca_fails
+    delta_pca_recoveries = final_pwm.get("recoveryAttempts", 0) - base_pwm.get("recoveryAttempts", 0)
+    delta_pca_recovery_fails = final_pwm.get("recoveryFailures", 0) - base_pwm.get("recoveryFailures", 0)
+    max_pca_latency_us = final_pwm.get("maxTransactionUs", 0)
+
     delta_wifi_disconnects = final_net.get("disconnectEvents", 0) - base_wifi_discs
     delta_fallback_activations = final_net.get("fallbackActivations", 0) - base_fb_activations
     delta_deadline_misses = final_frame.get("deadlineMisses", 0) - base_deadline_misses
 
     final_topo_gen = final_ctrl.get("topologyGeneration", base_topo_gen)
     final_topo_valid = final_ctrl.get("topologyValid", True)
+    final_fault_domain = final_ctrl.get("faultDomain", "none")
     actual_wifi_mode = final_net.get("actualMode", "unknown")
+
+    # Per-lane RMT parity calculations
+    base_lanes_map = {l.get("lane", i): l for i, l in enumerate(base_rmt.get("lanes", []))}
+    final_lanes_map = {l.get("lane", i): l for i, l in enumerate(final_rmt.get("lanes", []))}
+
+    lane_parity = {}
+    total_completion_mismatches = 0
+    total_symbol_mismatches = 0
+    total_lane_near_misses = 0
+
+    for l_idx in range(8):
+        bl = base_lanes_map.get(l_idx, {})
+        fl = final_lanes_map.get(l_idx, {})
+        d_sub = fl.get("submissions", 0) - bl.get("submissions", 0)
+        d_cb = fl.get("txDoneCallbacks", 0) - bl.get("txDoneCallbacks", 0)
+        d_cm = fl.get("completionMismatches", 0) - bl.get("completionMismatches", 0)
+        d_sm = fl.get("symbolMismatches", 0) - bl.get("symbolMismatches", 0)
+        d_nm = fl.get("deadlineNearMisses", 0) - bl.get("deadlineNearMisses", 0)
+        lane_parity[l_idx] = (d_cb, d_sub)
+        total_completion_mismatches += d_cm
+        total_symbol_mismatches += d_sm
+        total_lane_near_misses += d_nm
 
     total_time = time.time() - start_time
     print("\n==================================================================")
-    print("                LG-HW-002 SOAK TEST FINAL REPORT")
+    print("                LG-HW-003 SOAK TEST FINAL REPORT")
     print("==================================================================")
     print(f"Elapsed Time:                  {total_time:.2f} seconds")
     print(f"Total HTTP Requests:           {metrics.total_requests}")
@@ -382,11 +411,26 @@ def main():
     print(f"Failed HTTP Requests:          {metrics.failed_requests}")
     print(f"Reboots Detected:              {metrics.reboots_detected}")
     print("------------------------------------------------------------------")
+    print("RMT CALLBACK PARITY & INTEGRITY:")
+    for l_idx in range(8):
+        cb, sub = lane_parity.get(l_idx, (0, 0))
+        print(f"  lane {l_idx}  {cb}/{sub}")
+    print(f"RMT symbol mismatches:         {total_symbol_mismatches}")
+    print(f"RMT completion mismatches:     {total_completion_mismatches}")
+    print(f"RMT deadline near misses:      {delta_rmt_near_misses}")
+    print("------------------------------------------------------------------")
+    print("PCA / I2C INTEGRITY:")
+    print(f"  PCA tx failures:             {delta_pca_failures}")
+    print(f"  PCA recoveries:              {delta_pca_recoveries}")
+    print(f"  PCA recovery failures:       {delta_pca_recovery_fails}")
+    print(f"  PCA max transaction latency: {max_pca_latency_us} us")
+    print(f"  PCA recovery required:       {final_pwm.get('recoveryRequired', False)}")
+    print(f"  PCA last fault kind:         {final_pwm.get('lastFaultKind', 'none')}")
+    print("------------------------------------------------------------------")
     print("HARDWARE COEXISTENCE DELTAS:")
     print(f"  RMT Rendered Frames Delta:   +{delta_rmt_frames}")
     print(f"  RMT Failed Frames Delta:     {delta_rmt_failures}")
     print(f"  PCA Transactions Delta:      +{delta_pca_tx}")
-    print(f"  PCA Failures Delta:          {delta_pca_failures}")
     print(f"  Frame Deadline Misses Delta: {delta_deadline_misses}")
     print(f"  Wi-Fi Disconnect Events:     {delta_wifi_disconnects}")
     print(f"  Fallback AP Activations:     {delta_fallback_activations}")
@@ -400,44 +444,68 @@ def main():
     print("------------------------------------------------------------------")
     print("LIFECYCLE & TOPOLOGY INTEGRITY:")
     print(f"  Topology Valid:              {final_topo_valid}")
+    print(f"  Fault Domain:                {final_fault_domain}")
     print(f"  Topology Generation Baseline:{base_topo_gen}")
     print(f"  Topology Generation Final:   {final_topo_gen}")
     print(f"  Actual Wi-Fi Mode:           {actual_wifi_mode}")
     print("------------------------------------------------------------------")
 
-    passed = True
-    if metrics.reboots_detected > 0:
-        print("[FAIL] Unexpected device reboots occurred during soak!")
-        passed = False
-    if delta_rmt_failures > 0:
-        print(f"[FAIL] RMT failed frames observed during soak (delta: {delta_rmt_failures})!")
-        passed = False
-    if delta_pca_failures > 0:
-        print(f"[FAIL] PCA transaction failures observed during soak (delta: {delta_pca_failures})!")
-        passed = False
-    if not final_topo_valid:
-        print("[FAIL] Hardware topology became invalid!")
-        passed = False
-    if final_topo_gen != base_topo_gen:
-        print(f"[FAIL] Topology generation spontaneously drifted ({base_topo_gen} -> {final_topo_gen})!")
-        passed = False
-    if metrics.min_largest_internal < 12 * 1024:
-        print(f"[FAIL] Internal memory fell below reserve (min largest internal block: {metrics.min_largest_internal} < 12 KB)!")
-        passed = False
-    if metrics.failed_requests > (metrics.total_requests * 0.05):
-        print("[FAIL] HTTP failure rate exceeded 5% threshold!")
-        passed = False
-    if actual_wifi_mode == "apsta" and not final_net.get("isFallbackAp", False):
-        print("[FAIL] State drift: actual Wi-Fi mode is APSTA but software claims normal STA!")
-        passed = False
+    # Qualification classification: PASS, MARGINAL, FAIL
+    fail_reasons = []
+    marginal_reasons = []
 
-    if passed:
-        print("[PASS] LG-HW-002 Hardware Coexistence Soak Test PASSED ALL CRITERIA!")
+    # FAIL conditions
+    if metrics.reboots_detected > 0:
+        fail_reasons.append("Unexpected device reboot")
+    if delta_rmt_failures > 0:
+        fail_reasons.append(f"RMT failed frames (delta: {delta_rmt_failures})")
+    if total_completion_mismatches > 0:
+        fail_reasons.append(f"RMT completion mismatches (delta: {total_completion_mismatches})")
+    if total_symbol_mismatches > 0:
+        fail_reasons.append(f"RMT symbol mismatches (delta: {total_symbol_mismatches})")
+    if delta_pca_failures > 0:
+        fail_reasons.append(f"PCA transaction failures (delta: {delta_pca_failures})")
+    if delta_pca_recovery_fails > 0:
+        fail_reasons.append(f"PCA recovery failures (delta: {delta_pca_recovery_fails})")
+    if not final_topo_valid:
+        fail_reasons.append("Hardware topology became invalid")
+    if final_topo_gen != base_topo_gen:
+        fail_reasons.append(f"Topology generation drifted ({base_topo_gen} -> {final_topo_gen})")
+    if metrics.min_largest_internal < 12 * 1024:
+        fail_reasons.append(f"Internal memory fell below reserve ({metrics.min_largest_internal} < 12 KB)")
+    if metrics.failed_requests > (metrics.total_requests * 0.05):
+        fail_reasons.append("HTTP failure rate exceeded 5%")
+    if actual_wifi_mode == "apsta" and not final_net.get("isFallbackAp", False):
+        fail_reasons.append("State drift: actual Wi-Fi mode is APSTA but software claims normal STA")
+
+    # MARGINAL conditions (when no hard FAIL)
+    if delta_rmt_near_misses > 0 or total_lane_near_misses > 0:
+        marginal_reasons.append(f"RMT deadline near misses observed (delta: {delta_rmt_near_misses})")
+    if delta_deadline_misses > 10:
+        marginal_reasons.append(f"Frame deadline misses exceeded threshold (delta: {delta_deadline_misses})")
+
+    if fail_reasons:
+        classification = "FAIL"
+    elif marginal_reasons:
+        classification = "MARGINAL"
     else:
-        print("[FAIL] LG-HW-002 Hardware Coexistence Soak Test FAILED one or more criteria.")
+        classification = "PASS"
+
+    print(f"QUALIFICATION RESULT: [{classification}]")
+    if fail_reasons:
+        for r in fail_reasons:
+            print(f"  [FAIL REASON] {r}")
+    if marginal_reasons:
+        for r in marginal_reasons:
+            print(f"  [MARGINAL REASON] {r}")
     print("==================================================================")
 
-    return 0 if passed else 1
+    if classification == "PASS":
+        return 0
+    elif classification == "MARGINAL":
+        return 0  # Functional pass with warnings
+    else:
+        return 1
 
 
 if __name__ == "__main__":

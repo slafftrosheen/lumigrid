@@ -10,6 +10,25 @@
 
 namespace lg {
 
+enum class OutputFaultDomain : uint8_t {
+    None = 0,
+    AddressableRmt,
+    PcaI2c,
+    Topology,
+    Safety,
+};
+
+inline const char* output_fault_domain_name(OutputFaultDomain d) {
+    switch (d) {
+        case OutputFaultDomain::None: return "none";
+        case OutputFaultDomain::AddressableRmt: return "addressable_rmt";
+        case OutputFaultDomain::PcaI2c: return "pca_i2c";
+        case OutputFaultDomain::Topology: return "topology";
+        case OutputFaultDomain::Safety: return "safety";
+        default: return "unknown";
+    }
+}
+
 class OutputController;
 
 /// Controlled output transaction RAII object (Batch 8 Item 8).
@@ -129,6 +148,11 @@ public:
     esp_err_t reconfigure(const DeviceConfig& cfg);
     esp_err_t reconfigure_on_output_core(const DeviceConfig& cfg);
     esp_err_t rollback_to_last_good_topology();
+    esp_err_t recover_pca();
+    esp_err_t recover_pca_on_output_core();
+    
+    OutputFaultDomain last_fault_domain() const { return last_fault_domain_.load(std::memory_order_acquire); }
+    void clear_fault_domain() { last_fault_domain_.store(OutputFaultDomain::None, std::memory_order_release); }
     
     RmtDiagnostics rmt_diagnostics() const { return pixels_.diagnostics(); }
 
@@ -205,6 +229,7 @@ private:
     std::atomic<bool> topology_valid_{false};  // Set to true only after a successful reconfigure()
     std::atomic<uint32_t> topology_generation_{0};
     OutputTopologySnapshot last_known_good_snapshot_{};
+    std::atomic<OutputFaultDomain> last_fault_domain_{OutputFaultDomain::None};
 
     std::atomic<uint32_t> topology_reconfigure_attempts_{0};
     std::atomic<uint32_t> topology_reconfigure_failures_{0};

@@ -158,6 +158,22 @@ esp_err_t new_strip_encoder(bool rgbw, rmt_encoder_handle_t* out) {
 }
 
 // ── Production transport ──────────────────────────────────────────────────────
+// Static DRAM storage for ISR ledgers to guarantee internal SRAM residency
+DRAM_ATTR static RmtIsrLedger s_ledgers[ParallelRmtDriver::kLanes];
+
+static bool IRAM_ATTR on_rmt_tx_done(
+    rmt_channel_handle_t /*channel*/,
+    const rmt_tx_done_event_data_t* event,
+    void* user_data
+) {
+    if (user_data && event) {
+        auto* ledger = static_cast<RmtIsrLedger*>(user_data);
+        ledger->completions.fetch_add(1, std::memory_order_relaxed);
+        ledger->last_num_symbols.store(static_cast<uint32_t>(event->num_symbols), std::memory_order_relaxed);
+    }
+    return false;
+}
+
 class EspRmtTransport final : public IRmtTransport {
 public:
     esp_err_t prepare(uint8_t lane, int gpio, bool rgbw, bool existing) override {
@@ -212,6 +228,20 @@ public:
             return err;
         }
 
+        // Reset ISR ledger and register event callback before enabling channel
+        s_ledgers[lane].completions.store(0, std::memory_order_relaxed);
+        s_ledgers[lane].last_num_symbols.store(0, std::memory_order_relaxed);
+
+        rmt_tx_event_callbacks_t cbs = {};
+        cbs.on_trans_done = on_rmt_tx_done;
+        err = rmt_tx_register_event_callbacks(chan_[lane], &cbs, &s_ledgers[lane]);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "RMT register event callbacks failed for lane %u: %s", lane, esp_err_to_name(err));
+            rmt_del_channel(chan_[lane]);
+            chan_[lane] = nullptr;
+            return err;
+        }
+
         err = new_strip_encoder(rgbw, &enc_[lane]);
         if (err != ESP_OK) {
             rmt_del_channel(chan_[lane]);
@@ -248,6 +278,8 @@ public:
 
     esp_err_t destroy(uint8_t lane) override {
         if (lane >= ParallelRmtDriver::kLanes || !chan_[lane]) return ESP_OK;
+        s_ledgers[lane].completions.store(0, std::memory_order_relaxed);
+        s_ledgers[lane].last_num_symbols.store(0, std::memory_order_relaxed);
         esp_err_t first = rmt_disable(chan_[lane]);
         esp_err_t e2 = rmt_del_channel(chan_[lane]);
         if (first == ESP_OK) first = e2;
@@ -255,6 +287,14 @@ public:
         chan_[lane] = nullptr;
         enc_[lane] = nullptr;
         return first;
+    }
+
+    uint32_t get_completed_count(uint8_t lane) const override {
+        return lane < ParallelRmtDriver::kLanes ? s_ledgers[lane].completions.load(std::memory_order_relaxed) : 0;
+    }
+
+    uint32_t get_last_num_symbols(uint8_t lane) const override {
+        return lane < ParallelRmtDriver::kLanes ? s_ledgers[lane].last_num_symbols.load(std::memory_order_relaxed) : 0;
     }
 
 private:
@@ -405,6 +445,7 @@ esp_err_t ParallelRmtDriver::commit_candidate() {
         } else if (configured(lane)) {
             tx().destroy(lane);
         }
+        candidate_[lane].submitted_generation = lanes_[lane].submitted_generation;
         heap_caps_free(lanes_[lane].wire);
         lanes_[lane] = candidate_[lane];
         candidate_[lane] = Lane{};
@@ -521,6 +562,7 @@ AddressableCommitResult ParallelRmtDriver::commit(bool allow_faulted) {
         }
         s_last_sub_err[lane] = ESP_OK;
         L.state = LaneState::Transmitting;
+        L.submitted_generation++;
         submitted[lane] = true;
     }
     const int64_t t1 = esp_timer_get_time();
@@ -530,12 +572,28 @@ AddressableCommitResult ParallelRmtDriver::commit(bool allow_faulted) {
     for (uint8_t lane = 0; lane < kLanes; ++lane) {
         if (!submitted[lane]) continue;
         Lane& L = lanes_[lane];
+        const uint32_t timeout_us = addressable_timeout_us(L.pixels, L.rgbw);
+        const uint32_t wire_us = addressable_wire_time_us(L.pixels, L.rgbw);
         const int64_t wait_t0 = esp_timer_get_time();
-        const esp_err_t err = tx().wait(lane, addressable_timeout_us(L.pixels, L.rgbw));
+        const esp_err_t err = tx().wait(lane, timeout_us);
         const uint32_t wait_us = static_cast<uint32_t>(esp_timer_get_time() - wait_t0);
 
         auto& ldiag = diagnostics_.lanes[lane];
         if (wait_us > ldiag.max_wait_us) ldiag.max_wait_us = wait_us;
+
+        // HW-003: Latency overhead telemetry (wait time exceeding wire time)
+        if (wait_us > wire_us) {
+            const uint32_t overhead_us = wait_us - wire_us;
+            if (overhead_us > ldiag.max_wait_over_wire_us) {
+                ldiag.max_wait_over_wire_us = overhead_us;
+            }
+        }
+
+        // HW-003: Deadline near-miss detection
+        if (timeout_us >= wait_us && (timeout_us - wait_us) <= kRmtNearDeadlineMarginUs) {
+            ldiag.deadline_near_misses++;
+            diagnostics_.deadline_near_misses++;
+        }
 
         if (err != ESP_OK) {
             L.state = LaneState::Faulted;
@@ -550,12 +608,50 @@ AddressableCommitResult ParallelRmtDriver::commit(bool allow_faulted) {
                 s_last_wait_err[lane] = err;
                 ESP_LOGE(TAG, "lane %u wait failed: %s", lane, output_err_name(err));
             }
-        } else {
-            L.state = LaneState::Ready;
-            ldiag.completed++;
-            ldiag.last_error = ESP_OK;
-            s_last_wait_err[lane] = ESP_OK;
+            continue;
         }
+
+        // HW-003: Inspect ISR completion ledger
+        const uint32_t completed_gen = tx().get_completed_count(lane);
+        const uint32_t actual_symbols = tx().get_last_num_symbols(lane);
+        const uint32_t expected_symbols = static_cast<uint32_t>(L.wire_len * 8 + 2);
+
+        ldiag.tx_done_callbacks = completed_gen;
+        ldiag.last_expected_symbols = expected_symbols;
+        ldiag.last_actual_symbols = actual_symbols;
+
+        // HW-003 Section 16: Track submit-to-completion parity
+        if (completed_gen != L.submitted_generation) {
+            ldiag.completion_mismatches++;
+            L.state = LaneState::Faulted;
+            note(ESP_ERR_INVALID_STATE, lane);
+            ldiag.last_error = ESP_ERR_INVALID_STATE;
+            if (s_last_wait_err[lane] != ESP_ERR_INVALID_STATE) {
+                s_last_wait_err[lane] = ESP_ERR_INVALID_STATE;
+                ESP_LOGE(TAG, "lane %u completion parity mismatch: submitted=%lu completed=%lu",
+                         lane, (unsigned long)L.submitted_generation, (unsigned long)completed_gen);
+            }
+            continue;
+        }
+
+        // HW-003 Section 15: Validate generated RMT symbol count
+        if (actual_symbols != expected_symbols) {
+            ldiag.symbol_count_mismatches++;
+            L.state = LaneState::Faulted;
+            note(ESP_ERR_INVALID_SIZE, lane);
+            ldiag.last_error = ESP_ERR_INVALID_SIZE;
+            if (s_last_wait_err[lane] != ESP_ERR_INVALID_SIZE) {
+                s_last_wait_err[lane] = ESP_ERR_INVALID_SIZE;
+                ESP_LOGE(TAG, "lane %u symbol count mismatch: expected=%lu actual=%lu",
+                         lane, (unsigned long)expected_symbols, (unsigned long)actual_symbols);
+            }
+            continue;
+        }
+
+        L.state = LaneState::Ready;
+        ldiag.completed++;
+        ldiag.last_error = ESP_OK;
+        s_last_wait_err[lane] = ESP_OK;
     }
     const int64_t t2 = esp_timer_get_time();
 
@@ -574,6 +670,27 @@ RmtDiagnostics ParallelRmtDriver::diagnostics() const {
     diagnostics_.active_lanes = active_lanes();
     diagnostics_.interrupt_priority = kRmtInterruptPriority;
     diagnostics_.iram_safe = (CONFIG_RMT_ISR_IRAM_SAFE != 0);
+
+    bool has_fault = (diagnostics_.failed_frames > 0);
+    for (uint8_t i = 0; i < kLanes; ++i) {
+        if (lanes_[i].state == LaneState::Faulted ||
+            diagnostics_.lanes[i].wait_timeouts > 0 ||
+            diagnostics_.lanes[i].submit_failures > 0 ||
+            diagnostics_.lanes[i].completion_mismatches > 0 ||
+            diagnostics_.lanes[i].symbol_count_mismatches > 0) {
+            has_fault = true;
+            break;
+        }
+    }
+
+    if (has_fault) {
+        diagnostics_.health = RmtHealth::Faulted;
+    } else if (diagnostics_.deadline_near_misses > 0) {
+        diagnostics_.health = RmtHealth::Marginal;
+    } else {
+        diagnostics_.health = RmtHealth::Healthy;
+    }
+
     return diagnostics_;
 }
 

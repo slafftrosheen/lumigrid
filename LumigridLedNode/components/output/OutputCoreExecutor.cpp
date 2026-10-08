@@ -143,6 +143,42 @@ esp_err_t OutputCoreExecutor::execute_reconfigure(OutputController* controller, 
     return cmd.result;
 }
 
+esp_err_t OutputCoreExecutor::execute_pca_recovery(OutputController* controller) {
+    if (controller == nullptr) return ESP_ERR_INVALID_ARG;
+
+    // If caller is already executing on CPU1, invoke directly to prevent deadlocks
+    if (xPortGetCoreID() == 1) {
+        return controller->recover_pca_on_output_core();
+    }
+
+    esp_err_t err = start();
+    if (err != ESP_OK) return err;
+
+    OutputCoreCommand cmd{};
+    cmd.type = OutputCoreCommandType::RecoverPca;
+    cmd.controller = controller;
+    cmd.completion_sem = xSemaphoreCreateBinary();
+    if (cmd.completion_sem == nullptr) return ESP_ERR_NO_MEM;
+
+    if (xSemaphoreTake(lifecycle_mutex_, portMAX_DELAY) != pdTRUE) {
+        vSemaphoreDelete(cmd.completion_sem);
+        return ESP_ERR_TIMEOUT;
+    }
+
+    OutputCoreCommand* p_cmd = &cmd;
+    if (xQueueSend(queue_, &p_cmd, portMAX_DELAY) != pdTRUE) {
+        xSemaphoreGive(lifecycle_mutex_);
+        vSemaphoreDelete(cmd.completion_sem);
+        return ESP_FAIL;
+    }
+
+    xSemaphoreTake(cmd.completion_sem, portMAX_DELAY);
+    xSemaphoreGive(lifecycle_mutex_);
+
+    vSemaphoreDelete(cmd.completion_sem);
+    return cmd.result;
+}
+
 void OutputCoreExecutor::task_entry(void* arg) {
     static_cast<OutputCoreExecutor*>(arg)->run();
 }
@@ -163,6 +199,8 @@ void OutputCoreExecutor::run() {
                 } else {
                     cmd->result = ESP_ERR_INVALID_ARG;
                 }
+            } else if (cmd->type == OutputCoreCommandType::RecoverPca) {
+                cmd->result = cmd->controller->recover_pca_on_output_core();
             }
             if (cmd->completion_sem != nullptr) {
                 xSemaphoreGive(cmd->completion_sem);
