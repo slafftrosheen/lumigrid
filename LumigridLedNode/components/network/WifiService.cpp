@@ -10,7 +10,7 @@
 #include "esp_mac.h"
 #include "esp_netif.h"
 #include "esp_wifi.h"
-#include "nvs_flash.h"
+#include "NvsRuntime.hpp"
 
 namespace lg {
 namespace {
@@ -25,7 +25,20 @@ void WifiService::on_fallback_timer(void* arg) {
     }
     if (self->is_fallback_ap_.load(std::memory_order_relaxed)) {
         ESP_LOGI(kTag, "Fallback AP: periodic background attempt to rejoin STA...");
-        esp_wifi_connect();
+        self->wifi_diagnostics_.reconnect_attempts++;
+        esp_err_t err = esp_wifi_connect();
+        if (err != ESP_OK) {
+            self->wifi_diagnostics_.reconnect_failures++;
+            self->wifi_diagnostics_.last_error = err;
+            ESP_LOGW(kTag, "Background STA reconnect attempt failed: %s", esp_err_to_name(err));
+        }
+    }
+}
+
+void WifiService::on_fallback_exit_timer(void* arg) {
+    auto* self = static_cast<WifiService*>(arg);
+    if (self) {
+        self->perform_exit_fallback_ap();
     }
 }
 
@@ -63,23 +76,81 @@ void WifiService::cancel_fallback_timer() {
     }
 }
 
+void WifiService::schedule_exit_fallback_ap() {
+    cancel_fallback_exit_timer();
+    fallback_exit_pending_.store(true, std::memory_order_release);
+
+    if (!fallback_exit_timer_) {
+        esp_timer_create_args_t timer_args = {
+            .callback = &WifiService::on_fallback_exit_timer,
+            .arg = this,
+            .dispatch_method = ESP_TIMER_TASK,
+            .name = "wifi_fb_exit",
+            .skip_unhandled_events = true
+        };
+        esp_timer_create(&timer_args, &fallback_exit_timer_);
+    }
+
+    if (fallback_exit_timer_) {
+        // Deferred 50ms to allow IP_EVENT handling to cleanly return
+        esp_timer_start_once(fallback_exit_timer_, 50000ULL);
+    }
+}
+
+void WifiService::cancel_fallback_exit_timer() {
+    if (fallback_exit_timer_) {
+        esp_timer_stop(fallback_exit_timer_);
+    }
+}
+
+void WifiService::perform_exit_fallback_ap() {
+    wifi_diagnostics_.fallback_exit_attempts++;
+    ESP_LOGI(kTag, "Transitioning from Fallback AP (APSTA) to normal Station (STA) mode...");
+
+    esp_err_t err = esp_wifi_set_mode(WIFI_MODE_STA);
+    if (err != ESP_OK) {
+        wifi_diagnostics_.fallback_exit_failures++;
+        wifi_diagnostics_.last_error = err;
+        ESP_LOGE(kTag, "Failed to switch mode to WIFI_MODE_STA (%s). Remaining in APSTA fallback mode.", esp_err_to_name(err));
+        return;
+    }
+
+    wifi_mode_t cur_mode = WIFI_MODE_NULL;
+    err = esp_wifi_get_mode(&cur_mode);
+    if (err != ESP_OK || cur_mode != WIFI_MODE_STA) {
+        wifi_diagnostics_.fallback_exit_failures++;
+        wifi_diagnostics_.last_error = (err != ESP_OK) ? err : ESP_ERR_INVALID_STATE;
+        ESP_LOGE(kTag, "Failed to confirm WIFI_MODE_STA after set_mode. Remaining degraded in APSTA.");
+        return;
+    }
+
+    is_fallback_ap_.store(false, std::memory_order_release);
+    fallback_exit_pending_.store(false, std::memory_order_release);
+    ESP_LOGI(kTag, "Successfully exited fallback AP mode. Device restored to STA-only mode.");
+    if (callback_) {
+        callback_(state_);
+    }
+}
+
 esp_err_t WifiService::start(const WifiConfig& config,
                              WifiStateCallback callback) {
     config_ = config;
     callback_ = std::move(callback);
     intentional_disconnect_.store(false, std::memory_order_relaxed);
     is_fallback_ap_.store(false, std::memory_order_relaxed);
+    fallback_exit_pending_.store(false, std::memory_order_relaxed);
     fallback_backoff_index_ = 0;
     retries_ = 0;
     last_disconnect_reason_.store(0, std::memory_order_relaxed);
 
     if (!wifi_init_done_) {
-        esp_err_t err = nvs_flash_init();
-        if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-            ESP_RETURN_ON_ERROR(nvs_flash_erase(), kTag, "nvs erase");
-            err = nvs_flash_init();
+        if (!NvsRuntime::ready()) {
+            esp_err_t nvs_err = NvsRuntime::initialise();
+            if (nvs_err != ESP_OK) {
+                ESP_LOGE(kTag, "NVS storage not ready for WiFi service: %s", esp_err_to_name(nvs_err));
+                return nvs_err;
+            }
         }
-        ESP_RETURN_ON_ERROR(err, kTag, "nvs init");
 
         esp_err_t netif_err = esp_netif_init();
         if (netif_err != ESP_OK && netif_err != ESP_ERR_INVALID_STATE) {
@@ -145,6 +216,7 @@ esp_err_t WifiService::start(const WifiConfig& config,
 }
 
 esp_err_t WifiService::start_sta() {
+    wifi_diagnostics_.start_attempts++;
     wifi_config_t wifi_cfg = {};
     std::strncpy(reinterpret_cast<char*>(wifi_cfg.sta.ssid),
                  config_.sta_ssid.c_str(),
@@ -153,15 +225,34 @@ esp_err_t WifiService::start_sta() {
                  config_.sta_password.c_str(),
                  sizeof(wifi_cfg.sta.password) - 1);
 
-    ESP_RETURN_ON_ERROR(esp_wifi_set_mode(WIFI_MODE_STA), kTag, "set sta mode");
-    ESP_RETURN_ON_ERROR(esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg), kTag, "sta cfg");
-    ESP_RETURN_ON_ERROR(esp_wifi_start(), kTag, "wifi start");
+    esp_err_t err = esp_wifi_set_mode(WIFI_MODE_STA);
+    if (err != ESP_OK) {
+        wifi_diagnostics_.start_failures++;
+        wifi_diagnostics_.last_error = err;
+        ESP_LOGE(kTag, "esp_wifi_set_mode(STA) failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    err = esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg);
+    if (err != ESP_OK) {
+        wifi_diagnostics_.start_failures++;
+        wifi_diagnostics_.last_error = err;
+        ESP_LOGE(kTag, "esp_wifi_set_config(STA) failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    err = esp_wifi_start();
+    if (err != ESP_OK) {
+        wifi_diagnostics_.start_failures++;
+        wifi_diagnostics_.last_error = err;
+        ESP_LOGE(kTag, "esp_wifi_start(STA) failed: %s", esp_err_to_name(err));
+        return err;
+    }
 
     state_ = WifiState::Connecting;
     return ESP_OK;
 }
 
 esp_err_t WifiService::start_ap() {
+    wifi_diagnostics_.start_attempts++;
     wifi_config_t ap_cfg = {};
     std::strncpy(reinterpret_cast<char*>(ap_cfg.ap.ssid),
                  config_.ap_ssid.c_str(),
@@ -187,9 +278,27 @@ esp_err_t WifiService::start_ap() {
              ap_cfg.ap.channel,
              (ap_cfg.ap.authmode == WIFI_AUTH_OPEN) ? "OPEN" : "WPA2_PSK");
 
-    ESP_RETURN_ON_ERROR(esp_wifi_set_mode(WIFI_MODE_AP), kTag, "set ap mode");
-    ESP_RETURN_ON_ERROR(esp_wifi_set_config(WIFI_IF_AP, &ap_cfg), kTag, "ap cfg");
-    ESP_RETURN_ON_ERROR(esp_wifi_start(), kTag, "wifi ap start");
+    esp_err_t err = esp_wifi_set_mode(WIFI_MODE_AP);
+    if (err != ESP_OK) {
+        wifi_diagnostics_.start_failures++;
+        wifi_diagnostics_.last_error = err;
+        ESP_LOGE(kTag, "esp_wifi_set_mode(AP) failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    err = esp_wifi_set_config(WIFI_IF_AP, &ap_cfg);
+    if (err != ESP_OK) {
+        wifi_diagnostics_.start_failures++;
+        wifi_diagnostics_.last_error = err;
+        ESP_LOGE(kTag, "esp_wifi_set_config(AP) failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    err = esp_wifi_start();
+    if (err != ESP_OK) {
+        wifi_diagnostics_.start_failures++;
+        wifi_diagnostics_.last_error = err;
+        ESP_LOGE(kTag, "esp_wifi_start(AP) failed: %s", esp_err_to_name(err));
+        return err;
+    }
     return ESP_OK;
 }
 
@@ -216,10 +325,23 @@ esp_err_t WifiService::start_fallback_ap() {
     }
 
     // Use APSTA mode so SoftAP serves operator while STA continues background reconnect
-    esp_wifi_set_mode(WIFI_MODE_APSTA);
-    esp_wifi_set_config(WIFI_IF_AP, &ap_cfg);
+    esp_err_t err = esp_wifi_set_mode(WIFI_MODE_APSTA);
+    if (err != ESP_OK) {
+        wifi_diagnostics_.last_error = err;
+        ESP_LOGE(kTag, "Failed to set APSTA mode for fallback AP: %s", esp_err_to_name(err));
+        return err;
+    }
 
-    is_fallback_ap_.store(true, std::memory_order_relaxed);
+    err = esp_wifi_set_config(WIFI_IF_AP, &ap_cfg);
+    if (err != ESP_OK) {
+        wifi_diagnostics_.last_error = err;
+        ESP_LOGE(kTag, "Failed to set AP config for fallback AP: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    wifi_diagnostics_.fallback_activations++;
+    is_fallback_ap_.store(true, std::memory_order_release);
+    fallback_exit_pending_.store(false, std::memory_order_release);
     state_ = WifiState::FallbackAp;
     has_ip_.store(true, std::memory_order_release); // Recovery AP interface is usable
 
@@ -240,7 +362,13 @@ void WifiService::event_handler(void* arg,
     if (event_base == WIFI_EVENT) {
         if (event_id == WIFI_EVENT_STA_START) {
             if (!self->intentional_disconnect_.load(std::memory_order_relaxed)) {
-                esp_wifi_connect();
+                self->wifi_diagnostics_.reconnect_attempts++;
+                esp_err_t err = esp_wifi_connect();
+                if (err != ESP_OK) {
+                    self->wifi_diagnostics_.reconnect_failures++;
+                    self->wifi_diagnostics_.last_error = err;
+                    ESP_LOGE(kTag, "esp_wifi_connect failed on STA_START: %s", esp_err_to_name(err));
+                }
             }
             return;
         }
@@ -272,8 +400,10 @@ void WifiService::event_handler(void* arg,
 
         if (event_id == WIFI_EVENT_STA_DISCONNECTED) {
             auto* dis_event = static_cast<wifi_event_sta_disconnected_t*>(event_data);
+            self->wifi_diagnostics_.disconnect_events++;
             if (dis_event) {
                 self->last_disconnect_reason_.store(dis_event->reason, std::memory_order_relaxed);
+                self->wifi_diagnostics_.last_disconnect_reason = dis_event->reason;
             }
 
             // Check if this was an administrative disconnect (e.g. reconfigure / stop)
@@ -296,7 +426,12 @@ void WifiService::event_handler(void* arg,
                 ++self->retries_;
                 ESP_LOGI(kTag, "STA disconnected (reason: %u). Retrying (%u/%u)...",
                          self->last_disconnect_reason_.load(), self->retries_, self->config_.max_retry);
-                esp_wifi_connect();
+                self->wifi_diagnostics_.reconnect_attempts++;
+                esp_err_t err = esp_wifi_connect();
+                if (err != ESP_OK) {
+                    self->wifi_diagnostics_.reconnect_failures++;
+                    self->wifi_diagnostics_.last_error = err;
+                }
                 self->state_ = WifiState::Connecting;
             } else if (self->config_.mode == WifiMode::StaWithApFallback) {
                 self->start_fallback_ap();
@@ -314,10 +449,16 @@ void WifiService::event_handler(void* arg,
         self->retries_ = 0;
         self->cancel_fallback_timer();
         self->fallback_backoff_index_ = 0;
-        self->is_fallback_ap_.store(false, std::memory_order_relaxed);
         self->has_ip_ = true;
         self->state_ = WifiState::Connected;
         ESP_LOGI(kTag, "STA connected and acquired IP address");
+
+        if (self->is_fallback_ap_.load(std::memory_order_acquire)) {
+            self->schedule_exit_fallback_ap();
+        } else {
+            self->is_fallback_ap_.store(false, std::memory_order_release);
+        }
+
         if (self->callback_) self->callback_(self->state_);
         return;
     }
@@ -334,13 +475,28 @@ bool WifiService::has_ip() const {
 esp_err_t WifiService::stop() {
     intentional_disconnect_.store(true, std::memory_order_relaxed);
     cancel_fallback_timer();
-    esp_wifi_stop();
+    cancel_fallback_exit_timer();
+    esp_err_t err = esp_wifi_stop();
+    if (err != ESP_OK) {
+        wifi_diagnostics_.last_error = err;
+        ESP_LOGE(kTag, "esp_wifi_stop failed: %s", esp_err_to_name(err));
+    }
     state_ = WifiState::Idle;
     has_ip_ = false;
     callback_ = nullptr;
     retries_ = 0;
     is_fallback_ap_.store(false, std::memory_order_relaxed);
-    return ESP_OK;
+    fallback_exit_pending_.store(false, std::memory_order_relaxed);
+    return err;
+}
+
+WifiDiagnostics WifiService::diagnostics() const {
+    WifiDiagnostics diag = wifi_diagnostics_;
+    wifi_mode_t m = WIFI_MODE_NULL;
+    if (wifi_init_done_ && esp_wifi_get_mode(&m) == ESP_OK) {
+        diag.actual_mode = m;
+    }
+    return diag;
 }
 
 WifiRuntimeStatus WifiService::status() const {

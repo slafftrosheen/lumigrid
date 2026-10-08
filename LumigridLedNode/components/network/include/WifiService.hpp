@@ -10,6 +10,8 @@
 #include "esp_netif_types.h"
 #include "esp_timer.h"
 
+#include "esp_wifi_types.h"
+
 namespace lg {
 
 enum class WifiMode : uint8_t {
@@ -35,6 +37,25 @@ enum class WifiState : uint8_t {
     ApActive,
     FallbackAp,
     Failed
+};
+
+struct WifiDiagnostics {
+    uint32_t start_attempts = 0;
+    uint32_t start_failures = 0;
+
+    uint32_t reconnect_attempts = 0;
+    uint32_t reconnect_failures = 0;
+
+    uint32_t fallback_activations = 0;
+    uint32_t fallback_exit_attempts = 0;
+    uint32_t fallback_exit_failures = 0;
+
+    uint32_t disconnect_events = 0;
+
+    uint8_t last_disconnect_reason = 0;
+    esp_err_t last_error = ESP_OK;
+
+    wifi_mode_t actual_mode = WIFI_MODE_NULL;
 };
 
 struct WifiRuntimeStatus {
@@ -64,6 +85,10 @@ public:
     WifiState state() const;
     bool has_ip() const;
     WifiRuntimeStatus status() const;
+    WifiDiagnostics diagnostics() const;
+
+    void schedule_exit_fallback_ap();
+    void perform_exit_fallback_ap();
 
     void set_intentional_disconnect(bool val) {
         intentional_disconnect_.store(val, std::memory_order_relaxed);
@@ -87,12 +112,14 @@ private:
     );
 
     static void on_fallback_timer(void* arg);
+    static void on_fallback_exit_timer(void* arg);
 
     esp_err_t start_sta();
     esp_err_t start_ap();
     esp_err_t start_fallback_ap();
     void schedule_fallback_retry();
     void cancel_fallback_timer();
+    void cancel_fallback_exit_timer();
 
     WifiConfig config_{};
     WifiStateCallback callback_{};
@@ -102,8 +129,12 @@ private:
     std::atomic<bool> intentional_disconnect_{false};
     std::atomic<uint8_t> last_disconnect_reason_{0};
     std::atomic<bool> is_fallback_ap_{false};
+    std::atomic<bool> fallback_exit_pending_{false};
+
+    WifiDiagnostics wifi_diagnostics_{};
 
     esp_timer_handle_t fallback_timer_ = nullptr;
+    esp_timer_handle_t fallback_exit_timer_ = nullptr;
     uint8_t fallback_backoff_index_ = 0;
 
     esp_netif_t* sta_netif_ = nullptr;

@@ -58,7 +58,8 @@ $$\text{Total Memory} = 512 \text{ words} = 8 \text{ channels} \times 64 \text{ 
 
 1. **Exact Allocation**: Every lane is configured with `mem_block_symbols = 64`. Increasing any single lane to 128 or 192 symbols steals RAM blocks from adjacent channels, reducing the total available addressable outputs below the 8 required by LumiGrid.
 2. **Interrupt Priority**: TX channels are registered with `cc.intr_priority = 3`, ensuring RMT buffer reload ISRs preempt standard tasks while remaining below FreeRTOS critical masking levels.
-3. **Internal DRAM Buffers**: Because `CONFIG_RMT_ISR_IRAM_SAFE=y` is active, any buffer touched in interrupt context or encoder callback must reside in internal SRAM. `ParallelRmtDriver` allocates wire buffers and `StripEncoder` memory strictly via `heap_caps_calloc(1, size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)`. Allocation from external PSRAM or standard general heap is prohibited.
+3. **Internal DRAM Buffers vs Generic Memory**: Because `CONFIG_RMT_ISR_IRAM_SAFE=y` is active, any buffer touched in interrupt context or encoder callback must reside in internal SRAM. `ParallelRmtDriver` allocates wire buffers and `StripEncoder` memory strictly via `heap_caps_calloc(1, size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)`. Allocation from external PSRAM or standard general heap is prohibited. Conversely, diagnostic shadow buffers, pixel color staging arrays, and gamma tables use generic heap memory.
+4. **Internal Reserve & Transactional Admission (LG-HW-002)**: To prevent Wi-Fi packet buffers and ISR stacks from starving, a mandatory 12 KB internal SRAM headroom (`kPostTopologyInternalReserveBytes = 12 * 1024`) must remain free post-allocation. Reconfiguration topology admission is strictly transactional: see [LG-HW-002](LG-HW-002-TRANSACTIONAL-OUTPUT-WIFI.md) for candidate staging, rollback, and admission formulas.
 
 ---
 

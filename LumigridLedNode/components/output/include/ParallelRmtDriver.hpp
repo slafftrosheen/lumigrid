@@ -42,15 +42,67 @@ constexpr esp_err_t kErrRmtResourceExhausted = 0x6A01;
 // LG-038.3 §41: explicit memory-admission failure (not a bare ESP_ERR_NO_MEM).
 constexpr esp_err_t kErrInsufficientRuntimeMemory = 0x6A02;
 
-inline uint32_t addressable_candidate_bytes(const DeviceConfig& cfg) {
-    uint32_t bytes = 0;
+// Post-allocation reserve in internal DRAM enforced before accepting a new topology (LG-HW-002)
+constexpr uint32_t kPostTopologyInternalReserveBytes = 12 * 1024;
+
+// Conservative fixed overhead for internal allocations per enabled lane
+constexpr uint32_t kRmtStripEncoderOverheadBytes = 128; // StripEncoder struct in internal DRAM
+constexpr uint32_t kRmtDriverInternalOverheadBytes = 512; // Conservative fixed overhead for IDF RMT channel/TX structures
+
+struct AddressableAllocationEstimate {
+    uint32_t wire_internal_bytes = 0;
+    uint32_t encoder_internal_bytes = 0;
+    uint32_t driver_internal_overhead_bytes = 0;
+
+    uint32_t shadow_generic_bytes = 0;
+
+    uint32_t largest_internal_allocation = 0;
+    uint32_t largest_generic_allocation = 0;
+
+    uint32_t total_internal_required() const {
+        return wire_internal_bytes + encoder_internal_bytes + driver_internal_overhead_bytes;
+    }
+    uint32_t total_generic_required() const {
+        return shadow_generic_bytes;
+    }
+};
+
+inline AddressableAllocationEstimate estimate_addressable_allocation(const DeviceConfig& cfg) {
+    AddressableAllocationEstimate est{};
     for (uint8_t lane = 0; lane < MAX_RMT_LANES; ++lane) {
         const auto& cc = cfg.channels[lane];
-        if (cc.enabled && cc.pixel_count) {
-            bytes += cc.pixel_count * (cc.addressable_type == AddressableType::SK6812 ? 8u : 7u) + 256u;
+        if (cc.enabled && cc.pixel_count > 0) {
+            const bool rgbw = (cc.addressable_type == AddressableType::SK6812);
+            const uint32_t bpp = rgbw ? 4u : 3u;
+            const uint32_t wire_bytes = static_cast<uint32_t>(cc.pixel_count) * bpp;
+            const uint32_t shadow_bytes = static_cast<uint32_t>(cc.pixel_count) * 4u; // sizeof(AddressableShadowPixel)
+
+            est.wire_internal_bytes += wire_bytes;
+            est.encoder_internal_bytes += kRmtStripEncoderOverheadBytes;
+            est.driver_internal_overhead_bytes += kRmtDriverInternalOverheadBytes;
+            est.shadow_generic_bytes += shadow_bytes;
+
+            if (wire_bytes > est.largest_internal_allocation) {
+                est.largest_internal_allocation = wire_bytes;
+            }
+            if (kRmtStripEncoderOverheadBytes > est.largest_internal_allocation) {
+                est.largest_internal_allocation = kRmtStripEncoderOverheadBytes;
+            }
+            if (kRmtDriverInternalOverheadBytes > est.largest_internal_allocation) {
+                est.largest_internal_allocation = kRmtDriverInternalOverheadBytes;
+            }
+
+            if (shadow_bytes > est.largest_generic_allocation) {
+                est.largest_generic_allocation = shadow_bytes;
+            }
         }
     }
-    return bytes;
+    return est;
+}
+
+inline uint32_t addressable_candidate_bytes(const DeviceConfig& cfg) {
+    const AddressableAllocationEstimate est = estimate_addressable_allocation(cfg);
+    return est.total_internal_required() + est.total_generic_required();
 }
 
 /// Human readable name for output-path errors ("rmt_resource_exhausted", ...).
@@ -166,7 +218,11 @@ public:
     /// Allocate resources for one lane. `rgbw` selects 4 bytes/pixel (SK6812).
     /// Returns kErrRmtResourceExhausted when RMT channel/memory cannot be allocated.
     esp_err_t configure_lane(uint8_t lane, int gpio, bool rgbw, PixelOrder order, uint16_t pixels);
-    esp_err_t reconfigure(const DeviceConfig& cfg, uint32_t reserve_bytes);
+    esp_err_t reconfigure(const DeviceConfig& cfg, uint32_t generic_reserve, uint32_t internal_reserve = kPostTopologyInternalReserveBytes);
+    esp_err_t prepare_candidate(const DeviceConfig& cfg, uint32_t generic_reserve, uint32_t internal_reserve = kPostTopologyInternalReserveBytes);
+    esp_err_t commit_candidate();
+    void cancel_candidate();
+    bool has_candidate() const { return has_candidate_; }
     void release_lane(uint8_t lane);
     void release_all();
 
@@ -215,6 +271,9 @@ private:
 
     IRmtTransport* transport_ = nullptr;
     Lane lanes_[kLanes];
+    Lane candidate_[kLanes]{};
+    bool candidate_prepared_[kLanes]{};
+    bool has_candidate_ = false;
     mutable RmtDiagnostics diagnostics_{};
 };
 

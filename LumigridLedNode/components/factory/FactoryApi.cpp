@@ -103,6 +103,18 @@ esp_err_t send_memory_admission_error(httpd_req_t* request, uint32_t required) {
     return send_json(request, body, "507 Insufficient Storage");
 }
 
+esp_err_t send_output_admission_error(httpd_req_t* request, const OutputMemoryAdmission& adm) {
+    char body[256];
+    snprintf(body, sizeof(body),
+             "{\"error\":\"insufficient_runtime_memory\",\"reason\":\"%s\",\"requiredGeneric\":%u,\"requiredInternal\":%u,\"free8\":%u,\"freeInternal\":%u,\"largestInternal\":%u,\"reserveGeneric\":%u,\"reserveInternal\":%u}",
+             adm.rejection_reason ? adm.rejection_reason : "unknown",
+             (unsigned)adm.generic_required, (unsigned)adm.internal_required,
+             (unsigned)adm.free_8bit, (unsigned)adm.free_internal,
+             (unsigned)adm.largest_internal,
+             (unsigned)adm.generic_reserve, (unsigned)adm.internal_reserve);
+    return send_json(request, body, "507 Insufficient Storage");
+}
+
 #include <cmath>
 
 // Strict UTF-8 byte length for API limits (names/labels).
@@ -1238,6 +1250,46 @@ esp_err_t get_diagnostics_output(httpd_req_t* request) {
     cJSON_AddNumberToObject(frame, "maxUs", max_frame_us);
     cJSON_AddNumberToObject(frame, "deadlineMisses", deadline_misses);
     cJSON_AddItemToObject(root, "frame", frame);
+
+    cJSON* out_obj = cJSON_CreateObject();
+    if (api_ptr && api_ptr->signage()) {
+        const auto& ctrl = api_ptr->signage()->controller();
+        cJSON_AddBoolToObject(out_obj, "topologyValid", ctrl.is_topology_valid());
+        cJSON_AddNumberToObject(out_obj, "topologyGeneration", ctrl.topology_generation());
+        cJSON_AddNumberToObject(out_obj, "reconfigureAttempts", ctrl.topology_reconfigure_attempts());
+        cJSON_AddNumberToObject(out_obj, "reconfigureFailures", ctrl.topology_reconfigure_failures());
+        cJSON_AddNumberToObject(out_obj, "rollbacks", ctrl.topology_rollbacks());
+        cJSON_AddNumberToObject(out_obj, "rollbackFailures", ctrl.topology_rollback_failures());
+        cJSON_AddNumberToObject(out_obj, "lockContentions", ctrl.output_lock_contentions());
+        cJSON_AddNumberToObject(out_obj, "maxLockWaitUs", ctrl.output_lock_max_wait_us());
+        cJSON_AddNumberToObject(out_obj, "lifecycleMaxUs", ctrl.lifecycle_max_us());
+        cJSON_AddNumberToObject(out_obj, "reconfigureMaxUs", ctrl.reconfigure_max_us());
+    }
+    cJSON_AddItemToObject(root, "output", out_obj);
+
+    if (api_ptr && api_ptr->wifi()) {
+        const WifiDiagnostics wdiag = api_ptr->wifi()->diagnostics();
+        cJSON* wifi_obj = cJSON_CreateObject();
+        const char* actual_mode_str = "null";
+        switch (wdiag.actual_mode) {
+            case WIFI_MODE_STA: actual_mode_str = "sta"; break;
+            case WIFI_MODE_AP: actual_mode_str = "ap"; break;
+            case WIFI_MODE_APSTA: actual_mode_str = "apsta"; break;
+            default: actual_mode_str = "null"; break;
+        }
+        cJSON_AddStringToObject(wifi_obj, "actualMode", actual_mode_str);
+        cJSON_AddNumberToObject(wifi_obj, "startAttempts", wdiag.start_attempts);
+        cJSON_AddNumberToObject(wifi_obj, "startFailures", wdiag.start_failures);
+        cJSON_AddNumberToObject(wifi_obj, "reconnectAttempts", wdiag.reconnect_attempts);
+        cJSON_AddNumberToObject(wifi_obj, "reconnectFailures", wdiag.reconnect_failures);
+        cJSON_AddNumberToObject(wifi_obj, "fallbackActivations", wdiag.fallback_activations);
+        cJSON_AddNumberToObject(wifi_obj, "fallbackExitAttempts", wdiag.fallback_exit_attempts);
+        cJSON_AddNumberToObject(wifi_obj, "fallbackExitFailures", wdiag.fallback_exit_failures);
+        cJSON_AddNumberToObject(wifi_obj, "disconnectEvents", wdiag.disconnect_events);
+        cJSON_AddNumberToObject(wifi_obj, "lastDisconnectReason", wdiag.last_disconnect_reason);
+        cJSON_AddNumberToObject(wifi_obj, "lastError", wdiag.last_error);
+        cJSON_AddItemToObject(root, "wifi", wifi_obj);
+    }
 
     char* json = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
@@ -4346,32 +4398,28 @@ esp_err_t post_config_validate(httpd_req_t* request) {
         cJSON_AddItemToArray(warnings, cJSON_CreateString("fallback_scene_not_found"));
     }
 
-    // LG-038.3 §42: output configuration impact preview. Estimate the new
-    // topology cost against the projected free heap and warn / invalidate.
+    // LG-038.3 / LG-HW-002: output configuration impact preview.
+    // Real internal SRAM and generic heap admission model.
     {
-        uint32_t required = 0;
-        for (uint8_t ch = 0; ch < 8; ++ch) {
-            const ChannelConfig& ccfg = candidate_cfg.channels[ch];
-            if (ccfg.enabled && ccfg.pixel_count > 0) {
-                const uint32_t bpp = (ccfg.addressable_type == AddressableType::SK6812) ? 4u : 3u;
-                required += ccfg.pixel_count * (bpp + 4u) + 256u;
-            }
-        }
-        const RuntimeMemorySnapshot mem = capture_runtime_memory();
-        const auto admission = check_memory_admission_snapshot(mem, required);
-        const uint32_t projected_free = admission.accepted ? admission.projected_free_bytes : 0;
-        if (required > 0) {
-            char warn[128];
+        const OutputMemoryAdmission admission = check_output_memory_admission(candidate_cfg);
+        if (admission.generic_required > 0 || admission.internal_required > 0) {
+            char warn[160];
             snprintf(warn, sizeof(warn),
-                     "topology_estimated_remaining_heap_bytes:%u_reserve_bytes:%u",
-                     (unsigned)projected_free, (unsigned)kPostTopologyHeapReserveBytes);
+                     "topology_req_internal:%u_generic:%u_freeInternal:%u_reserveInternal:%u",
+                     (unsigned)admission.internal_required, (unsigned)admission.generic_required,
+                     (unsigned)admission.free_internal, (unsigned)admission.internal_reserve);
             cJSON_AddItemToArray(warnings, cJSON_CreateString(warn));
             if (!admission.accepted) {
                 cJSON_AddBoolToObject(resp, "valid", false);
                 cJSON_AddStringToObject(resp, "error", "insufficient_runtime_memory");
-                cJSON_AddNumberToObject(resp, "requiredBytes", required);
-                cJSON_AddNumberToObject(resp, "freeBytes", mem.free_8bit);
-                cJSON_AddNumberToObject(resp, "reserveBytes", kPostTopologyHeapReserveBytes);
+                cJSON_AddStringToObject(resp, "reason", admission.rejection_reason ? admission.rejection_reason : "unknown");
+                cJSON_AddNumberToObject(resp, "requiredGeneric", admission.generic_required);
+                cJSON_AddNumberToObject(resp, "requiredInternal", admission.internal_required);
+                cJSON_AddNumberToObject(resp, "free8", admission.free_8bit);
+                cJSON_AddNumberToObject(resp, "freeInternal", admission.free_internal);
+                cJSON_AddNumberToObject(resp, "largestInternal", admission.largest_internal);
+                cJSON_AddNumberToObject(resp, "reserveGeneric", admission.generic_reserve);
+                cJSON_AddNumberToObject(resp, "reserveInternal", admission.internal_reserve);
             }
         }
     }
@@ -4416,9 +4464,12 @@ esp_err_t put_device_config(httpd_req_t* request) {
     cJSON_Delete(root);
 
     ConfigApplyPlan plan = diff_device_config(old_cfg, candidate_cfg);
-    const uint32_t topology_bytes = addressable_candidate_bytes(candidate_cfg);
-    if (plan.requires_output_reconfigure() && !check_memory_admission(topology_bytes).accepted)
-        return send_memory_admission_error(request, topology_bytes);
+    if (plan.requires_output_reconfigure()) {
+        const OutputMemoryAdmission admission = check_output_memory_admission(candidate_cfg);
+        if (!admission.accepted) {
+            return send_output_admission_error(request, admission);
+        }
+    }
     uint32_t cmd_id = api_ptr->command_journal().accept(CommandDomain::Config);
 
     // Apply candidate to runtime first (LG-036 §18, §19)
@@ -4427,7 +4478,8 @@ esp_err_t put_device_config(httpd_req_t* request) {
         if (apply_err != ESP_OK) {
             if (apply_err == kErrInsufficientRuntimeMemory) {
                 api_ptr->command_journal().failed(cmd_id, apply_err);
-                return send_memory_admission_error(request, topology_bytes);
+                const OutputMemoryAdmission adm = check_output_memory_admission(candidate_cfg);
+                return send_output_admission_error(request, adm);
             }
             api_ptr->runtime_apply_func()(candidate_cfg, old_cfg, plan); // rollback
             api_ptr->command_journal().failed(cmd_id, apply_err);
@@ -4749,6 +4801,25 @@ esp_err_t get_network_status(httpd_req_t* request) {
         }
 
         cJSON_AddNumberToObject(response, "lastDisconnectReason", st.last_disconnect_reason);
+
+        const WifiDiagnostics wdiag = api_ptr->wifi()->diagnostics();
+        const char* actual_mode_str = "null";
+        switch (wdiag.actual_mode) {
+            case WIFI_MODE_STA: actual_mode_str = "sta"; break;
+            case WIFI_MODE_AP: actual_mode_str = "ap"; break;
+            case WIFI_MODE_APSTA: actual_mode_str = "apsta"; break;
+            default: actual_mode_str = "null"; break;
+        }
+        cJSON_AddStringToObject(response, "actualMode", actual_mode_str);
+        cJSON_AddNumberToObject(response, "startAttempts", wdiag.start_attempts);
+        cJSON_AddNumberToObject(response, "startFailures", wdiag.start_failures);
+        cJSON_AddNumberToObject(response, "reconnectAttempts", wdiag.reconnect_attempts);
+        cJSON_AddNumberToObject(response, "reconnectFailures", wdiag.reconnect_failures);
+        cJSON_AddNumberToObject(response, "fallbackActivations", wdiag.fallback_activations);
+        cJSON_AddNumberToObject(response, "fallbackExitAttempts", wdiag.fallback_exit_attempts);
+        cJSON_AddNumberToObject(response, "fallbackExitFailures", wdiag.fallback_exit_failures);
+        cJSON_AddNumberToObject(response, "disconnectEvents", wdiag.disconnect_events);
+        cJSON_AddNumberToObject(response, "lastError", wdiag.last_error);
 
         NetworkSettings persisted{};
         bool persisted_matches = false;

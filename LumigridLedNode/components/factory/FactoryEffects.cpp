@@ -203,16 +203,17 @@ void render_effect(FactoryEffect effect,
                 output.pwm().set(ch, static_cast<uint16_t>(duty));
             }
 
-            // 2. Addressable: All 8 lanes active, 256 pixels per lane, cycling 6 patterns
+            // 2. Addressable: Cycle 6 patterns stressing all configured pixels per lane (LG-HW-002)
             const uint8_t pattern = (elapsed_ms / 1000) % 6;
-            constexpr uint16_t kCoexPixels = 256;
 
             switch (pattern) {
                 case 0: {
                     // Pattern 1: One moving pixel (sparse WS2812 latch detector)
-                    const uint16_t moving_base = static_cast<uint16_t>((elapsed_ms / 16) % kCoexPixels);
                     for (uint8_t lane = 0; lane < 8; ++lane) {
-                        const uint16_t px = (moving_base + lane * 32) % kCoexPixels;
+                        const uint16_t lane_px = output.pixels().configured_pixels(lane);
+                        if (lane_px == 0) continue;
+                        const uint16_t moving_base = static_cast<uint16_t>((elapsed_ms / 16) % lane_px);
+                        const uint16_t px = (moving_base + lane * 32) % lane_px;
                         set_rgb(output, lane, px, scale(kIdentityColors[lane], brightness));
                     }
                     break;
@@ -221,8 +222,9 @@ void render_effect(FactoryEffect effect,
                     // Pattern 2: Alternating pixels (odd/even alternating)
                     const bool flip = ((elapsed_ms / 250) % 2) != 0;
                     for (uint8_t lane = 0; lane < 8; ++lane) {
+                        const uint16_t lane_px = output.pixels().configured_pixels(lane);
                         const Rgb c = scale(kIdentityColors[lane], brightness);
-                        for (uint16_t px = 0; px < kCoexPixels; ++px) {
+                        for (uint16_t px = 0; px < lane_px; ++px) {
                             if (((px % 2) != 0) ^ flip) {
                                 set_rgb(output, lane, px, c);
                             }
@@ -234,8 +236,9 @@ void render_effect(FactoryEffect effect,
                     // Pattern 3: Checker pattern
                     const uint8_t phase_check = static_cast<uint8_t>((elapsed_ms / 250) % 2);
                     for (uint8_t lane = 0; lane < 8; ++lane) {
+                        const uint16_t lane_px = output.pixels().configured_pixels(lane);
                         const Rgb c = scale(kIdentityColors[lane], brightness);
-                        for (uint16_t px = 0; px < kCoexPixels; ++px) {
+                        for (uint16_t px = 0; px < lane_px; ++px) {
                             if ((((px / 8) + lane + phase_check) % 2) == 0) {
                                 set_rgb(output, lane, px, c);
                             }
@@ -260,7 +263,8 @@ void render_effect(FactoryEffect effect,
                     // Pattern 6: Random deterministic PRNG pattern (reproducible seed)
                     uint32_t seed = static_cast<uint32_t>((elapsed_ms / 200) * 0x9E3779B9u + 0x1234567u);
                     for (uint8_t lane = 0; lane < 8; ++lane) {
-                        for (uint16_t px = 0; px < kCoexPixels; ++px) {
+                        const uint16_t lane_px = output.pixels().configured_pixels(lane);
+                        for (uint16_t px = 0; px < lane_px; ++px) {
                             seed = seed * 1664525u + 1013904223u;
                             const uint8_t r = scale8(static_cast<uint8_t>((seed >> 16) & 0xFF), brightness);
                             seed = seed * 1664525u + 1013904223u;

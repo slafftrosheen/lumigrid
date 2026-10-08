@@ -8,27 +8,56 @@
 
 namespace lg {
 
-namespace {
-// LG-038.3 §39: deterministic per-lane admission cost. The driver allocates
-// one wire buffer (3 B/pixel RGB, 4 B/pixel RGBW) + one shadow buffer
-// (4 B/pixel) per lane; RMT channel/encoder overhead is reserved separately.
-// LG-038.3 §40/§41: explicit admission failure payload used by callers.
-struct TopologyAdmission {
-    bool ok = false;
-    uint32_t required_bytes = 0;
-    uint32_t free_bytes = 0;
-    uint32_t reserve_bytes = kPostTopologyHeapReserveBytes;
-};
+// LG-HW-002: Output memory admission checking internal SRAM and generic heap
+OutputMemoryAdmission check_output_memory_admission(
+    const DeviceConfig& candidate,
+    uint32_t generic_reserve,
+    uint32_t internal_reserve)
+{
+    OutputMemoryAdmission adm;
+    adm.generic_reserve = generic_reserve;
+    adm.internal_reserve = internal_reserve;
 
-TopologyAdmission check_topology_admission(const DeviceConfig& candidate) {
-    TopologyAdmission res;
-    res.required_bytes = addressable_candidate_bytes(candidate);
+    const AddressableAllocationEstimate est = estimate_addressable_allocation(candidate);
+    adm.internal_required = est.total_internal_required();
+    adm.generic_required = est.total_generic_required();
+
     const RuntimeMemorySnapshot snap = capture_runtime_memory();
-    res.free_bytes = snap.free_8bit;
-    res.ok = check_memory_admission_snapshot(snap, res.required_bytes, res.reserve_bytes).accepted;
-    return res;
+    adm.free_8bit = snap.free_8bit;
+    adm.free_internal = snap.free_internal;
+    adm.largest_8bit = snap.largest_8bit;
+    adm.largest_internal = snap.largest_internal;
+
+    if (adm.free_internal < adm.internal_required + adm.internal_reserve) {
+        adm.accepted = false;
+        adm.rejection_reason = "internal_reserve";
+    } else if (snap.largest_internal < est.largest_internal_allocation) {
+        adm.accepted = false;
+        adm.rejection_reason = "largest_internal";
+    } else if (adm.free_8bit < adm.generic_required + adm.generic_reserve) {
+        adm.accepted = false;
+        adm.rejection_reason = "generic_reserve";
+    } else if (snap.largest_8bit < est.largest_generic_allocation) {
+        adm.accepted = false;
+        adm.rejection_reason = "largest_8bit";
+    } else {
+        adm.accepted = true;
+        adm.rejection_reason = nullptr;
+    }
+
+    if (!adm.accepted) {
+        ESP_LOGE("output",
+                 "OUTPUT_ADMISSION reject reason=%s free8=%lu freeInternal=%lu largestInternal=%lu requiredInternal=%lu requiredGeneric=%lu",
+                 adm.rejection_reason ? adm.rejection_reason : "unknown",
+                 (unsigned long)adm.free_8bit,
+                 (unsigned long)adm.free_internal,
+                 (unsigned long)adm.largest_internal,
+                 (unsigned long)adm.internal_required,
+                 (unsigned long)adm.generic_required);
+    }
+
+    return adm;
 }
-} // namespace
 
 // LG-038.1 / LG-HW-001: Heap telemetry helper with internal-memory reporting
 void log_output_heap_stage(const char *stage) {
@@ -40,11 +69,38 @@ void log_output_heap_stage(const char *stage) {
       (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
 }
 
+OutputController::OutputController() {
+    mutex_ = xSemaphoreCreateRecursiveMutex();
+}
+
+OutputController::~OutputController() {
+    if (mutex_) {
+        vSemaphoreDelete(mutex_);
+        mutex_ = nullptr;
+    }
+}
+
+void OutputController::lock() {
+    const int64_t t0 = esp_timer_get_time();
+    if (xSemaphoreTakeRecursive(mutex_, 0) != pdTRUE) {
+        output_lock_contentions_.fetch_add(1, std::memory_order_relaxed);
+        xSemaphoreTakeRecursive(mutex_, portMAX_DELAY);
+        const uint32_t wait_us = static_cast<uint32_t>(esp_timer_get_time() - t0);
+        uint32_t prev = output_lock_max_wait_us_.load(std::memory_order_relaxed);
+        while (wait_us > prev && !output_lock_max_wait_us_.compare_exchange_weak(prev, wait_us, std::memory_order_relaxed)) {}
+    }
+}
+
+void OutputController::unlock() {
+    xSemaphoreGiveRecursive(mutex_);
+}
+
 esp_err_t OutputController::init() {
   return OutputCoreExecutor::instance().execute_init(this);
 }
 
 esp_err_t OutputController::init_on_output_core() {
+  const int64_t t_init_start = esp_timer_get_time();
   const int core = xPortGetCoreID();
   ESP_LOGI("output", "Hardware lifecycle executing on core=%d", core);
   if (core != 1) {
@@ -90,6 +146,10 @@ esp_err_t OutputController::init_on_output_core() {
 
   unlock();
 
+  const uint32_t init_dur_us = static_cast<uint32_t>(esp_timer_get_time() - t_init_start);
+  uint32_t prev_life = lifecycle_max_us_.load(std::memory_order_relaxed);
+  while (init_dur_us > prev_life && !lifecycle_max_us_.compare_exchange_weak(prev_life, init_dur_us, std::memory_order_relaxed)) {}
+
   return ESP_OK;
 }
 
@@ -97,104 +157,188 @@ esp_err_t OutputController::reconfigure(const DeviceConfig& cfg) {
   return OutputCoreExecutor::instance().execute_reconfigure(this, cfg);
 }
 
+esp_err_t OutputController::rollback_to_last_good_topology() {
+    Pca9685Driver::force_disable_outputs(); // /OE HIGH immediately
+
+    if (!last_known_good_snapshot_.valid) {
+        ESP_LOGE("output", "OUTPUT_RECONFIG rollback_failed: no valid last-known-good topology snapshot available");
+        topology_rollback_failures_++;
+        topology_valid_.store(false, std::memory_order_release);
+        output_enabled_.store(false, std::memory_order_release);
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    ESP_LOGW("output", "OUTPUT_RECONFIG attempting rollback to generation %lu",
+             (unsigned long)last_known_good_snapshot_.generation);
+
+    DeviceConfig rb_cfg{};
+    for (uint8_t ch = 0; ch < 8; ++ch) {
+        rb_cfg.channels[ch].enabled = last_known_good_snapshot_.addressable[ch].enabled;
+        rb_cfg.channels[ch].pixel_count = last_known_good_snapshot_.addressable[ch].pixels;
+        rb_cfg.channels[ch].addressable_type = last_known_good_snapshot_.addressable[ch].type;
+        rb_cfg.channels[ch].pixel_order = last_known_good_snapshot_.addressable[ch].order;
+        rb_cfg.channels[ch + 8].enabled = last_known_good_snapshot_.pwm_enabled[ch];
+    }
+
+    // Rebuild addressable topology:
+    esp_err_t err = pixels_.reconfigure(rb_cfg, kPostTopologyHeapReserveBytes, kPostTopologyInternalReserveBytes);
+    if (err != ESP_OK) {
+        ESP_LOGE("output", "OUTPUT_RECONFIG rollback_failed: addressable rebuild failed: %s", output_err_name(err));
+        topology_rollback_failures_++;
+        topology_valid_.store(false, std::memory_order_release);
+        output_enabled_.store(false, std::memory_order_release);
+        Pca9685Driver::force_disable_outputs();
+        return err;
+    }
+
+    // Send known-zero frame
+    AddressableCommitResult bo = pixels_.blackout();
+    if (bo.result != ESP_OK) {
+        ESP_LOGE("output", "OUTPUT_RECONFIG rollback_failed: addressable blackout failed: %s", output_err_name(bo.result));
+        topology_rollback_failures_++;
+        topology_valid_.store(false, std::memory_order_release);
+        output_enabled_.store(false, std::memory_order_release);
+        Pca9685Driver::force_disable_outputs();
+        return bo.result;
+    }
+
+    // Clear PCA
+    if (pwm_available_.load(std::memory_order_acquire)) {
+        err = pwm_.clear();
+        if (err != ESP_OK) {
+            ESP_LOGE("output", "OUTPUT_RECONFIG rollback_failed: pwm clear failed: %s", esp_err_to_name(err));
+            topology_rollback_failures_++;
+            topology_valid_.store(false, std::memory_order_release);
+            output_enabled_.store(false, std::memory_order_release);
+            Pca9685Driver::force_disable_outputs();
+            return err;
+        }
+    }
+
+    // Success: restore generation to snapshot generation
+    topology_generation_ = last_known_good_snapshot_.generation;
+    topology_rollbacks_++;
+    topology_valid_.store(true, std::memory_order_release);
+    if (!estop_latched_.load(std::memory_order_acquire)) {
+        output_enabled_.store(true, std::memory_order_release);
+    }
+    ESP_LOGI("output", "OUTPUT_RECONFIG rollback_ok: restored topology generation %lu",
+             (unsigned long)topology_generation_);
+    return ESP_OK;
+}
+
 esp_err_t OutputController::reconfigure_on_output_core(const DeviceConfig& cfg) {
+    const int64_t t_start = esp_timer_get_time();
+    topology_reconfigure_attempts_++;
+
     const int core = xPortGetCoreID();
     ESP_LOGI("output", "Hardware lifecycle executing on core=%d", core);
     if (core != 1) {
         ESP_LOGE("output", "Hardware lifecycle called on invalid core=%d (CPU1 required)", core);
+        topology_reconfigure_failures_++;
         return ESP_ERR_INVALID_STATE;
     }
 
     lock();
     ESP_LOGI("output", "Reconfiguring OutputController drivers based on DeviceConfig on CPU1...");
 
-    // Phase 1: Validate admission, PWM availability, channel configs
-    const TopologyAdmission admission = check_topology_admission(cfg);
-    if (!admission.ok) {
-        ESP_LOGE("output",
-                 "Topology admission rejected: required=%lu free8=%lu reserve=%lu (insufficient_runtime_memory)",
-                 (unsigned long)admission.required_bytes,
-                 (unsigned long)admission.free_bytes,
-                 (unsigned long)admission.reserve_bytes);
-        note_rmt_allocation_failure();
+    const bool previous_topology_valid = topology_valid_.load(std::memory_order_acquire);
+    const bool previous_output_enabled = output_enabled_.load(std::memory_order_acquire);
+
+    auto abort_preswap = [&](esp_err_t err, const char* reason) -> esp_err_t {
+        pixels_.cancel_candidate();
+        topology_valid_.store(previous_topology_valid, std::memory_order_release);
+        output_enabled_.store(previous_output_enabled, std::memory_order_release);
+        // Note: Do not change /OE here; next normal frame may resume old topology
+        topology_reconfigure_failures_++;
+        ESP_LOGE("output", "OUTPUT_RECONFIG candidate_failed_preswap (%s): %s", reason, output_err_name(err));
         unlock();
-        return kErrInsufficientRuntimeMemory;
-    }
+        return err;
+    };
 
+    // Step 1: Validate config
     const bool pwm_ok = pwm_available_.load(std::memory_order_acquire);
-
-    // PWM Availability Validation
     if (!pwm_ok) {
         for (uint8_t ch = 8; ch < 16; ++ch) {
             if (cfg.channels[ch].enabled) {
                 ESP_LOGE("output", "Reconfigure validation: channel[%u] (P%u) is enabled, but PCA9685 driver is unavailable", ch, ch - 7);
-                unlock();
-                return ESP_ERR_NOT_FOUND;
+                return abort_preswap(ESP_ERR_NOT_FOUND, "pca9685_unavailable");
             }
         }
     }
 
-    // Validate addressable channels
     for (uint8_t ch = 0; ch < 8; ++ch) {
         const ChannelConfig& ccfg = cfg.channels[ch];
         if (ccfg.enabled) {
             if (ccfg.pixel_count > MAX_PIXELS) {
                 ESP_LOGE("output", "Reconfigure validation: channel[%u] pixel_count (%u) > MAX_PIXELS", ch, ccfg.pixel_count);
-                unlock();
-                return ESP_ERR_INVALID_ARG;
+                return abort_preswap(ESP_ERR_INVALID_ARG, "pixel_count_exceeded");
             }
             if (!pixel_order_valid(ccfg.addressable_type, ccfg.pixel_order)) {
                 ESP_LOGE("output", "Reconfigure validation: channel[%u] invalid pixel order for type", ch);
-                unlock();
-                return ESP_ERR_INVALID_ARG;
+                return abort_preswap(ESP_ERR_INVALID_ARG, "invalid_pixel_order");
             }
         }
     }
 
-    // Phase 2: Gate PWM
-    Pca9685Driver::disable_outputs();
-
-    // Phase 3: Clear old hardware state before changing topology
-    AddressableCommitResult old_blackout = pixels_.blackout();
-    if (old_blackout.result != ESP_OK) {
-        ESP_LOGE("output", "Old topology blackout failed: %s (aborting reconfigure to protect hardware)",
-                 output_err_name(old_blackout.result));
-        topology_valid_.store(false, std::memory_order_release);
-        last_blackout_result_ = old_blackout;
-        unlock();
-        return old_blackout.result;
+    // Step 2: Memory admission
+    const OutputMemoryAdmission admission = check_output_memory_admission(cfg);
+    if (!admission.accepted) {
+        note_rmt_allocation_failure();
+        return abort_preswap(kErrInsufficientRuntimeMemory, admission.rejection_reason ? admission.rejection_reason : "admission_rejected");
     }
 
-    // Phase 4: Prepare candidate buffers/encoders, then swap only after every allocation succeeds.
-    const esp_err_t topology_err = pixels_.reconfigure(cfg, kPostTopologyHeapReserveBytes);
-    if (topology_err != ESP_OK) {
+    // Step 3: Prepare all candidate allocations/encoders possible without disturbing old topology
+    const esp_err_t prep_err = pixels_.prepare_candidate(cfg, kPostTopologyHeapReserveBytes, kPostTopologyInternalReserveBytes);
+    if (prep_err != ESP_OK) {
         note_rmt_allocation_failure();
-        topology_valid_.store(false, std::memory_order_release);
+        return abort_preswap(prep_err, "candidate_prepare_failed");
+    }
+
+    // Step 4: Gate PCA /OE
+    Pca9685Driver::disable_outputs();
+
+    // Step 5: Blackout old addressable topology
+    AddressableCommitResult old_blackout = pixels_.blackout();
+    if (old_blackout.result != ESP_OK) {
+        ESP_LOGE("output", "Old topology blackout failed: %s", output_err_name(old_blackout.result));
+        last_blackout_result_ = old_blackout;
+        return abort_preswap(old_blackout.result, "old_blackout_failed");
+    }
+
+    // Step 6: Commit/swap candidate (point of hardware mutation)
+    const esp_err_t commit_err = pixels_.commit_candidate();
+    if (commit_err != ESP_OK) {
+        ESP_LOGE("output", "OUTPUT_RECONFIG candidate_failed_postswap: commit_candidate failed: %s", output_err_name(commit_err));
+        topology_reconfigure_failures_++;
+        esp_err_t rb_err = rollback_to_last_good_topology();
         unlock();
-        return topology_err;
+        return (rb_err == ESP_OK) ? commit_err : rb_err;
     }
 
     log_output_heap_stage("addressable_topology");
 
-    // Phase 5: Blackout new addressable topology
+    // Step 7: Blackout candidate
     AddressableCommitResult new_blackout = pixels_.blackout();
     if (new_blackout.result != ESP_OK) {
-        ESP_LOGE("output", "New topology blackout failed: %s", output_err_name(new_blackout.result));
-        topology_valid_.store(false, std::memory_order_release);
+        ESP_LOGE("output", "OUTPUT_RECONFIG candidate_failed_postswap: new blackout failed: %s", output_err_name(new_blackout.result));
         last_blackout_result_ = new_blackout;
+        topology_reconfigure_failures_++;
+        esp_err_t rb_err = rollback_to_last_good_topology();
         unlock();
-        return new_blackout.result;
+        return (rb_err == ESP_OK) ? new_blackout.result : rb_err;
     }
 
-    // Phase 6: Confirm PCA zero (fatal if clear fails)
+    // Step 8: PCA clear
     if (pwm_ok) {
         const esp_err_t pwm_clr = pwm_.clear();
         if (pwm_clr != ESP_OK) {
-            Pca9685Driver::disable_outputs();
-            topology_valid_.store(false, std::memory_order_release);
-            ESP_LOGE("output", "PWM clear after reconfigure failed: %s (fatal hardware error)", esp_err_to_name(pwm_clr));
+            Pca9685Driver::force_disable_outputs();
+            ESP_LOGE("output", "OUTPUT_RECONFIG candidate_failed_postswap: PWM clear failed: %s", esp_err_to_name(pwm_clr));
+            topology_reconfigure_failures_++;
+            esp_err_t rb_err = rollback_to_last_good_topology();
             unlock();
-            return pwm_clr;
+            return (rb_err == ESP_OK) ? pwm_clr : rb_err;
         }
         for (uint8_t ch = 8; ch < 16; ++ch) {
             const ChannelConfig& ccfg = cfg.channels[ch];
@@ -204,13 +348,30 @@ esp_err_t OutputController::reconfigure_on_output_core(const DeviceConfig& cfg) 
         }
     }
 
-    // Phase 7: Publish topology valid
+    // Step 9: Store last known-good snapshot and publish
+    topology_generation_++;
+    last_known_good_snapshot_.valid = true;
+    last_known_good_snapshot_.generation = topology_generation_;
+    for (uint8_t ch = 0; ch < 8; ++ch) {
+        last_known_good_snapshot_.addressable[ch].enabled = cfg.channels[ch].enabled;
+        last_known_good_snapshot_.addressable[ch].pixels = cfg.channels[ch].pixel_count;
+        last_known_good_snapshot_.addressable[ch].type = cfg.channels[ch].addressable_type;
+        last_known_good_snapshot_.addressable[ch].order = cfg.channels[ch].pixel_order;
+        last_known_good_snapshot_.pwm_enabled[ch] = cfg.channels[ch + 8].enabled;
+    }
+
     topology_valid_.store(true, std::memory_order_release);
     if (!estop_latched_.load(std::memory_order_acquire)) {
         output_enabled_.store(true, std::memory_order_release);
     }
 
-    // Phase 8: Leave output gated (/OE remains HIGH) until first valid frame commit
+    const uint32_t reconfig_dur_us = static_cast<uint32_t>(esp_timer_get_time() - t_start);
+    uint32_t prev_rec = reconfigure_max_us_.load(std::memory_order_relaxed);
+    while (reconfig_dur_us > prev_rec && !reconfigure_max_us_.compare_exchange_weak(prev_rec, reconfig_dur_us, std::memory_order_relaxed)) {}
+
+    ESP_LOGI("output", "OUTPUT_RECONFIG success generation=%lu duration=%lu us",
+             (unsigned long)topology_generation_, (unsigned long)reconfig_dur_us);
+
     unlock();
     return ESP_OK;
 }

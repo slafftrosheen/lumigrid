@@ -347,21 +347,22 @@ void ParallelRmtDriver::release_all() {
     for (uint8_t i = 0; i < kLanes; ++i) release_lane(i);
 }
 
-esp_err_t ParallelRmtDriver::reconfigure(const DeviceConfig& cfg, uint32_t reserve_bytes) {
+esp_err_t ParallelRmtDriver::prepare_candidate(const DeviceConfig& cfg, uint32_t generic_reserve, uint32_t internal_reserve) {
+    cancel_candidate();
+
     for (uint8_t lane = 0; lane < kLanes; ++lane) {
         if (!configured(lane)) continue;
         const esp_err_t err = tx().wait(lane, addressable_timeout_us(lanes_[lane].pixels, lanes_[lane].rgbw));
         if (err != ESP_OK) return err;
     }
-    Lane candidate[kLanes]{};
-    bool prepared[kLanes]{};
+
     esp_err_t err = ESP_OK;
     for (uint8_t lane = 0; lane < kLanes; ++lane) {
         const auto& cc = cfg.channels[lane];
         if (!cc.enabled || !cc.pixel_count) continue;
         if (cc.pixel_count > MAX_PIXELS) { err = ESP_ERR_INVALID_ARG; break; }
         if (!pixel_order_valid(cc.addressable_type, cc.pixel_order)) { err = ESP_ERR_INVALID_ARG; break; }
-        auto& next = candidate[lane];
+        auto& next = candidate_[lane];
         next.rgbw = cc.addressable_type == AddressableType::SK6812;
         next.pixels = cc.pixel_count;
         next.wire_len = next.pixels * (next.rgbw ? 4u : 3u);
@@ -373,27 +374,65 @@ esp_err_t ParallelRmtDriver::reconfigure(const DeviceConfig& cfg, uint32_t reser
         next.state = LaneState::Ready;
         err = tx().prepare(lane, board::kAledPins[lane], next.rgbw, configured(lane));
         if (err != ESP_OK) { err = map_create_error(err); break; }
-        prepared[lane] = true;
+        candidate_prepared_[lane] = true;
     }
-    // Old resources remain live until all candidate allocations and the reserve
-    // gate pass. Cancelling the candidate requires no replacement allocation.
-    if (err == ESP_OK && heap_caps_get_free_size(MALLOC_CAP_8BIT) < reserve_bytes)
-        err = kErrInsufficientRuntimeMemory;
-    if (err != ESP_OK) {
-        for (uint8_t lane = 0; lane < kLanes; ++lane) {
-            if (prepared[lane]) tx().cancel_prepared(lane, configured(lane));
-            heap_caps_free(candidate[lane].wire);
+
+    // Old resources remain live until all candidate allocations and both internal
+    // and generic reserve gates pass.
+    if (err == ESP_OK) {
+        if (heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) < internal_reserve ||
+            heap_caps_get_free_size(MALLOC_CAP_8BIT) < generic_reserve) {
+            err = kErrInsufficientRuntimeMemory;
         }
+    }
+
+    if (err != ESP_OK) {
+        cancel_candidate();
         return err;
     }
+
+    has_candidate_ = true;
+    return ESP_OK;
+}
+
+esp_err_t ParallelRmtDriver::commit_candidate() {
+    if (!has_candidate_) return ESP_ERR_INVALID_STATE;
+
     diagnostics_.allocation_core = xPortGetCoreID();
     for (uint8_t lane = 0; lane < kLanes; ++lane) {
-        if (prepared[lane]) tx().commit_prepared(lane);
-        else if (configured(lane)) tx().destroy(lane);
+        if (candidate_prepared_[lane]) {
+            tx().commit_prepared(lane);
+        } else if (configured(lane)) {
+            tx().destroy(lane);
+        }
         heap_caps_free(lanes_[lane].wire);
-        lanes_[lane] = candidate[lane];
+        lanes_[lane] = candidate_[lane];
+        candidate_[lane] = Lane{};
+        candidate_prepared_[lane] = false;
     }
+    has_candidate_ = false;
     return ESP_OK;
+}
+
+void ParallelRmtDriver::cancel_candidate() {
+    for (uint8_t lane = 0; lane < kLanes; ++lane) {
+        if (candidate_prepared_[lane]) {
+            tx().cancel_prepared(lane, configured(lane));
+            candidate_prepared_[lane] = false;
+        }
+        if (candidate_[lane].wire) {
+            heap_caps_free(candidate_[lane].wire);
+            candidate_[lane].wire = nullptr;
+        }
+        candidate_[lane] = Lane{};
+    }
+    has_candidate_ = false;
+}
+
+esp_err_t ParallelRmtDriver::reconfigure(const DeviceConfig& cfg, uint32_t generic_reserve, uint32_t internal_reserve) {
+    esp_err_t err = prepare_candidate(cfg, generic_reserve, internal_reserve);
+    if (err != ESP_OK) return err;
+    return commit_candidate();
 }
 
 void ParallelRmtDriver::stage_pixel(uint8_t lane, uint16_t pixel, uint8_t r, uint8_t g, uint8_t b, uint8_t w) {

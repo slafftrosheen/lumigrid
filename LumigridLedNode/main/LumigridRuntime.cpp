@@ -17,6 +17,7 @@
 #include "esp_system.h"
 #include "nvs.h"
 #include "nvs_flash.h"
+#include "NvsRuntime.hpp"
 #include <cinttypes>
 #include <cstring>
 #include <memory>
@@ -297,6 +298,19 @@ esp_err_t LumigridRuntime::init() {
   }
   startup_stage_ = StartupStage::SourceManagerInitialized;
   vTaskDelay(pdMS_TO_TICKS(100));
+
+  ESP_LOGI("lumigrid", "Step 1.9: NVS initialization...");
+  err = NvsRuntime::initialise();
+  if (err != ESP_OK) {
+    startup_state_ = StartupState::Faulted;
+    failing_stage_ = StartupStage::ConfigStoreInitialized;
+    failing_error_ = err;
+    safe_mode_ = true;
+    output_.blackout();
+    output_.set_output_enabled(false);
+    ESP_LOGE("lumigrid", "NVS initialization FAILED: %s. Safe/recovery mode required.", esp_err_to_name(err));
+    return err;
+  }
 
   ESP_LOGI("lumigrid", "Step 2: config.init()...");
   err = config_.init();

@@ -460,6 +460,36 @@ else:
     if not re.search(r"xTaskCreatePinnedToCore\([^)]*,\s*1\s*(?://[^\n]*)?\)", exec_text, re.S):
         errors.append("OutputCoreExecutor.cpp: executor worker must be pinned permanently to CPU1")
 
+# LG-HW-002: Transactional Output, Storage Ownership, and Wi-Fi Fault Containment
+for ext in ["*.cpp", "*.hpp", "*.h", "*.c"]:
+    for f in (NODE_DIR / "components" / "network").rglob(ext):
+        check_file_contains(f, [("nvs_flash_erase(", "Forbidden nvs_flash_erase in network components (LG-HW-002 §9)")])
+
+cfg_store_cpp = NODE_DIR / "components" / "config" / "ConfigStore.cpp"
+if cfg_store_cpp.exists():
+    check_file_contains(cfg_store_cpp, [("nvs_flash_erase(", "Forbidden automatic nvs_flash_erase in ConfigStore (LG-HW-002 §9)")])
+
+nvs_runtime_hpp = NODE_DIR / "components" / "storage" / "include" / "NvsRuntime.hpp"
+if not nvs_runtime_hpp.exists():
+    errors.append("NvsRuntime.hpp: Centralized storage owner header missing (LG-HW-002 §9)")
+
+if "kPostTopologyInternalReserveBytes = 12 * 1024" not in par_rmt_hpp:
+    errors.append("ParallelRmtDriver.hpp: kPostTopologyInternalReserveBytes must be 12 KB (12 * 1024) (LG-HW-002 §1)")
+if "check_output_memory_admission" not in out_ctrl_hpp:
+    errors.append("OutputController.hpp: check_output_memory_admission declaration missing (LG-HW-002 §1)")
+if "rollback_to_last_good_topology" not in out_ctrl_hpp:
+    errors.append("OutputController.hpp: rollback_to_last_good_topology declaration missing (LG-HW-002 §5)")
+if "OutputTopologySnapshot" not in out_ctrl_hpp:
+    errors.append("OutputController.hpp: OutputTopologySnapshot declaration missing (LG-HW-002 §4)")
+
+wifi_service_cpp = NODE_DIR / "components" / "network" / "WifiService.cpp"
+if wifi_service_cpp.exists():
+    ws_text = wifi_service_cpp.read_text(encoding="utf-8")
+    if "schedule_exit_fallback_ap" not in ws_text or "perform_exit_fallback_ap" not in ws_text:
+        errors.append("WifiService.cpp: missing scheduled exit fallback AP lifecycle methods (LG-HW-002 §10)")
+    if "actual_mode" not in ws_text:
+        errors.append("WifiService.cpp: missing actual_mode diagnostics reporting (LG-HW-002 §11)")
+
 if errors:
     print("\nFAILED: Discovered architectural invariant violations:")
     for err in errors:

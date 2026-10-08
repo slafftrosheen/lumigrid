@@ -11,6 +11,7 @@
 #include "esp_rom_crc.h"
 #include "lg_board_pins.hpp"
 #include "ChannelHardware.hpp"
+#include "NvsRuntime.hpp"
 
 static const char* TAG = "config";
 
@@ -84,13 +85,11 @@ void clear_cue_list(CueList& cl) {
 } // namespace
 
 esp_err_t ConfigStore::init() {
-    esp_err_t err = nvs_flash_init();
-    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_LOGW(TAG, "NVS partition full or outdated, erasing...");
-        ESP_RETURN_ON_ERROR(nvs_flash_erase(), TAG, "erase");
-        err = nvs_flash_init();
+    esp_err_t err = NvsRuntime::initialise();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "ConfigStore: NVS initialization failed (%s); recovery required", esp_err_to_name(err));
+        return err;
     }
-    ESP_RETURN_ON_ERROR(err, TAG, "flash init");
     ESP_RETURN_ON_ERROR(nvs_open("lumigrid", NVS_READWRITE, &handle_), TAG, "open");
 
     ESP_RETURN_ON_ERROR(ensure_defaults(), TAG, "defaults");

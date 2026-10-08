@@ -20,7 +20,11 @@ struct AddressableShadowPixel {
 /// every active lane is submitted before any lane is waited on.
 class AddressableDriver {
 public:
-    esp_err_t reconfigure(const DeviceConfig& cfg, uint32_t reserve_bytes);
+    esp_err_t reconfigure(const DeviceConfig& cfg, uint32_t generic_reserve, uint32_t internal_reserve = kPostTopologyInternalReserveBytes);
+    esp_err_t prepare_candidate(const DeviceConfig& cfg, uint32_t generic_reserve, uint32_t internal_reserve = kPostTopologyInternalReserveBytes);
+    esp_err_t commit_candidate();
+    void cancel_candidate();
+    bool has_candidate() const { return has_candidate_; }
     static constexpr uint8_t kLanes = MAX_RMT_LANES;
     /// Same canonical product maximum as config validation. There is no separate limit.
     static constexpr uint16_t kPixels = MAX_PIXELS;
@@ -69,6 +73,8 @@ private:
     ParallelRmtDriver rmt_;
     // Per-lane shadow, allocated at configure time (never per frame).
     AddressableShadowPixel* shadow_[kLanes] = {};
+    AddressableShadowPixel* candidate_shadow_[kLanes] = {};
+    bool has_candidate_ = false;
 };
 
 } // namespace lg

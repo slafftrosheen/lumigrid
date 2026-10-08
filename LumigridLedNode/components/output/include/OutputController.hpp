@@ -74,6 +74,43 @@ struct OutputCommitMetrics {
     uint8_t  last_failed_lane = kNoFailedLane;
 };
 
+struct OutputMemoryAdmission {
+    bool accepted = false;
+
+    uint32_t generic_required = 0;
+    uint32_t internal_required = 0;
+
+    uint32_t free_8bit = 0;
+    uint32_t free_internal = 0;
+
+    uint32_t largest_8bit = 0;
+    uint32_t largest_internal = 0;
+
+    uint32_t generic_reserve = 0;
+    uint32_t internal_reserve = 0;
+
+    const char* rejection_reason = nullptr;
+};
+
+OutputMemoryAdmission check_output_memory_admission(
+    const DeviceConfig& candidate,
+    uint32_t generic_reserve = 16u * 1024u,
+    uint32_t internal_reserve = kPostTopologyInternalReserveBytes);
+
+struct OutputTopologySnapshot {
+    struct Addressable {
+        bool enabled = false;
+        uint16_t pixels = 0;
+        AddressableType type = AddressableType::WS2812;
+        PixelOrder order = PixelOrder::GRB;
+    } addressable[8];
+
+    bool pwm_enabled[8] = {};
+
+    bool valid = false;
+    uint32_t generation = 0;
+};
+
 /// Controls all output hardware (addressable LEDs + PCA9685 PWM).
 ///
 /// Thread-safety: All physical output commits MUST pass the try_commit() safety gate.
@@ -82,15 +119,8 @@ class OutputController {
 public:
     using CommitObserver = std::function<void(esp_err_t commit_result)>;
 
-    OutputController() {
-        mutex_ = xSemaphoreCreateRecursiveMutex();
-    }
-    ~OutputController() {
-        if (mutex_) {
-            vSemaphoreDelete(mutex_);
-            mutex_ = nullptr;
-        }
-    }
+    OutputController();
+    ~OutputController();
 
     esp_err_t init();
     esp_err_t init_on_output_core();
@@ -98,6 +128,7 @@ public:
     // Reconfigures hardware driver layers based on logical configuration
     esp_err_t reconfigure(const DeviceConfig& cfg);
     esp_err_t reconfigure_on_output_core(const DeviceConfig& cfg);
+    esp_err_t rollback_to_last_good_topology();
     
     RmtDiagnostics rmt_diagnostics() const { return pixels_.diagnostics(); }
 
@@ -122,6 +153,18 @@ public:
     bool output_enabled() const { return output_enabled_.load(std::memory_order_acquire); }
 
     bool is_topology_valid() const { return topology_valid_.load(std::memory_order_acquire); }
+    uint32_t topology_generation() const { return topology_generation_.load(std::memory_order_acquire); }
+    const OutputTopologySnapshot& last_known_good_snapshot() const { return last_known_good_snapshot_; }
+
+    uint32_t topology_reconfigure_attempts() const { return topology_reconfigure_attempts_.load(std::memory_order_relaxed); }
+    uint32_t topology_reconfigure_failures() const { return topology_reconfigure_failures_.load(std::memory_order_relaxed); }
+    uint32_t topology_rollbacks() const { return topology_rollbacks_.load(std::memory_order_relaxed); }
+    uint32_t topology_rollback_failures() const { return topology_rollback_failures_.load(std::memory_order_relaxed); }
+
+    uint32_t output_lock_max_wait_us() const { return output_lock_max_wait_us_.load(std::memory_order_relaxed); }
+    uint32_t output_lock_contentions() const { return output_lock_contentions_.load(std::memory_order_relaxed); }
+    uint32_t lifecycle_max_us() const { return lifecycle_max_us_.load(std::memory_order_relaxed); }
+    uint32_t reconfigure_max_us() const { return reconfigure_max_us_.load(std::memory_order_relaxed); }
 
     bool is_pwm_available() const { return pwm_available_.load(std::memory_order_acquire); }
     void set_pwm_available(bool available) { pwm_available_.store(available, std::memory_order_release); }
@@ -142,10 +185,9 @@ public:
     Pca9685Driver& pwm() { return pwm_; }
     const Pca9685Driver& pwm() const { return pwm_; }
 
-    /// Acquire the output mutex. Use when performing multi-step
-    /// pixel/pwm operations that must be atomic.
-    void lock()   { xSemaphoreTakeRecursive(mutex_, portMAX_DELAY); }
-    void unlock() { xSemaphoreGiveRecursive(mutex_); }
+    /// Acquire the output mutex with contention tracking.
+    void lock();
+    void unlock();
 
     friend class OutputTransaction;
 
@@ -161,6 +203,19 @@ private:
     std::atomic<bool> output_enabled_{true};
     std::atomic<bool> estop_latched_{false};
     std::atomic<bool> topology_valid_{false};  // Set to true only after a successful reconfigure()
+    std::atomic<uint32_t> topology_generation_{0};
+    OutputTopologySnapshot last_known_good_snapshot_{};
+
+    std::atomic<uint32_t> topology_reconfigure_attempts_{0};
+    std::atomic<uint32_t> topology_reconfigure_failures_{0};
+    std::atomic<uint32_t> topology_rollbacks_{0};
+    std::atomic<uint32_t> topology_rollback_failures_{0};
+
+    std::atomic<uint32_t> output_lock_max_wait_us_{0};
+    std::atomic<uint32_t> output_lock_contentions_{0};
+    std::atomic<uint32_t> lifecycle_max_us_{0};
+    std::atomic<uint32_t> reconfigure_max_us_{0};
+
     std::atomic<bool> pwm_available_{false};
     std::atomic<uint32_t> failed_commit_count_{0};
     std::atomic<esp_err_t> last_commit_error_{ESP_OK};

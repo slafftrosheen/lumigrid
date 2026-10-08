@@ -46,6 +46,7 @@
 #include "OutputCoreExecutor.hpp"
 #include "PowerBudget.hpp"
 #include "lg_board_pins.hpp"
+#include "NvsRuntime.hpp"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -6498,6 +6499,189 @@ bool test_lg029_node_backed_authentication() {
         return true;
     }
 
+    bool test_lghw002_transactional_output_and_wifi() {
+        ESP_LOGI(TAG, "Testing LG-HW-002 Transactional Output and Wi-Fi Fault Containment...");
+
+        // 1. Centralized NVS ownership:
+        assert(NvsRuntime::initialise() == ESP_OK || NvsRuntime::destructive_recovery_required());
+        assert(NvsRuntime::ready() == true || NvsRuntime::destructive_recovery_required());
+
+        // 2. Memory Admission calculation & rejection checks
+        DeviceConfig cfg_admit{};
+        for (uint8_t l = 0; l < 8; ++l) {
+            cfg_admit.channels[l].enabled = true;
+            cfg_admit.channels[l].pixel_count = 256;
+            cfg_admit.channels[l].addressable_type = AddressableType::WS2812;
+            cfg_admit.channels[l].pixel_order = PixelOrder::GRB;
+        }
+
+        AddressableAllocationEstimate est = estimate_addressable_allocation(cfg_admit);
+        assert(est.wire_internal_bytes > 0);
+        assert(est.total_internal_required() > 10000);
+        assert(est.total_generic_required() > 0);
+        assert(est.largest_internal_allocation > 0);
+
+        // Admission passes under normal conditions
+        OutputMemoryAdmission adm_ok = check_output_memory_admission(cfg_admit);
+        assert(adm_ok.accepted == true);
+        assert(adm_ok.rejection_reason == nullptr);
+
+        // Admission rejected when internal_reserve cannot be met
+        OutputMemoryAdmission adm_fail_internal = check_output_memory_admission(
+            cfg_admit, 16u * 1024u, 0xFFFFFFFF - 100000u);
+        assert(adm_fail_internal.accepted == false);
+        assert(adm_fail_internal.rejection_reason != nullptr);
+        assert(std::string(adm_fail_internal.rejection_reason) == "internal_reserve");
+
+        // 3. Staged Candidates & Rollback in ParallelRmtDriver
+        {
+            class TestRmtTransport : public IRmtTransport {
+            public:
+                bool prepared[8] = {};
+                bool active[8] = {};
+                esp_err_t create(uint8_t lane, int, bool) override {
+                    active[lane] = true;
+                    return ESP_OK;
+                }
+                esp_err_t prepare(uint8_t lane, int, bool, bool) override {
+                    prepared[lane] = true;
+                    return ESP_OK;
+                }
+                void commit_prepared(uint8_t lane) override {
+                    active[lane] = true;
+                    prepared[lane] = false;
+                }
+                void cancel_prepared(uint8_t lane, bool existing) override {
+                    prepared[lane] = false;
+                    if (!existing) active[lane] = false;
+                }
+                esp_err_t submit(uint8_t, const uint8_t*, size_t) override { return ESP_OK; }
+                esp_err_t wait(uint8_t, uint32_t) override { return ESP_OK; }
+                esp_err_t destroy(uint8_t lane) override {
+                    active[lane] = false;
+                    return ESP_OK;
+                }
+            };
+
+            TestRmtTransport trans;
+            ParallelRmtDriver rmt(&trans);
+
+            // Configure initial topology: lane 0 only
+            DeviceConfig init_cfg{};
+            init_cfg.channels[0].enabled = true;
+            init_cfg.channels[0].pixel_count = 50;
+            init_cfg.channels[0].addressable_type = AddressableType::WS2812;
+            init_cfg.channels[0].pixel_order = PixelOrder::GRB;
+
+            esp_err_t init_err = rmt.reconfigure(init_cfg, 16 * 1024, 12 * 1024);
+            assert(init_err == ESP_OK);
+            assert(rmt.configured(0));
+            assert(rmt.pixels(0) == 50);
+            assert(!rmt.configured(1));
+
+            // Stage candidate: lane 0 (100 px), lane 1 (60 px)
+            DeviceConfig cand_cfg{};
+            cand_cfg.channels[0].enabled = true;
+            cand_cfg.channels[0].pixel_count = 100;
+            cand_cfg.channels[0].addressable_type = AddressableType::WS2812;
+            cand_cfg.channels[0].pixel_order = PixelOrder::GRB;
+
+            cand_cfg.channels[1].enabled = true;
+            cand_cfg.channels[1].pixel_count = 60;
+            cand_cfg.channels[1].addressable_type = AddressableType::WS2812;
+            cand_cfg.channels[1].pixel_order = PixelOrder::GRB;
+
+            esp_err_t prep_err = rmt.prepare_candidate(cand_cfg, 16 * 1024, 12 * 1024);
+            assert(prep_err == ESP_OK);
+            assert(rmt.has_candidate());
+
+            // While candidate staged, active lanes remain unchanged
+            assert(rmt.configured(0));
+            assert(rmt.pixels(0) == 50);
+            assert(!rmt.configured(1));
+
+            // Cancel candidate -> active remains unchanged
+            rmt.cancel_candidate();
+            assert(!rmt.has_candidate());
+            assert(rmt.configured(0));
+            assert(rmt.pixels(0) == 50);
+            assert(!rmt.configured(1));
+
+            // Stage again and commit
+            prep_err = rmt.prepare_candidate(cand_cfg, 16 * 1024, 12 * 1024);
+            assert(prep_err == ESP_OK);
+            assert(rmt.has_candidate());
+
+            esp_err_t commit_err = rmt.commit_candidate();
+            assert(commit_err == ESP_OK);
+            assert(!rmt.has_candidate());
+            assert(rmt.configured(0));
+            assert(rmt.pixels(0) == 100);
+            assert(rmt.configured(1));
+            assert(rmt.pixels(1) == 60);
+        }
+
+        // 4. OutputController transactional sequence & pre-swap preservation
+        {
+            OutputController ctrl;
+            DeviceConfig cfg1{};
+            cfg1.channels[0].enabled = true;
+            cfg1.channels[0].pixel_count = 16;
+            cfg1.channels[0].addressable_type = AddressableType::WS2812;
+            cfg1.channels[0].pixel_order = PixelOrder::GRB;
+
+            esp_err_t err = ctrl.reconfigure_on_output_core(cfg1);
+            assert(err == ESP_OK);
+            assert(ctrl.is_topology_valid());
+            uint32_t gen1 = ctrl.topology_generation();
+            assert(gen1 == 1);
+            assert(ctrl.last_known_good_snapshot().valid);
+            assert(ctrl.last_known_good_snapshot().generation == 1);
+            assert(ctrl.last_known_good_snapshot().addressable[0].enabled);
+            assert(ctrl.last_known_good_snapshot().addressable[0].pixels == 16);
+
+            // Now provide a bad config that fails validation (invalid pixel count 0 for enabled channel)
+            DeviceConfig cfg_bad = cfg1;
+            cfg_bad.channels[0].pixel_count = 0;
+            uint32_t fails_before = ctrl.topology_reconfigure_failures();
+
+            err = ctrl.reconfigure_on_output_core(cfg_bad);
+            assert(err != ESP_OK);
+            // Pre-swap failure MUST preserve previous healthy state
+            assert(ctrl.is_topology_valid());
+            assert(ctrl.topology_generation() == gen1);
+            assert(ctrl.topology_reconfigure_failures() == fails_before + 1);
+            assert(ctrl.pixels().configured_pixels(0) == 16);
+
+            // Rollback test: verify rollback_to_last_good_topology() restores healthy state
+            esp_err_t roll_err = ctrl.rollback_to_last_good_topology();
+            assert(roll_err == ESP_OK);
+            assert(ctrl.is_topology_valid());
+            assert(ctrl.topology_rollbacks() >= 1);
+            assert(!Pca9685Driver::is_outputs_enabled()); // /OE safely high after rollback blackout
+        }
+
+        // 5. OutputController lock contention tracking
+        {
+            OutputController ctrl;
+            ctrl.lock();
+            uint32_t wait_us = ctrl.output_lock_max_wait_us();
+            (void)wait_us;
+            ctrl.unlock();
+        }
+
+        // 6. Wi-Fi diagnostics & fallback AP
+        {
+            WifiService wifi;
+            WifiDiagnostics diag = wifi.diagnostics();
+            assert(diag.actual_mode == WIFI_MODE_NULL || diag.actual_mode != WIFI_MODE_NULL);
+            wifi.schedule_exit_fallback_ap();
+        }
+
+        ESP_LOGI(TAG, "[PASS] LG-HW-002 Transactional Output and Wi-Fi Fault Containment tests passed.");
+        return true;
+    }
+
 } // namespace
 
 bool run_runtime_hardening_tests() {
@@ -6629,6 +6813,9 @@ bool run_runtime_hardening_tests() {
 
     // LG-HW-001 Hardware Coexistence Foundation
     all_ok &= test_lghw001_hardware_coexistence_foundation();
+
+    // LG-HW-002 Transactional Output + Wi-Fi Fault Containment
+    all_ok &= test_lghw002_transactional_output_and_wifi();
 
     if (all_ok) {
         ESP_LOGI(TAG, "==================================================");

@@ -20,6 +20,7 @@ namespace lg {
 static const char* TAG = "aled";
 
 AddressableDriver::~AddressableDriver() {
+    cancel_candidate();
     for (uint8_t lane = 0; lane < kLanes; ++lane) free_shadow(lane);
 }
 
@@ -28,26 +29,63 @@ void AddressableDriver::free_shadow(uint8_t lane) {
     shadow_[lane] = nullptr;
 }
 
-esp_err_t AddressableDriver::reconfigure(const DeviceConfig& cfg, uint32_t reserve_bytes) {
-    AddressableShadowPixel* candidate[kLanes]{};
+esp_err_t AddressableDriver::prepare_candidate(const DeviceConfig& cfg, uint32_t generic_reserve, uint32_t internal_reserve) {
+    cancel_candidate();
+
     esp_err_t err = ESP_OK;
     for (uint8_t lane = 0; lane < kLanes; ++lane) {
         const auto& cc = cfg.channels[lane];
         if (!cc.enabled || !cc.pixel_count) continue;
         if (cc.pixel_count > kPixels) { err = ESP_ERR_INVALID_ARG; break; }
-        candidate[lane] = static_cast<AddressableShadowPixel*>(calloc(cc.pixel_count, sizeof(AddressableShadowPixel)));
-        if (!candidate[lane]) { err = kErrInsufficientRuntimeMemory; break; }
+        candidate_shadow_[lane] = static_cast<AddressableShadowPixel*>(calloc(cc.pixel_count, sizeof(AddressableShadowPixel)));
+        if (!candidate_shadow_[lane]) { err = kErrInsufficientRuntimeMemory; break; }
     }
-    if (err == ESP_OK) err = rmt_.reconfigure(cfg, reserve_bytes);
+
+    if (err == ESP_OK) {
+        err = rmt_.prepare_candidate(cfg, generic_reserve, internal_reserve);
+    }
+
     if (err != ESP_OK) {
-        for (auto* shadow : candidate) free(shadow);
+        cancel_candidate();
         return err;
     }
+
+    has_candidate_ = true;
+    return ESP_OK;
+}
+
+esp_err_t AddressableDriver::commit_candidate() {
+    if (!has_candidate_) return ESP_ERR_INVALID_STATE;
+
+    esp_err_t err = rmt_.commit_candidate();
+    if (err != ESP_OK) {
+        return err;
+    }
+
     for (uint8_t lane = 0; lane < kLanes; ++lane) {
         free_shadow(lane);
-        shadow_[lane] = candidate[lane];
+        shadow_[lane] = candidate_shadow_[lane];
+        candidate_shadow_[lane] = nullptr;
     }
+    has_candidate_ = false;
     return ESP_OK;
+}
+
+void AddressableDriver::cancel_candidate() {
+    for (uint8_t lane = 0; lane < kLanes; ++lane) {
+        if (candidate_shadow_[lane]) {
+            free(candidate_shadow_[lane]);
+            candidate_shadow_[lane] = nullptr;
+        }
+    }
+    rmt_.cancel_candidate();
+    has_candidate_ = false;
+}
+
+esp_err_t AddressableDriver::reconfigure(const DeviceConfig& cfg, uint32_t generic_reserve, uint32_t internal_reserve) {
+    esp_err_t err = prepare_candidate(cfg, generic_reserve, internal_reserve);
+    if (err != ESP_OK) return err;
+    return commit_candidate();
 }
 
 // ── Lifecycle ─────────────────────────────────────────────────────────────────

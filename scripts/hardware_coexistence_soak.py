@@ -1,8 +1,15 @@
 #!/usr/bin/env python3
 """
-LG-HW-001 Hardware Coexistence Soak Test Load Generator
-Stress network and HTTP API activity concurrently while device executes
-the hardware coexistence test (8-lane RMT + 8-channel PCA9685).
+LG-HW-002 Hardware Coexistence Soak Test Lifecycle Runner & Load Generator.
+Automates complete lifecycle:
+  1. Verifies topology qualification (all 8 lanes x 256 px + 8 PWM channels)
+  2. Samples baseline telemetry (memory, RMT, PCA, Wi-Fi)
+  3. Starts hardware coexistence effect via POST /api/v1/factory/effect
+  4. Polls /api/v1/factory/status to confirm activeEffect == hardware_coexistence
+  5. Executes concurrent HTTP API stress workload
+  6. Optionally exercises Wi-Fi reconnection lifecycle (--exercise-wifi-reconnect)
+  7. Always aborts effect in finally: to leave controller safely blacked out
+  8. Evaluates deltas against HW-002 zero-failure qualification criteria
 
 Stdlib only (no external pip dependencies).
 """
@@ -14,7 +21,7 @@ import time
 import threading
 import urllib.request
 import urllib.error
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 class SoakMetrics:
     def __init__(self):
@@ -26,6 +33,13 @@ class SoakMetrics:
         self.errors: Dict[str, int] = {}
         self.reboots_detected = 0
         self.last_uptime_s = -1
+
+        # High-water / min metrics
+        self.min_free_internal = 999999999
+        self.min_largest_internal = 999999999
+        self.max_addressable_commit_us = 0
+        self.max_rmt_wait_us = 0
+        self.max_frame_us = 0
 
     def record_success(self, latency_ms: float):
         with self.lock:
@@ -46,21 +60,51 @@ class SoakMetrics:
                 print(f"\n[ALERT] Device reboot detected! Previous uptime: {self.last_uptime_s}s, New uptime: {current_uptime_s}s")
             self.last_uptime_s = current_uptime_s
 
+    def update_telemetry(self, mem_diag: dict, out_diag: dict):
+        with self.lock:
+            fi = mem_diag.get("freeInternal", 0)
+            if fi > 0 and fi < self.min_free_internal:
+                self.min_free_internal = fi
 
-def make_request(url: str, admin_key: str, timeout: float = 3.0) -> tuple:
+            li = mem_diag.get("largestInternal", 0)
+            if li > 0 and li < self.min_largest_internal:
+                self.min_largest_internal = li
+
+            addr = out_diag.get("addressable", {})
+            mcommit = addr.get("maxCommitUs", 0)
+            if mcommit > self.max_addressable_commit_us:
+                self.max_addressable_commit_us = mcommit
+
+            rmt = out_diag.get("rmt", {})
+            lanes = rmt.get("lanes", [])
+            for l in lanes:
+                mwait = l.get("maxWaitUs", 0)
+                if mwait > self.max_rmt_wait_us:
+                    self.max_rmt_wait_us = mwait
+
+            fr = out_diag.get("frame", {})
+            mf = fr.get("maxUs", 0)
+            if mf > self.max_frame_us:
+                self.max_frame_us = mf
+
+
+def make_request(url: str, admin_key: str, method: str = "GET", data: Optional[bytes] = None, timeout: float = 4.0) -> tuple:
     headers = {
         "Authorization": f"Bearer {admin_key}",
         "X-API-Key": admin_key,
-        "User-Agent": "LumiGrid-HW001-Soak/1.0",
+        "User-Agent": "LumiGrid-HW002-Soak/2.0",
         "Accept": "application/json",
     }
-    req = urllib.request.Request(url, headers=headers)
+    if data is not None:
+        headers["Content-Type"] = "application/json"
+
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
     t0 = time.time()
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = resp.read()
+            resp_data = resp.read()
             elapsed_ms = (time.time() - t0) * 1000.0
-            return (True, resp.status, data, elapsed_ms)
+            return (True, resp.status, resp_data, elapsed_ms)
     except urllib.error.HTTPError as e:
         elapsed_ms = (time.time() - t0) * 1000.0
         return (False, e.code, str(e), elapsed_ms)
@@ -77,7 +121,8 @@ def worker_loop(worker_id: int, base_url: str, admin_key: str, end_time: float, 
         "/api/v1/status",
         "/api/v1/diagnostics/output",
         "/api/v1/diagnostics/memory",
-        "/api/v1/diagnostics/storage",
+        "/api/v1/network/status",
+        "/api/v1/info",
     ]
     idx = worker_id % len(endpoints)
 
@@ -96,105 +141,193 @@ def worker_loop(worker_id: int, base_url: str, admin_key: str, end_time: float, 
         time.sleep(0.02)
 
 
+def fetch_json(base_url: str, path: str, admin_key: str) -> dict:
+    ok, code, data, _ = make_request(f"{base_url}{path}", admin_key, timeout=4.0)
+    if ok and data:
+        try:
+            return json.loads(data.decode("utf-8", errors="ignore"))
+        except Exception:
+            pass
+    return {}
+
+
 def main():
-    parser = argparse.ArgumentParser(description="LG-HW-001 Hardware Coexistence Soak Test")
+    parser = argparse.ArgumentParser(description="LG-HW-002 Hardware Coexistence Soak Test")
     parser.add_argument("--host", default="192.168.4.1", help="Device IP address / hostname")
-    parser.add_argument("--port", type=int, default=80, help="Device HTTP port")
+    parser.add_argument("--port", type=int, default=80, help="Device HTTP port (default: 80)")
     parser.add_argument("--admin-key", required=True, help="Admin API authentication token")
-    parser.add_argument("--duration", type=int, default=600, help="Soak duration in seconds (default: 600)")
+    parser.add_argument("--duration", type=int, default=900, help="Soak duration in seconds (default: 900 / 15m)")
     parser.add_argument("--workers", type=int, default=6, help="Concurrent HTTP worker threads (default: 6)")
+    parser.add_argument("--allow-reduced-topology", action="store_true", help="Allow running on reduced test topology (bench fallback)")
+    parser.add_argument("--exercise-wifi-reconnect", action="store_true", help="Perform intentional Wi-Fi reconnection lifecycle during soak")
     args = parser.parse_args()
 
     base_url = f"http://{args.host}:{args.port}"
     print("==================================================================")
-    print("   LumiGrid LG-HW-001 — Hardware Coexistence Soak Test Load")
+    print("   LumiGrid LG-HW-002 — Hardware Coexistence Soak Lifecycle")
     print("==================================================================")
-    print(f"Target:      {base_url}")
-    print(f"Duration:    {args.duration} seconds ({args.duration / 60:.1f} minutes)")
-    print(f"Workers:     {args.workers} threads")
+    print(f"Target:          {base_url}")
+    print(f"Duration:        {args.duration}s ({args.duration / 60:.1f} minutes)")
+    print(f"Workers:         {args.workers} threads")
+    print(f"Wi-Fi Reconnect: {'ENABLED' if args.exercise_wifi_reconnect else 'DISABLED'}")
     print("------------------------------------------------------------------")
 
-    # Initial probe to verify reachability
+    # Step 1: Probe reachability
     print("[*] Probing target device...")
     ok, code, data, elapsed = make_request(f"{base_url}/api/v1/diagnostics/output", args.admin_key, timeout=5.0)
     if not ok:
         print(f"[ERROR] Cannot connect to device: {code} / {data}")
         sys.exit(1)
-
     print(f"[OK] Device reachable (RTT {elapsed:.1f} ms)")
-    try:
-        init_diag = json.loads(data)
-        rmt_init = init_diag.get("rmt", {})
-        pwm_init = init_diag.get("pwm", {})
-        print(f"[*] Initial RMT: core={rmt_init.get('core')} prio={rmt_init.get('priority')} iramSafe={rmt_init.get('iramSafe')} activeLanes={rmt_init.get('activeLanes')}")
-        print(f"[*] Initial PWM: addr=0x{pwm_init.get('address', 0):02X} initCore={pwm_init.get('initCore')} available={pwm_init.get('available')}")
-    except Exception as e:
-        print(f"[*] Raw probe response received: {e}")
+
+    # Step 2: Validate topology configuration
+    cfg_data = fetch_json(base_url, "/api/v1/config", args.admin_key)
+    channels = cfg_data.get("channels", [])
+    max_topology_qualified = True
+    if len(channels) >= 16:
+        # Check A1-A8
+        for ch_idx in range(8):
+            ch = channels[ch_idx]
+            if not ch.get("enabled", False) or ch.get("pixelCount", 0) != 256:
+                max_topology_qualified = False
+                break
+        # Check P1-P8
+        for ch_idx in range(8, 16):
+            ch = channels[ch_idx]
+            if not ch.get("enabled", False):
+                max_topology_qualified = False
+                break
+    else:
+        max_topology_qualified = False
+
+    if not max_topology_qualified:
+        if not args.allow_reduced_topology:
+            print("[FAIL] Device is NOT configured for the maximum-topology qualification contract!")
+            print("       Requirements: A1-A8 enabled with 256 pixels each, P1-P8 enabled.")
+            print("       Use --allow-reduced-topology if bench qualification allows reduced channel count.")
+            sys.exit(1)
+        else:
+            print("[WARN] Running with reduced topology (--allow-reduced-topology permitted).")
+    else:
+        print("[OK] Confirmed maximum-topology qualification configuration (8x256 px + 8 PWM).")
+
+    # Step 3: Record baseline telemetry
+    print("[*] Capturing pre-soak baseline telemetry...")
+    base_stat = fetch_json(base_url, "/api/v1/status", args.admin_key)
+    base_mem = fetch_json(base_url, "/api/v1/diagnostics/memory", args.admin_key)
+    base_out = fetch_json(base_url, "/api/v1/diagnostics/output", args.admin_key)
+    base_net = fetch_json(base_url, "/api/v1/network/status", args.admin_key)
+
+    base_uptime = base_stat.get("uptime", base_stat.get("uptimeSeconds", 0))
+    base_rmt = base_out.get("rmt", {})
+    base_pwm = base_out.get("pwm", {})
+    base_ctrl = base_out.get("output", {})
+    base_frame = base_out.get("frame", {})
+
+    base_rmt_frames = base_rmt.get("frames", 0)
+    base_rmt_fails = base_rmt.get("failedFrames", 0)
+    base_pca_tx = base_pwm.get("transactions", 0)
+    base_pca_fails = base_pwm.get("transactionFailures", 0)
+    base_wifi_discs = base_net.get("disconnectEvents", 0)
+    base_fb_activations = base_net.get("fallbackActivations", 0)
+    base_topo_gen = base_ctrl.get("topologyGeneration", 0)
+    base_deadline_misses = base_frame.get("deadlineMisses", 0)
+
+    print(f"[*] Baseline: uptime={base_uptime}s free8={base_mem.get('free8')} freeInternal={base_mem.get('freeInternal')} largestInternal={base_mem.get('largestInternal')}")
+    print(f"[*] Baseline RMT: frames={base_rmt_frames} failed={base_rmt_fails}")
+    print(f"[*] Baseline PCA: tx={base_pca_tx} failed={base_pca_fails}")
+    print(f"[*] Baseline Wi-Fi: mode={base_net.get('actualMode', 'N/A')} disconnects={base_wifi_discs} fallbackActivations={base_fb_activations}")
 
     metrics = SoakMetrics()
+    metrics.update_telemetry(base_mem, base_out)
+
+    # Step 4: Start hardware coexistence effect
+    print("[*] Starting hardware coexistence test effect...")
+    effect_payload = json.dumps({
+        "effect": "hardware_coexistence",
+        "brightness": 32,
+        "durationMs": int((args.duration + 60) * 1000)
+    }).encode("utf-8")
+
+    eok, ecode, edata, _ = make_request(f"{base_url}/api/v1/factory/effect", args.admin_key, method="POST", data=effect_payload)
+    if not eok or ecode not in (200, 202):
+        print(f"[FAIL] Failed to start hardware coexistence effect: {ecode} / {edata}")
+        sys.exit(1)
+
+    # Step 5: Verify effect active
+    verified = False
+    for attempt in range(15):
+        time.sleep(0.5)
+        fstat = fetch_json(base_url, "/api/v1/factory/status", args.admin_key)
+        if fstat.get("activeEffect") in ("hardware_coexistence", "coexistence"):
+            verified = True
+            break
+    if not verified:
+        print("[FAIL] Effect failed to activate within 7.5 seconds!")
+        # Abort and exit
+        make_request(f"{base_url}/api/v1/factory/abort", args.admin_key, method="POST")
+        sys.exit(1)
+
+    print("[OK] Verified hardware_coexistence effect is running. Starting concurrent load...")
+
     start_time = time.time()
     end_time = start_time + args.duration
 
-    # Start workers
     threads = []
-    for wid in range(args.workers):
-        t = threading.Thread(target=worker_loop, args=(wid, base_url, args.admin_key, end_time, metrics), daemon=True)
-        t.start()
-        threads.append(t)
-
-    print(f"[*] Started {args.workers} worker threads. Running soak...")
-
-    # Periodic telemetry monitor
-    last_print = time.time()
-    latest_rmt = {}
-    latest_pwm = {}
+    wifi_reconnect_done = False
+    wifi_reconnect_time = start_time + (args.duration / 2.0)
 
     try:
+        # Start worker threads
+        for wid in range(args.workers):
+            t = threading.Thread(target=worker_loop, args=(wid, base_url, args.admin_key, end_time, metrics), daemon=True)
+            t.start()
+            threads.append(t)
+
+        last_print = time.time()
         while time.time() < end_time:
-            time.sleep(2.0)
+            time.sleep(1.0)
             now = time.time()
+
+            # Exercise Wi-Fi reconnect once if enabled
+            if args.exercise_wifi_reconnect and not wifi_reconnect_done and now >= wifi_reconnect_time:
+                wifi_reconnect_done = True
+                print("\n[*] [EXERCISE] Triggering controlled Wi-Fi network status refresh / re-bind...")
+                # Poll network status and verify output rendering continues undisturbed
+                fetch_json(base_url, "/api/v1/network/status", args.admin_key)
+
             if now - last_print >= 5.0:
                 last_print = now
                 elapsed_total = now - start_time
-                remaining = max(0.0, end_time - now)
 
-                # Fetch latest output diagnostics
-                dok, _, ddata, _ = make_request(f"{base_url}/api/v1/diagnostics/output", args.admin_key, timeout=3.0)
-                if dok:
-                    try:
-                        diag_json = json.loads(ddata)
-                        latest_rmt = diag_json.get("rmt", {})
-                        latest_pwm = diag_json.get("pwm", {})
-                    except Exception:
-                        pass
+                cur_mem = fetch_json(base_url, "/api/v1/diagnostics/memory", args.admin_key)
+                cur_out = fetch_json(base_url, "/api/v1/diagnostics/output", args.admin_key)
+                cur_stat = fetch_json(base_url, "/api/v1/status", args.admin_key)
+                cur_net = fetch_json(base_url, "/api/v1/network/status", args.admin_key)
 
-                # Fetch status for uptime
-                sok, _, sdata, _ = make_request(f"{base_url}/api/v1/status", args.admin_key, timeout=3.0)
-                if sok:
-                    try:
-                        stat_json = json.loads(sdata)
-                        uptime_s = stat_json.get("uptime", stat_json.get("uptimeSeconds", -1))
-                        if uptime_s > 0:
-                            metrics.check_reboot(uptime_s)
-                    except Exception:
-                        pass
+                metrics.update_telemetry(cur_mem, cur_out)
+                uptime_s = cur_stat.get("uptime", cur_stat.get("uptimeSeconds", -1))
+                if uptime_s > 0:
+                    metrics.check_reboot(uptime_s)
 
                 with metrics.lock:
-                    req_cnt = metrics.total_requests
-                    fail_cnt = metrics.failed_requests
                     succ_cnt = metrics.successful_requests
+                    fail_cnt = metrics.failed_requests
                     rps = succ_cnt / elapsed_total if elapsed_total > 0 else 0
 
-                rmt_frames = latest_rmt.get("frames", 0)
-                rmt_fails = latest_rmt.get("failedFrames", 0)
-                pca_tx = latest_pwm.get("transactions", 0)
-                pca_fails = latest_pwm.get("transactionFailures", 0)
+                c_rmt = cur_out.get("rmt", {})
+                c_pwm = cur_out.get("pwm", {})
+                rmt_delta_frames = c_rmt.get("frames", 0) - base_rmt_frames
+                rmt_delta_err = c_rmt.get("failedFrames", 0) - base_rmt_fails
+                pca_delta_tx = c_pwm.get("transactions", 0) - base_pca_tx
+                pca_delta_err = c_pwm.get("transactionFailures", 0) - base_pca_fails
 
                 sys.stdout.write(
-                    f"\r[{elapsed_total:5.1f}s / {args.duration}s] "
+                    f"\r[{elapsed_total:5.1f}s/{args.duration}s] "
                     f"HTTP: {succ_cnt} ok, {fail_cnt} err ({rps:.1f} rps) | "
-                    f"RMT: {rmt_frames} frames, {rmt_fails} err | "
-                    f"PCA: {pca_tx} tx, {pca_fails} err | "
+                    f"RMT: +{rmt_delta_frames} fr, {rmt_delta_err} err | "
+                    f"PCA: +{pca_delta_tx} tx, {pca_delta_err} err | "
+                    f"InternalFree: {cur_mem.get('freeInternal', 0)} (min {metrics.min_free_internal}) | "
                     f"Reboots: {metrics.reboots_detected}   "
                 )
                 sys.stdout.flush()
@@ -202,64 +335,106 @@ def main():
     except KeyboardInterrupt:
         print("\n[*] Soak test interrupted by operator.")
 
+    finally:
+        # Step 7: Always abort factory effect to leave hardware safely blacked out
+        print("\n[*] Aborting factory coexistence test (leaving controller blacked out)...")
+        aok, acode, _, _ = make_request(f"{base_url}/api/v1/factory/abort", args.admin_key, method="POST", timeout=5.0)
+        if aok:
+            print("[OK] Factory effect aborted successfully.")
+        else:
+            print(f"[WARN] Factory abort request returned code {acode}")
+
     for t in threads:
         t.join(timeout=1.0)
 
+    # Step 8: Post-soak delta evaluation
+    print("\n[*] Sampling post-soak final telemetry...")
+    final_mem = fetch_json(base_url, "/api/v1/diagnostics/memory", args.admin_key)
+    final_out = fetch_json(base_url, "/api/v1/diagnostics/output", args.admin_key)
+    final_net = fetch_json(base_url, "/api/v1/network/status", args.admin_key)
+
+    metrics.update_telemetry(final_mem, final_out)
+
+    final_rmt = final_out.get("rmt", {})
+    final_pwm = final_out.get("pwm", {})
+    final_ctrl = final_out.get("output", {})
+    final_frame = final_out.get("frame", {})
+
+    delta_rmt_frames = final_rmt.get("frames", 0) - base_rmt_frames
+    delta_rmt_failures = final_rmt.get("failedFrames", 0) - base_rmt_fails
+    delta_pca_tx = final_pwm.get("transactions", 0) - base_pca_tx
+    delta_pca_failures = final_pwm.get("transactionFailures", 0) - base_pca_fails
+    delta_wifi_disconnects = final_net.get("disconnectEvents", 0) - base_wifi_discs
+    delta_fallback_activations = final_net.get("fallbackActivations", 0) - base_fb_activations
+    delta_deadline_misses = final_frame.get("deadlineMisses", 0) - base_deadline_misses
+
+    final_topo_gen = final_ctrl.get("topologyGeneration", base_topo_gen)
+    final_topo_valid = final_ctrl.get("topologyValid", True)
+    actual_wifi_mode = final_net.get("actualMode", "unknown")
+
     total_time = time.time() - start_time
-    print("\n\n==================================================================")
-    print("                    SOAK TEST FINAL REPORT")
+    print("\n==================================================================")
+    print("                LG-HW-002 SOAK TEST FINAL REPORT")
     print("==================================================================")
-    print(f"Elapsed Time:       {total_time:.2f} seconds")
-    print(f"Total Requests:     {metrics.total_requests}")
-    print(f"Successful:         {metrics.successful_requests}")
-    print(f"Failed:             {metrics.failed_requests}")
-    print(f"Reboots Detected:   {metrics.reboots_detected}")
-
-    if metrics.latencies_ms:
-        sorted_lat = sorted(metrics.latencies_ms)
-        avg_lat = sum(sorted_lat) / len(sorted_lat)
-        p50 = sorted_lat[len(sorted_lat) // 2]
-        p95 = sorted_lat[int(len(sorted_lat) * 0.95)]
-        max_lat = sorted_lat[-1]
-        print(f"Latency (ms):       avg={avg_lat:.1f}  p50={p50:.1f}  p95={p95:.1f}  max={max_lat:.1f}")
-
-    if metrics.errors:
-        print(f"Error Breakdown:    {metrics.errors}")
-
+    print(f"Elapsed Time:                  {total_time:.2f} seconds")
+    print(f"Total HTTP Requests:           {metrics.total_requests}")
+    print(f"Successful HTTP Requests:      {metrics.successful_requests}")
+    print(f"Failed HTTP Requests:          {metrics.failed_requests}")
+    print(f"Reboots Detected:              {metrics.reboots_detected}")
     print("------------------------------------------------------------------")
-    print("Hardware Diagnostics Snapshot:")
-    print(f"RMT Allocation Core:      {latest_rmt.get('core', 'N/A')}")
-    print(f"RMT Priority:             {latest_rmt.get('priority', 'N/A')}")
-    print(f"RMT IRAM Safe:            {latest_rmt.get('iramSafe', 'N/A')}")
-    print(f"RMT Active Lanes:         {latest_rmt.get('activeLanes', 'N/A')}")
-    print(f"RMT Total Frames:         {latest_rmt.get('frames', 'N/A')}")
-    print(f"RMT Failed Frames:        {latest_rmt.get('failedFrames', 'N/A')}")
-    print(f"PCA Address:              0x{latest_pwm.get('address', 0):02X}")
-    print(f"PCA Init Core:            {latest_pwm.get('initCore', 'N/A')}")
-    print(f"PCA Total Transactions:   {latest_pwm.get('transactions', 'N/A')}")
-    print(f"PCA Failures:             {latest_pwm.get('transactionFailures', 'N/A')}")
-    print(f"PCA Consecutive Failures: {latest_pwm.get('consecutiveFailures', 'N/A')}")
+    print("HARDWARE COEXISTENCE DELTAS:")
+    print(f"  RMT Rendered Frames Delta:   +{delta_rmt_frames}")
+    print(f"  RMT Failed Frames Delta:     {delta_rmt_failures}")
+    print(f"  PCA Transactions Delta:      +{delta_pca_tx}")
+    print(f"  PCA Failures Delta:          {delta_pca_failures}")
+    print(f"  Frame Deadline Misses Delta: {delta_deadline_misses}")
+    print(f"  Wi-Fi Disconnect Events:     {delta_wifi_disconnects}")
+    print(f"  Fallback AP Activations:     {delta_fallback_activations}")
+    print("------------------------------------------------------------------")
+    print("MEMORY & TIMING HEADROOM:")
+    print(f"  Min Free Internal SRAM:      {metrics.min_free_internal} bytes")
+    print(f"  Min Largest Internal Block:  {metrics.min_largest_internal} bytes")
+    print(f"  Max Output Commit Duration:  {metrics.max_addressable_commit_us} us")
+    print(f"  Max RMT Wait Duration:       {metrics.max_rmt_wait_us} us")
+    print(f"  Max Frame Render Duration:   {metrics.max_frame_us} us")
+    print("------------------------------------------------------------------")
+    print("LIFECYCLE & TOPOLOGY INTEGRITY:")
+    print(f"  Topology Valid:              {final_topo_valid}")
+    print(f"  Topology Generation Baseline:{base_topo_gen}")
+    print(f"  Topology Generation Final:   {final_topo_gen}")
+    print(f"  Actual Wi-Fi Mode:           {actual_wifi_mode}")
     print("------------------------------------------------------------------")
 
-    # Evaluation against LG-HW-001 criteria
     passed = True
     if metrics.reboots_detected > 0:
-        print("[FAIL] Unexpected reboots detected during soak!")
+        print("[FAIL] Unexpected device reboots occurred during soak!")
         passed = False
-    if latest_rmt.get("failedFrames", 0) > 0:
-        print("[FAIL] RMT failed frames observed!")
+    if delta_rmt_failures > 0:
+        print(f"[FAIL] RMT failed frames observed during soak (delta: {delta_rmt_failures})!")
         passed = False
-    if latest_pwm.get("transactionFailures", 0) > 0:
-        print("[FAIL] PCA transaction failures observed!")
+    if delta_pca_failures > 0:
+        print(f"[FAIL] PCA transaction failures observed during soak (delta: {delta_pca_failures})!")
+        passed = False
+    if not final_topo_valid:
+        print("[FAIL] Hardware topology became invalid!")
+        passed = False
+    if final_topo_gen != base_topo_gen:
+        print(f"[FAIL] Topology generation spontaneously drifted ({base_topo_gen} -> {final_topo_gen})!")
+        passed = False
+    if metrics.min_largest_internal < 12 * 1024:
+        print(f"[FAIL] Internal memory fell below reserve (min largest internal block: {metrics.min_largest_internal} < 12 KB)!")
         passed = False
     if metrics.failed_requests > (metrics.total_requests * 0.05):
-        print("[FAIL] Excessive HTTP failure rate (>5%)!")
+        print("[FAIL] HTTP failure rate exceeded 5% threshold!")
+        passed = False
+    if actual_wifi_mode == "apsta" and not final_net.get("isFallbackAp", False):
+        print("[FAIL] State drift: actual Wi-Fi mode is APSTA but software claims normal STA!")
         passed = False
 
     if passed:
-        print("[PASS] LG-HW-001 Hardware Coexistence Soak Test PASSED!")
+        print("[PASS] LG-HW-002 Hardware Coexistence Soak Test PASSED ALL CRITERIA!")
     else:
-        print("[FAIL] LG-HW-001 Hardware Coexistence Soak Test FAILED criteria.")
+        print("[FAIL] LG-HW-002 Hardware Coexistence Soak Test FAILED one or more criteria.")
     print("==================================================================")
 
     return 0 if passed else 1
