@@ -36,11 +36,11 @@ The current ESP32 diagnostic ELF measured the fixture sizes and the compiler emi
 - `check_invariants.py`: passed after the final reserve guard edit.
 - Factory firmware build (`pio run -d LumigridLedNode -e factory`): passed.
 - Dedicated `env:test` build (`pio run -d LumigridLedNode -e test`): passed after the final reserve guard edit. The suite was not flashed or executed on a controller in this session, so Item 13.D's runtime result and device stack watermarks remain unverified.
-- No matching ELF was available for the supplied panic. The DMX integration result, five physical Ready boots, NVS preservation on hardware, and no-output activation acceptance remain open.
+- The supplied panic ELF was matched and decoded as described above. The DMX integration result, five physical Ready boots, NVS preservation on hardware, and no-output activation acceptance remain open.
 - PCA9685 electrical bring-up remains open. Keep PWM unavailable and `/OE` HIGH until detection succeeds. Use the bench checklist to capture VDD/ground, SDA/SCL idle voltage and pull-ups, GPIO21/22 routing, `0x55` address straps, and a START/address/ACK-or-NACK/STOP waveform. `ESP_FAIL` alone does not establish the electrical cause.
 
 ## Commit and files
 
-Implementation commit: `9059e9d34f8a85ae9ac9932f8086ce951f86f868` (`fix: isolate runtime hardening tests from boot stack`).
+Implementation commits: `9059e9d34f8a85ae9ac9932f8086ce951f86f868` (`fix: isolate runtime hardening tests from boot stack`) and `c49308e` (`fix: keep runtime test output mocks isolated`).
 
 Changed files are listed in the task summary; the user's pre-existing `OutputController` edits are preserved and are not part of this task's commit.
