@@ -41,6 +41,6 @@ The current ESP32 diagnostic ELF measured the fixture sizes and the compiler emi
 
 ## Commit and files
 
-Commit SHA: pending.
+Implementation commit: `9059e9d34f8a85ae9ac9932f8086ce951f86f868` (`fix: isolate runtime hardening tests from boot stack`).
 
 Changed files are listed in the task summary; the user's pre-existing `OutputController` edits are preserved and are not part of this task's commit.
