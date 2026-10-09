@@ -1,6 +1,7 @@
 #include "OutputController.hpp"
 #include "OutputCoreExecutor.hpp"
 #include "RuntimeMemory.hpp"
+#include "PowerConfigLimits.hpp"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -368,6 +369,7 @@ esp_err_t OutputController::reconfigure_on_output_core(const DeviceConfig& cfg) 
     if (!estop_latched_.load(std::memory_order_acquire)) {
         output_enabled_.store(true, std::memory_order_release);
     }
+    power_cfg_ = cfg;
 
     const uint32_t reconfig_dur_us = static_cast<uint32_t>(esp_timer_get_time() - t_start);
     uint32_t prev_rec = reconfigure_max_us_.load(std::memory_order_relaxed);
@@ -558,6 +560,9 @@ esp_err_t OutputController::try_commit_locked() {
         return err;
     }
 
+    // HW-005.11: Common last-stage power guard before physical commit
+    enforce_power_guard_locked();
+
     const int64_t t_total_start = esp_timer_get_time();
 
     // 1. Parallel Addressable commit
@@ -637,6 +642,119 @@ esp_err_t OutputController::try_commit_locked() {
     }
 
     return final_err;
+}
+
+void OutputController::enforce_power_guard_locked() {
+    uint64_t ch_mw[kChannelCount] = {};
+    uint64_t total_mw = 0;
+
+    for (uint8_t lane = 0; lane < AddressableDriver::kLanes; ++lane) {
+        if (!pixels_.configured(lane)) continue;
+        const uint16_t pcount = pixels_.configured_pixels(lane);
+        const bool rgbw = pixels_.has_white(lane);
+        const uint8_t* wire = pixels_.wire_data(lane);
+        if (!wire || pcount == 0) continue;
+
+        const uint8_t pr = pixels_.rmt().pos_r(lane);
+        const uint8_t pg = pixels_.rmt().pos_g(lane);
+        const uint8_t pb = pixels_.rmt().pos_b(lane);
+        const uint8_t pw = pixels_.rmt().pos_w(lane);
+        const uint32_t bpp = rgbw ? 4u : 3u;
+
+        uint64_t lane_idle = static_cast<uint64_t>(pcount) * 5u; // 5 mW idle
+        uint64_t lane_active = 0;
+
+        for (uint16_t px = 0; px < pcount; ++px) {
+            const size_t offset = static_cast<size_t>(px) * bpp;
+            const uint8_t r = wire[offset + pr];
+            const uint8_t g = wire[offset + pg];
+            const uint8_t b = wire[offset + pb];
+            const uint8_t w = rgbw ? wire[offset + pw] : 0;
+
+            const uint64_t sum_rgb = static_cast<uint64_t>(r) + g + b;
+            const uint64_t sum_w = static_cast<uint64_t>(w);
+            const uint64_t px_mw = ((sum_rgb * 295u) + (sum_w * 380u)) / 255u;
+            lane_active += px_mw;
+        }
+
+        ch_mw[lane] = lane_idle + lane_active;
+        total_mw += ch_mw[lane];
+    }
+
+    if (pwm_available_.load(std::memory_order_acquire)) {
+        const auto& pwm_vals = pwm_.values();
+        for (uint8_t ch = 8; ch < kChannelCount; ++ch) {
+            const auto& ccfg = power_cfg_.channels[ch];
+            const uint16_t duty = pwm_vals[ch - 8];
+            const uint32_t rated = ccfg.rated_full_power_mw > 0 ? ccfg.rated_full_power_mw : ccfg.max_milliwatts;
+            if (duty > 0 && rated > 0) {
+                const uint64_t pwm_mw = (static_cast<uint64_t>(duty) * rated) / 4095u;
+                ch_mw[ch] = pwm_mw;
+                total_mw += pwm_mw;
+            }
+        }
+    }
+
+    // 2. Local channel limit enforcement
+    for (uint8_t ch = 0; ch < kChannelCount; ++ch) {
+        const auto& ccfg = power_cfg_.channels[ch];
+        const uint32_t ch_limit = ccfg.channel_limit_mw > 0 ? ccfg.channel_limit_mw : ccfg.max_milliwatts;
+        if (ch_limit > 0 && ch_mw[ch] > ch_limit) {
+            const uint16_t scale_256 = static_cast<uint16_t>((static_cast<uint64_t>(ch_limit) * 256u) / ch_mw[ch]);
+            if (ch < 8) {
+                pixels_.scale_lane(ch, scale_256);
+            } else if (pwm_available_.load(std::memory_order_acquire)) {
+                pwm_.set(ch - 8, static_cast<uint16_t>((static_cast<uint32_t>(pwm_.values()[ch - 8]) * scale_256) / 256u));
+            }
+            ch_mw[ch] = ch_limit;
+        }
+    }
+
+    // 3. Supply domain budgeting
+    for (uint8_t s = 0; s < kMaxPowerSupplies; ++s) {
+        const auto& psu = power_cfg_.power_supplies[s];
+        if (!psu.enabled) continue;
+        const uint64_t usable_mw = psu.usable_power_mw();
+        if (usable_mw == 0) continue;
+
+        uint64_t domain_load_mw = 0;
+        for (uint8_t ch = 0; ch < kChannelCount; ++ch) {
+            if ((psu.channel_mask & (1u << ch)) != 0) {
+                domain_load_mw += ch_mw[ch];
+            }
+        }
+
+        if (domain_load_mw > usable_mw) {
+            const uint16_t d_scale = static_cast<uint16_t>((usable_mw * 256u) / domain_load_mw);
+            for (uint8_t ch = 0; ch < kChannelCount; ++ch) {
+                if ((psu.channel_mask & (1u << ch)) != 0) {
+                    if (ch < 8) {
+                        pixels_.scale_lane(ch, d_scale);
+                    } else if (pwm_available_.load(std::memory_order_acquire)) {
+                        pwm_.set(ch - 8, static_cast<uint16_t>((static_cast<uint32_t>(pwm_.values()[ch - 8]) * d_scale) / 256u));
+                    }
+                    ch_mw[ch] = (ch_mw[ch] * d_scale) / 256u;
+                }
+            }
+        }
+    }
+
+    // 4. Global budget clamping
+    total_mw = 0;
+    for (uint8_t ch = 0; ch < kChannelCount; ++ch) {
+        total_mw += ch_mw[ch];
+    }
+
+    if (power_cfg_.max_power_mw > 0 && total_mw > power_cfg_.max_power_mw) {
+        const uint16_t g_scale = static_cast<uint16_t>((static_cast<uint64_t>(power_cfg_.max_power_mw) * 256u) / total_mw);
+        for (uint8_t ch = 0; ch < kChannelCount; ++ch) {
+            if (ch < 8) {
+                pixels_.scale_lane(ch, g_scale);
+            } else if (pwm_available_.load(std::memory_order_acquire)) {
+                pwm_.set(ch - 8, static_cast<uint16_t>((static_cast<uint32_t>(pwm_.values()[ch - 8]) * g_scale) / 256u));
+            }
+        }
+    }
 }
 
 esp_err_t OutputController::try_commit() {

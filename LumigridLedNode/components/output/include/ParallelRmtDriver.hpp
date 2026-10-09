@@ -276,6 +276,7 @@ public:
     void stage_pixel(uint8_t lane, uint16_t pixel, uint8_t r, uint8_t g, uint8_t b, uint8_t w);
     void stage_clear_lane(uint8_t lane);
     void stage_clear_all();
+    void scale_lane(uint8_t lane, uint16_t scale_256);
 
     /// Submit every active lane, then wait for every submitted lane. Faulted lanes are
     /// rejected (ESP_ERR_INVALID_STATE) unless `allow_faulted` is set (blackout recovery).

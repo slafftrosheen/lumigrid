@@ -213,11 +213,20 @@ public:
     void lock();
     void unlock();
 
+    void set_power_config(const DeviceConfig& cfg) {
+        lock();
+        power_cfg_ = cfg;
+        unlock();
+    }
+    const DeviceConfig& power_config() const { return power_cfg_; }
+
     friend class OutputTransaction;
 
 private:
+    void enforce_power_guard_locked();
     BlackoutResult blackout_locked();
 
+    DeviceConfig power_cfg_{};
     AddressableDriver pixels_;
     Pca9685Driver pwm_;
     SemaphoreHandle_t mutex_ = nullptr;
@@ -256,6 +265,11 @@ public:
     }
     void set_mock_pixel_failure(bool fail) { mock_pixel_failure_.store(fail, std::memory_order_release); }
     void set_mock_pwm_failure(bool fail) { mock_pwm_failure_.store(fail, std::memory_order_release); }
+    void enforce_power_guard_for_test() {
+        lock();
+        enforce_power_guard_locked();
+        unlock();
+    }
 private:
     std::atomic<uint32_t> mock_failure_injections_{0};
     std::atomic<bool> mock_pixel_failure_{false};

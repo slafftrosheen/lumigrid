@@ -501,6 +501,15 @@ void ParallelRmtDriver::stage_clear_all() {
     for (uint8_t i = 0; i < kLanes; ++i) stage_clear_lane(i);
 }
 
+void ParallelRmtDriver::scale_lane(uint8_t lane, uint16_t scale_256) {
+    if (lane >= kLanes || lanes_[lane].wire == nullptr || scale_256 >= 256) return;
+    uint8_t* wire = lanes_[lane].wire;
+    const size_t len = lanes_[lane].wire_len;
+    for (size_t i = 0; i < len; ++i) {
+        wire[i] = static_cast<uint8_t>((static_cast<uint16_t>(wire[i]) * scale_256) / 256u);
+    }
+}
+
 uint8_t ParallelRmtDriver::active_lanes() const {
     uint8_t n = 0;
     for (uint8_t i = 0; i < kLanes; ++i) if (lanes_[i].state != LaneState::Unconfigured) ++n;

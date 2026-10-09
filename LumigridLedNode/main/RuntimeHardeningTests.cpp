@@ -53,6 +53,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "cJSON.h"
+#include "PowerConfigLimits.hpp"
 #include <cassert>
 #include <cstring>
 #include <cmath>
@@ -495,13 +496,21 @@ bool test_config_migration() {
     // Warnings must be reported for non-ideal cases
     assert(warning_count >= 3);
 
-    // Now migrate v2 to v3 (DeviceConfig)
-    auto v3 = std::make_unique<DeviceConfig>();
+    // Now migrate v2 to v3 (DeviceConfigV3)
+    auto v3 = std::make_unique<DeviceConfigV3>();
     uint32_t v3_warnings = 0;
     bool v3_ok = ConfigStore::migrate_v2_to_v3(*v2, *v3, &v3_warnings);
     assert(v3_ok);
     assert(v3->schema_version == 3);
     assert(std::strcmp(v3->device_name, "stage_rig_01") == 0);
+
+    // Now migrate v3 to v4 (DeviceConfig)
+    auto v4 = std::make_unique<DeviceConfig>();
+    uint32_t v4_warnings = 0;
+    bool v4_ok = ConfigStore::migrate_v3_to_v4(*v3, *v4, &v4_warnings);
+    assert(v4_ok);
+    assert(v4->schema_version == 4);
+    assert(std::strcmp(v4->device_name, "stage_rig_01") == 0);
 
     // Persist & reload verification
     ConfigStore cfg_store;
@@ -510,15 +519,15 @@ bool test_config_migration() {
     DeviceConfig original_cfg{};
     bool had_original = (cfg_store.load_config(original_cfg) == ESP_OK);
 
-    // Persist migrated v3
-    esp_err_t save_err = cfg_store.save_config(*v3);
+    // Persist migrated v4
+    esp_err_t save_err = cfg_store.save_config(*v4);
     assert(save_err == ESP_OK);
 
     // Reload and verify
     DeviceConfig reloaded{};
     esp_err_t load_err = cfg_store.load_config(reloaded);
     assert(load_err == ESP_OK);
-    assert(reloaded.schema_version == 3);
+    assert(reloaded.schema_version == 4);
     assert(std::strcmp(reloaded.device_name, "stage_rig_01") == 0);
 
     // Restore original config
@@ -1505,12 +1514,16 @@ bool test_batch6_config_migration() {
     assert(v2->schema_version == 2);
     assert(std::strcmp(v2->device_name, "Lumigrid-V1-Node") == 0);
 
-    auto v3 = std::make_unique<DeviceConfig>();
+    auto v3 = std::make_unique<DeviceConfigV3>();
     assert(ConfigStore::migrate_v2_to_v3(*v2, *v3) == true);
     assert(v3->schema_version == 3);
 
+    auto v4 = std::make_unique<DeviceConfig>();
+    assert(ConfigStore::migrate_v3_to_v4(*v3, *v4) == true);
+    assert(v4->schema_version == 4);
+
     ConfigStore::ConfigValidationResult val_res;
-    esp_err_t val_err = ConfigStore::validate_config(*v3, &val_res);
+    esp_err_t val_err = ConfigStore::validate_config(*v4, &val_res);
     assert(val_err == ESP_OK);
     assert(val_res.valid == true);
 
@@ -7097,6 +7110,404 @@ bool test_lg029_node_backed_authentication() {
         return true;
     }
 
+    // ============================================================================
+    // LG-HW-005 Production Power Model & Multi-Supply Integrity
+    // ============================================================================
+    bool test_lghw005_power_architecture() {
+        ESP_LOGI(TAG, "Testing LG-HW-005 Production Power Model & Multi-Supply Integrity...");
+
+        // Test 1: V3 -> V4 lossless migration
+        {
+            DeviceConfigV3 v3{};
+            v3.schema_version = 3;
+            v3.max_power_mw = 55000;
+            v3.channels[0].enabled = true;
+            v3.channels[0].pixel_count = 100;
+            v3.channels[0].max_milliwatts = 12000;
+            v3.channels[8].enabled = true;
+            v3.channels[8].max_milliwatts = 25000;
+
+            DeviceConfig v4{};
+            uint32_t warns = 0;
+            assert(ConfigStore::migrate_v3_to_v4(v3, v4, &warns));
+            assert(v4.schema_version == 4);
+            assert(v4.max_power_mw == 55000);
+            assert(v4.channels[0].max_milliwatts == 12000);
+            assert(v4.channels[0].channel_limit_mw == 12000);
+            assert(v4.channels[8].max_milliwatts == 25000);
+            assert(v4.channels[8].channel_limit_mw == 25000);
+            assert(v4.channels[8].rated_full_power_mw == 25000);
+            assert(v4.power_supplies[0].enabled);
+            assert(v4.power_supplies[0].voltage_mv == 24000);
+            assert(v4.power_supplies[0].rated_current_ma == 5000);
+            assert(v4.power_supplies[0].channel_mask == 0x00FF);
+        }
+
+        // Test 2: Full V1 -> V2 -> V3 -> V4 migration chain
+        {
+            DeviceConfigV1 v1{};
+            v1.max_power_mw = 40000;
+            strncpy(v1.device_name, "lumigrid-v1", sizeof(v1.device_name) - 1);
+
+            DeviceConfigV2 v2{};
+            uint32_t warns_v2 = 0;
+            assert(ConfigStore::migrate_v1_to_v2(v1, v2, &warns_v2));
+            assert(v2.schema_version == 2);
+            assert(v2.max_power_mw == 40000);
+
+            DeviceConfigV3 v3{};
+            uint32_t warns_v3 = 0;
+            assert(ConfigStore::migrate_v2_to_v3(v2, v3, &warns_v3));
+            assert(v3.schema_version == 3);
+            assert(v3.max_power_mw == 40000);
+
+            DeviceConfig v4{};
+            uint32_t warns_v4 = 0;
+            assert(ConfigStore::migrate_v3_to_v4(v3, v4, &warns_v4));
+            assert(v4.schema_version == 4);
+            assert(v4.max_power_mw == 40000);
+        }
+
+        // Test 3: Large 32-bit power value accepted without truncation
+        {
+            DeviceConfig cfg{};
+            cfg.schema_version = 4;
+            cfg.max_power_mw = 200'000; // 200 W (exceeds old 16-bit 65,535 limit)
+            cfg.channels[0].enabled = true;
+            cfg.channels[0].pixel_count = 300;
+            cfg.channels[0].channel_limit_mw = 150'000;
+            cfg.channels[0].max_milliwatts = 150'000;
+
+            cfg.power_supplies[0].enabled = true;
+            cfg.power_supplies[0].voltage_mv = 24000;
+            cfg.power_supplies[0].rated_current_ma = 10000;
+            cfg.power_supplies[0].usable_capacity_permille = 900;
+            cfg.power_supplies[0].channel_mask = 0x0001;
+
+            ConfigStore::ConfigValidationResult res;
+            assert(ConfigStore::validate_config(cfg, &res) == ESP_OK);
+            assert(res.valid);
+        }
+
+        // Test 4: JSON invalid/overflow values rejected
+        {
+            DeviceConfig current{};
+            DeviceConfig candidate{};
+            char err[128] = {};
+
+            // Exceeds 2,000,000 mW ceiling
+            const char* json_bad_global = "{\"maxPowerMw\": 2500000}";
+            cJSON* root = cJSON_Parse(json_bad_global);
+            assert(root != nullptr);
+            assert(!parse_and_validate_device_config(root, current, candidate, err, sizeof(err)));
+            cJSON_Delete(root);
+
+            // Exceeds 1,000,000 mW channel limit
+            const char* json_bad_channel = "{\"channels\":[{\"index\":0,\"channelPowerLimitMw\":1500000}]}";
+            root = cJSON_Parse(json_bad_channel);
+            assert(root != nullptr);
+            assert(!parse_and_validate_device_config(root, current, candidate, err, sizeof(err)));
+            cJSON_Delete(root);
+
+            // Negative value rejected
+            const char* json_negative = "{\"maxPowerMw\": -10}";
+            root = cJSON_Parse(json_negative);
+            assert(root != nullptr);
+            assert(!parse_and_validate_device_config(root, current, candidate, err, sizeof(err)));
+            cJSON_Delete(root);
+        }
+
+        // Test 5: 8 × 256 RGB model arithmetic without 16-bit overflow
+        {
+            PowerBudget budget;
+            budget.set_limit_mw(0); // unlimited
+            budget.set_soft_start(false, 0);
+
+            DeviceConfig cfg{};
+            for (uint8_t c = 0; c < 8; ++c) {
+                cfg.channels[c].enabled = true;
+                cfg.channels[c].pixel_count = 256;
+                cfg.channels[c].addressable_type = AddressableType::WS2812;
+            }
+
+            RenderFrame frame{};
+            for (uint8_t c = 0; c < 8; ++c) {
+                for (uint16_t p = 0; p < 256; ++p) {
+                    frame.channels[c].pixels[p] = LightValue(255, 255, 255, 0);
+                }
+            }
+
+            uint32_t req_mw = budget.enforce(frame, cfg, 0);
+            assert(req_mw > 1000000);
+            assert(req_mw == budget.diagnostics().requested_power_mw);
+        }
+
+        // Test 6: 8 × 256 RGBW model arithmetic without 16-bit overflow
+        {
+            PowerBudget budget;
+            budget.set_limit_mw(0);
+            budget.set_soft_start(false, 0);
+
+            DeviceConfig cfg{};
+            for (uint8_t c = 0; c < 8; ++c) {
+                cfg.channels[c].enabled = true;
+                cfg.channels[c].pixel_count = 256;
+                cfg.channels[c].addressable_type = AddressableType::SK6812;
+            }
+
+            RenderFrame frame{};
+            for (uint8_t c = 0; c < 8; ++c) {
+                for (uint16_t p = 0; p < 256; ++p) {
+                    frame.channels[c].pixels[p] = LightValue(255, 255, 255, 255);
+                }
+            }
+
+            uint32_t req_mw = budget.enforce(frame, cfg, 0);
+            assert(req_mw > 2000000);
+            assert(budget.diagnostics().requested_power_mw == req_mw);
+        }
+
+        // Test 7: Zero limit explicitly means unlimited
+        {
+            PowerBudget budget;
+            budget.set_limit_mw(0); // 0 = unlimited
+            budget.set_soft_start(false, 0);
+
+            DeviceConfig cfg{};
+            cfg.channels[0].enabled = true;
+            cfg.channels[0].pixel_count = 100;
+            cfg.channels[0].addressable_type = AddressableType::WS2812;
+
+            RenderFrame frame{};
+            for (int p = 0; p < 100; ++p) {
+                frame.channels[0].pixels[p] = LightValue(255, 255, 255, 0);
+            }
+
+            uint32_t req = budget.enforce(frame, cfg, 0);
+            auto diag = budget.diagnostics();
+            assert(diag.limited_power_mw == req);
+            assert(frame.channels[0].pixels[0].r == 255);
+        }
+
+        // Test 8: PWM unconfigured rating does not silently equal zero
+        {
+            PowerBudget budget;
+            budget.set_limit_mw(100000);
+            budget.set_soft_start(false, 0);
+
+            DeviceConfig cfg{};
+            cfg.channels[8].enabled = true;
+            cfg.channels[8].rated_full_power_mw = 0; // unmodeled
+            cfg.channels[8].max_milliwatts = 0;
+
+            RenderFrame frame{};
+            frame.channels[8].pwm = 200;
+
+            budget.enforce(frame, cfg, 0);
+            auto diag = budget.diagnostics();
+            assert(diag.model_state == PowerEstimateState::Partial);
+            assert((diag.unmodeled_channel_mask & (1u << 8)) != 0);
+            assert(diag.unknown_load_warnings >= 1);
+        }
+
+        // Test 9: Independent PSU domain budget isolation
+        {
+            PowerBudget budget;
+            budget.set_limit_mw(0); // unlimited global
+            budget.set_soft_start(false, 0);
+
+            DeviceConfig cfg{};
+            cfg.channels[0].enabled = true;
+            cfg.channels[0].pixel_count = 100;
+            cfg.channels[0].addressable_type = AddressableType::WS2812;
+
+            cfg.channels[1].enabled = true;
+            cfg.channels[1].pixel_count = 100;
+            cfg.channels[1].addressable_type = AddressableType::WS2812;
+
+            // PSU 0: limited to 20 W usable
+            cfg.power_supplies[0].enabled = true;
+            cfg.power_supplies[0].voltage_mv = 24000;
+            cfg.power_supplies[0].rated_current_ma = 1000;
+            cfg.power_supplies[0].usable_capacity_permille = 833;
+            cfg.power_supplies[0].channel_mask = (1u << 0);
+
+            // PSU 1: massive capacity (240 W usable)
+            cfg.power_supplies[1].enabled = true;
+            cfg.power_supplies[1].voltage_mv = 24000;
+            cfg.power_supplies[1].rated_current_ma = 10000;
+            cfg.power_supplies[1].usable_capacity_permille = 1000;
+            cfg.power_supplies[1].channel_mask = (1u << 1);
+
+            RenderFrame frame{};
+            for (int p = 0; p < 100; ++p) {
+                frame.channels[0].pixels[p] = LightValue(255, 255, 255, 0);
+                frame.channels[1].pixels[p] = LightValue(255, 255, 255, 0);
+            }
+
+            budget.enforce(frame, cfg, 0);
+
+            // Channel 0 MUST be scaled down
+            assert(frame.channels[0].pixels[0].r < 255);
+
+            // Channel 1 MUST NOT be throttled
+            assert(frame.channels[1].pixels[0].r == 255);
+            assert(frame.channels[1].pixels[0].g == 255);
+            assert(frame.channels[1].pixels[0].b == 255);
+
+            auto diag = budget.diagnostics();
+            assert(diag.supply_domains[0].usable_power_mw > 0);
+            assert(diag.supply_domains[0].throttle_events >= 1);
+            assert(diag.supply_domains[1].throttle_events == 0);
+        }
+
+        // Test 10: Conflicting supply channel mask assignment rejected
+        {
+            DeviceConfig cfg{};
+            cfg.schema_version = 4;
+            cfg.power_supplies[0].enabled = true;
+            cfg.power_supplies[0].voltage_mv = 24000;
+            cfg.power_supplies[0].rated_current_ma = 5000;
+            cfg.power_supplies[0].channel_mask = 0x0003;
+
+            cfg.power_supplies[1].enabled = true;
+            cfg.power_supplies[1].voltage_mv = 24000;
+            cfg.power_supplies[1].rated_current_ma = 5000;
+            cfg.power_supplies[1].channel_mask = 0x0002;
+
+            ConfigStore::ConfigValidationResult res;
+            assert(ConfigStore::validate_config(cfg, &res) != ESP_OK);
+            assert(!res.valid);
+        }
+
+        // Test 11: Post-scale power recalculation matches actual final output
+        {
+            PowerBudget budget;
+            budget.set_limit_mw(10000); // 10 W limit
+            budget.set_soft_start(false, 0);
+
+            DeviceConfig cfg{};
+            cfg.channels[0].enabled = true;
+            cfg.channels[0].pixel_count = 50;
+            cfg.channels[0].addressable_type = AddressableType::WS2812;
+
+            RenderFrame frame{};
+            for (int p = 0; p < 50; ++p) {
+                frame.channels[0].pixels[p] = LightValue(255, 255, 255, 0);
+            }
+
+            budget.enforce(frame, cfg, 0);
+            auto diag = budget.diagnostics();
+            assert(diag.limited_power_mw <= 10000);
+
+            // Recalculate power manually from the scaled frame
+            uint64_t actual_post_mw = 50 * 5; // idle
+            for (int p = 0; p < 50; ++p) {
+                uint64_t sum_rgb = static_cast<uint64_t>(frame.channels[0].pixels[p].r) +
+                                   frame.channels[0].pixels[p].g +
+                                   frame.channels[0].pixels[p].b;
+                actual_post_mw += (sum_rgb * 295u) / 255u;
+            }
+            assert(diag.limited_power_mw == actual_post_mw);
+        }
+
+        // Test 12: OutputController common last-stage power guard
+        {
+            OutputController ctrl;
+            ctrl.init();
+
+            DeviceConfig pcfg{};
+            pcfg.schema_version = 4;
+            pcfg.max_power_mw = 1000; // 1 W global limit
+            ctrl.set_power_config(pcfg);
+
+            ctrl.pixels().configure_lane(0, 18, FixtureProfile::WS2812, PixelOrder::GRB, 50);
+            ctrl.pixels().fill(0, 255, 255, 255, 0);
+
+            ctrl.enforce_power_guard_for_test();
+            const uint8_t* wire = ctrl.pixels().wire_data(0);
+            assert(wire != nullptr);
+            assert(wire[0] < 255);
+        }
+
+        // Test 13: Blackout and E-stop always permitted regardless of limits
+        {
+            OutputController ctrl;
+            ctrl.init();
+
+            DeviceConfig pcfg{};
+            pcfg.max_power_mw = 1; // Extremely tiny limit
+            ctrl.set_power_config(pcfg);
+
+            assert(ctrl.blackout() == ESP_OK);
+
+            ctrl.latch_estop();
+            assert(ctrl.is_estop_latched());
+            ctrl.clear_estop();
+            assert(!ctrl.is_estop_latched());
+        }
+
+        // Test 14: Soft-start and power-step limits preserved
+        {
+            PowerBudget budget;
+            budget.set_limit_mw(50000);
+            budget.set_soft_start(true, 1000);
+            budget.on_enable();
+
+            DeviceConfig cfg{};
+            cfg.channels[0].enabled = true;
+            cfg.channels[0].pixel_count = 100;
+            cfg.channels[0].addressable_type = AddressableType::WS2812;
+
+            RenderFrame frame{};
+            for (int p = 0; p < 100; ++p) {
+                frame.channels[0].pixels[p] = LightValue(255, 255, 255, 0);
+            }
+
+            budget.enforce(frame, cfg, 100);
+            auto diag = budget.diagnostics();
+            assert(diag.limited_power_mw < diag.requested_power_mw);
+        }
+
+        // Test 15: Certification fingerprint sensitivity
+        {
+            DeviceConfig cfg{};
+            cfg.schema_version = 4;
+            cfg.max_power_mw = 50000;
+            cfg.channels[0].channel_limit_mw = 10000;
+            cfg.channels[8].rated_full_power_mw = 20000;
+            cfg.power_supplies[0].rated_current_ma = 5000;
+
+            uint32_t base_fp = CertificationService::compute_hardware_fingerprint(cfg, "REV_B");
+
+            // Modify max_power_mw
+            cfg.max_power_mw = 60000;
+            uint32_t fp_pwr = CertificationService::compute_hardware_fingerprint(cfg, "REV_B");
+            assert(fp_pwr != base_fp);
+            cfg.max_power_mw = 50000;
+
+            // Modify channel limit
+            cfg.channels[0].channel_limit_mw = 15000;
+            uint32_t fp_clim = CertificationService::compute_hardware_fingerprint(cfg, "REV_B");
+            assert(fp_clim != base_fp);
+            cfg.channels[0].channel_limit_mw = 10000;
+
+            // Modify rated full power
+            cfg.channels[8].rated_full_power_mw = 25000;
+            uint32_t fp_rfp = CertificationService::compute_hardware_fingerprint(cfg, "REV_B");
+            assert(fp_rfp != base_fp);
+            cfg.channels[8].rated_full_power_mw = 20000;
+
+            // Modify power supply current
+            cfg.power_supplies[0].rated_current_ma = 8000;
+            uint32_t fp_psu = CertificationService::compute_hardware_fingerprint(cfg, "REV_B");
+            assert(fp_psu != base_fp);
+        }
+
+        ESP_LOGI(TAG, "[PASS] LG-HW-005 Production Power Model & Multi-Supply Integrity passed.");
+        return true;
+    }
+
 } // namespace
 
 bool run_runtime_hardening_tests() {
@@ -7237,6 +7648,9 @@ bool run_runtime_hardening_tests() {
 
     // LG-HW-004 Electrical Boot Safety + Power-Step Control + Reset Forensics
     all_ok &= test_lghw004_boot_safety_power_and_forensics();
+
+    // LG-HW-005 Production Power Model & Multi-Supply Integrity
+    all_ok &= test_lghw005_power_architecture();
 
     if (all_ok) {
         ESP_LOGI(TAG, "==================================================");

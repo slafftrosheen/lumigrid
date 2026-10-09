@@ -58,6 +58,8 @@ public:
     LaneState lane_state(uint8_t lane) const { return rmt_.lane_state(lane); }
     uint8_t active_lanes() const { return rmt_.active_lanes(); }
     uint32_t longest_wire_time_us() const { return rmt_.longest_wire_time_us(); }
+    void scale_lane(uint8_t lane, uint16_t scale_256) { rmt_.scale_lane(lane, scale_256); }
+    const uint8_t* wire_data(uint8_t lane) const { return rmt_.wire_data(lane); }
 
     /// Diagnostic shadow. Returns zeros outside the configured lane/pixel range.
     AddressableShadowPixel shadow_pixel(uint8_t lane, uint16_t pixel) const;

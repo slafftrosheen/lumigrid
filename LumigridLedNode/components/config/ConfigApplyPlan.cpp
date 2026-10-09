@@ -47,6 +47,8 @@ ConfigApplyPlan diff_device_config(const DeviceConfig& old_cfg, const DeviceConf
         if (och.max_brightness != nch.max_brightness ||
             och.gamma_correction != nch.gamma_correction ||
             och.max_milliwatts != nch.max_milliwatts ||
+            och.rated_full_power_mw != nch.rated_full_power_mw ||
+            och.channel_limit_mw != nch.channel_limit_mw ||
             strcmp(och.name, nch.name) != 0) {
             plan.impact |= ConfigApplyImpact::LightingHot;
         }
@@ -56,6 +58,19 @@ ConfigApplyPlan diff_device_config(const DeviceConfig& old_cfg, const DeviceConf
             och.dmx_start_channel != nch.dmx_start_channel ||
             och.dmx_mode != nch.dmx_mode) {
             plan.impact |= ConfigApplyImpact::DmxReconfigure;
+        }
+    }
+
+    // Check power supply differences
+    for (uint8_t s = 0; s < kMaxPowerSupplies; ++s) {
+        const auto& os = old_cfg.power_supplies[s];
+        const auto& ns = new_cfg.power_supplies[s];
+        if (os.enabled != ns.enabled ||
+            os.voltage_mv != ns.voltage_mv ||
+            os.rated_current_ma != ns.rated_current_ma ||
+            os.usable_capacity_permille != ns.usable_capacity_permille ||
+            os.channel_mask != ns.channel_mask) {
+            plan.impact |= ConfigApplyImpact::LightingHot;
         }
     }
 

@@ -22,6 +22,7 @@
 #include "WifiService.hpp"
 #include "LightingRuntime.hpp"
 #include "SignageTypes.hpp"
+#include "PowerConfigLimits.hpp"
 #include "ChannelHardware.hpp"
 #include "BoardOutputSafety.hpp"
 #include "ResetForensics.hpp"
@@ -1369,6 +1370,40 @@ esp_err_t get_diagnostics_output(httpd_req_t* request) {
         cJSON_AddNumberToObject(pwr_obj, "rampEvents", pwr_trans.ramp_events);
         cJSON_AddNumberToObject(pwr_obj, "rampMs", pwr_trans.ramp_ms);
         cJSON_AddItemToObject(root, "powerTransient", pwr_obj);
+
+        // HW-005.14: Truthful supply and power diagnostics
+        cJSON* pwr_full = cJSON_CreateObject();
+        const char* model_state_str = (pwr_trans.model_state == PowerEstimateState::Complete) ? "complete" :
+                                      (pwr_trans.model_state == PowerEstimateState::Partial) ? "partial" : "unknown";
+        cJSON_AddStringToObject(pwr_full, "modelState", model_state_str);
+        cJSON_AddNumberToObject(pwr_full, "requestedMw", pwr_trans.requested_power_mw);
+        cJSON_AddNumberToObject(pwr_full, "limitedMw", pwr_trans.limited_power_mw);
+        cJSON_AddNullToObject(pwr_full, "measuredMw"); // Truthful: no physical current/power sensor
+        cJSON_AddBoolToObject(pwr_full, "limitActive", pwr_trans.requested_power_mw > pwr_trans.limited_power_mw);
+
+        cJSON* domains_arr = cJSON_CreateArray();
+        for (uint8_t s = 0; s < kMaxPowerSupplies; ++s) {
+            const auto& dom = pwr_trans.supply_domains[s];
+            if (dom.enabled || dom.usable_power_mw > 0) {
+                cJSON* dom_obj = cJSON_CreateObject();
+                cJSON_AddNumberToObject(dom_obj, "id", dom.id);
+                cJSON_AddNumberToObject(dom_obj, "voltageMv", dom.voltage_mv);
+                cJSON_AddNumberToObject(dom_obj, "ratedCurrentMa", dom.rated_current_ma);
+                cJSON_AddNumberToObject(dom_obj, "usablePowerMw", dom.usable_power_mw);
+                cJSON_AddNumberToObject(dom_obj, "estimatedLoadMw", dom.estimated_load_mw);
+                cJSON_AddNumberToObject(dom_obj, "channelMask", dom.channel_mask);
+                cJSON_AddNumberToObject(dom_obj, "throttleEvents", dom.throttle_events);
+                cJSON_AddItemToArray(domains_arr, dom_obj);
+            }
+        }
+        cJSON_AddItemToObject(pwr_full, "supplyDomains", domains_arr);
+        cJSON_AddNumberToObject(pwr_full, "unmodeledChannelMask", pwr_trans.unmodeled_channel_mask);
+        cJSON_AddNumberToObject(pwr_full, "channelThrottleEvents", pwr_trans.channel_throttle_events);
+        cJSON_AddNumberToObject(pwr_full, "unknownLoadWarnings", pwr_trans.unknown_load_warnings);
+        cJSON_AddNumberToObject(pwr_full, "rampEvents", pwr_trans.ramp_events);
+        cJSON_AddNumberToObject(pwr_full, "maxObservedStepMw", pwr_trans.max_observed_step_mw);
+        cJSON_AddNumberToObject(pwr_full, "overflowRejectionAttempts", pwr_trans.overflow_rejection_attempts);
+        cJSON_AddItemToObject(root, "power", pwr_full);
 
         const auto act_timing = api_ptr->signage()->activation_timing();
         cJSON* act_obj = cJSON_CreateObject();
@@ -4001,9 +4036,10 @@ esp_err_t get_device_config(httpd_req_t* request) {
     cJSON_AddStringToObject(response, "mqttBroker", cfg.mqtt_broker);
     cJSON_AddNumberToObject(response, "mqttPort", cfg.mqtt_port);
 
-    // LG-036 §13: single source of truth for numeric limits
+    // LG-036 §13 / LG-HW-005: single source of truth for numeric limits
     cJSON* limits = cJSON_CreateObject();
-    cJSON_AddNumberToObject(limits, "maxPowerMw", 60000);
+    cJSON_AddNumberToObject(limits, "maxPowerMw", kMaxGlobalPowerMw);
+    cJSON_AddNumberToObject(limits, "maxChannelPowerMw", kMaxChannelPowerMw);
     cJSON_AddNumberToObject(limits, "maxPixelsPerChannel", 512);
     cJSON_AddNumberToObject(limits, "maxGroups", 8);
     cJSON_AddNumberToObject(limits, "maxChannels", 16);
@@ -4033,6 +4069,8 @@ esp_err_t get_device_config(httpd_req_t* request) {
         cJSON_AddNumberToObject(ch, "maxBrightness", c.max_brightness);
         cJSON_AddBoolToObject(ch, "gammaCorrection", c.gamma_correction);
         cJSON_AddNumberToObject(ch, "maxMilliwatts", c.max_milliwatts);
+        cJSON_AddNumberToObject(ch, "channelPowerLimitMw", c.channel_limit_mw);
+        cJSON_AddNumberToObject(ch, "ratedFullPowerMw", c.rated_full_power_mw);
         cJSON_AddNumberToObject(ch, "dmxUniverse", c.dmx_universe);
         cJSON_AddNumberToObject(ch, "dmxStartChannel", c.dmx_start_channel);
         cJSON_AddNumberToObject(ch, "dmxMode", c.dmx_mode);
@@ -4048,6 +4086,23 @@ esp_err_t get_device_config(httpd_req_t* request) {
         cJSON_AddItemToArray(channels, ch);
     }
     cJSON_AddItemToObject(response, "channels", channels);
+
+    // HW-005.5: Power supply domains
+    cJSON* psu_arr = cJSON_CreateArray();
+    for (uint8_t s = 0; s < kMaxPowerSupplies; ++s) {
+        const auto& psu = cfg.power_supplies[s];
+        cJSON* psu_obj = cJSON_CreateObject();
+        cJSON_AddNumberToObject(psu_obj, "id", s);
+        cJSON_AddBoolToObject(psu_obj, "enabled", psu.enabled);
+        cJSON_AddNumberToObject(psu_obj, "voltageMv", psu.voltage_mv);
+        cJSON_AddNumberToObject(psu_obj, "ratedCurrentMa", psu.rated_current_ma);
+        cJSON_AddNumberToObject(psu_obj, "usableCapacityPermille", psu.usable_capacity_permille);
+        cJSON_AddNumberToObject(psu_obj, "channelMask", psu.channel_mask);
+        cJSON_AddNumberToObject(psu_obj, "ratedPowerMw", psu.rated_power_mw());
+        cJSON_AddNumberToObject(psu_obj, "usablePowerMw", psu.usable_power_mw());
+        cJSON_AddItemToArray(psu_arr, psu_obj);
+    }
+    cJSON_AddItemToObject(response, "powerSupplies", psu_arr);
 
     cJSON* groups = cJSON_CreateArray();
     for (uint8_t i = 0; i < 8; ++i) {
@@ -4093,7 +4148,7 @@ esp_err_t get_device_config(httpd_req_t* request) {
     return result;
 }
 
-static bool parse_and_validate_device_config(const cJSON* root, const DeviceConfig& current_cfg, DeviceConfig& out_cfg, char* err_code, size_t err_len) {
+bool parse_and_validate_device_config(const cJSON* root, const DeviceConfig& current_cfg, DeviceConfig& out_cfg, char* err_code, size_t err_len) {
     out_cfg = current_cfg;
 
     #define PARSE_INT_BOUNDS(json_name, min_v, max_v, target, code_on_err) \
@@ -4148,7 +4203,7 @@ static bool parse_and_validate_device_config(const cJSON* root, const DeviceConf
     }
 
     PARSE_INT_BOUNDS("watchdogTimeoutS", 0, 3600, out_cfg.watchdog_timeout_s, "invalid_field_watchdogTimeoutS");
-    PARSE_INT_BOUNDS("maxPowerMw", 0, 60000, out_cfg.max_power_mw, "invalid_field_maxPowerMw");
+    PARSE_INT_BOUNDS("maxPowerMw", 0, kMaxGlobalPowerMw, out_cfg.max_power_mw, "invalid_field_maxPowerMw");
     PARSE_INT_BOUNDS("softStartMs", 0, 5000, out_cfg.soft_start_ms, "invalid_field_softStartMs");
 
     const cJSON* gm = cJSON_GetObjectItemCaseSensitive(root, "gamma");
@@ -4272,11 +4327,31 @@ static bool parse_and_validate_device_config(const cJSON* root, const DeviceConf
             }
             const cJSON* mw_j = cJSON_GetObjectItemCaseSensitive(ch_item, "maxMilliwatts");
             if (mw_j) {
-                if (!cJSON_IsNumber(mw_j) || mw_j->valuedouble < 0 || mw_j->valuedouble > 60000) {
+                if (!cJSON_IsNumber(mw_j) || mw_j->valuedouble < 0 || mw_j->valuedouble > kMaxChannelPowerMw) {
                     snprintf(err_code, err_len, "invalid_field_maxMilliwatts");
                     return false;
                 }
-                out_cfg.channels[ch_idx].max_milliwatts = static_cast<uint16_t>(mw_j->valueint);
+                out_cfg.channels[ch_idx].max_milliwatts = static_cast<uint32_t>(mw_j->valuedouble);
+                out_cfg.channels[ch_idx].channel_limit_mw = static_cast<uint32_t>(mw_j->valuedouble);
+                if (ch_idx >= 8) {
+                    out_cfg.channels[ch_idx].rated_full_power_mw = static_cast<uint32_t>(mw_j->valuedouble);
+                }
+            }
+            const cJSON* clim_j = cJSON_GetObjectItemCaseSensitive(ch_item, "channelPowerLimitMw");
+            if (clim_j) {
+                if (!cJSON_IsNumber(clim_j) || clim_j->valuedouble < 0 || clim_j->valuedouble > kMaxChannelPowerMw) {
+                    snprintf(err_code, err_len, "invalid_field_channelPowerLimitMw");
+                    return false;
+                }
+                out_cfg.channels[ch_idx].channel_limit_mw = static_cast<uint32_t>(clim_j->valuedouble);
+            }
+            const cJSON* rfp_j = cJSON_GetObjectItemCaseSensitive(ch_item, "ratedFullPowerMw");
+            if (rfp_j) {
+                if (!cJSON_IsNumber(rfp_j) || rfp_j->valuedouble < 0 || rfp_j->valuedouble > kMaxChannelPowerMw) {
+                    snprintf(err_code, err_len, "invalid_field_ratedFullPowerMw");
+                    return false;
+                }
+                out_cfg.channels[ch_idx].rated_full_power_mw = static_cast<uint32_t>(rfp_j->valuedouble);
             }
             const cJSON* du_j = cJSON_GetObjectItemCaseSensitive(ch_item, "dmxUniverse");
             if (du_j) {
@@ -4427,6 +4502,85 @@ static bool parse_and_validate_device_config(const cJSON* root, const DeviceConf
         }
     }
 
+    // Power supplies validation (LG-HW-005.5)
+    const cJSON* psus = cJSON_GetObjectItemCaseSensitive(root, "powerSupplies");
+    if (psus) {
+        if (!cJSON_IsArray(psus)) {
+            snprintf(err_code, err_len, "invalid_field_powerSupplies");
+            return false;
+        }
+        int psu_size = cJSON_GetArraySize(psus);
+        if (psu_size > kMaxPowerSupplies) {
+            snprintf(err_code, err_len, "too_many_power_supplies");
+            return false;
+        }
+        for (int i = 0; i < psu_size; ++i) {
+            const cJSON* p_item = cJSON_GetArrayItem(psus, i);
+            if (!cJSON_IsObject(p_item)) {
+                snprintf(err_code, err_len, "invalid_field_powerSupplies");
+                return false;
+            }
+            const cJSON* id_j = cJSON_GetObjectItemCaseSensitive(p_item, "id");
+            if (!id_j || !cJSON_IsNumber(id_j) || id_j->valueint < 0 || id_j->valueint >= kMaxPowerSupplies) {
+                snprintf(err_code, err_len, "invalid_field_powerSupplies");
+                return false;
+            }
+            uint8_t p_id = static_cast<uint8_t>(id_j->valueint);
+            auto& psu = out_cfg.power_supplies[p_id];
+
+            const cJSON* en_j = cJSON_GetObjectItemCaseSensitive(p_item, "enabled");
+            if (en_j) psu.enabled = cJSON_IsTrue(en_j);
+
+            const cJSON* v_j = cJSON_GetObjectItemCaseSensitive(p_item, "voltageMv");
+            if (v_j) {
+                if (!cJSON_IsNumber(v_j) || (psu.enabled && (v_j->valuedouble < 3000 || v_j->valuedouble > 60000))) {
+                    snprintf(err_code, err_len, "invalid_supply_voltage");
+                    return false;
+                }
+                psu.voltage_mv = static_cast<uint32_t>(v_j->valuedouble);
+            }
+
+            const cJSON* cur_j = cJSON_GetObjectItemCaseSensitive(p_item, "ratedCurrentMa");
+            if (cur_j) {
+                if (!cJSON_IsNumber(cur_j) || (psu.enabled && (cur_j->valuedouble < 1 || cur_j->valuedouble > 200000))) {
+                    snprintf(err_code, err_len, "invalid_current_rating");
+                    return false;
+                }
+                psu.rated_current_ma = static_cast<uint32_t>(cur_j->valuedouble);
+            }
+
+            const cJSON* cap_j = cJSON_GetObjectItemCaseSensitive(p_item, "usableCapacityPermille");
+            if (cap_j) {
+                if (!cJSON_IsNumber(cap_j) || (psu.enabled && (cap_j->valuedouble < 1 || cap_j->valuedouble > 1000))) {
+                    snprintf(err_code, err_len, "invalid_field_usableCapacityPermille");
+                    return false;
+                }
+                psu.usable_capacity_permille = static_cast<uint16_t>(cap_j->valueint);
+            }
+
+            const cJSON* mask_j = cJSON_GetObjectItemCaseSensitive(p_item, "channelMask");
+            if (mask_j) {
+                if (!cJSON_IsNumber(mask_j) || mask_j->valuedouble < 0 || mask_j->valuedouble > 0xFFFF) {
+                    snprintf(err_code, err_len, "invalid_field_channelMask");
+                    return false;
+                }
+                psu.channel_mask = static_cast<uint16_t>(mask_j->valueint);
+            }
+        }
+
+        // Validate channel mask conflicts across enabled supplies
+        for (uint8_t a = 0; a < kMaxPowerSupplies; ++a) {
+            if (!out_cfg.power_supplies[a].enabled) continue;
+            for (uint8_t b = a + 1; b < kMaxPowerSupplies; ++b) {
+                if (!out_cfg.power_supplies[b].enabled) continue;
+                if ((out_cfg.power_supplies[a].channel_mask & out_cfg.power_supplies[b].channel_mask) != 0) {
+                    snprintf(err_code, err_len, "supply_channel_assignment_conflict");
+                    return false;
+                }
+            }
+        }
+    }
+
     // Protocol config validation (LG-036 §11)
     const cJSON* prot = cJSON_GetObjectItemCaseSensitive(root, "protocol");
     if (prot) {
@@ -4538,6 +4692,47 @@ esp_err_t post_config_validate(httpd_req_t* request) {
     }
     if (!api_ptr->config()->scene_exists(candidate_cfg.fallback_preset_index)) {
         cJSON_AddItemToArray(warnings, cJSON_CreateString("fallback_scene_not_found"));
+    }
+
+    // HW-005.16: Preflight diagnostics and warnings
+    bool any_pwm_incomplete = false;
+    for (uint8_t ch = 8; ch < 16; ++ch) {
+        if (candidate_cfg.channels[ch].enabled && candidate_cfg.channels[ch].rated_full_power_mw == 0 && candidate_cfg.channels[ch].max_milliwatts == 0) {
+            any_pwm_incomplete = true;
+            break;
+        }
+    }
+    if (any_pwm_incomplete) {
+        cJSON_AddItemToArray(warnings, cJSON_CreateString("power_model_incomplete"));
+    }
+
+    for (uint8_t s = 0; s < kMaxPowerSupplies; ++s) {
+        const auto& psu = candidate_cfg.power_supplies[s];
+        if (!psu.enabled) continue;
+        uint64_t supply_chan_sum = 0;
+        for (uint8_t ch = 0; ch < 16; ++ch) {
+            if ((psu.channel_mask & (1u << ch)) != 0 && candidate_cfg.channels[ch].enabled) {
+                if (ch < 8) {
+                    supply_chan_sum += static_cast<uint64_t>(candidate_cfg.channels[ch].pixel_count) * 295u;
+                } else {
+                    supply_chan_sum += candidate_cfg.channels[ch].rated_full_power_mw > 0 ? candidate_cfg.channels[ch].rated_full_power_mw : candidate_cfg.channels[ch].max_milliwatts;
+                }
+            }
+        }
+        if (psu.usable_power_mw() > 0 && supply_chan_sum > psu.usable_power_mw()) {
+            cJSON_AddItemToArray(warnings, cJSON_CreateString("supply_capacity_exceeded"));
+            break;
+        }
+    }
+
+    if (candidate_cfg.schema_version < 4 || (candidate_cfg.max_power_mw <= 60000 && candidate_cfg.max_power_mw > 0)) {
+        uint32_t active_pixels = 0;
+        for (uint8_t ch = 0; ch < 8; ++ch) {
+            if (candidate_cfg.channels[ch].enabled) active_pixels += candidate_cfg.channels[ch].pixel_count;
+        }
+        if (active_pixels > 512) {
+            cJSON_AddItemToArray(warnings, cJSON_CreateString("legacy_power_limit_migration_required"));
+        }
     }
 
     // LG-038.3 / LG-HW-002: output configuration impact preview.
@@ -6285,12 +6480,29 @@ static cJSON* serialize_device_config(const DeviceConfig& cfg) {
         cJSON_AddNumberToObject(cj, "maxBrightness", ch.max_brightness);
         cJSON_AddBoolToObject(cj, "gammaCorrection", ch.gamma_correction);
         cJSON_AddNumberToObject(cj, "maxMilliwatts", ch.max_milliwatts);
+        cJSON_AddNumberToObject(cj, "channelPowerLimitMw", ch.channel_limit_mw);
+        cJSON_AddNumberToObject(cj, "ratedFullPowerMw", ch.rated_full_power_mw);
         cJSON_AddNumberToObject(cj, "dmxUniverse", ch.dmx_universe);
         cJSON_AddNumberToObject(cj, "dmxStartChannel", ch.dmx_start_channel);
         cJSON_AddNumberToObject(cj, "dmxMode", ch.dmx_mode);
         cJSON_AddItemToArray(channels_arr, cj);
     }
     cJSON_AddItemToObject(cfg_json, "channels", channels_arr);
+
+    // Power supplies (HW-005.5)
+    cJSON* psu_arr = cJSON_CreateArray();
+    for (uint8_t s = 0; s < kMaxPowerSupplies; ++s) {
+        const auto& psu = cfg.power_supplies[s];
+        cJSON* pj = cJSON_CreateObject();
+        cJSON_AddNumberToObject(pj, "id", s);
+        cJSON_AddBoolToObject(pj, "enabled", psu.enabled);
+        cJSON_AddNumberToObject(pj, "voltageMv", psu.voltage_mv);
+        cJSON_AddNumberToObject(pj, "ratedCurrentMa", psu.rated_current_ma);
+        cJSON_AddNumberToObject(pj, "usableCapacityPermille", psu.usable_capacity_permille);
+        cJSON_AddNumberToObject(pj, "channelMask", psu.channel_mask);
+        cJSON_AddItemToArray(psu_arr, pj);
+    }
+    cJSON_AddItemToObject(cfg_json, "powerSupplies", psu_arr);
 
     // Groups
     cJSON* groups_arr = cJSON_CreateArray();

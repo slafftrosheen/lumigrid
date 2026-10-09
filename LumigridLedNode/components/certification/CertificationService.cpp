@@ -71,9 +71,15 @@ uint32_t CertificationService::compute_hardware_fingerprint(const DeviceConfig& 
         crc = esp_rom_crc32_le(crc, reinterpret_cast<const uint8_t*>(&ch.pixel_order), sizeof(ch.pixel_order));
         crc = esp_rom_crc32_le(crc, reinterpret_cast<const uint8_t*>(&ch.pixel_count), sizeof(ch.pixel_count));
         crc = esp_rom_crc32_le(crc, reinterpret_cast<const uint8_t*>(&ch.max_milliwatts), sizeof(ch.max_milliwatts));
+        crc = esp_rom_crc32_le(crc, reinterpret_cast<const uint8_t*>(&ch.rated_full_power_mw), sizeof(ch.rated_full_power_mw));
+        crc = esp_rom_crc32_le(crc, reinterpret_cast<const uint8_t*>(&ch.channel_limit_mw), sizeof(ch.channel_limit_mw));
     }
 
     crc = esp_rom_crc32_le(crc, reinterpret_cast<const uint8_t*>(&cfg.max_power_mw), sizeof(cfg.max_power_mw));
+    for (size_t s = 0; s < kMaxPowerSupplies; ++s) {
+        const auto& psu = cfg.power_supplies[s];
+        crc = esp_rom_crc32_le(crc, reinterpret_cast<const uint8_t*>(&psu), sizeof(psu));
+    }
     return crc;
 }
 

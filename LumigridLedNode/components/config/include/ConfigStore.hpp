@@ -143,7 +143,10 @@ public:
     static bool migrate_v1_to_v2(const DeviceConfigV1& v1, DeviceConfigV2& v2, uint32_t* out_warning_count = nullptr);
 
     // Explicit Schema v2 -> v3 Migration (LG-023 16-Channel Hardware Truth)
-    static bool migrate_v2_to_v3(const DeviceConfigV2& v2, DeviceConfig& v3, uint32_t* out_warning_count = nullptr);
+    static bool migrate_v2_to_v3(const DeviceConfigV2& v2, DeviceConfigV3& v3, uint32_t* out_warning_count = nullptr);
+
+    // Explicit Schema v3 -> v4 Migration (LG-HW-005 32-bit Power & Multi-Supply Integrity)
+    static bool migrate_v3_to_v4(const DeviceConfigV3& v3, DeviceConfig& v4, uint32_t* out_warning_count = nullptr);
 
     // ── Scene Motion (Batch 11 Item 18) ──
     esp_err_t save_scene_motion(uint8_t index, const SceneMotionConfig& motion);

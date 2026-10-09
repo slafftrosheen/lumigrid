@@ -289,4 +289,6 @@ public:
 };
 
 
+bool parse_and_validate_device_config(const cJSON* root, const DeviceConfig& current_cfg, DeviceConfig& out_cfg, char* err_code, size_t err_len);
+
 } // namespace lg

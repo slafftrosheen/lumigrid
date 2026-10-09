@@ -36,6 +36,10 @@ uint32_t calc_device_crc(const DeviceConfig& dc) {
     return esp_rom_crc32_le(0, (const uint8_t*)&dc, sizeof(DeviceConfig) - sizeof(uint32_t));
 }
 
+uint32_t calc_device_crc(const DeviceConfigV3& dc) {
+    return esp_rom_crc32_le(0, (const uint8_t*)&dc, sizeof(DeviceConfigV3) - sizeof(uint32_t));
+}
+
 uint32_t calc_device_crc(const DeviceConfigV2& dc) {
     return esp_rom_crc32_le(0, (const uint8_t*)&dc, sizeof(DeviceConfigV2) - sizeof(uint32_t));
 }
@@ -723,8 +727,8 @@ esp_err_t ConfigStore::validate_config(const DeviceConfig& config, ConfigValidat
     if (config.gamma_x10 < 10 || config.gamma_x10 > 30) {
         add_error("gamma_x10 (%u) out of sane range [10, 30]", (unsigned)config.gamma_x10);
     }
-    if (config.max_power_mw > 65000) {
-        add_error("max_power_mw (%u) exceeds sane limit 65000", (unsigned)config.max_power_mw);
+    if (config.max_power_mw > 2000000) { // 2,000 W software ceiling
+        add_error("max_power_mw (%u) exceeds sane limit 2000000", (unsigned)config.max_power_mw);
     }
 
     // 2. Protocol configuration
@@ -739,7 +743,7 @@ esp_err_t ConfigStore::validate_config(const DeviceConfig& config, ConfigValidat
                   (unsigned)config.protocol.zone_start_channel);
     }
 
-    // 3. Channels validation (LG-023 16-Channel Hardware Model)
+    // 3. Channels validation (LG-023 16-Channel Hardware Model & LG-HW-005 Power)
     for (uint8_t ch = 0; ch < kChannelCount; ++ch) {
         const auto& c = config.channels[ch];
         if (!c.enabled) {
@@ -759,6 +763,13 @@ esp_err_t ConfigStore::validate_config(const DeviceConfig& config, ConfigValidat
             }
         }
 
+        if (c.channel_limit_mw > 1000000) {
+            add_error("channel[%u].channel_limit_mw (%u) exceeds 1000000", (unsigned)ch, (unsigned)c.channel_limit_mw);
+        }
+        if (c.rated_full_power_mw > 1000000) {
+            add_error("channel[%u].rated_full_power_mw (%u) exceeds 1000000", (unsigned)ch, (unsigned)c.rated_full_power_mw);
+        }
+
         if (c.dmx_start_channel > 0) {
             uint32_t req_channels = 0;
             if (!calculate_dmx_span(c, ch, req_channels)) {
@@ -770,6 +781,30 @@ esp_err_t ConfigStore::validate_config(const DeviceConfig& config, ConfigValidat
                           (unsigned)ch, (unsigned)c.dmx_universe);
             }
         }
+    }
+
+    // 4. Power supply domains validation (LG-HW-005.5)
+    uint16_t combined_supply_mask = 0;
+    for (uint8_t s = 0; s < kMaxPowerSupplies; ++s) {
+        const auto& psu = config.power_supplies[s];
+        if (!psu.enabled) continue;
+
+        if (psu.voltage_mv < 3000 || psu.voltage_mv > 60000) {
+            add_error("power_supplies[%u].voltage_mv (%u) out of range [3000, 60000]", (unsigned)s, (unsigned)psu.voltage_mv);
+        }
+        if (psu.rated_current_ma == 0 || psu.rated_current_ma > 200000) {
+            add_error("power_supplies[%u].rated_current_ma (%u) out of range [1, 200000]", (unsigned)s, (unsigned)psu.rated_current_ma);
+        }
+        if (psu.usable_capacity_permille > 1000) {
+            add_error("power_supplies[%u].usable_capacity_permille (%u) exceeds 1000", (unsigned)s, (unsigned)psu.usable_capacity_permille);
+        }
+
+        // Check for supply assignment conflicts
+        if ((combined_supply_mask & psu.channel_mask) != 0) {
+            add_error("power_supplies[%u] channel_mask (0x%04X) conflicts with existing assignment (0x%04X)",
+                      (unsigned)s, (unsigned)psu.channel_mask, (unsigned)combined_supply_mask);
+        }
+        combined_supply_mask |= psu.channel_mask;
     }
 
     if (out_result) {
@@ -948,8 +983,8 @@ bool ConfigStore::migrate_v1_to_v2(const DeviceConfigV1& v1, DeviceConfigV2& v2,
     return true;
 }
 
-bool ConfigStore::migrate_v2_to_v3(const DeviceConfigV2& v2, DeviceConfig& v3, uint32_t* out_warning_count) {
-    v3.reset();
+bool ConfigStore::migrate_v2_to_v3(const DeviceConfigV2& v2, DeviceConfigV3& v3, uint32_t* out_warning_count) {
+    v3 = DeviceConfigV3{};
     v3.schema_version = 3;
     safe_strncpy(v3.device_name, v2.device_name, sizeof(v3.device_name));
     v3.active_preset_index = v2.active_preset_index;
@@ -977,9 +1012,8 @@ bool ConfigStore::migrate_v2_to_v3(const DeviceConfigV2& v2, DeviceConfig& v3, u
     safe_strncpy(v3.group_label, v2.group_label, sizeof(v3.group_label));
 
     // Initialize all 16 physical channels as present-but-unconfigured.
-    // Port identity (A1..A8/P1..P8) comes from ChannelHardware, not user labels.
     for (uint8_t ch = 0; ch < 16; ++ch) {
-        v3.channels[ch] = ChannelConfig{};
+        v3.channels[ch] = ChannelConfigV3{};
     }
 
     // Migrate groups from legacy zones
@@ -1050,9 +1084,6 @@ bool ConfigStore::migrate_v2_to_v3(const DeviceConfigV2& v2, DeviceConfig& v3, u
                     ? 0
                     : static_cast<uint16_t>(fix.dmx_start_channel + component);
 
-                // Preserve old compound PWM colour semantics without exposing
-                // compound fixtures in the new UI. 0 is normal mono; 2..5 are
-                // migration-only R/G/B/W component selectors.
                 dst.dmx_mode = (fix.profile == FixtureProfile::PWM_Single)
                     ? 0
                     : static_cast<uint8_t>(2 + component);
@@ -1074,6 +1105,77 @@ bool ConfigStore::migrate_v2_to_v3(const DeviceConfigV2& v2, DeviceConfig& v3, u
     return true;
 }
 
+bool ConfigStore::migrate_v3_to_v4(const DeviceConfigV3& v3, DeviceConfig& v4, uint32_t* out_warning_count) {
+    v4.reset();
+    v4.schema_version = 4;
+    safe_strncpy(v4.device_name, v3.device_name, sizeof(v4.device_name));
+    v4.active_preset_index = v3.active_preset_index;
+    v4.fallback_preset_index = v3.fallback_preset_index;
+    v4.watchdog_timeout_s = v3.watchdog_timeout_s;
+    v4.max_power_mw = static_cast<PowerMilliwatts>(v3.max_power_mw);
+    v4.gamma_x10 = v3.gamma_x10;
+    v4.soft_start_enabled = v3.soft_start_enabled;
+    v4.soft_start_ms = v3.soft_start_ms;
+    v4.mqtt_enabled = v3.mqtt_enabled;
+    safe_strncpy(v4.mqtt_broker, v3.mqtt_broker, sizeof(v4.mqtt_broker));
+    v4.mqtt_port = v3.mqtt_port;
+    safe_strncpy(v4.timezone, v3.timezone, sizeof(v4.timezone));
+    v4.sync_enabled = v3.sync_enabled;
+    v4.sync_role = v3.sync_role;
+    v4.sync_token = v3.sync_token;
+
+    safe_strncpy(v4.admin_token, v3.admin_token, sizeof(v4.admin_token));
+    safe_strncpy(v4.installer_token, v3.installer_token, sizeof(v4.installer_token));
+    safe_strncpy(v4.operator_token, v3.operator_token, sizeof(v4.operator_token));
+
+    safe_strncpy(v4.serial_number, v3.serial_number, sizeof(v4.serial_number));
+    safe_strncpy(v4.hardware_revision, v3.hardware_revision, sizeof(v4.hardware_revision));
+    safe_strncpy(v4.site_label, v3.site_label, sizeof(v4.site_label));
+    safe_strncpy(v4.group_label, v3.group_label, sizeof(v4.group_label));
+
+    // Migrate channels: separate rated full load from channel budget (HW-005.8)
+    for (uint8_t ch = 0; ch < 16; ++ch) {
+        const auto& c3 = v3.channels[ch];
+        auto& c4 = v4.channels[ch];
+
+        safe_strncpy(c4.name, c3.name, sizeof(c4.name));
+        c4.enabled = c3.enabled;
+        c4.addressable_type = c3.addressable_type;
+        c4.pixel_order = c3.pixel_order;
+        c4.pixel_count = c3.pixel_count;
+        c4.max_brightness = c3.max_brightness;
+        c4.gamma_correction = c3.gamma_correction;
+
+        c4.max_milliwatts = static_cast<uint32_t>(c3.max_milliwatts);
+        if (ch < 8) {
+            // Addressable channels: max_milliwatts was a channel limit; full power is calculated from pixel model
+            c4.channel_limit_mw = static_cast<uint32_t>(c3.max_milliwatts);
+            c4.rated_full_power_mw = 0;
+        } else {
+            // PWM channels: legacy max_milliwatts served as both full rating and channel budget
+            c4.rated_full_power_mw = static_cast<uint32_t>(c3.max_milliwatts);
+            c4.channel_limit_mw = static_cast<uint32_t>(c3.max_milliwatts);
+        }
+
+        c4.dmx_universe = c3.dmx_universe;
+        c4.dmx_start_channel = c3.dmx_start_channel;
+        c4.dmx_mode = c3.dmx_mode;
+    }
+
+    for (uint8_t g = 0; g < 8; ++g) {
+        v4.groups[g] = v3.groups[g];
+    }
+    v4.protocol = v3.protocol;
+
+    // Zero-initialize power supplies (none enabled by default in legacy migration)
+    for (uint8_t p = 0; p < kMaxPowerSupplies; ++p) {
+        v4.power_supplies[p] = PowerSupplyConfig{};
+    }
+
+    v4.checksum = calc_device_crc(v4);
+    return true;
+}
+
 esp_err_t ConfigStore::load_config(DeviceConfig& config) {
     bool needs_persist = false;
 
@@ -1089,12 +1191,27 @@ esp_err_t ConfigStore::load_config(DeviceConfig& config) {
                         ESP_LOGW(TAG, "DeviceConfig %s CRC mismatch", k);
                         return ESP_ERR_NVS_INVALID_STATE;
                     }
-                    if (out.schema_version < 3) {
-                        ESP_LOGI(TAG, "Migrating DeviceConfig %s from in-memory schema v%u to v3", k, out.schema_version);
-                        out.schema_version = 3;
+                    if (out.schema_version < 4) {
+                        ESP_LOGI(TAG, "Migrating DeviceConfig %s from in-memory schema v%u to v4", k, out.schema_version);
+                        out.schema_version = 4;
                         out.checksum = calc_device_crc(out);
                         needs_persist = true;
                     }
+                    return ESP_OK;
+                }
+            } else if (len == sizeof(DeviceConfigV3)) {
+                std::unique_ptr<DeviceConfigV3> v3(new (std::nothrow) DeviceConfigV3{});
+                if (!v3) return ESP_ERR_NO_MEM;
+                err = nvs_get_blob(handle_, k, v3.get(), &len);
+                if (err == ESP_OK) {
+                    uint32_t expected_crc = esp_rom_crc32_le(0, (const uint8_t*)v3.get(), sizeof(DeviceConfigV3) - sizeof(uint32_t));
+                    if (v3->checksum != expected_crc) {
+                        ESP_LOGW(TAG, "Legacy DeviceConfigV3 %s CRC mismatch", k);
+                        return ESP_ERR_NVS_INVALID_STATE;
+                    }
+                    ESP_LOGI(TAG, "Migrating legacy v3 blob %s to v4", k);
+                    migrate_v3_to_v4(*v3, out);
+                    needs_persist = true;
                     return ESP_OK;
                 }
             } else if (len == sizeof(DeviceConfigV2)) {
@@ -1107,8 +1224,11 @@ esp_err_t ConfigStore::load_config(DeviceConfig& config) {
                         ESP_LOGW(TAG, "Legacy DeviceConfigV2 %s CRC mismatch", k);
                         return ESP_ERR_NVS_INVALID_STATE;
                     }
-                    ESP_LOGI(TAG, "Migrating legacy v2 blob %s to v3", k);
-                    migrate_v2_to_v3(*v2, out);
+                    ESP_LOGI(TAG, "Migrating legacy v2 blob %s through v3 to v4", k);
+                    std::unique_ptr<DeviceConfigV3> v3(new (std::nothrow) DeviceConfigV3{});
+                    if (!v3) return ESP_ERR_NO_MEM;
+                    migrate_v2_to_v3(*v2, *v3);
+                    migrate_v3_to_v4(*v3, out);
                     needs_persist = true;
                     return ESP_OK;
                 }
@@ -1122,11 +1242,13 @@ esp_err_t ConfigStore::load_config(DeviceConfig& config) {
                         ESP_LOGW(TAG, "Legacy DeviceConfigV1 %s CRC mismatch", k);
                         return ESP_ERR_NVS_INVALID_STATE;
                     }
-                    ESP_LOGI(TAG, "Migrating legacy v1 blob %s through v2 to v3", k);
+                    ESP_LOGI(TAG, "Migrating legacy v1 blob %s through v2 and v3 to v4", k);
                     std::unique_ptr<DeviceConfigV2> v2(new (std::nothrow) DeviceConfigV2{});
-                    if (!v2) return ESP_ERR_NO_MEM;
+                    std::unique_ptr<DeviceConfigV3> v3(new (std::nothrow) DeviceConfigV3{});
+                    if (!v2 || !v3) return ESP_ERR_NO_MEM;
                     migrate_v1_to_v2(*v1, *v2);
-                    migrate_v2_to_v3(*v2, out);
+                    migrate_v2_to_v3(*v2, *v3);
+                    migrate_v3_to_v4(*v3, out);
                     needs_persist = true;
                     return ESP_OK;
                 }
@@ -1175,7 +1297,7 @@ esp_err_t ConfigStore::load_config(DeviceConfig& config) {
         config.reset();
         ESP_LOGI(TAG, "Default credentials active (Admin role configured)");
         populate_default_topology(config);
-        config.schema_version = 3;
+        config.schema_version = 4;
         config.checksum = calc_device_crc(config);
         return save_config(config);
     } else if (err == ESP_OK) {

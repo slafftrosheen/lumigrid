@@ -577,6 +577,49 @@ if "PowerTransientDiagnostics" not in power_budget_hpp:
 if "kDefaultPowerRampMs" not in power_budget_hpp:
     errors.append("PowerBudget.hpp: must declare kDefaultPowerRampMs (LG-HW-004)")
 
+# LG-HW-005: Production Power Model & Multi-Supply Integrity
+signage_types_hpp = (NODE_DIR / "components" / "config" / "include" / "SignageTypes.hpp").read_text(encoding="utf-8")
+device_cfg_match = re.search(r"struct\s+DeviceConfig\s*\{(.*?)\n\};", signage_types_hpp, re.S)
+if not device_cfg_match:
+    errors.append("SignageTypes.hpp: struct DeviceConfig missing (LG-HW-005)")
+else:
+    dcfg_body = device_cfg_match.group(1)
+    if "uint16_t max_power_mw" in dcfg_body:
+        errors.append("SignageTypes.hpp: DeviceConfig must not have 16-bit uint16_t max_power_mw (LG-HW-005)")
+    if "PowerMilliwatts max_power_mw" not in dcfg_body and "uint32_t max_power_mw" not in dcfg_body:
+        errors.append("SignageTypes.hpp: DeviceConfig must declare 32-bit max_power_mw (LG-HW-005)")
+    if "PowerSupplyConfig power_supplies[kMaxPowerSupplies]" not in dcfg_body and "power_supplies" not in dcfg_body:
+        errors.append("SignageTypes.hpp: DeviceConfig must declare power_supplies domain array (LG-HW-005)")
+
+channel_cfg_match = re.search(r"struct\s+ChannelConfig\s*\{(.*?)\n\};", signage_types_hpp, re.S)
+if not channel_cfg_match:
+    errors.append("SignageTypes.hpp: struct ChannelConfig missing (LG-HW-005)")
+else:
+    ch_body = channel_cfg_match.group(1)
+    if "uint16_t max_milliwatts" in ch_body:
+        errors.append("SignageTypes.hpp: ChannelConfig must not have 16-bit uint16_t max_milliwatts (LG-HW-005)")
+    if "rated_full_power_mw" not in ch_body:
+        errors.append("SignageTypes.hpp: ChannelConfig must declare rated_full_power_mw (LG-HW-005)")
+    if "channel_limit_mw" not in ch_body:
+        errors.append("SignageTypes.hpp: ChannelConfig must declare channel_limit_mw (LG-HW-005)")
+
+config_store_cpp = (NODE_DIR / "components" / "config" / "ConfigStore.cpp").read_text(encoding="utf-8")
+if "migrate_v3_to_v4" not in config_store_cpp:
+    errors.append("ConfigStore.cpp: must implement migrate_v3_to_v4 (LG-HW-005)")
+
+factory_api_cpp = (NODE_DIR / "components" / "factory" / "FactoryApi.cpp").read_text(encoding="utf-8")
+if 'PARSE_INT_BOUNDS("maxPowerMw", 0, 60000' in factory_api_cpp:
+    errors.append("FactoryApi.cpp: maxPowerMw must not be hardcoded to 60,000 mW ceiling (LG-HW-005)")
+if "kMaxGlobalPowerMw" not in factory_api_cpp:
+    errors.append("FactoryApi.cpp: must use kMaxGlobalPowerMw (LG-HW-005)")
+
+out_ctrl_cpp = (NODE_DIR / "components" / "output" / "OutputController.cpp").read_text(encoding="utf-8")
+if "enforce_power_guard_locked()" not in out_ctrl_cpp:
+    errors.append("OutputController.cpp: must enforce last-stage power guard before physical commit (LG-HW-005)")
+
+if "PowerEstimateState" not in power_budget_hpp:
+    errors.append("PowerBudget.hpp: must declare PowerEstimateState enum (LG-HW-005)")
+
 
 if errors:
     print("\nFAILED: Discovered architectural invariant violations:")

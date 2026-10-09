@@ -92,7 +92,49 @@ inline bool parse_zone_role(const char* name, ZoneRole& out) {
     return false;
 }
 
-struct ChannelConfig {
+// Explicit numeric electrical types and limits (LG-HW-005)
+using PowerMilliwatts = uint32_t;
+using VoltageMillivolts = uint32_t;
+using CurrentMilliamps = uint32_t;
+
+enum class PowerEstimateState : uint8_t {
+    Complete = 0,
+    Partial  = 1,
+    Unknown  = 2
+};
+
+inline const char* power_estimate_state_name(PowerEstimateState state) {
+    switch (state) {
+        case PowerEstimateState::Complete: return "complete";
+        case PowerEstimateState::Partial:  return "partial";
+        case PowerEstimateState::Unknown:  return "unknown";
+    }
+    return "unknown";
+}
+
+constexpr uint8_t kMaxPowerSupplies = 4;
+
+struct PowerSupplyConfig {
+    bool enabled = false;
+    char name[24] = {};
+
+    uint32_t voltage_mv = 0;
+    uint32_t rated_current_ma = 0;
+
+    uint16_t usable_capacity_permille = 800; // Default 80% planning reserve
+    uint16_t channel_mask = 0;               // Bitmask of assigned channels (A1..A8 = bits 0..7, P1..P8 = bits 8..15)
+
+    uint64_t rated_power_mw() const {
+        return (uint64_t(voltage_mv) * rated_current_ma) / 1000ULL;
+    }
+
+    uint64_t usable_power_mw() const {
+        return (rated_power_mw() * usable_capacity_permille) / 1000ULL;
+    }
+};
+
+// ── Legacy Channel Config V3 (for lossless binary migration) ──
+struct ChannelConfigV3 {
     char name[24] = "";
     bool enabled = false;
 
@@ -105,6 +147,32 @@ struct ChannelConfig {
     uint8_t max_brightness = 255;
     bool gamma_correction = true;
     uint16_t max_milliwatts = 0;
+
+    // DMX patch
+    uint16_t dmx_universe = 0;
+    uint16_t dmx_start_channel = 0;
+    uint8_t dmx_mode = 0;
+};
+
+// Active 16-channel configuration (V4)
+struct ChannelConfig {
+    char name[24] = "";
+    bool enabled = false;
+
+    // Addressable-only configuration
+    AddressableType addressable_type = AddressableType::WS2812;
+    PixelOrder pixel_order = PixelOrder::GRB;
+    uint16_t pixel_count = 0;
+
+    // Common
+    uint8_t max_brightness = 255;
+    bool gamma_correction = true;
+
+    // HW-005.8: Separate rated full power from channel power limit
+    uint32_t rated_full_power_mw = 0; // For PWM: full-duty active power. For ALED: 0 (modeled per-pixel)
+    uint32_t channel_limit_mw = 0;    // Local channel power ceiling (0 = unlimited)
+
+    uint32_t max_milliwatts = 0;      // Legacy compatibility field (channel budget in mW)
 
     // DMX patch
     uint16_t dmx_universe = 0;
@@ -688,13 +756,13 @@ struct DeviceConfigV2 {
     uint32_t checksum                   = 0;
 };
 
-struct DeviceConfig {
+struct DeviceConfigV3 {
     uint8_t  schema_version         = 3;
     char     device_name[32]        = "lumigrid";
     uint8_t  active_preset_index    = 0;
     uint8_t  fallback_preset_index  = 0;
     uint16_t watchdog_timeout_s     = 60;   // System/Network timeout
-    uint16_t max_power_mw           = 0;    // 0 = no limit
+    uint16_t max_power_mw           = 0;    // 0 = no limit (16-bit legacy)
     uint8_t  gamma_x10              = 22;   // 2.2 gamma
     bool     soft_start_enabled     = true;
     uint16_t soft_start_ms          = 500;
@@ -717,15 +785,55 @@ struct DeviceConfig {
     char     site_label[64]         = "";
     char     group_label[64]        = "";
     
-    // Hardware-truth 16-channel topology
+    // Frozen V3 16-channel topology with 16-bit power fields
+    ChannelConfigV3 channels[16]        = {};
+    ChannelGroup    groups[8]           = {};
+    ProtocolConfig  protocol            = {};
+
+    uint32_t checksum                   = 0;
+};
+
+struct DeviceConfig {
+    uint8_t  schema_version         = 4;
+    char     device_name[32]        = "lumigrid";
+    uint8_t  active_preset_index    = 0;
+    uint8_t  fallback_preset_index  = 0;
+    uint16_t watchdog_timeout_s     = 60;   // System/Network timeout
+    PowerMilliwatts max_power_mw    = 0;    // 0 = no limit (32-bit, HW-005)
+    uint8_t  gamma_x10              = 22;   // 2.2 gamma
+    bool     soft_start_enabled     = true;
+    uint16_t soft_start_ms          = 500;
+    bool     mqtt_enabled           = false;
+    char     mqtt_broker[64]        = {};
+    uint16_t mqtt_port              = 1883;
+    char     timezone[48]           = "UTC0";
+    bool     sync_enabled           = false;
+    uint8_t  sync_role              = 0;    // 0=Auto, 1=Master, 2=Worker
+    uint32_t sync_token             = 0;
+    
+    // RBAC tokens (deprecated: managed by AuthStore in LG-029)
+    char     admin_token[32]        = "";
+    char     installer_token[32]    = "";
+    char     operator_token[32]     = "";
+
+    // Device Identity
+    char     serial_number[32]      = "";
+    char     hardware_revision[16]  = "v1.0";
+    char     site_label[64]         = "";
+    char     group_label[64]        = "";
+    
+    // Hardware-truth 16-channel topology (32-bit power, HW-005)
     ChannelConfig channels[16]          = {};
     ChannelGroup  groups[8]             = {};
     ProtocolConfig protocol             = {};
 
+    // HW-005.5: Logical external power-supply domains (up to 4)
+    PowerSupplyConfig power_supplies[kMaxPowerSupplies] = {};
+
     uint32_t checksum                   = 0;
 
     void reset() {
-        schema_version = 3;
+        schema_version = 4;
         strncpy(device_name, "lumigrid", sizeof(device_name) - 1);
         active_preset_index = 0;
         fallback_preset_index = 0;
@@ -753,6 +861,8 @@ struct DeviceConfig {
         for (size_t i = 0; i < sizeof(channels); ++i) pc[i] = 0;
         auto* pg = reinterpret_cast<uint8_t*>(groups);
         for (size_t i = 0; i < sizeof(groups); ++i) pg[i] = 0;
+        auto* ps = reinterpret_cast<uint8_t*>(power_supplies);
+        for (size_t i = 0; i < sizeof(power_supplies); ++i) ps[i] = 0;
         protocol = ProtocolConfig{};
     }
 };

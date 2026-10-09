@@ -15,6 +15,7 @@
 #include "esp_log.h"
 #include <algorithm>
 #include <cstring>
+#include <cinttypes>
 #include <new>
 
 static const char* TAG = "LightingRuntime";
@@ -172,7 +173,7 @@ esp_err_t LightingRuntime::start() {
     last_observed_topology_generation_ = controller_.topology_generation();
     restart_soft_start();
     lifecycle_state_.store(LifecycleState::Running, std::memory_order_release);
-    ESP_LOGI(TAG, "LightingRuntime started (gamma=%.1f, max_mw=%u)", device_cfg_.gamma_x10 / 10.0f, device_cfg_.max_power_mw);
+    ESP_LOGI(TAG, "LightingRuntime started (gamma=%.1f, max_mw=%" PRIu32 ")", device_cfg_.gamma_x10 / 10.0f, static_cast<uint32_t>(device_cfg_.max_power_mw));
     return ESP_OK;
 }
 
