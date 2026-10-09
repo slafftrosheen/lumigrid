@@ -428,7 +428,6 @@ esp_err_t OutputController::reconfigure_on_output_core(const DeviceConfig& cfg) 
 }
 
 BlackoutResult OutputController::blackout_locked() {
-    Pca9685Driver::disable_outputs();
 #if defined(CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS) && CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS
     if (test_mode_.load(std::memory_order_acquire)) {
         BlackoutResult res{};
@@ -440,6 +439,7 @@ BlackoutResult OutputController::blackout_locked() {
         return res;
     }
 #endif
+    Pca9685Driver::disable_outputs();
     AddressableCommitResult a_res = pixels_.blackout();
     esp_err_t p_err = pwm_available_.load(std::memory_order_acquire) ? pwm_.clear() : ESP_OK;
 
@@ -478,7 +478,6 @@ esp_err_t OutputController::clear_estop() {
     // Clearing the physical latch only re-arms the controller with known-zero outputs.
     // It must NOT immediately restore previous or stale output.
     lock();
-    Pca9685Driver::disable_outputs();
 #if defined(CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS) && CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS
     const bool mock = test_mode_.load(std::memory_order_acquire);
     if (!mock) Pca9685Driver::disable_outputs();
@@ -491,12 +490,13 @@ esp_err_t OutputController::clear_estop() {
         a_res = pixels_.blackout();
     }
 #else
+    Pca9685Driver::disable_outputs();
 
     esp_err_t p_err = pwm_available_.load(std::memory_order_acquire) ? pwm_.clear() : ESP_OK;
     pixels_.clear();
     AddressableCommitResult a_res = pixels_.blackout();
-
 #endif
+
     BlackoutResult b_res;
     b_res.addressable_result = a_res.result;
     b_res.pwm_result = p_err;
@@ -520,17 +520,17 @@ esp_err_t OutputController::clear_estop() {
 }
 
 esp_err_t OutputController::recover_pca() {
-    return OutputCoreExecutor::instance().execute_pca_recovery(this);
 #if defined(CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS) && CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS
     if (test_mode_.load(std::memory_order_acquire)) return ESP_OK;
 #endif
+    return OutputCoreExecutor::instance().execute_pca_recovery(this);
 }
 
 esp_err_t OutputController::recover_pca_on_output_core() {
-    const int core = xPortGetCoreID();
 #if defined(CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS) && CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS
     if (test_mode_.load(std::memory_order_acquire)) return ESP_OK;
 #endif
+    const int core = xPortGetCoreID();
     if (core != 1) {
         ESP_LOGE("output", "PCA recovery called on invalid core=%d (CPU1 required)", core);
         return ESP_ERR_INVALID_STATE;
@@ -618,7 +618,6 @@ esp_err_t OutputTransaction::abort() {
 esp_err_t OutputController::try_commit_locked() {
     commit_metrics_.attempted++;
 
-    if (estop_latched_.load(std::memory_order_acquire) ||
 #if defined(CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS) && CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS
     if (test_mode_.load(std::memory_order_acquire)) {
         esp_err_t result = ESP_OK;
@@ -643,6 +642,7 @@ esp_err_t OutputController::try_commit_locked() {
     }
 #endif
 
+    if (estop_latched_.load(std::memory_order_acquire) ||
         !output_enabled_.load(std::memory_order_acquire) ||
         !topology_valid_.load(std::memory_order_acquire)) {
         Pca9685Driver::disable_outputs();
