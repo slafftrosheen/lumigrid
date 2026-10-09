@@ -124,6 +124,9 @@ public:
     esp_err_t enable_outputs();
     static void disable_outputs();
     static bool is_outputs_enabled();
+#if defined(CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS) && CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS
+    static void enable_test_output_mock();
+#endif
 
     bool zero_confirmed() const { return zero_confirmed_; }
     bool recovery_required() const { return recovery_required_; }

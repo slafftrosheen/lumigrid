@@ -8,7 +8,8 @@ namespace lg::auth {
 
 class AuthStore {
 public:
-    AuthStore() = default;
+    explicit AuthStore(const char* storage_namespace = "node_auth")
+        : storage_namespace_(storage_namespace) {}
 
     esp_err_t init();
     
@@ -25,6 +26,7 @@ public:
     const AuthConfig& config() const { return config_; }
 
 private:
+    const char* storage_namespace_;
     AuthConfig config_{};
     bool initialized_ = false;
 };

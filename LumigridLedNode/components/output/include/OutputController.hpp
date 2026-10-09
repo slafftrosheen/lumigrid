@@ -260,6 +260,7 @@ private:
 
 #if defined(CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS) && CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS
 public:
+    void enable_test_mode() { test_mode_.store(true, std::memory_order_release); }
     void set_mock_failure_injections(uint32_t count) {
         mock_failure_injections_ = count;
     }
@@ -271,6 +272,7 @@ public:
         unlock();
     }
 private:
+    std::atomic<bool> test_mode_{false};
     std::atomic<uint32_t> mock_failure_injections_{0};
     std::atomic<bool> mock_pixel_failure_{false};
     std::atomic<bool> mock_pwm_failure_{false};

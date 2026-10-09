@@ -54,17 +54,180 @@
 #include "freertos/task.h"
 #include "cJSON.h"
 #include "PowerConfigLimits.hpp"
+#include "RuntimeMemory.hpp"
+#include "esp_heap_caps.h"
 #include <cassert>
 #include <cstring>
 #include <cmath>
 #include <memory>
 #include <array>
+#include <new>
+#include <atomic>
+#include <utility>
+#include <type_traits>
 
 #if defined(CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS) && CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS
 
-static const char* TAG = "HardeningTest";
-
 namespace lg {
+static const char* TAG = "HardeningTest";
+static bool s_current_test_failed = false;
+static std::atomic<size_t> s_fixture_bytes_current{0};
+static std::atomic<size_t> s_fixture_bytes_peak{0};
+constexpr uint32_t kTestFixtureHeapReserveBytes = 32u * 1024u;
+constexpr uint32_t kTestFixtureInternalReserveBytes = 16u * 1024u;
+constexpr uint32_t kTestFixtureInternalLargestReserveBytes = 8u * 1024u;
+
+template <typename T>
+struct TestFixtureDeleter {
+    void operator()(T* value) const {
+        if (!value) return;
+        s_fixture_bytes_current.fetch_sub(sizeof(T), std::memory_order_relaxed);
+        delete value;
+    }
+};
+
+template <typename T>
+using TestFixturePtr = std::unique_ptr<T, TestFixtureDeleter<T>>;
+
+struct TestBufferDeleter {
+    size_t size = 0;
+    void operator()(char* value) const {
+        if (!value) return;
+        s_fixture_bytes_current.fetch_sub(size, std::memory_order_relaxed);
+        delete[] value;
+    }
+};
+
+using TestBufferPtr = std::unique_ptr<char[], TestBufferDeleter>;
+
+TestBufferPtr make_test_buffer(size_t size) {
+    const RuntimeMemorySnapshot before = capture_runtime_memory();
+    if (before.free_8bit < size + kTestFixtureHeapReserveBytes ||
+        before.largest_8bit < size ||
+        before.free_internal < kTestFixtureInternalReserveBytes ||
+        before.largest_internal < kTestFixtureInternalLargestReserveBytes) {
+        ESP_LOGE(TAG,
+                 "[NOT RUN] test buffer reserve unavailable required=%u "
+                 "free8=%lu largest8=%lu largest_internal=%lu",
+                 (unsigned)size, (unsigned long)before.free_8bit,
+                 (unsigned long)before.largest_8bit,
+                 (unsigned long)before.largest_internal);
+        return TestBufferPtr(nullptr, TestBufferDeleter{size});
+    }
+    char* value = new (std::nothrow) char[size]{};
+    if (!value) return TestBufferPtr(nullptr, TestBufferDeleter{size});
+    const RuntimeMemorySnapshot after = capture_runtime_memory();
+    if (after.free_8bit < kTestFixtureHeapReserveBytes ||
+        after.free_internal < kTestFixtureInternalReserveBytes ||
+        after.largest_internal < kTestFixtureInternalLargestReserveBytes) {
+        delete[] value;
+        ESP_LOGE(TAG, "[NOT RUN] test buffer allocation would consume safety reserve");
+        return TestBufferPtr(nullptr, TestBufferDeleter{size});
+    }
+    const size_t current =
+        s_fixture_bytes_current.fetch_add(size, std::memory_order_relaxed) + size;
+    size_t peak = s_fixture_bytes_peak.load(std::memory_order_relaxed);
+    while (current > peak &&
+           !s_fixture_bytes_peak.compare_exchange_weak(
+               peak, current, std::memory_order_relaxed)) {}
+    return TestBufferPtr(value, TestBufferDeleter{size});
+}
+
+template <typename T, typename... Args>
+TestFixturePtr<T> make_test_fixture(Args&&... args) {
+    const RuntimeMemorySnapshot before = capture_runtime_memory();
+    if (before.free_8bit < sizeof(T) + kTestFixtureHeapReserveBytes ||
+        before.largest_8bit < sizeof(T) ||
+        before.free_internal < kTestFixtureInternalReserveBytes ||
+        before.largest_internal < kTestFixtureInternalLargestReserveBytes) {
+        ESP_LOGE(TAG,
+                 "[NOT RUN] fixture reserve unavailable required=%u free8=%lu "
+                 "largest8=%lu largest_internal=%lu",
+                 (unsigned)sizeof(T), (unsigned long)before.free_8bit,
+                 (unsigned long)before.largest_8bit,
+                 (unsigned long)before.largest_internal);
+        return TestFixturePtr<T>(nullptr);
+    }
+    T* value = new (std::nothrow) T(std::forward<Args>(args)...);
+    if (!value) return TestFixturePtr<T>(nullptr);
+    if constexpr (std::is_same_v<T, OutputController>) {
+        value->enable_test_mode();
+    }
+    const RuntimeMemorySnapshot after = capture_runtime_memory();
+    if (after.free_8bit < kTestFixtureHeapReserveBytes ||
+        after.free_internal < kTestFixtureInternalReserveBytes ||
+        after.largest_internal < kTestFixtureInternalLargestReserveBytes) {
+        delete value;
+        ESP_LOGE(TAG, "[NOT RUN] fixture allocation would consume safety reserve");
+        return TestFixturePtr<T>(nullptr);
+    }
+    const size_t current =
+        s_fixture_bytes_current.fetch_add(sizeof(T), std::memory_order_relaxed) +
+        sizeof(T);
+    size_t peak = s_fixture_bytes_peak.load(std::memory_order_relaxed);
+    while (current > peak &&
+           !s_fixture_bytes_peak.compare_exchange_weak(
+               peak, current, std::memory_order_relaxed)) {}
+    return TestFixturePtr<T>(value);
+}
+
+#define LG_TEST_HEAP(Type, name, ...)                                            \
+    auto name##_fixture = make_test_fixture<Type>(__VA_ARGS__);                  \
+    if (!name##_fixture) {                                                       \
+        ESP_LOGE(TAG, "[FAIL] fixture allocation failed: %s", #Type);           \
+        return false;                                                           \
+    }                                                                           \
+    Type& name = *name##_fixture
+
+#define LG_TEST_BUFFER(name, size_bytes)                                         \
+    auto name##_fixture = make_test_buffer(size_bytes);                          \
+    if (!name##_fixture) {                                                       \
+        ESP_LOGE(TAG, "[FAIL] test buffer allocation failed: %s", #name);       \
+        return false;                                                           \
+    }                                                                           \
+    char* name = name##_fixture.get()
+
+// Persistent integration tests get dedicated NVS namespaces. This keeps the
+// provisioned node configuration and credentials outside the test write set.
+class RuntimeTestConfigStore final : public ConfigStore {
+public:
+    RuntimeTestConfigStore() : ConfigStore("lg_test") {}
+};
+
+class RuntimeTestAuthStore final : public auth::AuthStore {
+public:
+    RuntimeTestAuthStore() : auth::AuthStore("lg_auth_test") {}
+};
+
+struct RuntimeHardeningFixtureSizes {
+    uint32_t output_controller, lighting_runtime, dmx_router, render_frame;
+    uint32_t live_dmx_frame, device_config, device_config_v1, device_config_v2;
+    uint32_t device_config_v3, scene_config, scene_motion, sequence, cue_list;
+    uint32_t calendar_schedule, lumigrid_runtime, runtime_snapshot;
+};
+
+extern "C" const volatile RuntimeHardeningFixtureSizes
+    lg_runtime_hardening_fixture_sizes = {
+        sizeof(OutputController), sizeof(LightingRuntime), sizeof(DmxRouter),
+        sizeof(RenderFrame), sizeof(LiveDmxFrame), sizeof(DeviceConfig),
+        sizeof(DeviceConfigV1), sizeof(DeviceConfigV2), sizeof(DeviceConfigV3),
+        sizeof(SceneConfig), sizeof(SceneMotionConfig), sizeof(Sequence),
+        sizeof(CueList), sizeof(CalendarSchedule), sizeof(LumigridRuntime),
+        sizeof(RuntimeSnapshot)};
+
+// Device-side assertions report a failed test without aborting or resetting
+// the controller. Host/unit builds can continue to use the standard assert.
+#undef assert
+#define assert(condition)                                                       \
+    do {                                                                        \
+        if (!(condition)) {                                                     \
+            ESP_LOGE(TAG, "[FAIL] assertion %s at %s:%d", #condition,          \
+                     __FILE__, __LINE__);                                      \
+            s_current_test_failed = true;                                      \
+            return false;                                                      \
+        }                                                                       \
+    } while (false)
+
 namespace {
 
 // ============================================================================
@@ -168,7 +331,7 @@ bool test_color_pipeline() {
 bool test_estop_hard_latch() {
     ESP_LOGI(TAG, "Testing E-stop Hard Latch (Item 13.A)...");
 
-    OutputController ctrl;
+    LG_TEST_HEAP(OutputController, ctrl);
 
     // 1. Normal commit -> succeeds
     esp_err_t err = ctrl.try_commit();
@@ -211,7 +374,7 @@ bool test_estop_hard_latch() {
 bool test_factory_vs_runtime_arbitration() {
     ESP_LOGI(TAG, "Testing Factory vs Runtime Arbitration (Item 13.B)...");
 
-    OutputController ctrl;
+    LG_TEST_HEAP(OutputController, ctrl);
     ControlSourceManager csm;
     csm.init();
 
@@ -307,27 +470,46 @@ bool test_fixture_scoped_ownership() {
 bool test_dmx_source_isolation() {
     ESP_LOGI(TAG, "Testing DMX Source Isolation (Item 13.D)...");
 
-    OutputController ctrl;
-    ConfigStore cfg_store;
+    // This test used to place two 256-pixel LiveDmxFrame buffers inside a
+    // DmxRouter on the 10 KiB boot stack. Keep every large fixture explicitly
+    // heap-owned and check each allocation before the fixture is used.
+    auto ctrl = make_test_fixture<OutputController>();
+    if (!ctrl) {
+        ESP_LOGE(TAG, "[FAIL] Item 13.D: OutputController allocation failed");
+        return false;
+    }
+    RuntimeTestConfigStore cfg_store;
     ControlSourceManager csm;
     csm.init();
-    LightingRuntime runtime(csm, ctrl, cfg_store);
+    auto runtime = make_test_fixture<LightingRuntime>(csm, *ctrl, cfg_store);
+    if (!runtime) {
+        ESP_LOGE(TAG, "[FAIL] Item 13.D: LightingRuntime allocation failed");
+        return false;
+    }
 
-    DeviceConfig dev_cfg{};
-    dev_cfg.protocol.artnet_enabled = true;
-    dev_cfg.protocol.sacn_enabled = true;
-    dev_cfg.protocol.universe_start = 1;
-    dev_cfg.protocol.merge_mode = MergeMode::HTP;
-    dev_cfg.protocol.stream_timeout_ms = 500;
+    auto dev_cfg = make_test_fixture<DeviceConfig>();
+    if (!dev_cfg) {
+        ESP_LOGE(TAG, "[FAIL] Item 13.D: DeviceConfig allocation failed");
+        return false;
+    }
+    dev_cfg->protocol.artnet_enabled = true;
+    dev_cfg->protocol.sacn_enabled = true;
+    dev_cfg->protocol.universe_start = 1;
+    dev_cfg->protocol.merge_mode = MergeMode::HTP;
+    dev_cfg->protocol.stream_timeout_ms = 500;
 
     // Channel 0 mapped to Universe 1, channel 1
-    dev_cfg.channels[0].enabled = true;
-    dev_cfg.channels[0].pixel_count = 4;
-    dev_cfg.channels[0].dmx_universe = 1;
-    dev_cfg.channels[0].dmx_start_channel = 1;
-    dev_cfg.channels[0].dmx_mode = 0; // RGB
+    dev_cfg->channels[0].enabled = true;
+    dev_cfg->channels[0].pixel_count = 4;
+    dev_cfg->channels[0].dmx_universe = 1;
+    dev_cfg->channels[0].dmx_start_channel = 1;
+    dev_cfg->channels[0].dmx_mode = 0; // RGB
 
-    DmxRouter router(runtime, dev_cfg);
+    auto router = make_test_fixture<DmxRouter>(*runtime, *dev_cfg);
+    if (!router) {
+        ESP_LOGE(TAG, "[FAIL] Item 13.D: DmxRouter allocation failed");
+        return false;
+    }
 
     // Define two distinct sources:
     // Source A: Art-Net from 192.168.1.50
@@ -335,39 +517,59 @@ bool test_dmx_source_isolation() {
     // Source B: Art-Net from 192.168.1.60
     DmxSourceId src_b{DmxSourceProtocol::ArtNet, {192, 168, 1, 60}};
 
-    assert(src_a != src_b);
+    if (src_a == src_b) {
+        ESP_LOGE(TAG, "[FAIL] Item 13.D: source identities collapsed");
+        return false;
+    }
 
     // Both active on Universe 1
     // Source A sends: [200, 50, 0]
     std::array<uint8_t, 12> data_a{200, 50, 0};
-    router.process_frame(1, data_a.data(), data_a.size(), 100, src_a, 1);
+    router->process_frame(1, data_a.data(), data_a.size(), 100, src_a, 1);
 
-    auto dmx_after_a = runtime.last_dmx_data();
-    assert(dmx_after_a[0] == 200);
-    assert(dmx_after_a[1] == 50);
+    auto dmx_after_a = runtime->last_dmx_data();
+    if (dmx_after_a[0] != 200 || dmx_after_a[1] != 50) {
+        ESP_LOGE(TAG, "[FAIL] Item 13.D: source A contribution mismatch");
+        return false;
+    }
 
     // Source B sends: [100, 150, 0]
     std::array<uint8_t, 12> data_b{100, 150, 0};
-    router.process_frame(1, data_b.data(), data_b.size(), 100, src_b, 1);
+    router->process_frame(1, data_b.data(), data_b.size(), 100, src_b, 1);
 
     // Under HTP merge: max([200, 50], [100, 150]) -> [200, 150]
-    auto dmx_merged = runtime.last_dmx_data();
-    assert(dmx_merged[0] == 200); // from A
-    assert(dmx_merged[1] == 150); // from B
+    auto dmx_merged = runtime->last_dmx_data();
+    if (dmx_merged[0] != 200 || dmx_merged[1] != 150) {
+        ESP_LOGE(TAG, "[FAIL] Item 13.D: HTP merge mismatch");
+        return false;
+    }
 
     // Both streams are tracked distinctly in the router without overwriting
-    assert(router.dropped_sources_count() == 0);
+    if (router->active_source_count() != 2 ||
+        router->dropped_sources_count() != 0 ||
+        router->dmx_packets_accepted() != 2) {
+        ESP_LOGE(TAG, "[FAIL] Item 13.D: source counters incorrect before timeout");
+        return false;
+    }
 
     // Now advance time past timeout (500ms) for Source A while Source B continues
     vTaskDelay(pdMS_TO_TICKS(550));
 
     // Send packet from Source B only: [100, 150, 0]
-    router.process_frame(1, data_b.data(), data_b.size(), 100, src_b, 2);
+    router->process_frame(1, data_b.data(), data_b.size(), 100, src_b, 2);
 
-    auto dmx_after_a_timeout = runtime.last_dmx_data();
+    auto dmx_after_a_timeout = runtime->last_dmx_data();
     // Since A timed out, only B remains active: channel 0 becomes 100, channel 1 becomes 150!
-    assert(dmx_after_a_timeout[0] == 100);
-    assert(dmx_after_a_timeout[1] == 150);
+    if (dmx_after_a_timeout[0] != 100 || dmx_after_a_timeout[1] != 150) {
+        ESP_LOGE(TAG, "[FAIL] Item 13.D: timed-out source remained in HTP merge");
+        return false;
+    }
+    if (router->active_source_count() != 1 ||
+        router->dropped_sources_count() != 0 ||
+        router->dmx_packets_accepted() != 3) {
+        ESP_LOGE(TAG, "[FAIL] Item 13.D: source counters incorrect after timeout");
+        return false;
+    }
 
     ESP_LOGI(TAG, "[PASS] DMX source isolation tests passed.");
     return true;
@@ -396,13 +598,13 @@ bool test_dmx_sequence() {
     assert(is_sequence_newer(0, 255) == true);
 
     // 2. Integration with DmxRouter
-    OutputController ctrl;
-    ConfigStore cfg_store;
+    LG_TEST_HEAP(OutputController, ctrl);
+    RuntimeTestConfigStore cfg_store;
     ControlSourceManager csm;
     csm.init();
-    LightingRuntime runtime(csm, ctrl, cfg_store);
+    LG_TEST_HEAP(LightingRuntime, runtime, csm, ctrl, cfg_store);
 
-    DeviceConfig dev_cfg{};
+    LG_TEST_HEAP(DeviceConfig, dev_cfg);
     dev_cfg.protocol.sacn_enabled = true;
     dev_cfg.protocol.universe_start = 1;
     dev_cfg.channels[0].enabled = true;
@@ -410,7 +612,7 @@ bool test_dmx_sequence() {
     dev_cfg.channels[0].dmx_universe = 1;
     dev_cfg.channels[0].dmx_start_channel = 1;
 
-    DmxRouter router(runtime, dev_cfg);
+    LG_TEST_HEAP(DmxRouter, router, runtime, dev_cfg);
     DmxSourceId src{DmxSourceProtocol::Sacn, {1, 2, 3, 4}};
 
     std::array<uint8_t, 4> p1{10, 0, 0, 0};
@@ -454,7 +656,9 @@ bool test_dmx_sequence() {
 bool test_config_migration() {
     ESP_LOGI(TAG, "Testing Config Migration & Persistence (Item 13.F)...");
 
-    auto v1 = std::make_unique<DeviceConfigV1>();
+    auto v1 = make_test_fixture<DeviceConfigV1>();
+
+    if (!v1) { ESP_LOGE(TAG, "[FAIL] fixture allocation failed: DeviceConfigV1"); return false; }
     std::strncpy(v1->device_name, "stage_rig_01", sizeof(v1->device_name));
     std::strncpy(v1->admin_token, "lumigrid_admin", sizeof(v1->admin_token));
 
@@ -472,7 +676,9 @@ bool test_config_migration() {
     v1->fixtures[8].profile = FixtureProfile::WS2812;
     v1->fixtures[8].num_pixels = 300;
 
-    auto v2 = std::make_unique<DeviceConfigV2>();
+    auto v2 = make_test_fixture<DeviceConfigV2>();
+
+    if (!v2) { ESP_LOGE(TAG, "[FAIL] fixture allocation failed: DeviceConfigV2"); return false; }
     uint32_t warning_count = 0;
     bool ok = ConfigStore::migrate_v1_to_v2(*v1, *v2, &warning_count);
 
@@ -497,7 +703,8 @@ bool test_config_migration() {
     assert(warning_count >= 3);
 
     // Now migrate v2 to v3 (DeviceConfigV3)
-    auto v3 = std::make_unique<DeviceConfigV3>();
+    auto v3 = make_test_fixture<DeviceConfigV3>();
+    if (!v3) { ESP_LOGE(TAG, "[FAIL] fixture allocation failed: DeviceConfigV3"); return false; }
     uint32_t v3_warnings = 0;
     bool v3_ok = ConfigStore::migrate_v2_to_v3(*v2, *v3, &v3_warnings);
     assert(v3_ok);
@@ -505,7 +712,8 @@ bool test_config_migration() {
     assert(std::strcmp(v3->device_name, "stage_rig_01") == 0);
 
     // Now migrate v3 to v4 (DeviceConfig)
-    auto v4 = std::make_unique<DeviceConfig>();
+    auto v4 = make_test_fixture<DeviceConfig>();
+    if (!v4) { ESP_LOGE(TAG, "[FAIL] fixture allocation failed: DeviceConfig"); return false; }
     uint32_t v4_warnings = 0;
     bool v4_ok = ConfigStore::migrate_v3_to_v4(*v3, *v4, &v4_warnings);
     assert(v4_ok);
@@ -513,10 +721,10 @@ bool test_config_migration() {
     assert(std::strcmp(v4->device_name, "stage_rig_01") == 0);
 
     // Persist & reload verification
-    ConfigStore cfg_store;
+    RuntimeTestConfigStore cfg_store;
     cfg_store.init();
 
-    DeviceConfig original_cfg{};
+    LG_TEST_HEAP(DeviceConfig, original_cfg);
     bool had_original = (cfg_store.load_config(original_cfg) == ESP_OK);
 
     // Persist migrated v4
@@ -524,7 +732,7 @@ bool test_config_migration() {
     assert(save_err == ESP_OK);
 
     // Reload and verify
-    DeviceConfig reloaded{};
+    LG_TEST_HEAP(DeviceConfig, reloaded);
     esp_err_t load_err = cfg_store.load_config(reloaded);
     assert(load_err == ESP_OK);
     assert(reloaded.schema_version == 4);
@@ -545,7 +753,7 @@ bool test_config_migration() {
 bool test_batch4_physical_safety_race_model() {
     ESP_LOGI(TAG, "Testing Batch 4 Test A: Physical Safety Race Model...");
 
-    OutputController ctrl;
+    LG_TEST_HEAP(OutputController, ctrl);
 
     // Normal commit -> succeeds
     assert(ctrl.try_commit() == ESP_OK);
@@ -586,11 +794,11 @@ bool test_batch4_physical_safety_race_model() {
 bool test_batch4_explicit_output_fault_recovery() {
     ESP_LOGI(TAG, "Testing Batch 4 Test B: Explicit Output Fault Recovery...");
 
-    OutputController ctrl;
+    LG_TEST_HEAP(OutputController, ctrl);
     ControlSourceManager csm;
     csm.init();
-    ConfigStore cfg_store;
-    LightingRuntime runtime(csm, ctrl, cfg_store);
+    RuntimeTestConfigStore cfg_store;
+    LG_TEST_HEAP(LightingRuntime, runtime, csm, ctrl, cfg_store);
 
     assert(runtime.output_fault() == false);
     assert(runtime.output_fault_count() == 0);
@@ -631,13 +839,13 @@ bool test_batch4_explicit_output_fault_recovery() {
 bool test_batch4_dmx_timeout_clearing() {
     ESP_LOGI(TAG, "Testing Batch 4 Test C: DMX Timeout Clearing...");
 
-    OutputController ctrl;
+    LG_TEST_HEAP(OutputController, ctrl);
     ControlSourceManager csm;
     csm.init();
-    ConfigStore cfg_store;
-    LightingRuntime runtime(csm, ctrl, cfg_store);
+    RuntimeTestConfigStore cfg_store;
+    LG_TEST_HEAP(LightingRuntime, runtime, csm, ctrl, cfg_store);
 
-    DeviceConfig dev_cfg{};
+    LG_TEST_HEAP(DeviceConfig, dev_cfg);
     dev_cfg.protocol.universe_start = 1;
     dev_cfg.protocol.stream_timeout_ms = 300;
     dev_cfg.channels[0].enabled = true;
@@ -646,7 +854,7 @@ bool test_batch4_dmx_timeout_clearing() {
     dev_cfg.channels[0].dmx_start_channel = 1;
     dev_cfg.channels[0].dmx_mode = 0; // wash
 
-    DmxRouter router(runtime, dev_cfg);
+    LG_TEST_HEAP(DmxRouter, router, runtime, dev_cfg);
     DmxSourceId src{DmxSourceProtocol::ArtNet, {192, 168, 1, 20}};
 
     std::array<uint8_t, 12> data{255, 128, 64, 0};
@@ -669,17 +877,17 @@ bool test_batch4_dmx_timeout_clearing() {
 bool test_batch4_router_lock_boundary() {
     ESP_LOGI(TAG, "Testing Batch 4 Test D: Router Lock Boundary...");
 
-    OutputController ctrl;
+    LG_TEST_HEAP(OutputController, ctrl);
     ControlSourceManager csm;
     csm.init();
-    ConfigStore cfg_store;
-    LightingRuntime runtime(csm, ctrl, cfg_store);
+    RuntimeTestConfigStore cfg_store;
+    LG_TEST_HEAP(LightingRuntime, runtime, csm, ctrl, cfg_store);
 
-    DeviceConfig dev_cfg{};
+    LG_TEST_HEAP(DeviceConfig, dev_cfg);
     dev_cfg.protocol.universe_start = 1;
     dev_cfg.protocol.stream_timeout_ms = 1000;
 
-    DmxRouter router(runtime, dev_cfg);
+    LG_TEST_HEAP(DmxRouter, router, runtime, dev_cfg);
     DmxSourceId src{DmxSourceProtocol::ArtNet, {10, 0, 0, 1}};
 
     // Verify that router configuration and timeout can be read concurrently without deadlock
@@ -701,7 +909,7 @@ bool test_batch4_router_lock_boundary() {
 bool test_batch4_config_validation() {
     ESP_LOGI(TAG, "Testing Batch 4 Test E: Config Validation...");
 
-    DeviceConfig cfg{};
+    LG_TEST_HEAP(DeviceConfig, cfg);
     cfg.schema_version = 2;
     cfg.gamma_x10 = 22;
     cfg.max_power_mw = 50000;
@@ -714,7 +922,7 @@ bool test_batch4_config_validation() {
     assert(res.valid == true);
 
     // 2. Too many pixels rejected
-    DeviceConfig bad_pixels = cfg;
+    LG_TEST_HEAP(DeviceConfig, bad_pixels, cfg);
     bad_pixels.channels[0].enabled = true;
     bad_pixels.channels[0].pixel_count = MAX_PIXELS + 1; // 257 > 256
     assert(ConfigStore::validate_config(bad_pixels, &res) == ESP_ERR_INVALID_ARG);
@@ -722,7 +930,7 @@ bool test_batch4_config_validation() {
     assert(res.error_count >= 1);
 
     // Verify save_config does NOT silently mutate bad_pixels
-    ConfigStore store;
+    RuntimeTestConfigStore store;
     store.init();
     uint16_t orig_pixels = bad_pixels.channels[0].pixel_count;
     esp_err_t save_err = store.save_config(bad_pixels);
@@ -730,26 +938,26 @@ bool test_batch4_config_validation() {
     assert(bad_pixels.channels[0].pixel_count == orig_pixels); // Not mutated!
 
     // 3. Invalid DMX universe rejected
-    DeviceConfig bad_dmx_uni = cfg;
+    LG_TEST_HEAP(DeviceConfig, bad_dmx_uni, cfg);
     bad_dmx_uni.channels[0].enabled = true;
     bad_dmx_uni.channels[0].dmx_start_channel = 1;
     bad_dmx_uni.channels[0].dmx_universe = 64000; // > 63999
     assert(ConfigStore::validate_config(bad_dmx_uni, &res) == ESP_ERR_INVALID_ARG);
 
     // 4. DMX overflow rejected (wash mode RGB needs 3 channels)
-    DeviceConfig bad_dmx = cfg;
+    LG_TEST_HEAP(DeviceConfig, bad_dmx, cfg);
     bad_dmx.channels[0].enabled = true;
     bad_dmx.channels[0].dmx_start_channel = 511; // 511 + 3 - 1 = 513 > 512
     bad_dmx.channels[0].dmx_mode = 0;
     assert(ConfigStore::validate_config(bad_dmx, &res) == ESP_ERR_INVALID_ARG);
 
     // 5. Invalid protocol layer rejected
-    DeviceConfig bad_layer = cfg;
+    LG_TEST_HEAP(DeviceConfig, bad_layer, cfg);
     bad_layer.protocol.live_stream_layer = 3; // >= 3
     assert(ConfigStore::validate_config(bad_layer, &res) == ESP_ERR_INVALID_ARG);
 
     // 6. Sane gamma range checked
-    DeviceConfig bad_gamma = cfg;
+    LG_TEST_HEAP(DeviceConfig, bad_gamma, cfg);
     bad_gamma.gamma_x10 = 5; // < 10
     assert(ConfigStore::validate_config(bad_gamma, &res) == ESP_ERR_INVALID_ARG);
 
@@ -763,17 +971,17 @@ bool test_batch4_config_validation() {
 bool test_batch4_source_metrics() {
     ESP_LOGI(TAG, "Testing Batch 4 Test F: Source Metrics...");
 
-    OutputController ctrl;
+    LG_TEST_HEAP(OutputController, ctrl);
     ControlSourceManager csm;
     csm.init();
-    ConfigStore cfg_store;
-    LightingRuntime runtime(csm, ctrl, cfg_store);
+    RuntimeTestConfigStore cfg_store;
+    LG_TEST_HEAP(LightingRuntime, runtime, csm, ctrl, cfg_store);
 
-    DeviceConfig dev_cfg{};
+    LG_TEST_HEAP(DeviceConfig, dev_cfg);
     dev_cfg.protocol.universe_start = 1;
     dev_cfg.protocol.stream_timeout_ms = 400;
 
-    DmxRouter router(runtime, dev_cfg);
+    LG_TEST_HEAP(DmxRouter, router, runtime, dev_cfg);
     assert(router.active_source_count() == 0);
     assert(router.dmx_packets_accepted() == 0);
     assert(router.dmx_sources_dropped() == 0);
@@ -823,15 +1031,15 @@ bool test_batch4_sequence_protocol_semantics() {
     assert(DmxRouter::sequence_check_required(DmxSourceProtocol::Sacn, 0) == true);
     assert(DmxRouter::sequence_check_required(DmxSourceProtocol::Sacn, 1) == true);
 
-    OutputController ctrl;
+    LG_TEST_HEAP(OutputController, ctrl);
     ControlSourceManager csm;
     csm.init();
-    ConfigStore cfg_store;
-    LightingRuntime runtime(csm, ctrl, cfg_store);
+    RuntimeTestConfigStore cfg_store;
+    LG_TEST_HEAP(LightingRuntime, runtime, csm, ctrl, cfg_store);
 
-    DeviceConfig dev_cfg{};
+    LG_TEST_HEAP(DeviceConfig, dev_cfg);
     dev_cfg.protocol.universe_start = 1;
-    DmxRouter router(runtime, dev_cfg);
+    LG_TEST_HEAP(DmxRouter, router, runtime, dev_cfg);
 
     DmxSourceId artnet_src{DmxSourceProtocol::ArtNet, {10, 0, 0, 5}};
     std::array<uint8_t, 4> data{10, 20, 30, 0};
@@ -854,11 +1062,11 @@ bool test_batch4_sequence_protocol_semantics() {
 bool test_batch5_output_fault_latch() {
     ESP_LOGI(TAG, "Testing Batch 5 Test A: Output Fault Latch & Two-Stage Clear...");
 
-    OutputController ctrl;
+    LG_TEST_HEAP(OutputController, ctrl);
     ControlSourceManager csm;
     csm.init();
-    ConfigStore cfg_store;
-    LightingRuntime runtime(csm, ctrl, cfg_store);
+    RuntimeTestConfigStore cfg_store;
+    LG_TEST_HEAP(LightingRuntime, runtime, csm, ctrl, cfg_store);
 
     assert(!runtime.output_fault());
     assert(runtime.output_fault_count() == 0);
@@ -895,11 +1103,11 @@ bool test_batch5_output_fault_latch() {
 bool test_batch5_live_frame_clear() {
     ESP_LOGI(TAG, "Testing Batch 5 Test B: Live-Frame Clear Semantics...");
 
-    OutputController ctrl;
+    LG_TEST_HEAP(OutputController, ctrl);
     ControlSourceManager csm;
     csm.init();
-    ConfigStore cfg_store;
-    LightingRuntime runtime(csm, ctrl, cfg_store);
+    RuntimeTestConfigStore cfg_store;
+    LG_TEST_HEAP(LightingRuntime, runtime, csm, ctrl, cfg_store);
 
     // Inject live fixture data
     LightValue pixels[4] = {{255, 0, 0, 0}, {0, 255, 0, 0}, {0, 0, 255, 0}, {255, 255, 255, 0}};
@@ -924,17 +1132,17 @@ bool test_batch5_live_frame_clear() {
 bool test_batch5_universe_timeout_and_patch_clear() {
     ESP_LOGI(TAG, "Testing Batch 5 Test C: Universe Timeout & Patch Clearing...");
 
-    OutputController ctrl;
+    LG_TEST_HEAP(OutputController, ctrl);
     ControlSourceManager csm;
     csm.init();
-    ConfigStore cfg_store;
-    LightingRuntime runtime(csm, ctrl, cfg_store);
+    RuntimeTestConfigStore cfg_store;
+    LG_TEST_HEAP(LightingRuntime, runtime, csm, ctrl, cfg_store);
 
-    DeviceConfig dev_cfg{};
+    LG_TEST_HEAP(DeviceConfig, dev_cfg);
     dev_cfg.protocol.universe_start = 1;
     dev_cfg.protocol.stream_timeout_ms = 50; // fast timeout for test
 
-    DmxRouter router(runtime, dev_cfg);
+    LG_TEST_HEAP(DmxRouter, router, runtime, dev_cfg);
 
     DmxSourceId src_a{DmxSourceProtocol::ArtNet, {192, 168, 1, 10}};
     DmxSourceId src_b{DmxSourceProtocol::ArtNet, {192, 168, 1, 11}};
@@ -973,13 +1181,13 @@ bool test_batch5_universe_timeout_and_patch_clear() {
 bool test_batch5_patch_update_invalidation() {
     ESP_LOGI(TAG, "Testing Batch 5 Test D: Patch Update Invalidation...");
 
-    OutputController ctrl;
+    LG_TEST_HEAP(OutputController, ctrl);
     ControlSourceManager csm;
     csm.init();
-    ConfigStore cfg_store;
-    LightingRuntime runtime(csm, ctrl, cfg_store);
+    RuntimeTestConfigStore cfg_store;
+    LG_TEST_HEAP(LightingRuntime, runtime, csm, ctrl, cfg_store);
 
-    DeviceConfig cfg1{};
+    LG_TEST_HEAP(DeviceConfig, cfg1);
     cfg1.protocol.universe_start = 10; // Zone wash on 10
     cfg1.channels[0].enabled = true;
     cfg1.channels[0].pixel_count = 4;
@@ -987,7 +1195,7 @@ bool test_batch5_patch_update_invalidation() {
     cfg1.channels[0].dmx_start_channel = 1;
     cfg1.channels[0].dmx_mode = 0;
 
-    DmxRouter router(runtime, cfg1);
+    LG_TEST_HEAP(DmxRouter, router, runtime, cfg1);
     DmxSourceId src{DmxSourceProtocol::ArtNet, {192, 168, 1, 50}};
 
     std::array<uint8_t, 12> data{255, 128, 64, 0};
@@ -995,7 +1203,7 @@ bool test_batch5_patch_update_invalidation() {
     assert(router.get_stats().packets_accepted == 1);
 
     // Update config to move channel 0 from universe 1 to universe 2
-    DeviceConfig cfg2 = cfg1;
+    LG_TEST_HEAP(DeviceConfig, cfg2, cfg1);
     cfg2.channels[0].dmx_universe = 2;
     router.update_config(cfg2);
 
@@ -1107,7 +1315,7 @@ bool test_batch5_output_mapping_validation() {
     ESP_LOGI(TAG, "Testing Batch 5 Test F: Output Mapping Validation...");
 
     // 1. Invalid pixel_count (> MAX_PIXELS)
-    DeviceConfig cfg_bad_pixels{};
+    LG_TEST_HEAP(DeviceConfig, cfg_bad_pixels);
     cfg_bad_pixels.channels[0].enabled = true;
     cfg_bad_pixels.channels[0].pixel_count = MAX_PIXELS + 1;
     ConfigStore::ConfigValidationResult res_pix;
@@ -1115,7 +1323,7 @@ bool test_batch5_output_mapping_validation() {
     assert(res_pix.error_count > 0);
 
     // 2. Invalid DMX universe (> 63999)
-    DeviceConfig cfg_bad_dmx{};
+    LG_TEST_HEAP(DeviceConfig, cfg_bad_dmx);
     cfg_bad_dmx.channels[0].enabled = true;
     cfg_bad_dmx.channels[0].dmx_start_channel = 1;
     cfg_bad_dmx.channels[0].dmx_universe = 64000;
@@ -1124,11 +1332,11 @@ bool test_batch5_output_mapping_validation() {
     assert(res_dmx.error_count > 0);
 
     // 3. OutputScheduler Pass 1 pre-validation: enabled addressable channel with 0 pixels
-    DeviceConfig cfg_bad_sched{};
+    LG_TEST_HEAP(DeviceConfig, cfg_bad_sched);
     cfg_bad_sched.channels[0].enabled = true;
     cfg_bad_sched.channels[0].pixel_count = 0;
-    OutputController ctrl;
-    RenderFrame frame{};
+    LG_TEST_HEAP(OutputController, ctrl);
+    LG_TEST_HEAP(RenderFrame, frame);
     esp_err_t sched_err = OutputScheduler::schedule(frame, cfg_bad_sched, ctrl);
     assert(sched_err == ESP_ERR_INVALID_ARG);
 
@@ -1142,13 +1350,13 @@ bool test_batch5_output_mapping_validation() {
 bool test_batch5_submit_live_frame_return_value() {
     ESP_LOGI(TAG, "Testing Batch 5 Test G: submit_live_frame() Return Value...");
 
-    OutputController ctrl;
+    LG_TEST_HEAP(OutputController, ctrl);
     ControlSourceManager csm;
     csm.init();
-    ConfigStore cfg_store;
-    LightingRuntime runtime(csm, ctrl, cfg_store);
+    RuntimeTestConfigStore cfg_store;
+    LG_TEST_HEAP(LightingRuntime, runtime, csm, ctrl, cfg_store);
 
-    LiveDmxFrame frame{};
+    LG_TEST_HEAP(LiveDmxFrame, frame);
     frame.layers[0][0].active = true;
     frame.layers[0][0].opacity = 255;
     frame.layers[0][0].color = BrandColor{10, 20, 30};
@@ -1172,15 +1380,15 @@ bool test_batch5_submit_live_frame_return_value() {
 bool test_batch5_config_reload_transactional_safety() {
     ESP_LOGI(TAG, "Testing Batch 5 Test H: Config Reload Transactional Safety...");
 
-    OutputController ctrl;
+    LG_TEST_HEAP(OutputController, ctrl);
     ControlSourceManager csm;
     csm.init();
-    ConfigStore cfg_store;
+    RuntimeTestConfigStore cfg_store;
     cfg_store.init();
 
-    LightingRuntime runtime(csm, ctrl, cfg_store);
+    LG_TEST_HEAP(LightingRuntime, runtime, csm, ctrl, cfg_store);
 
-    DeviceConfig initial_cfg = runtime.get_config_snapshot();
+    LG_TEST_HEAP(DeviceConfig, initial_cfg, runtime.get_config_snapshot());
     uint8_t orig_gamma = initial_cfg.gamma_x10;
 
     // If reload encounters an invalid config in storage, candidate validation must reject it
@@ -1197,7 +1405,8 @@ bool test_batch5_config_reload_transactional_safety() {
 // ============================================================================
 bool test_batch6_unused_output_slots() {
     ESP_LOGI(TAG, "Testing Batch 6 Test A: Unused output slots...");
-    auto cfg = std::make_unique<DeviceConfig>();
+    auto cfg = make_test_fixture<DeviceConfig>();
+    if (!cfg) { ESP_LOGE(TAG, "[FAIL] fixture allocation failed: DeviceConfig"); return false; }
     cfg->schema_version = 3;
     cfg->channels[0].enabled = true;
     cfg->channels[0].pixel_count = 10;
@@ -1220,7 +1429,8 @@ bool test_batch6_unused_output_slots() {
 // ============================================================================
 bool test_batch6_enabled_bad_output() {
     ESP_LOGI(TAG, "Testing Batch 6 Test B: Enabled bad output...");
-    auto cfg = std::make_unique<DeviceConfig>();
+    auto cfg = make_test_fixture<DeviceConfig>();
+    if (!cfg) { ESP_LOGE(TAG, "[FAIL] fixture allocation failed: DeviceConfig"); return false; }
     cfg->schema_version = 3;
     // Channel 1 is enabled with invalid pixel_count > MAX_PIXELS
     cfg->channels[1].enabled = true;
@@ -1240,7 +1450,8 @@ bool test_batch6_enabled_bad_output() {
 // ============================================================================
 bool test_batch6_unused_fixture() {
     ESP_LOGI(TAG, "Testing Batch 6 Test C: Unused fixture...");
-    auto cfg = std::make_unique<DeviceConfig>();
+    auto cfg = make_test_fixture<DeviceConfig>();
+    if (!cfg) { ESP_LOGE(TAG, "[FAIL] fixture allocation failed: DeviceConfig"); return false; }
     cfg->schema_version = 3;
     // Default config has all channels disabled
     assert(ConfigStore::has_configured_fixtures(*cfg) == false);
@@ -1259,7 +1470,8 @@ bool test_batch6_unused_fixture() {
 // ============================================================================
 bool test_batch6_configured_fixture() {
     ESP_LOGI(TAG, "Testing Batch 6 Test D: Configured fixture...");
-    auto cfg = std::make_unique<DeviceConfig>();
+    auto cfg = make_test_fixture<DeviceConfig>();
+    if (!cfg) { ESP_LOGE(TAG, "[FAIL] fixture allocation failed: DeviceConfig"); return false; }
     cfg->schema_version = 3;
     cfg->channels[0].enabled = true;
     cfg->channels[0].pixel_count = 30;
@@ -1280,11 +1492,11 @@ bool test_batch6_configured_fixture() {
 // ============================================================================
 bool test_batch6_output_fault_state_machine() {
     ESP_LOGI(TAG, "Testing Batch 6 Test E: Output fault state machine...");
-    OutputController ctrl;
+    LG_TEST_HEAP(OutputController, ctrl);
     ControlSourceManager csm;
     csm.init();
-    ConfigStore cfg_store;
-    LightingRuntime runtime(csm, ctrl, cfg_store);
+    RuntimeTestConfigStore cfg_store;
+    LG_TEST_HEAP(LightingRuntime, runtime, csm, ctrl, cfg_store);
 
     assert(runtime.output_state() == LightingRuntime::OutputState::Healthy);
     assert(runtime.output_fault_count() == 0);
@@ -1315,13 +1527,13 @@ bool test_batch6_output_fault_state_machine() {
 // ============================================================================
 bool test_batch6_live_frame_render_snapshot() {
     ESP_LOGI(TAG, "Testing Batch 6 Test F: Live frame render snapshot...");
-    OutputController ctrl;
+    LG_TEST_HEAP(OutputController, ctrl);
     ControlSourceManager csm;
     csm.init();
-    ConfigStore cfg_store;
-    LightingRuntime runtime(csm, ctrl, cfg_store);
+    RuntimeTestConfigStore cfg_store;
+    LG_TEST_HEAP(LightingRuntime, runtime, csm, ctrl, cfg_store);
 
-    LiveDmxFrame frame{};
+    LG_TEST_HEAP(LiveDmxFrame, frame);
     frame.layers[0][0].active = true;
     frame.layers[0][0].opacity = 255;
     frame.layers[0][0].color = BrandColor{100, 150, 200};
@@ -1339,14 +1551,16 @@ bool test_batch6_live_frame_render_snapshot() {
 // ============================================================================
 bool test_batch6_patch_update_invalidation() {
     ESP_LOGI(TAG, "Testing Batch 6 Test G: Patch update invalidation...");
-    OutputController ctrl;
+    LG_TEST_HEAP(OutputController, ctrl);
     ControlSourceManager csm;
     csm.init();
-    ConfigStore cfg_store;
-    LightingRuntime runtime(csm, ctrl, cfg_store);
-    DmxRouter router(runtime);
+    RuntimeTestConfigStore cfg_store;
+    LG_TEST_HEAP(LightingRuntime, runtime, csm, ctrl, cfg_store);
+    LG_TEST_HEAP(DmxRouter, router, runtime);
 
-    auto cfg = std::make_unique<DeviceConfig>();
+    auto cfg = make_test_fixture<DeviceConfig>();
+
+    if (!cfg) { ESP_LOGE(TAG, "[FAIL] fixture allocation failed: DeviceConfig"); return false; }
     cfg->protocol.universe_start = 1;
     cfg->protocol.artnet_enabled = true;
     router.update_config(*cfg);
@@ -1380,14 +1594,16 @@ bool test_batch6_patch_update_invalidation() {
 // ============================================================================
 bool test_batch6_universe_stats_expiry() {
     ESP_LOGI(TAG, "Testing Batch 6 Test H: Universe stats expiry...");
-    OutputController ctrl;
+    LG_TEST_HEAP(OutputController, ctrl);
     ControlSourceManager csm;
     csm.init();
-    ConfigStore cfg_store;
-    LightingRuntime runtime(csm, ctrl, cfg_store);
-    DmxRouter router(runtime);
+    RuntimeTestConfigStore cfg_store;
+    LG_TEST_HEAP(LightingRuntime, runtime, csm, ctrl, cfg_store);
+    LG_TEST_HEAP(DmxRouter, router, runtime);
 
-    auto cfg = std::make_unique<DeviceConfig>();
+    auto cfg = make_test_fixture<DeviceConfig>();
+
+    if (!cfg) { ESP_LOGE(TAG, "[FAIL] fixture allocation failed: DeviceConfig"); return false; }
     cfg->protocol.universe_start = 1;
     cfg->protocol.artnet_enabled = true;
     cfg->protocol.stream_timeout_ms = 50;
@@ -1415,14 +1631,16 @@ bool test_batch6_universe_stats_expiry() {
 // ============================================================================
 bool test_batch6_htp_payload_lengths() {
     ESP_LOGI(TAG, "Testing Batch 6 Test I: HTP payload lengths...");
-    OutputController ctrl;
+    LG_TEST_HEAP(OutputController, ctrl);
     ControlSourceManager csm;
     csm.init();
-    ConfigStore cfg_store;
-    LightingRuntime runtime(csm, ctrl, cfg_store);
-    DmxRouter router(runtime);
+    RuntimeTestConfigStore cfg_store;
+    LG_TEST_HEAP(LightingRuntime, runtime, csm, ctrl, cfg_store);
+    LG_TEST_HEAP(DmxRouter, router, runtime);
 
-    auto cfg = std::make_unique<DeviceConfig>();
+    auto cfg = make_test_fixture<DeviceConfig>();
+
+    if (!cfg) { ESP_LOGE(TAG, "[FAIL] fixture allocation failed: DeviceConfig"); return false; }
     cfg->protocol.universe_start = 1;
     cfg->protocol.merge_mode = MergeMode::HTP;
     cfg->protocol.artnet_enabled = true;
@@ -1464,14 +1682,16 @@ bool test_batch6_htp_payload_lengths() {
 // ============================================================================
 bool test_batch6_ltp_newest_expires() {
     ESP_LOGI(TAG, "Testing Batch 6 Test J: LTP newest expires...");
-    OutputController ctrl;
+    LG_TEST_HEAP(OutputController, ctrl);
     ControlSourceManager csm;
     csm.init();
-    ConfigStore cfg_store;
-    LightingRuntime runtime(csm, ctrl, cfg_store);
-    DmxRouter router(runtime);
+    RuntimeTestConfigStore cfg_store;
+    LG_TEST_HEAP(LightingRuntime, runtime, csm, ctrl, cfg_store);
+    LG_TEST_HEAP(DmxRouter, router, runtime);
 
-    auto cfg = std::make_unique<DeviceConfig>();
+    auto cfg = make_test_fixture<DeviceConfig>();
+
+    if (!cfg) { ESP_LOGE(TAG, "[FAIL] fixture allocation failed: DeviceConfig"); return false; }
     cfg->protocol.universe_start = 1;
     cfg->protocol.merge_mode = MergeMode::LTP;
     cfg->protocol.artnet_enabled = true;
@@ -1503,22 +1723,29 @@ bool test_batch6_ltp_newest_expires() {
 // ============================================================================
 bool test_batch6_config_migration() {
     ESP_LOGI(TAG, "Testing Batch 6 Test K: Config migration...");
-    auto v1 = std::make_unique<DeviceConfigV1>();
+    auto v1 = make_test_fixture<DeviceConfigV1>();
+    if (!v1) { ESP_LOGE(TAG, "[FAIL] fixture allocation failed: DeviceConfigV1"); return false; }
     std::strncpy(v1->device_name, "Lumigrid-V1-Node", sizeof(v1->device_name));
     v1->gamma_x10 = 22;
     v1->max_power_mw = 25000;
     v1->protocol.universe_start = 1;
 
-    auto v2 = std::make_unique<DeviceConfigV2>();
+    auto v2 = make_test_fixture<DeviceConfigV2>();
+
+    if (!v2) { ESP_LOGE(TAG, "[FAIL] fixture allocation failed: DeviceConfigV2"); return false; }
     assert(ConfigStore::migrate_v1_to_v2(*v1, *v2) == true);
     assert(v2->schema_version == 2);
     assert(std::strcmp(v2->device_name, "Lumigrid-V1-Node") == 0);
 
-    auto v3 = std::make_unique<DeviceConfigV3>();
+    auto v3 = make_test_fixture<DeviceConfigV3>();
+
+    if (!v3) { ESP_LOGE(TAG, "[FAIL] fixture allocation failed: DeviceConfigV3"); return false; }
     assert(ConfigStore::migrate_v2_to_v3(*v2, *v3) == true);
     assert(v3->schema_version == 3);
 
-    auto v4 = std::make_unique<DeviceConfig>();
+    auto v4 = make_test_fixture<DeviceConfig>();
+
+    if (!v4) { ESP_LOGE(TAG, "[FAIL] fixture allocation failed: DeviceConfig"); return false; }
     assert(ConfigStore::migrate_v3_to_v4(*v3, *v4) == true);
     assert(v4->schema_version == 4);
 
@@ -1536,7 +1763,8 @@ bool test_batch6_config_migration() {
 // ============================================================================
 bool test_batch7_topology_validation() {
     ESP_LOGI(TAG, "Testing Batch 7 Test A: Option A Topology & Anti-Aliasing...");
-    auto cfg = std::make_unique<DeviceConfig>();
+    auto cfg = make_test_fixture<DeviceConfig>();
+    if (!cfg) { ESP_LOGE(TAG, "[FAIL] fixture allocation failed: DeviceConfig"); return false; }
     cfg->gamma_x10 = 22;
     cfg->max_power_mw = 25000;
     cfg->protocol.universe_start = 1;
@@ -1594,11 +1822,11 @@ bool test_batch7_output_fault_state_machine() {
     ESP_LOGI(TAG, "Testing Batch 7 Test B: Output fault explicit state machine...");
     ControlSourceManager sm;
     sm.init();
-    OutputController ctrl;
+    LG_TEST_HEAP(OutputController, ctrl);
     ctrl.init();
-    ConfigStore cfg_store;
+    RuntimeTestConfigStore cfg_store;
 
-    LightingRuntime runtime(sm, ctrl, cfg_store);
+    LG_TEST_HEAP(LightingRuntime, runtime, sm, ctrl, cfg_store);
     assert(runtime.output_state() == LightingRuntime::OutputState::Healthy);
     assert(runtime.fault_event_count() == 0);
 
@@ -1639,13 +1867,15 @@ bool test_batch7_router_to_runtime_integration() {
     ESP_LOGI(TAG, "Testing Batch 7 Test C: DmxRouter to LightingRuntime integration...");
     ControlSourceManager sm;
     sm.init();
-    OutputController ctrl;
+    LG_TEST_HEAP(OutputController, ctrl);
     ctrl.init();
-    ConfigStore cfg_store;
+    RuntimeTestConfigStore cfg_store;
 
-    LightingRuntime runtime(sm, ctrl, cfg_store);
+    LG_TEST_HEAP(LightingRuntime, runtime, sm, ctrl, cfg_store);
 
-    auto cfg = std::make_unique<DeviceConfig>();
+    auto cfg = make_test_fixture<DeviceConfig>();
+
+    if (!cfg) { ESP_LOGE(TAG, "[FAIL] fixture allocation failed: DeviceConfig"); return false; }
     cfg->protocol.universe_start = 1;
     cfg->protocol.zone_start_channel = 1;
     cfg->protocol.live_stream_layer = 2;
@@ -1658,7 +1888,7 @@ bool test_batch7_router_to_runtime_integration() {
     cfg->channels[0].dmx_start_channel = 25; // Channels 25..54
     cfg->channels[0].dmx_mode = 0; // Wash mode
 
-    DmxRouter router(runtime, *cfg);
+    LG_TEST_HEAP(DmxRouter, router, runtime, *cfg);
 
     // Initial state: no live DMX active
     assert(runtime.current_control_source() == ControlSource::Idle);
@@ -1700,12 +1930,12 @@ bool test_batch7_shutdown_restart() {
     ESP_LOGI(TAG, "Testing Batch 7 Test D: Shutdown and restart...");
     ControlSourceManager sm;
     sm.init();
-    OutputController ctrl;
+    LG_TEST_HEAP(OutputController, ctrl);
     ctrl.init();
-    ConfigStore cfg_store;
+    RuntimeTestConfigStore cfg_store;
 
     {
-        LightingRuntime runtime(sm, ctrl, cfg_store);
+        LG_TEST_HEAP(LightingRuntime, runtime, sm, ctrl, cfg_store);
         runtime.start();
         runtime.inject_live_data(0, 2, BrandColor{255, 0, 0}, 255);
         assert(runtime.current_control_source() == ControlSource::LiveDmx);
@@ -1716,7 +1946,7 @@ bool test_batch7_shutdown_restart() {
 
     // Clean restart
     {
-        LightingRuntime runtime2(sm, ctrl, cfg_store);
+        LG_TEST_HEAP(LightingRuntime, runtime2, sm, ctrl, cfg_store);
         assert(runtime2.output_state() == LightingRuntime::OutputState::Healthy);
         assert(runtime2.active_live_objects() == 0);
         assert(runtime2.current_control_source() == ControlSource::Idle);
@@ -1733,10 +1963,10 @@ bool test_batch7_shutdown_restart() {
 bool test_batch8_double_start_and_cooperative_shutdown() {
     ESP_LOGI(TAG, "Batch 8 Test A: Double-start rejection and cooperative shutdown...");
     ControlSourceManager sm;
-    OutputController ctrl;
-    ConfigStore cfg_store;
+    LG_TEST_HEAP(OutputController, ctrl);
+    RuntimeTestConfigStore cfg_store;
 
-    LightingRuntime runtime(sm, ctrl, cfg_store);
+    LG_TEST_HEAP(LightingRuntime, runtime, sm, ctrl, cfg_store);
     assert(runtime.lifecycle_state() == LightingRuntime::LifecycleState::Constructed);
 
     // Initial start succeeds
@@ -1782,7 +2012,7 @@ bool test_batch8_double_start_and_cooperative_shutdown() {
 bool test_batch8_factory_runner_abort_vs_estop() {
     ESP_LOGI(TAG, "Batch 8 Test B: Factory abort vs E-stop semantics & state serialization...");
     ControlSourceManager sm;
-    OutputController ctrl;
+    LG_TEST_HEAP(OutputController, ctrl);
     FactoryRunner runner(sm, ctrl);
 
     assert(runner.lifecycle_state() == FactoryRunner::LifecycleState::Constructed);
@@ -1849,9 +2079,9 @@ bool test_batch8_factory_runner_abort_vs_estop() {
 bool test_batch8_output_transaction_and_fault_unification() {
     ESP_LOGI(TAG, "Batch 8 Test C: Output transaction API and unified commit fault transitions...");
     ControlSourceManager sm;
-    OutputController ctrl;
-    ConfigStore cfg_store;
-    LightingRuntime runtime(sm, ctrl, cfg_store);
+    LG_TEST_HEAP(OutputController, ctrl);
+    RuntimeTestConfigStore cfg_store;
+    LG_TEST_HEAP(LightingRuntime, runtime, sm, ctrl, cfg_store);
 
     // Requirement 8: Controlled RAII transaction
     {
@@ -1969,7 +2199,7 @@ bool test_batch8_output_transaction_and_fault_unification() {
     assert(runtime.output_state() == LightingRuntime::OutputState::Healthy);
 
     // Candidate reconfigure failure & topology validity policy (Requirement 15)
-    DeviceConfig bad_cfg{};
+    LG_TEST_HEAP(DeviceConfig, bad_cfg);
     bad_cfg.channels[0].enabled = true;
     bad_cfg.channels[0].pixel_count = 5000; // > MAX_PIXELS (256)
 
@@ -1985,7 +2215,7 @@ bool test_batch8_output_transaction_and_fault_unification() {
     }
 
     // Recovery gate: applying a valid configuration restores topology_valid_ and re-arms output_enabled_
-    DeviceConfig good_cfg{};
+    LG_TEST_HEAP(DeviceConfig, good_cfg);
     good_cfg.channels[0].enabled = true;
     good_cfg.channels[0].pixel_count = 60;
     esp_err_t good_reconf = ctrl.reconfigure(good_cfg);
@@ -2004,12 +2234,12 @@ bool test_batch8_output_transaction_and_fault_unification() {
 bool test_batch8_dmx_ltp_same_ms_tie_and_expiry() {
     ESP_LOGI(TAG, "Batch 8 Test D: LTP same-ms arrival_seq tie-breaking and universe expiration...");
     ControlSourceManager sm;
-    OutputController ctrl;
-    ConfigStore cfg_store;
-    LightingRuntime runtime(sm, ctrl, cfg_store);
-    DmxRouter router(runtime);
+    LG_TEST_HEAP(OutputController, ctrl);
+    RuntimeTestConfigStore cfg_store;
+    LG_TEST_HEAP(LightingRuntime, runtime, sm, ctrl, cfg_store);
+    LG_TEST_HEAP(DmxRouter, router, runtime);
 
-    DeviceConfig cfg{};
+    LG_TEST_HEAP(DeviceConfig, cfg);
     cfg.protocol.merge_mode = MergeMode::LTP;
     cfg.protocol.stream_timeout_ms = 500;
     cfg.channels[0].enabled = true;
@@ -2060,12 +2290,12 @@ bool test_batch8_dmx_ltp_same_ms_tie_and_expiry() {
 bool test_batch8_dmx_source_capacity_policy() {
     ESP_LOGI(TAG, "Batch 8 Test E: Bounded 4-source capacity policy...");
     ControlSourceManager sm;
-    OutputController ctrl;
-    ConfigStore cfg_store;
-    LightingRuntime runtime(sm, ctrl, cfg_store);
-    DmxRouter router(runtime);
+    LG_TEST_HEAP(OutputController, ctrl);
+    RuntimeTestConfigStore cfg_store;
+    LG_TEST_HEAP(LightingRuntime, runtime, sm, ctrl, cfg_store);
+    LG_TEST_HEAP(DmxRouter, router, runtime);
 
-    DeviceConfig cfg{};
+    LG_TEST_HEAP(DeviceConfig, cfg);
     cfg.protocol.stream_timeout_ms = 1000;
     cfg.channels[0].enabled = true;
     cfg.channels[0].pixel_count = 4;
@@ -2104,12 +2334,12 @@ bool test_batch8_dmx_partial_expiration_both_directions_and_reuse() {
     ESP_LOGI(TAG, "Batch 8 Test H: DMX partial-source expiration in both directions & slot reuse...");
     ControlSourceManager sm;
     sm.init();
-    OutputController ctrl;
-    ConfigStore cfg_store;
-    LightingRuntime runtime(sm, ctrl, cfg_store);
-    DmxRouter router(runtime);
+    LG_TEST_HEAP(OutputController, ctrl);
+    RuntimeTestConfigStore cfg_store;
+    LG_TEST_HEAP(LightingRuntime, runtime, sm, ctrl, cfg_store);
+    LG_TEST_HEAP(DmxRouter, router, runtime);
 
-    DeviceConfig cfg{};
+    LG_TEST_HEAP(DeviceConfig, cfg);
     cfg.protocol.merge_mode = MergeMode::HTP;
     cfg.protocol.stream_timeout_ms = 500;
     cfg.protocol.universe_start = 1;
@@ -2231,12 +2461,12 @@ bool test_batch8_dmx_partial_expiration_both_directions_and_reuse() {
 bool test_batch8_protocol_consistency_and_artnet_serialization() {
     ESP_LOGI(TAG, "Batch 8 Test F: Protocol universe consistency and Art-Net 4 serialization...");
     ControlSourceManager sm;
-    OutputController ctrl;
-    ConfigStore cfg_store;
-    LightingRuntime runtime(sm, ctrl, cfg_store);
-    DmxRouter router(runtime);
+    LG_TEST_HEAP(OutputController, ctrl);
+    RuntimeTestConfigStore cfg_store;
+    LG_TEST_HEAP(LightingRuntime, runtime, sm, ctrl, cfg_store);
+    LG_TEST_HEAP(DmxRouter, router, runtime);
 
-    DeviceConfig cfg{};
+    LG_TEST_HEAP(DeviceConfig, cfg);
     cfg.protocol.universe_start = 1;
     cfg.channels[0].enabled = true;
     cfg.channels[0].pixel_count = 4;
@@ -2334,7 +2564,7 @@ bool test_batch8_protocol_consistency_and_artnet_serialization() {
 
 bool test_batch8_observational_health_and_lifecycle_rollback() {
     ESP_LOGI(TAG, "Batch 8 Test G: Purely observational health, persistence states, and lifecycle rollback...");
-    ConfigStore cfg_store;
+    RuntimeTestConfigStore cfg_store;
     assert(cfg_store.persistence_state_str() != nullptr);
     const auto& res = cfg_store.cached_validation_result();
     (void)res;
@@ -2396,7 +2626,7 @@ bool test_batch9_burnin_blockers() {
     // 1. FactoryRunner Cooperative Lifecycle & Stop
     {
         ControlSourceManager sm;
-        OutputController ctrl;
+        LG_TEST_HEAP(OutputController, ctrl);
         FactoryRunner runner(sm, ctrl);
 
         assert(runner.lifecycle_state() == FactoryRunner::LifecycleState::Constructed);
@@ -2419,11 +2649,11 @@ bool test_batch9_burnin_blockers() {
     // 2. LightingRuntime Commit Observer Detachment on Stop
     {
         ControlSourceManager sm;
-        OutputController ctrl;
-        ConfigStore cfg;
+        LG_TEST_HEAP(OutputController, ctrl);
+        RuntimeTestConfigStore cfg;
 
         {
-            LightingRuntime runtime(sm, ctrl, cfg);
+            LG_TEST_HEAP(LightingRuntime, runtime, sm, ctrl, cfg);
             esp_err_t err = runtime.start();
             assert(err == ESP_OK);
 
@@ -2443,14 +2673,14 @@ bool test_batch9_burnin_blockers() {
 
     // 3. OutputController PCA9685 Availability & PWM Configuration Rejection
     {
-        OutputController ctrl;
+        LG_TEST_HEAP(OutputController, ctrl);
         ctrl.init();
 
         // Simulate PCA9685 unavailable
         ctrl.set_pwm_available(false);
         assert(ctrl.is_pwm_available() == false);
 
-        DeviceConfig cfg{};
+        LG_TEST_HEAP(DeviceConfig, cfg);
         // Setup 1 addressable fixture
         cfg.channels[0].enabled = true;
         cfg.channels[0].pixel_count = 30;
@@ -2491,14 +2721,10 @@ bool test_batch9_checked_scene_activation_lifecycle_guard() {
     ControlSourceManager source_manager;
     source_manager.init();
 
-    OutputController controller;
-    ConfigStore config_store;
+    LG_TEST_HEAP(OutputController, controller);
+    RuntimeTestConfigStore config_store;
 
-    LightingRuntime runtime(
-        source_manager,
-        controller,
-        config_store
-    );
+    LG_TEST_HEAP(LightingRuntime, runtime, source_manager, controller, config_store);
 
     /*
      * Constructed runtime is not allowed to claim that a scene request
@@ -2656,7 +2882,7 @@ bool test_batch11_phase0_truthful_control_contract() {
     // 3. FactoryRunner Truthful Command Lifecycle Contract
     {
         ControlSourceManager sm;
-        OutputController ctrl;
+        LG_TEST_HEAP(OutputController, ctrl);
         CommandJournal journal;
 
         FactoryRunner runner(sm, ctrl);
@@ -2803,9 +3029,9 @@ bool test_lg022_show_engine() {
     assert(v_start >= 10000 && v_start <= 50000);
 
     // In-place scene application
-    SceneConfig sc{};
+    LG_TEST_HEAP(SceneConfig, sc);
     sc.global_brightness = 0;
-    SceneMotionConfig sm{};
+    LG_TEST_HEAP(SceneMotionConfig, sm);
     sm.track_count = 1;
     sm.tracks[0].target = AutomationTarget::GlobalBrightness;
     sm.tracks[0].curve = AutomationCurve::Linear;
@@ -2821,12 +3047,12 @@ bool test_lg022_show_engine() {
     // 4. CueRunner State Machine
     {
         ControlSourceManager sman;
-        OutputController out;
-        ConfigStore cfg;
-        LightingRuntime lighting(sman, out, cfg);
+        LG_TEST_HEAP(OutputController, out);
+        RuntimeTestConfigStore cfg;
+        LG_TEST_HEAP(LightingRuntime, lighting, sman, out, cfg);
         CueRunner runner(cfg, lighting);
 
-        CueList list{};
+        LG_TEST_HEAP(CueList, list);
         list.mode = CueRunMode::SingleShot;
         list.count = 2;
         list.cues[0] = {0, 1000, 500, TransitionCurve::Linear, "Cue 1"};
@@ -2877,7 +3103,7 @@ bool test_lg022_show_engine() {
     static_assert(sizeof(CalendarScheduleEntry) == 8, "CalendarScheduleEntry size changed!");
     static_assert(sizeof(CalendarSchedule) == 68, "CalendarSchedule size changed!");
 
-    CalendarSchedule sched{};
+    LG_TEST_HEAP(CalendarSchedule, sched);
     sched.entries[0].action = CalendarAction::CueList;
     sched.entries[0].cue_list_index = 3;
     assert(sched.entries[0].cue_list_index == 3);
@@ -2990,11 +3216,11 @@ bool test_lg024_live_desk_and_manual_override() {
     // Manual active on multiple channels; trigger E-Stop.
     // Verify manual is deactivated and output controller latches.
     {
-        OutputController ctrl;
-        ConfigStore cfg_store;
+        LG_TEST_HEAP(OutputController, ctrl);
+        RuntimeTestConfigStore cfg_store;
         ControlSourceManager csm;
         csm.init();
-        LightingRuntime runtime(csm, ctrl, cfg_store);
+        LG_TEST_HEAP(LightingRuntime, runtime, csm, ctrl, cfg_store);
 
         ManualOverrideFrame frame{};
         frame.channels[0].active = true;
@@ -3012,11 +3238,11 @@ bool test_lg024_live_desk_and_manual_override() {
     // LiveDmx and ManualOverride both active. clear_manual_override() releases only ManualOverride;
     // LiveDmx and other sources remain active and unchanged.
     {
-        OutputController ctrl;
-        ConfigStore cfg_store;
+        LG_TEST_HEAP(OutputController, ctrl);
+        RuntimeTestConfigStore cfg_store;
         ControlSourceManager csm;
         csm.init();
-        LightingRuntime runtime(csm, ctrl, cfg_store);
+        LG_TEST_HEAP(LightingRuntime, runtime, csm, ctrl, cfg_store);
 
         // Claim LiveDmx on P1 (channel 8)
         csm.acquire(ControlSource::LiveDmx, 10000, 0x01, 0x01, 0x0100);
@@ -3045,11 +3271,11 @@ bool test_lg024_live_desk_and_manual_override() {
     // Submitting manual A1+A2, then submitting replacement manual P1 only.
     // Resulting mask must be only P1 (0x0100). A1 and A2 must no longer be ManualOverride.
     {
-        OutputController ctrl;
-        ConfigStore cfg_store;
+        LG_TEST_HEAP(OutputController, ctrl);
+        RuntimeTestConfigStore cfg_store;
         ControlSourceManager csm;
         csm.init();
-        LightingRuntime runtime(csm, ctrl, cfg_store);
+        LG_TEST_HEAP(LightingRuntime, runtime, csm, ctrl, cfg_store);
 
         // First frame: A1 + A2
         ManualOverrideFrame frame1{};
@@ -3093,11 +3319,11 @@ bool test_lg025_fleet_sync_and_show_deployment() {
 
     // ── Test A: ManualOverride scope and stop lifecycle ────────────────────────
     {
-        OutputController ctrl;
-        ConfigStore cfg;
+        LG_TEST_HEAP(OutputController, ctrl);
+        RuntimeTestConfigStore cfg;
         ControlSourceManager csm;
         csm.init();
-        LightingRuntime runtime(csm, ctrl, cfg);
+        LG_TEST_HEAP(LightingRuntime, runtime, csm, ctrl, cfg);
 
         // Submit A1 only
         ManualOverrideFrame frame{};
@@ -3125,14 +3351,14 @@ bool test_lg025_fleet_sync_and_show_deployment() {
 
     // ── Test B: Real Scene Deletion ───────────────────────────────────────────
     {
-        ConfigStore cfg;
-        SceneConfig scene{};
+        RuntimeTestConfigStore cfg;
+        LG_TEST_HEAP(SceneConfig, scene);
         strncpy(scene.name, "Test Scene 7", sizeof(scene.name) - 1);
         scene.checksum = 7777;
         assert(cfg.save_scene(7, scene) == ESP_OK);
         assert(cfg.scene_exists(7));
 
-        SceneMotionConfig motion{};
+        LG_TEST_HEAP(SceneMotionConfig, motion);
         motion.track_count = 1;
         motion.checksum = 8888;
         assert(cfg.save_scene_motion(7, motion) == ESP_OK);
@@ -3142,17 +3368,17 @@ bool test_lg025_fleet_sync_and_show_deployment() {
         assert(!cfg.scene_exists(7));
         assert(cfg.delete_scene_motion(7) == ESP_OK);
 
-        SceneConfig loaded{};
+        LG_TEST_HEAP(SceneConfig, loaded);
         assert(cfg.load_scene(7, loaded) != ESP_OK);
     }
 
     // ── Test C: Scheduler Sync Timeline Transport ─────────────────────────────
     {
-        ConfigStore cfg;
-        OutputController ctrl;
+        RuntimeTestConfigStore cfg;
+        LG_TEST_HEAP(OutputController, ctrl);
         ControlSourceManager csm;
         csm.init();
-        LightingRuntime runtime(csm, ctrl, cfg);
+        LG_TEST_HEAP(LightingRuntime, runtime, csm, ctrl, cfg);
         ClockDiscipline clock;
         Scheduler scheduler(cfg, runtime, clock);
 
@@ -3172,30 +3398,30 @@ bool test_lg025_fleet_sync_and_show_deployment() {
 
     // ── Test D: Show Manifest Hash Determinism ─────────────────────────────────
     {
-        ConfigStore cfg1;
-        ConfigStore cfg2;
+        RuntimeTestConfigStore cfg1;
+        RuntimeTestConfigStore cfg2;
 
         uint32_t hash1 = cfg1.compute_show_hash();
         uint32_t hash2 = cfg2.compute_show_hash();
         assert(hash1 == hash2);
 
         // Modify Scene 4 on cfg1
-        SceneConfig scene4{};
+        LG_TEST_HEAP(SceneConfig, scene4);
         strncpy(scene4.name, "Scene 4", sizeof(scene4.name) - 1);
         scene4.checksum = 4444;
         assert(cfg1.save_scene(4, scene4) == ESP_OK);
         assert(cfg1.compute_show_hash() != hash2);
 
         // Modify Scene Motion 4 on cfg2
-        SceneMotionConfig motion4{};
+        LG_TEST_HEAP(SceneMotionConfig, motion4);
         motion4.track_count = 1;
         motion4.checksum = 4445;
         assert(cfg2.save_scene_motion(4, motion4) == ESP_OK);
         assert(cfg2.compute_show_hash() != hash1);
 
         // Modify hardware configuration on a fresh cfg3: showHash must remain identical to cfg1 baseline
-        ConfigStore cfg3;
-        DeviceConfig dev_cfg{};
+        RuntimeTestConfigStore cfg3;
+        LG_TEST_HEAP(DeviceConfig, dev_cfg);
         cfg3.load_config(dev_cfg);
         dev_cfg.channels[0].max_brightness = 100;
         dev_cfg.channels[0].max_milliwatts = 5000;
@@ -3268,23 +3494,23 @@ static bool test_lg026_show_transport_and_cue_sync() {
         }
 
         // EStop dominates everything
-        OutputController ctrl;
+        LG_TEST_HEAP(OutputController, ctrl);
         ctrl.latch_estop();
         assert(ctrl.is_estop_latched() == true);
     }
 
     // ── Test 3: Follower Suppression of Local Timeline ────────────────────────
     {
-        ConfigStore cfg;
-        OutputController ctrl;
+        RuntimeTestConfigStore cfg;
+        LG_TEST_HEAP(OutputController, ctrl);
         ControlSourceManager csm;
         csm.init();
-        LightingRuntime runtime(csm, ctrl, cfg);
+        LG_TEST_HEAP(LightingRuntime, runtime, csm, ctrl, cfg);
         ClockDiscipline clock;
         Scheduler scheduler(cfg, runtime, clock);
 
         // Simulate local sequence persisted with enabled=true, 120 BPM
-        Sequence seq{};
+        LG_TEST_HEAP(Sequence, seq);
         seq.enabled = true;
         seq.bpm = 120;
         cfg.save_sequence(seq);
@@ -3307,11 +3533,11 @@ static bool test_lg026_show_transport_and_cue_sync() {
 
     // ── Test 4: Timeline Sync BPM & Suppression Transition ────────────────────
     {
-        ConfigStore cfg;
-        OutputController ctrl;
+        RuntimeTestConfigStore cfg;
+        LG_TEST_HEAP(OutputController, ctrl);
         ControlSourceManager csm;
         csm.init();
-        LightingRuntime runtime(csm, ctrl, cfg);
+        LG_TEST_HEAP(LightingRuntime, runtime, csm, ctrl, cfg);
         ClockDiscipline clock;
         Scheduler scheduler(cfg, runtime, clock);
 
@@ -3336,8 +3562,8 @@ static bool test_lg026_show_transport_and_cue_sync() {
 
     // ── Test 5: Cue Synchronization & Authoritative Progression ───────────────
     {
-        ConfigStore cfg;
-        CueList cl{};
+        RuntimeTestConfigStore cfg;
+        LG_TEST_HEAP(CueList, cl);
         cl.count = 3;
         cl.mode = CueRunMode::Random;
         cl.cues[0].scene_index = 1;
@@ -3353,16 +3579,17 @@ static bool test_lg026_show_transport_and_cue_sync() {
 
         // Save mock scenes
         for (uint8_t i = 1; i <= 3; ++i) {
-            SceneConfig sc{};
+            LG_TEST_HEAP(SceneConfig, sc);
             sc.checksum = 100 + i;
             cfg.save_scene(i, sc);
         }
 
-        OutputController ctrl1, ctrl2;
+        LG_TEST_HEAP(OutputController, ctrl1);
+        LG_TEST_HEAP(OutputController, ctrl2);
         ControlSourceManager csm1, csm2;
         csm1.init(); csm2.init();
-        LightingRuntime rt1(csm1, ctrl1, cfg);
-        LightingRuntime rt2(csm2, ctrl2, cfg);
+        LG_TEST_HEAP(LightingRuntime, rt1, csm1, ctrl1, cfg);
+        LG_TEST_HEAP(LightingRuntime, rt2, csm2, ctrl2, cfg);
 
         CueRunner leader(cfg, rt1);
         CueRunner follower(cfg, rt2);
@@ -3372,7 +3599,7 @@ static bool test_lg026_show_transport_and_cue_sync() {
         assert(follower.start(0, 0, t0) == ESP_OK);
 
         // Snap leader state and apply to follower
-        CueSyncSnapshot snap = leader.sync_snapshot(t0 + 500);
+        LG_TEST_HEAP(CueSyncSnapshot, snap, leader.sync_snapshot(t0 + 500));
         assert(follower.apply_sync_snapshot(snap, t0 + 500) == ESP_OK);
         assert(follower.snapshot(t0 + 500).list_index == leader.snapshot(t0 + 500).list_index);
         assert(follower.snapshot(t0 + 500).current_cue == leader.snapshot(t0 + 500).current_cue);
@@ -3394,7 +3621,7 @@ static bool test_lg026_show_transport_and_cue_sync() {
         assert(elapsed_leader == elapsed_follower);
 
         // Manual crossfade
-        CueList manual_cl = cl;
+        LG_TEST_HEAP(CueList, manual_cl, cl);
         manual_cl.mode = CueRunMode::Manual;
         cfg.save_cue_list(1, manual_cl);
 
@@ -3445,14 +3672,14 @@ static bool test_lg026_show_transport_and_cue_sync() {
 
     // ── Test 7: ShowManifest v2 Separation ─────────────────────────────────────
     {
-        ConfigStore cfg;
+        RuntimeTestConfigStore cfg;
         uint32_t play_hash = cfg.compute_playback_hash();
         uint32_t sched_hash = cfg.compute_schedule_hash();
         uint32_t full_hash = cfg.compute_show_hash();
 
         // Modifying only CalendarSchedule must change sched_hash and full_hash,
         // but leave playback_hash unchanged!
-        CalendarSchedule sched{};
+        LG_TEST_HEAP(CalendarSchedule, sched);
         sched.entries[0].enabled = true;
         sched.entries[0].hour = 14;
         sched.entries[0].minute = 30;
@@ -3500,7 +3727,7 @@ static bool test_lg027_network_settings_and_commissioning() {
 
     // ── Test 3: ConfigStore NetworkSettings save and load with CRC32 ──────────
     {
-        ConfigStore cfg;
+        RuntimeTestConfigStore cfg;
         NetworkSettings net{};
         net.mode = NetworkMode::StaWithApFallback;
         strncpy(net.sta_ssid, "Test-SSID", sizeof(net.sta_ssid) - 1);
@@ -3614,7 +3841,7 @@ bool test_lg028_network_commissioning_and_lifecycle() {
 
     // Regression B: Corrupt primary -> valid backup recovery
     {
-        ConfigStore cfg;
+        RuntimeTestConfigStore cfg;
         NetworkSettings net{};
         net.mode = NetworkMode::StaWithApFallback;
         std::strncpy(net.sta_ssid, "BackupRecoverSSID", sizeof(net.sta_ssid) - 1);
@@ -3625,7 +3852,7 @@ bool test_lg028_network_commissioning_and_lifecycle() {
 
         // Corrupt primary by writing garbage directly to "network" NVS key
         nvs_handle_t h;
-        if (nvs_open("lumigrid_cfg", NVS_READWRITE, &h) == ESP_OK) {
+        if (nvs_open("lg_test", NVS_READWRITE, &h) == ESP_OK) {
             uint8_t garbage[sizeof(NetworkSettings)] = {0xDE, 0xAD, 0xBE, 0xEF};
             nvs_set_blob(h, "network", garbage, sizeof(garbage));
             nvs_commit(h);
@@ -3641,14 +3868,14 @@ bool test_lg028_network_commissioning_and_lifecycle() {
 
     // Regression C: Unsupported schema rejected
     {
-        ConfigStore cfg;
+        RuntimeTestConfigStore cfg;
         NetworkSettings net{};
         net.schema_version = 99; // Unsupported schema
         net.mode = NetworkMode::ApOnly;
         net.checksum = calc_network_settings_crc(net);
 
         nvs_handle_t h;
-        if (nvs_open("lumigrid_cfg", NVS_READWRITE, &h) == ESP_OK) {
+        if (nvs_open("lg_test", NVS_READWRITE, &h) == ESP_OK) {
             nvs_set_blob(h, "network", &net, sizeof(net));
             nvs_set_blob(h, "network_b", &net, sizeof(net));
             nvs_commit(h);
@@ -3764,7 +3991,7 @@ bool test_lg028_network_commissioning_and_lifecycle() {
 
     // Regression N: Failed new configuration leaves old persisted config unchanged
     {
-        ConfigStore cfg;
+        RuntimeTestConfigStore cfg;
         NetworkSettings original{};
         original.mode = NetworkMode::ApOnly;
         std::strncpy(original.ap_name, "OriginalKnownGood", sizeof(original.ap_name) - 1);
@@ -3797,7 +4024,7 @@ bool test_lg028_network_commissioning_and_lifecycle() {
 
     // Regression P: Successful apply persists only after network-ready
     {
-        ConfigStore cfg;
+        RuntimeTestConfigStore cfg;
         NetworkSettings prev{};
         cfg.load_network_settings(prev);
 
@@ -3816,7 +4043,7 @@ bool test_lg028_network_commissioning_and_lifecycle() {
 
     // Regression Q: Second simultaneous apply gets rejected
     {
-        LumigridRuntime runtime;
+        LG_TEST_HEAP(LumigridRuntime, runtime);
         NetworkApplyRequest r1{};
         r1.command_id = 101;
         assert(runtime.queue_network_apply(r1) == ESP_OK);
@@ -3840,7 +4067,7 @@ bool test_lg028_network_commissioning_and_lifecycle() {
     {
         // Rebinding network calls stop_network_services() and start_network_services(),
         // never touching OutputController or LightingRuntime
-        OutputController output;
+        LG_TEST_HEAP(OutputController, output);
         output.set_output_enabled(true);
         assert(output.output_enabled());
     }
@@ -3866,7 +4093,7 @@ bool test_lg028_network_commissioning_and_lifecycle() {
 }
 
 bool test_lg0387_bootstrap_and_credentials() {
-    auth::AuthStore store;
+    RuntimeTestAuthStore store;
     auth::AuthManager mgr(&store);
     assert(mgr.init() == ESP_OK);
     assert(mgr.factory_reset() == ESP_OK);
@@ -3913,7 +4140,7 @@ bool test_lg0387_bootstrap_and_credentials() {
 
     // G: Reconstructing manager over persistent NVS retains provisioned credential across boots.
     for (int boot = 0; boot < 2; ++boot) {
-        auth::AuthStore reboot_store;
+        RuntimeTestAuthStore reboot_store;
         auth::AuthManager reboot(&reboot_store);
         assert(reboot.init() == ESP_OK);
         assert(reboot.is_provisioned());
@@ -3966,7 +4193,7 @@ bool test_lg0387_bootstrap_and_credentials() {
 bool test_lg029_node_backed_authentication() {
     ESP_LOGI(TAG, "Testing LG-029 Node-Backed Authentication & Sessions (Tests A..AC)...");
 
-    auth::AuthStore mem_store;
+    RuntimeTestAuthStore mem_store;
     auth::AuthManager mgr(&mem_store);
     mgr.init();
 
@@ -4157,7 +4384,7 @@ bool test_lg029_node_backed_authentication() {
 
     // Regression X: v2 restore ignores legacy auth secrets
     {
-        DeviceConfig legacy_cfg{};
+        LG_TEST_HEAP(DeviceConfig, legacy_cfg);
         std::strncpy(legacy_cfg.admin_token, "HackedToken12345!", sizeof(legacy_cfg.admin_token) - 1);
         auth::AuthRole r;
         assert(!mgr.verify_api_key(legacy_cfg.admin_token, &r));
@@ -4210,7 +4437,7 @@ bool test_lg029_node_backed_authentication() {
 
         // 0. Bootstrap Trust Boundary & Commissioning State Policy
         {
-            auth::AuthStore mem_store;
+            RuntimeTestAuthStore mem_store;
             auth::AuthManager auth_mgr(&mem_store);
             assert(auth_mgr.init() == ESP_OK);
             assert(auth_mgr.factory_reset() == ESP_OK);
@@ -4408,7 +4635,7 @@ bool test_lg029_node_backed_authentication() {
 
         // 2. Requirement A & K: Snapshot collection is side-effect free & contains 16 physical channels
         {
-            RuntimeSnapshot snap{};
+            LG_TEST_HEAP(RuntimeSnapshot, snap);
             snap.schema = 3;
             snap.generated_at_ms = 123456;
             std::strncpy(snap.node.id, "lg-aabbccddeeff", sizeof(snap.node.id) - 1);
@@ -4439,7 +4666,7 @@ bool test_lg029_node_backed_authentication() {
 
         // 3. Requirement B, C, D, E, F: Serialization test for HTTP vs WS
         {
-            RuntimeSnapshot snap{};
+            LG_TEST_HEAP(RuntimeSnapshot, snap);
             snap.schema = 3;
             snap.stream_seq = 0;
             snap.generated_at_ms = 5000;
@@ -4454,16 +4681,16 @@ bool test_lg029_node_backed_authentication() {
             std::strncpy(snap.transport.mode, "scene", sizeof(snap.transport.mode) - 1);
 
             // HTTP serialization: stream_seq = 0
-            char http_buf[8192];
-            FixedJsonWriter http_writer(http_buf, sizeof(http_buf));
+            LG_TEST_BUFFER(http_buf, 8192);
+            FixedJsonWriter http_writer(http_buf, 8192);
             bool http_ok = serialize_runtime_snapshot(snap, http_writer);
             assert(http_ok);
             assert(http_writer.ok());
 
             // WS serialization: stream_seq = 42
             snap.stream_seq = 42;
-            char ws_buf[8192];
-            FixedJsonWriter ws_writer(ws_buf, sizeof(ws_buf));
+            LG_TEST_BUFFER(ws_buf, 8192);
+            FixedJsonWriter ws_writer(ws_buf, 8192);
             bool ws_ok = serialize_runtime_snapshot(snap, ws_writer);
             assert(ws_ok);
             assert(ws_writer.ok());
@@ -4510,7 +4737,7 @@ bool test_lg029_node_backed_authentication() {
             assert(!tiny_writer.ok()); // Must detect overflow
 
             // Worst-case 16-channel snapshot must comfortably fit 8192 bytes budget
-            RuntimeSnapshot max_snap{};
+            LG_TEST_HEAP(RuntimeSnapshot, max_snap);
             max_snap.schema = 3;
             max_snap.stream_seq = 12345;
             max_snap.generated_at_ms = 99999999;
@@ -4552,7 +4779,7 @@ bool test_lg029_node_backed_authentication() {
 
         // 5. Requirement L, M, N, O, P: Observational fields mapping
         {
-            RuntimeSnapshot snap{};
+            LG_TEST_HEAP(RuntimeSnapshot, snap);
             snap.stream_seq = 1;
             snap.manual.active = true;
             snap.manual.channel_mask = 0x00FF;
@@ -4614,10 +4841,10 @@ bool test_lg029_node_backed_authentication() {
         }
 
         // 2. Scene and Motion Persistence via ConfigStore
-        ConfigStore cfg_store;
+        RuntimeTestConfigStore cfg_store;
         cfg_store.init();
 
-        SceneConfig scene{};
+        LG_TEST_HEAP(SceneConfig, scene);
         scene.schema_version = 2;
         std::strncpy(scene.name, "Lobby Warm", sizeof(scene.name) - 1);
         scene.global_brightness = 200;
@@ -4629,7 +4856,7 @@ bool test_lg029_node_backed_authentication() {
             scene.channels[c].layers[0].primary_color = {255, 140, 40};
         }
 
-        SceneMotionConfig motion{};
+        LG_TEST_HEAP(SceneMotionConfig, motion);
         motion.schema_version = 1;
         motion.transition_curve = TransitionCurve::EaseInOut;
         motion.track_count = 1;
@@ -4646,12 +4873,12 @@ bool test_lg029_node_backed_authentication() {
         assert(cfg_store.save_scene_motion(test_slot, motion) == ESP_OK);
 
         // Verify readback
-        SceneConfig loaded_scene{};
+        LG_TEST_HEAP(SceneConfig, loaded_scene);
         assert(cfg_store.load_scene(test_slot, loaded_scene) == ESP_OK);
         assert(std::strcmp(loaded_scene.name, "Lobby Warm") == 0);
         assert(loaded_scene.checksum != 0);
 
-        SceneMotionConfig loaded_motion{};
+        LG_TEST_HEAP(SceneMotionConfig, loaded_motion);
         assert(cfg_store.load_scene_motion(test_slot, loaded_motion) == ESP_OK);
         assert(loaded_motion.track_count == 1);
         assert(loaded_motion.checksum != 0);
@@ -4775,10 +5002,10 @@ bool test_lg029_node_backed_authentication() {
         }
 
         // 2. ConfigStore Sequence Persistence, Legacy Migration & Checksum (Requirements D..G, M..O, W)
-        ConfigStore cfg;
+        RuntimeTestConfigStore cfg;
         cfg.init();
         {
-            Sequence seq{};
+            LG_TEST_HEAP(Sequence, seq);
             seq.enabled = true; // Legacy backup/client had enabled=true
             seq.bpm = 120;
             for (uint8_t i = 0; i < 16; ++i) {
@@ -4795,7 +5022,7 @@ bool test_lg029_node_backed_authentication() {
 
             assert(cfg.save_sequence(seq) == ESP_OK);
 
-            Sequence loaded{};
+            LG_TEST_HEAP(Sequence, loaded);
             assert(cfg.load_sequence(loaded) == ESP_OK);
             // Requirement W: legacy enabled=true cannot auto-start after reboot/load!
             assert(loaded.enabled == false);
@@ -4803,7 +5030,7 @@ bool test_lg029_node_backed_authentication() {
             assert(loaded.checksum != 0);
 
             // Legacy non-canonical channel mapping migration
-            Sequence legacy_order{};
+            LG_TEST_HEAP(Sequence, legacy_order);
             legacy_order.bpm = 130;
             legacy_order.tracks[0].channel_id = 7; // A8 placed in slot 0
             legacy_order.tracks[0].enabled = true;
@@ -4817,7 +5044,7 @@ bool test_lg029_node_backed_authentication() {
             legacy_order.tracks[1].steps[0].length_beats = 4;
 
             assert(cfg.save_sequence(legacy_order) == ESP_OK);
-            Sequence canon_loaded{};
+            LG_TEST_HEAP(Sequence, canon_loaded);
             assert(cfg.load_sequence(canon_loaded) == ESP_OK);
             // Canonical mapping ensures tracks[i].channel_id == i
             for (uint8_t i = 0; i < 16; ++i) {
@@ -4836,10 +5063,10 @@ bool test_lg029_node_backed_authentication() {
 
         // 3. Persistence / Playback Separation & Anchored Transport (Requirements P..W, X..AC)
         {
-            OutputController ctrl;
+            LG_TEST_HEAP(OutputController, ctrl);
             ControlSourceManager csm;
             csm.init();
-            LightingRuntime runtime(csm, ctrl, cfg);
+            LG_TEST_HEAP(LightingRuntime, runtime, csm, ctrl, cfg);
             ClockDiscipline clock;
             Scheduler scheduler(cfg, runtime, clock);
 
@@ -4857,7 +5084,7 @@ bool test_lg029_node_backed_authentication() {
             assert(!scheduler.is_timeline_content_stale());
 
             // Verify active snapshot matches stored sequence
-            Sequence active1 = scheduler.active_sequence();
+            LG_TEST_HEAP(Sequence, active1, scheduler.active_sequence());
             assert(active1.bpm == 120);
             assert(active1.tracks[0].steps[0].length_beats == 4);
 
@@ -4871,7 +5098,7 @@ bool test_lg029_node_backed_authentication() {
             assert(snap1.timeline_active_checksum == snap1.timeline_saved_checksum);
 
             // Simulate PUT /sequence (saving edits while running)
-            Sequence modified_seq{};
+            LG_TEST_HEAP(Sequence, modified_seq);
             cfg.load_sequence(modified_seq);
             modified_seq.bpm = 145; // Edited BPM
             modified_seq.tracks[0].steps[0].length_beats = 16; // Edited step length
@@ -4907,7 +5134,7 @@ bool test_lg029_node_backed_authentication() {
             // Stop Timeline: releases playback, leaves persisted sequence untouched
             scheduler.stop_local_timeline();
             assert(!scheduler.is_local_timeline_running());
-            Sequence check_persisted{};
+            LG_TEST_HEAP(Sequence, check_persisted);
             cfg.load_sequence(check_persisted);
             assert(check_persisted.bpm == 145);
         }
@@ -4915,14 +5142,14 @@ bool test_lg029_node_backed_authentication() {
         // 4. NodeSync v5 & Follower Timeline Synchronization (Requirements AD..AN)
         {
             static_assert(sizeof(NodeSync::SyncPacket) == 76, "NodeSync v6 packet must be exactly 76 bytes");
-            OutputController ctrl;
+            LG_TEST_HEAP(OutputController, ctrl);
             ControlSourceManager csm;
             csm.init();
-            LightingRuntime runtime(csm, ctrl, cfg);
+            LG_TEST_HEAP(LightingRuntime, runtime, csm, ctrl, cfg);
             ClockDiscipline clock;
             Scheduler scheduler(cfg, runtime, clock);
 
-            Sequence stored_seq{};
+            LG_TEST_HEAP(Sequence, stored_seq);
             cfg.load_sequence(stored_seq);
 
             // Apply new remote timeline generation
@@ -4966,24 +5193,25 @@ bool test_lg029_node_backed_authentication() {
         ESP_LOGI(TAG, "Testing LG-034 Cue Studio v2 & Cue Runtime Hardening...");
 
         // ── Setup: two independent runtimes (leader + follower), shared config ──
-        ConfigStore cfg;
+        RuntimeTestConfigStore cfg;
         cfg.init();
-        OutputController ctrl1, ctrl2;
+        LG_TEST_HEAP(OutputController, ctrl1);
+        LG_TEST_HEAP(OutputController, ctrl2);
         ControlSourceManager csm1, csm2;
         csm1.init();
         csm2.init();
-        LightingRuntime rt1(csm1, ctrl1, cfg);
-        LightingRuntime rt2(csm2, ctrl2, cfg);
+        LG_TEST_HEAP(LightingRuntime, rt1, csm1, ctrl1, cfg);
+        LG_TEST_HEAP(LightingRuntime, rt2, csm2, ctrl2, cfg);
         CueRunner runner(cfg, rt1);
         CueRunner follower(cfg, rt2);
 
         // Persist three scenes (0, 1, 2) and a 3-cue single-shot list in slot 0
         for (uint8_t i = 0; i < 3; ++i) {
-            SceneConfig sc{};
+            LG_TEST_HEAP(SceneConfig, sc);
             sc.checksum = 100 + i;
             assert(cfg.save_scene(i, sc) == ESP_OK);
         }
-        CueList list{};
+        LG_TEST_HEAP(CueList, list);
         list.count = 3;
         list.mode = CueRunMode::SingleShot;
         list.end_action = CueEndAction::HoldLast;
@@ -4993,7 +5221,7 @@ bool test_lg029_node_backed_authentication() {
         list.cues[2] = {2, 1000, 500, TransitionCurve::Linear, "three"};
         assert(cfg.save_cue_list(0, list) == ESP_OK);
 
-        CueList stored{};
+        LG_TEST_HEAP(CueList, stored);
         assert(cfg.load_cue_list(0, stored) == ESP_OK);
         const uint32_t original_checksum = stored.checksum;
         assert(original_checksum != 0);
@@ -5019,7 +5247,7 @@ bool test_lg029_node_backed_authentication() {
         // ── B/C/D. Natural completion applies each end action (§73.B..D) ──
         {
             // HoldLast (already covered by A; explicit end-action state check)
-            CueList hold_list = stored;
+            LG_TEST_HEAP(CueList, hold_list, stored);
             hold_list.end_action = CueEndAction::HoldLast;
             cfg.save_cue_list(1, hold_list);
             assert(runner.start(1, 0, 20000) == ESP_OK);
@@ -5034,7 +5262,7 @@ bool test_lg029_node_backed_authentication() {
             assert(rt1.active_scene_index() == 2);
 
             // Blackout end action
-            CueList bo_list = stored;
+            LG_TEST_HEAP(CueList, bo_list, stored);
             bo_list.end_action = CueEndAction::Blackout;
             cfg.save_cue_list(1, bo_list);
             assert(runner.start(1, 0, 30000) == ESP_OK);
@@ -5048,7 +5276,7 @@ bool test_lg029_node_backed_authentication() {
             assert(runner.snapshot(37100).running == false);
 
             // RestoreFallback end action
-            CueList fb_list = stored;
+            LG_TEST_HEAP(CueList, fb_list, stored);
             fb_list.end_action = CueEndAction::RestoreFallback;
             cfg.save_cue_list(1, fb_list);
             assert(runner.start(1, 0, 40000) == ESP_OK);
@@ -5064,7 +5292,7 @@ bool test_lg029_node_backed_authentication() {
 
         // ── E. Operator Stop does NOT execute end action (§73.E) ──
         {
-            CueList bo_list = stored;
+            LG_TEST_HEAP(CueList, bo_list, stored);
             bo_list.end_action = CueEndAction::Blackout;
             cfg.save_cue_list(1, bo_list);
             assert(runner.start(1, 0, 50000) == ESP_OK);
@@ -5154,7 +5382,7 @@ bool test_lg029_node_backed_authentication() {
             assert(runner.snapshot(100000).active_checksum == original_checksum);
 
             // Q: edit + save the same slot while running
-            CueList edited = stored;
+            LG_TEST_HEAP(CueList, edited, stored);
             edited.cues[0].hold_ms = 5000;
             assert(cfg.save_cue_list(0, edited) == ESP_OK);
 
@@ -5164,7 +5392,7 @@ bool test_lg029_node_backed_authentication() {
             assert(after_save.active_checksum == original_checksum);
 
             // R/S: active checksum differs from saved; contentStale true
-            CueList reloaded{};
+            LG_TEST_HEAP(CueList, reloaded);
             assert(cfg.load_cue_list(0, reloaded) == ESP_OK);
             assert(after_save.saved_checksum == reloaded.checksum);
             assert(after_save.saved_checksum != original_checksum);
@@ -5182,15 +5410,15 @@ bool test_lg029_node_backed_authentication() {
         // ── AJ..AM. Checksum conflict protection at ConfigStore level (§77) ──
         {
             // Checksum match detection basis (API layer compares expectedChecksum)
-            CueList current{};
+            LG_TEST_HEAP(CueList, current);
             assert(cfg.load_cue_list(0, current) == ESP_OK);
             // AM: save does not change runtime state (already stopped here)
             assert(runner.snapshot(103000).running == false);
             // AL: save produces a new stable checksum via readback
-            CueList v2 = current;
+            LG_TEST_HEAP(CueList, v2, current);
             v2.cues[0].hold_ms = 7000;
             assert(cfg.save_cue_list(0, v2) == ESP_OK);
-            CueList v2_back{};
+            LG_TEST_HEAP(CueList, v2_back);
             assert(cfg.load_cue_list(0, v2_back) == ESP_OK);
             assert(v2_back.checksum == current.checksum); // unchanged content -> same checksum
         }
@@ -5208,7 +5436,7 @@ bool test_lg029_node_backed_authentication() {
             // AY: crossfade outside Manual mode
             assert(runner.set_manual_fade(16384) == ESP_ERR_INVALID_STATE);
             // Crossfade inside Manual mode is accepted
-            CueList manual_list = stored;
+            LG_TEST_HEAP(CueList, manual_list, stored);
             manual_list.mode = CueRunMode::Manual;
             cfg.save_cue_list(2, manual_list);
             assert(runner.start(2, 0, 110200) == ESP_OK);
@@ -5227,7 +5455,7 @@ bool test_lg029_node_backed_authentication() {
 
             // Mismatched checksum is detected by the API layer via cue_list_mismatch;
             // here verify the follower rejects an unavailable list index
-            CueSyncSnapshot bad_list = leader_snap;
+            LG_TEST_HEAP(CueSyncSnapshot, bad_list, leader_snap);
             bad_list.list_index = 7; // not persisted in this test
             assert(follower.apply_sync_snapshot(bad_list, 120200) != ESP_OK);
 
@@ -5251,7 +5479,7 @@ bool test_lg029_node_backed_authentication() {
         // 1. FactoryRunner Test Session State Machine & Operator Confirmation Invariant
         {
             ControlSourceManager sm;
-            OutputController ctrl;
+            LG_TEST_HEAP(OutputController, ctrl);
             FactoryRunner runner(sm, ctrl);
 
             assert(runner.start() == ESP_OK);
@@ -5351,12 +5579,12 @@ bool test_lg029_node_backed_authentication() {
 
         // 1. DeviceConfig Checksum and Bounds (§92 A..K)
         {
-            DeviceConfig cfg1{};
+            LG_TEST_HEAP(DeviceConfig, cfg1);
             strncpy(cfg1.device_name, "Lobby East", sizeof(cfg1.device_name) - 1);
             cfg1.max_power_mw = 50000;
             cfg1.gamma_x10 = 22;
 
-            DeviceConfig cfg2 = cfg1;
+            LG_TEST_HEAP(DeviceConfig, cfg2, cfg1);
             uint32_t crc1 = ConfigStore::compute_device_crc(cfg1);
             uint32_t crc2 = ConfigStore::compute_device_crc(cfg2);
             assert(crc1 == crc2);
@@ -5387,7 +5615,7 @@ bool test_lg029_node_backed_authentication() {
 
         // 2. ConfigApplyPlan & Impact Classification (§93 L..W)
         {
-            DeviceConfig old_cfg{};
+            LG_TEST_HEAP(DeviceConfig, old_cfg);
             strncpy(old_cfg.device_name, "Node 1", sizeof(old_cfg.device_name) - 1);
             old_cfg.gamma_x10 = 22;
             old_cfg.max_power_mw = 40000;
@@ -5396,7 +5624,7 @@ bool test_lg029_node_backed_authentication() {
             old_cfg.sync_enabled = false;
 
             // L. Metadata only change -> no output restart
-            DeviceConfig new_cfg = old_cfg;
+            LG_TEST_HEAP(DeviceConfig, new_cfg, old_cfg);
             strncpy(new_cfg.device_name, "Node 1 Renamed", sizeof(new_cfg.device_name) - 1);
             ConfigApplyPlan plan_meta = diff_device_config(old_cfg, new_cfg);
             assert(plan_meta.has_impact(ConfigApplyImpact::Metadata));
@@ -5433,7 +5661,7 @@ bool test_lg029_node_backed_authentication() {
 
         // 3. Backup Package Streaming & Secret Exclusion (§94 X..AH)
         {
-            DeviceConfig cfg_with_token{};
+            LG_TEST_HEAP(DeviceConfig, cfg_with_token);
             cfg_with_token.sync_token = 0xDEADBEEF;
             cJSON* json_cfg = cJSON_CreateObject();
             cJSON_AddBoolToObject(json_cfg, "syncTokenSet", cfg_with_token.sync_token != 0);
@@ -5460,7 +5688,7 @@ bool test_lg029_node_backed_authentication() {
 
         // 5. Restore Transaction & Power-Loss Marker (§96 AR..AZ)
         {
-            ConfigStore cs;
+            RuntimeTestConfigStore cs;
             uint32_t marker_checksum = 0;
             cs.set_restore_in_progress(false, 0);
             assert(!cs.is_restore_in_progress(&marker_checksum));
@@ -5581,14 +5809,14 @@ bool test_lg029_node_backed_authentication() {
 
         // 2. Hardware Fingerprint Computation & Invalidation (§114)
         {
-            DeviceConfig cfg1{};
+            LG_TEST_HEAP(DeviceConfig, cfg1);
             cfg1.max_power_mw = 50000;
             cfg1.channels[0].pixel_count = 60;
             cfg1.channels[0].addressable_type = AddressableType::WS2812;
             cfg1.channels[0].pixel_order = PixelOrder::GRB;
 
             uint32_t fp1 = CertificationService::compute_hardware_fingerprint(cfg1, "A");
-            DeviceConfig cfg2 = cfg1;
+            LG_TEST_HEAP(DeviceConfig, cfg2, cfg1);
             uint32_t fp2 = CertificationService::compute_hardware_fingerprint(cfg2, "A");
             assert(fp1 == fp2);
 
@@ -5610,7 +5838,7 @@ bool test_lg029_node_backed_authentication() {
 
         // 3. Session Lifecycle, Exclusivity & Anti-Spoofing (§111, §112, §113)
         {
-            ConfigStore cs;
+            RuntimeTestConfigStore cs;
             NodeIdentity identity{};
             strncpy(identity.id, "lg-testnode01", sizeof(identity.id) - 1);
             strncpy(identity.name, "Test Node", sizeof(identity.name) - 1);
@@ -5697,7 +5925,7 @@ bool test_lg029_node_backed_authentication() {
             assert(summary.passed >= 2);
 
             // Check invalidation on configuration drift
-            DeviceConfig drift_cfg{};
+            LG_TEST_HEAP(DeviceConfig, drift_cfg);
             drift_cfg.max_power_mw = 30000; // was different
             svc.check_invalidation(drift_cfg, "A", "0.8.0");
             assert(svc.is_stale());
@@ -5711,7 +5939,7 @@ bool test_lg029_node_backed_authentication() {
 
         // 4. Report Generation & Zero-Secrets Invariant (§117, §118)
         {
-            ConfigStore cs;
+            RuntimeTestConfigStore cs;
             NodeIdentity identity{};
             strncpy(identity.id, "lg-node-report", sizeof(identity.id) - 1);
             strncpy(identity.hw_revision, "A", sizeof(identity.hw_revision) - 1);
@@ -5876,7 +6104,7 @@ bool test_lg029_node_backed_authentication() {
 
         // 4. Frame Budget Preflight & Headroom Calculation (§27, §82)
         {
-            DeviceConfig cfg{};
+            LG_TEST_HEAP(DeviceConfig, cfg);
             for (size_t i = 0; i < 8; ++i) {
                 cfg.channels[i].enabled = true;
                 cfg.channels[i].pixel_count = 256;
@@ -5909,7 +6137,7 @@ bool test_lg029_node_backed_authentication() {
             assert(board::BoardSafetyCapabilities::kPhysicalEstopInput == false);
             assert(board::BoardSafetyCapabilities::kAddressablePowerGate == false);
 
-            OutputController ctrl;
+            LG_TEST_HEAP(OutputController, ctrl);
             assert(!ctrl.is_estop_latched());
             ctrl.latch_estop();
             assert(ctrl.is_estop_latched());
@@ -5922,14 +6150,14 @@ bool test_lg029_node_backed_authentication() {
 
         // 7. Certification Truth Pass: Injected Probe & No Placeholder Passes (§50-§56, §85)
         {
-            ConfigStore cs;
+            RuntimeTestConfigStore cs;
             NodeIdentity identity{};
             strncpy(identity.id, "lg-cert-probe", sizeof(identity.id) - 1);
             strncpy(identity.hw_revision, "A", sizeof(identity.hw_revision) - 1);
             strncpy(identity.fw_version, "0.8.0", sizeof(identity.fw_version) - 1);
 
             CertificationService svc;
-            CertificationProbeSnapshot mock_probe{};
+            LG_TEST_HEAP(CertificationProbeSnapshot, mock_probe);
             mock_probe.ap_active = false;
             mock_probe.api_running = false;
             mock_probe.authenticated_ws_clients = 0;
@@ -5999,23 +6227,23 @@ bool test_lg029_node_backed_authentication() {
 
     // §78: fresh DeviceConfig protocol defaults are OFF; migration keeps stored values.
     bool test_lg0383_fresh_protocol_defaults() {
-        DeviceConfig fresh{};
+        LG_TEST_HEAP(DeviceConfig, fresh);
         fresh.reset();
         assert(fresh.protocol.artnet_enabled == false);
         assert(fresh.protocol.sacn_enabled == false);
         assert(fresh.sync_enabled == false);
         assert(fresh.mqtt_enabled == false);
 
-        DeviceConfig fresh_default_ctor{}; // default member initializers path
+        LG_TEST_HEAP(DeviceConfig, fresh_default_ctor); // default member initializers path
         assert(fresh_default_ctor.protocol.artnet_enabled == false);
         assert(fresh_default_ctor.protocol.sacn_enabled == false);
 
         // Persisted config path: migration code (ConfigStore v1->v2->v3) copies
         // stored protocol flags verbatim; verify struct copy preserves values.
-        DeviceConfig persisted{};
+        LG_TEST_HEAP(DeviceConfig, persisted);
         persisted.protocol.artnet_enabled = true;
         persisted.protocol.sacn_enabled = true;
-        DeviceConfig copy = persisted;
+        LG_TEST_HEAP(DeviceConfig, copy, persisted);
         assert(copy.protocol.artnet_enabled == true);
         assert(copy.protocol.sacn_enabled == true);
         ESP_LOGI(TAG, "[PASS] LG-038.3 fresh protocol defaults are OFF; stored values preserved");
@@ -6040,7 +6268,7 @@ bool test_lg029_node_backed_authentication() {
             check_memory_admission(now.free_8bit, 1);
         assert(!too_big.accepted);
 
-        RuntimeMemorySnapshot reserve_test{};
+        LG_TEST_HEAP(RuntimeMemorySnapshot, reserve_test);
         reserve_test.free_8bit = 32768;
         reserve_test.largest_8bit = 8192;
         assert(check_memory_admission_snapshot(reserve_test, 4096, 16384).accepted);
@@ -6060,7 +6288,7 @@ bool test_lg029_node_backed_authentication() {
         assert(frag > 0.0f && frag <= 1.0f);
 
         // Health evaluation: classification matches free/largest against gates.
-        RuntimeMemorySnapshot synthetic{};
+        LG_TEST_HEAP(RuntimeMemorySnapshot, synthetic);
         synthetic.free_8bit = 4096;   // < 24 KB gate
         synthetic.largest_8bit = 512; // < 12 KB gate
         assert(evaluate_memory_health(synthetic) == MemoryHealth::Critical);
@@ -6106,7 +6334,7 @@ bool test_lg029_node_backed_authentication() {
 
     // §13(§78)/§61-63/§35: deterministic service plan.
     bool test_lg0383_service_plan() {
-        DeviceConfig cfg{};
+        LG_TEST_HEAP(DeviceConfig, cfg);
 
         // Normal configured node, protocols off (fresh defaults).
         {
@@ -6202,7 +6430,7 @@ bool test_lg029_node_backed_authentication() {
         // Factory worker absent after construction (normal boot no longer starts it).
         {
             ControlSourceManager sources;
-            OutputController controller;
+            LG_TEST_HEAP(OutputController, controller);
             FactoryRunner runner(sources, controller);
             assert(runner.lifecycle_state() != FactoryRunner::LifecycleState::Running);
 
@@ -6219,7 +6447,7 @@ bool test_lg029_node_backed_authentication() {
         // Network apply: no task while idle; queue function rejects a second
         // concurrent apply (§8/§10; one-shot worker self-exits in production).
         {
-            LumigridRuntime runtime;
+            LG_TEST_HEAP(LumigridRuntime, runtime);
             NetworkApplyRequest first{};
             first.command_id = 4001;
             // On the hostless test image, starting the one-shot worker should
@@ -6265,7 +6493,7 @@ bool test_lg029_node_backed_authentication() {
             assert(driver.pos_b(0) == 2);
             assert(driver.pos_w(0) == 3);
 
-            DeviceConfig candidate{};
+            LG_TEST_HEAP(DeviceConfig, candidate);
             candidate.channels[0].enabled = true;
             candidate.channels[0].pixel_count = 10;
             candidate.channels[0].addressable_type = AddressableType::SK6812;
@@ -6313,7 +6541,7 @@ bool test_lg029_node_backed_authentication() {
             assert(driver.configure_lane(0, board::kAledPins[0], false, PixelOrder::RGBW, 10) == ESP_ERR_INVALID_ARG);
 
             ConfigStore::ConfigValidationResult res;
-            DeviceConfig bad_cfg{};
+            LG_TEST_HEAP(DeviceConfig, bad_cfg);
             bad_cfg.channels[0].enabled = true;
             bad_cfg.channels[0].pixel_count = 50;
             bad_cfg.channels[0].addressable_type = AddressableType::WS2812;
@@ -6350,7 +6578,7 @@ bool test_lg029_node_backed_authentication() {
             assert(bo_res.result == ESP_OK);
             assert(driver.wire_data(0)[40 * 3 + driver.pos_r(0)] == 0); // Tail pixels are zeroed
 
-            DeviceConfig shrunk{};
+            LG_TEST_HEAP(DeviceConfig, shrunk);
             shrunk.channels[0].enabled = true;
             shrunk.channels[0].pixel_count = 20;
             shrunk.channels[0].addressable_type = AddressableType::WS2812;
@@ -6369,7 +6597,7 @@ bool test_lg029_node_backed_authentication() {
 
         // 5. E-stop clear verified return value & latch semantics
         {
-            OutputController ctrl;
+            LG_TEST_HEAP(OutputController, ctrl);
             ctrl.latch_estop();
             assert(ctrl.is_estop_latched());
             esp_err_t res = ctrl.clear_estop();
@@ -6381,7 +6609,7 @@ bool test_lg029_node_backed_authentication() {
         // 6. Power budget: WS2812 / SK6812 calculation and PWM load model
         {
             PowerBudget budget;
-            DeviceConfig cfg{};
+            LG_TEST_HEAP(DeviceConfig, cfg);
             cfg.channels[0].enabled = true;
             cfg.channels[0].pixel_count = 10;
             cfg.channels[0].addressable_type = AddressableType::WS2812;
@@ -6395,7 +6623,7 @@ bool test_lg029_node_backed_authentication() {
             cfg.channels[8].enabled = true;
             cfg.channels[8].max_milliwatts = 0; // Incomplete model
 
-            RenderFrame frame{};
+            LG_TEST_HEAP(RenderFrame, frame);
             uint32_t req = budget.enforce(frame, cfg, 1000);
             // Quiescent: 10 * 5 mW + 10 * 5 mW = 100 mW
             assert(req == 100);
@@ -6506,7 +6734,7 @@ bool test_lg029_node_backed_authentication() {
         assert(!Pca9685Driver::is_outputs_enabled());
 
         // 5. OutputController does not enable PCA before successful frame
-        OutputController ctrl;
+        LG_TEST_HEAP(OutputController, ctrl);
         assert(!ctrl.is_estop_latched());
         assert(!Pca9685Driver::is_outputs_enabled());
 
@@ -6522,7 +6750,7 @@ bool test_lg029_node_backed_authentication() {
         assert(NvsRuntime::ready() == true || NvsRuntime::destructive_recovery_required());
 
         // 2. Memory Admission calculation & rejection checks
-        DeviceConfig cfg_admit{};
+        LG_TEST_HEAP(DeviceConfig, cfg_admit);
         for (uint8_t l = 0; l < 8; ++l) {
             cfg_admit.channels[l].enabled = true;
             cfg_admit.channels[l].pixel_count = 256;
@@ -6582,7 +6810,7 @@ bool test_lg029_node_backed_authentication() {
             ParallelRmtDriver rmt(&trans);
 
             // Configure initial topology: lane 0 only
-            DeviceConfig init_cfg{};
+            LG_TEST_HEAP(DeviceConfig, init_cfg);
             init_cfg.channels[0].enabled = true;
             init_cfg.channels[0].pixel_count = 50;
             init_cfg.channels[0].addressable_type = AddressableType::WS2812;
@@ -6595,7 +6823,7 @@ bool test_lg029_node_backed_authentication() {
             assert(!rmt.configured(1));
 
             // Stage candidate: lane 0 (100 px), lane 1 (60 px)
-            DeviceConfig cand_cfg{};
+            LG_TEST_HEAP(DeviceConfig, cand_cfg);
             cand_cfg.channels[0].enabled = true;
             cand_cfg.channels[0].pixel_count = 100;
             cand_cfg.channels[0].addressable_type = AddressableType::WS2812;
@@ -6638,8 +6866,8 @@ bool test_lg029_node_backed_authentication() {
 
         // 4. OutputController transactional sequence & pre-swap preservation
         {
-            OutputController ctrl;
-            DeviceConfig cfg1{};
+            LG_TEST_HEAP(OutputController, ctrl);
+            LG_TEST_HEAP(DeviceConfig, cfg1);
             cfg1.channels[0].enabled = true;
             cfg1.channels[0].pixel_count = 16;
             cfg1.channels[0].addressable_type = AddressableType::WS2812;
@@ -6656,7 +6884,7 @@ bool test_lg029_node_backed_authentication() {
             assert(ctrl.last_known_good_snapshot().addressable[0].pixels == 16);
 
             // Now provide a bad config that fails validation (invalid pixel count 0 for enabled channel)
-            DeviceConfig cfg_bad = cfg1;
+            LG_TEST_HEAP(DeviceConfig, cfg_bad, cfg1);
             cfg_bad.channels[0].pixel_count = 0;
             uint32_t fails_before = ctrl.topology_reconfigure_failures();
 
@@ -6678,7 +6906,7 @@ bool test_lg029_node_backed_authentication() {
 
         // 5. OutputController lock contention tracking
         {
-            OutputController ctrl;
+            LG_TEST_HEAP(OutputController, ctrl);
             ctrl.lock();
             uint32_t wait_us = ctrl.output_lock_max_wait_us();
             (void)wait_us;
@@ -6845,7 +7073,7 @@ bool test_lg029_node_backed_authentication() {
 
         // 4. OutputController Fault Domain Classification & Recovery Integration
         {
-            OutputController ctrl;
+            LG_TEST_HEAP(OutputController, ctrl);
             assert(ctrl.last_fault_domain() == OutputFaultDomain::None);
 
             // E-stop triggers Safety fault domain
@@ -6897,7 +7125,7 @@ bool test_lg029_node_backed_authentication() {
             IntegrityTestRmtTransport trans;
             ParallelRmtDriver rmt(&trans);
 
-            DeviceConfig cfg{};
+            LG_TEST_HEAP(DeviceConfig, cfg);
             cfg.channels[0].enabled = true;
             cfg.channels[0].pixel_count = 10;
             cfg.channels[0].addressable_type = AddressableType::WS2812;
@@ -7026,7 +7254,7 @@ bool test_lg029_node_backed_authentication() {
             TestTransport trans;
             ParallelRmtDriver rmt(&trans);
 
-            DeviceConfig cfg{};
+            LG_TEST_HEAP(DeviceConfig, cfg);
             cfg.channels[0].enabled = true;
             cfg.channels[0].pixel_count = 4;
             cfg.channels[0].addressable_type = AddressableType::WS2812;
@@ -7070,7 +7298,7 @@ bool test_lg029_node_backed_authentication() {
             budget.set_soft_start(true, 750); // 750 ms ramp
             budget.on_enable();
 
-            DeviceConfig cfg{};
+            LG_TEST_HEAP(DeviceConfig, cfg);
             cfg.channels[0].enabled = true;
             cfg.channels[0].pixel_count = 10;
             cfg.channels[0].addressable_type = AddressableType::WS2812;
@@ -7078,7 +7306,7 @@ bool test_lg029_node_backed_authentication() {
             cfg.channels[8].enabled = true;
             cfg.channels[8].max_milliwatts = 5000;
 
-            RenderFrame frame{};
+            LG_TEST_HEAP(RenderFrame, frame);
             for (int p = 0; p < 10; ++p) {
                 frame.channels[0].pixels[p] = LightValue(255, 255, 255, 0);
             }
@@ -7118,7 +7346,7 @@ bool test_lg029_node_backed_authentication() {
 
         // Test 1: V3 -> V4 lossless migration
         {
-            DeviceConfigV3 v3{};
+            LG_TEST_HEAP(DeviceConfigV3, v3);
             v3.schema_version = 3;
             v3.max_power_mw = 55000;
             v3.channels[0].enabled = true;
@@ -7127,7 +7355,7 @@ bool test_lg029_node_backed_authentication() {
             v3.channels[8].enabled = true;
             v3.channels[8].max_milliwatts = 25000;
 
-            DeviceConfig v4{};
+            LG_TEST_HEAP(DeviceConfig, v4);
             uint32_t warns = 0;
             assert(ConfigStore::migrate_v3_to_v4(v3, v4, &warns));
             assert(v4.schema_version == 4);
@@ -7145,23 +7373,23 @@ bool test_lg029_node_backed_authentication() {
 
         // Test 2: Full V1 -> V2 -> V3 -> V4 migration chain
         {
-            DeviceConfigV1 v1{};
+            LG_TEST_HEAP(DeviceConfigV1, v1);
             v1.max_power_mw = 40000;
             strncpy(v1.device_name, "lumigrid-v1", sizeof(v1.device_name) - 1);
 
-            DeviceConfigV2 v2{};
+            LG_TEST_HEAP(DeviceConfigV2, v2);
             uint32_t warns_v2 = 0;
             assert(ConfigStore::migrate_v1_to_v2(v1, v2, &warns_v2));
             assert(v2.schema_version == 2);
             assert(v2.max_power_mw == 40000);
 
-            DeviceConfigV3 v3{};
+            LG_TEST_HEAP(DeviceConfigV3, v3);
             uint32_t warns_v3 = 0;
             assert(ConfigStore::migrate_v2_to_v3(v2, v3, &warns_v3));
             assert(v3.schema_version == 3);
             assert(v3.max_power_mw == 40000);
 
-            DeviceConfig v4{};
+            LG_TEST_HEAP(DeviceConfig, v4);
             uint32_t warns_v4 = 0;
             assert(ConfigStore::migrate_v3_to_v4(v3, v4, &warns_v4));
             assert(v4.schema_version == 4);
@@ -7170,7 +7398,7 @@ bool test_lg029_node_backed_authentication() {
 
         // Test 3: Large 32-bit power value accepted without truncation
         {
-            DeviceConfig cfg{};
+            LG_TEST_HEAP(DeviceConfig, cfg);
             cfg.schema_version = 4;
             cfg.max_power_mw = 200'000; // 200 W (exceeds old 16-bit 65,535 limit)
             cfg.channels[0].enabled = true;
@@ -7191,8 +7419,8 @@ bool test_lg029_node_backed_authentication() {
 
         // Test 4: JSON invalid/overflow values rejected
         {
-            DeviceConfig current{};
-            DeviceConfig candidate{};
+            LG_TEST_HEAP(DeviceConfig, current);
+            LG_TEST_HEAP(DeviceConfig, candidate);
             char err[128] = {};
 
             // Exceeds 2,000,000 mW ceiling
@@ -7223,14 +7451,14 @@ bool test_lg029_node_backed_authentication() {
             budget.set_limit_mw(0); // unlimited
             budget.set_soft_start(false, 0);
 
-            DeviceConfig cfg{};
+            LG_TEST_HEAP(DeviceConfig, cfg);
             for (uint8_t c = 0; c < 8; ++c) {
                 cfg.channels[c].enabled = true;
                 cfg.channels[c].pixel_count = 256;
                 cfg.channels[c].addressable_type = AddressableType::WS2812;
             }
 
-            RenderFrame frame{};
+            LG_TEST_HEAP(RenderFrame, frame);
             for (uint8_t c = 0; c < 8; ++c) {
                 for (uint16_t p = 0; p < 256; ++p) {
                     frame.channels[c].pixels[p] = LightValue(255, 255, 255, 0);
@@ -7248,14 +7476,14 @@ bool test_lg029_node_backed_authentication() {
             budget.set_limit_mw(0);
             budget.set_soft_start(false, 0);
 
-            DeviceConfig cfg{};
+            LG_TEST_HEAP(DeviceConfig, cfg);
             for (uint8_t c = 0; c < 8; ++c) {
                 cfg.channels[c].enabled = true;
                 cfg.channels[c].pixel_count = 256;
                 cfg.channels[c].addressable_type = AddressableType::SK6812;
             }
 
-            RenderFrame frame{};
+            LG_TEST_HEAP(RenderFrame, frame);
             for (uint8_t c = 0; c < 8; ++c) {
                 for (uint16_t p = 0; p < 256; ++p) {
                     frame.channels[c].pixels[p] = LightValue(255, 255, 255, 255);
@@ -7273,12 +7501,12 @@ bool test_lg029_node_backed_authentication() {
             budget.set_limit_mw(0); // 0 = unlimited
             budget.set_soft_start(false, 0);
 
-            DeviceConfig cfg{};
+            LG_TEST_HEAP(DeviceConfig, cfg);
             cfg.channels[0].enabled = true;
             cfg.channels[0].pixel_count = 100;
             cfg.channels[0].addressable_type = AddressableType::WS2812;
 
-            RenderFrame frame{};
+            LG_TEST_HEAP(RenderFrame, frame);
             for (int p = 0; p < 100; ++p) {
                 frame.channels[0].pixels[p] = LightValue(255, 255, 255, 0);
             }
@@ -7295,12 +7523,12 @@ bool test_lg029_node_backed_authentication() {
             budget.set_limit_mw(100000);
             budget.set_soft_start(false, 0);
 
-            DeviceConfig cfg{};
+            LG_TEST_HEAP(DeviceConfig, cfg);
             cfg.channels[8].enabled = true;
             cfg.channels[8].rated_full_power_mw = 0; // unmodeled
             cfg.channels[8].max_milliwatts = 0;
 
-            RenderFrame frame{};
+            LG_TEST_HEAP(RenderFrame, frame);
             frame.channels[8].pwm = 200;
 
             budget.enforce(frame, cfg, 0);
@@ -7316,7 +7544,7 @@ bool test_lg029_node_backed_authentication() {
             budget.set_limit_mw(0); // unlimited global
             budget.set_soft_start(false, 0);
 
-            DeviceConfig cfg{};
+            LG_TEST_HEAP(DeviceConfig, cfg);
             cfg.channels[0].enabled = true;
             cfg.channels[0].pixel_count = 100;
             cfg.channels[0].addressable_type = AddressableType::WS2812;
@@ -7339,7 +7567,7 @@ bool test_lg029_node_backed_authentication() {
             cfg.power_supplies[1].usable_capacity_permille = 1000;
             cfg.power_supplies[1].channel_mask = (1u << 1);
 
-            RenderFrame frame{};
+            LG_TEST_HEAP(RenderFrame, frame);
             for (int p = 0; p < 100; ++p) {
                 frame.channels[0].pixels[p] = LightValue(255, 255, 255, 0);
                 frame.channels[1].pixels[p] = LightValue(255, 255, 255, 0);
@@ -7363,7 +7591,7 @@ bool test_lg029_node_backed_authentication() {
 
         // Test 10: Conflicting supply channel mask assignment rejected
         {
-            DeviceConfig cfg{};
+            LG_TEST_HEAP(DeviceConfig, cfg);
             cfg.schema_version = 4;
             cfg.power_supplies[0].enabled = true;
             cfg.power_supplies[0].voltage_mv = 24000;
@@ -7386,12 +7614,12 @@ bool test_lg029_node_backed_authentication() {
             budget.set_limit_mw(10000); // 10 W limit
             budget.set_soft_start(false, 0);
 
-            DeviceConfig cfg{};
+            LG_TEST_HEAP(DeviceConfig, cfg);
             cfg.channels[0].enabled = true;
             cfg.channels[0].pixel_count = 50;
             cfg.channels[0].addressable_type = AddressableType::WS2812;
 
-            RenderFrame frame{};
+            LG_TEST_HEAP(RenderFrame, frame);
             for (int p = 0; p < 50; ++p) {
                 frame.channels[0].pixels[p] = LightValue(255, 255, 255, 0);
             }
@@ -7413,10 +7641,10 @@ bool test_lg029_node_backed_authentication() {
 
         // Test 12: OutputController common last-stage power guard
         {
-            OutputController ctrl;
+            LG_TEST_HEAP(OutputController, ctrl);
             ctrl.init();
 
-            DeviceConfig pcfg{};
+            LG_TEST_HEAP(DeviceConfig, pcfg);
             pcfg.schema_version = 4;
             pcfg.max_power_mw = 1000; // 1 W global limit
             ctrl.set_power_config(pcfg);
@@ -7432,10 +7660,10 @@ bool test_lg029_node_backed_authentication() {
 
         // Test 13: Blackout and E-stop always permitted regardless of limits
         {
-            OutputController ctrl;
+            LG_TEST_HEAP(OutputController, ctrl);
             ctrl.init();
 
-            DeviceConfig pcfg{};
+            LG_TEST_HEAP(DeviceConfig, pcfg);
             pcfg.max_power_mw = 1; // Extremely tiny limit
             ctrl.set_power_config(pcfg);
 
@@ -7454,12 +7682,12 @@ bool test_lg029_node_backed_authentication() {
             budget.set_soft_start(true, 1000);
             budget.on_enable();
 
-            DeviceConfig cfg{};
+            LG_TEST_HEAP(DeviceConfig, cfg);
             cfg.channels[0].enabled = true;
             cfg.channels[0].pixel_count = 100;
             cfg.channels[0].addressable_type = AddressableType::WS2812;
 
-            RenderFrame frame{};
+            LG_TEST_HEAP(RenderFrame, frame);
             for (int p = 0; p < 100; ++p) {
                 frame.channels[0].pixels[p] = LightValue(255, 255, 255, 0);
             }
@@ -7471,7 +7699,7 @@ bool test_lg029_node_backed_authentication() {
 
         // Test 15: Certification fingerprint sensitivity
         {
-            DeviceConfig cfg{};
+            LG_TEST_HEAP(DeviceConfig, cfg);
             cfg.schema_version = 4;
             cfg.max_power_mw = 50000;
             cfg.channels[0].channel_limit_mw = 10000;
@@ -7510,147 +7738,213 @@ bool test_lg029_node_backed_authentication() {
 
 } // namespace
 
-bool run_runtime_hardening_tests() {
+RuntimeHardeningResult run_runtime_hardening_tests() {
     ESP_LOGI(TAG, "==================================================");
+    const auto& sizes = lg_runtime_hardening_fixture_sizes;
+    ESP_LOGI(TAG,
+             "FIXTURE_SIZES bytes OutputController=%u LightingRuntime=%u "
+             "DmxRouter=%u RenderFrame=%u LiveDmxFrame=%u DeviceConfig=%u "
+             "DeviceConfigV1=%u DeviceConfigV2=%u DeviceConfigV3=%u "
+             "SceneConfig=%u SceneMotionConfig=%u Sequence=%u CueList=%u "
+             "CalendarSchedule=%u LumigridRuntime=%u RuntimeSnapshot=%u",
+             (unsigned)sizes.output_controller, (unsigned)sizes.lighting_runtime,
+             (unsigned)sizes.dmx_router, (unsigned)sizes.render_frame,
+             (unsigned)sizes.live_dmx_frame, (unsigned)sizes.device_config,
+             (unsigned)sizes.device_config_v1, (unsigned)sizes.device_config_v2,
+             (unsigned)sizes.device_config_v3, (unsigned)sizes.scene_config,
+             (unsigned)sizes.scene_motion, (unsigned)sizes.sequence,
+             (unsigned)sizes.cue_list, (unsigned)sizes.calendar_schedule,
+             (unsigned)sizes.lumigrid_runtime, (unsigned)sizes.runtime_snapshot);
     ESP_LOGI(TAG, "  STARTING RUNTIME HARDENING TESTS (BATCH 3..9)");
     ESP_LOGI(TAG, "==================================================");
 
+    const RuntimeMemorySnapshot admission = capture_runtime_memory();
+    constexpr uint32_t kTestFreeHeapReserveBytes = 64u * 1024u;
+    constexpr uint32_t kTestLargestBlockReserveBytes = 32u * 1024u;
+    if (admission.free_8bit < kTestFreeHeapReserveBytes ||
+        admission.largest_8bit < kTestLargestBlockReserveBytes ||
+        admission.free_internal < kTestFixtureInternalReserveBytes ||
+        admission.largest_internal < 8u * 1024u) {
+        ESP_LOGE(TAG,
+                 "[NOT RUN] memory reserve unavailable: free8=%lu largest8=%lu "
+                 "largest_internal=%lu",
+                 (unsigned long)admission.free_8bit,
+                 (unsigned long)admission.largest_8bit,
+                 (unsigned long)admission.largest_internal);
+        return RuntimeHardeningResult::NotRun;
+    }
+
+    auto run_one = [](const char* name, bool (*test)()) {
+        const lg::RuntimeMemorySnapshot before = lg::capture_runtime_memory();
+        const size_t stack_before =
+            static_cast<size_t>(uxTaskGetStackHighWaterMark(nullptr)) *
+            sizeof(StackType_t);
+        s_current_test_failed = false;
+        s_fixture_bytes_peak.store(
+            s_fixture_bytes_current.load(std::memory_order_relaxed),
+            std::memory_order_relaxed);
+        const bool returned_ok = test();
+        const bool passed = returned_ok && !s_current_test_failed;
+        const size_t fixture_peak = s_fixture_bytes_peak.load(std::memory_order_relaxed);
+        const lg::RuntimeMemorySnapshot after = lg::capture_runtime_memory();
+        const size_t stack_after =
+            static_cast<size_t>(uxTaskGetStackHighWaterMark(nullptr)) *
+            sizeof(StackType_t);
+        ESP_LOGI(TAG,
+                 "TEST_METRICS name=%s free8=%lu->%lu largest8=%lu->%lu "
+                 "internal=%lu->%lu largest_internal=%lu->%lu "
+                 "min_heap=%lu fixture_peak_bytes=%u "
+                 "stack_hwm_bytes=%u->%u result=%s",
+                 name, (unsigned long)before.free_8bit,
+                 (unsigned long)after.free_8bit,
+                 (unsigned long)before.largest_8bit,
+                 (unsigned long)after.largest_8bit,
+                 (unsigned long)before.free_internal,
+                 (unsigned long)after.free_internal,
+                 (unsigned long)before.largest_internal,
+                 (unsigned long)after.largest_internal,
+                 (unsigned long)after.minimum_free_heap,
+                 (unsigned)fixture_peak,
+                 (unsigned)stack_before, (unsigned)stack_after,
+                 passed ? "PASS" : "FAIL");
+        return passed;
+    };
     bool all_ok = true;
-    all_ok &= test_color_pipeline();
-    all_ok &= test_estop_hard_latch();               // Batch 3 Test A
-    all_ok &= test_factory_vs_runtime_arbitration(); // Batch 3 Test B
-    all_ok &= test_fixture_scoped_ownership();       // Batch 3 Test C
-    all_ok &= test_dmx_source_isolation();           // Batch 3 Test D
-    all_ok &= test_dmx_sequence();                   // Batch 3 Test E
-    all_ok &= test_config_migration();               // Batch 3 Test F
+    all_ok &= run_one("test_color_pipeline", test_color_pipeline);
+    all_ok &= run_one("test_estop_hard_latch", test_estop_hard_latch); // Batch 3 A
+    all_ok &= run_one("test_factory_vs_runtime_arbitration", test_factory_vs_runtime_arbitration); // Batch 3 B
+    all_ok &= run_one("test_fixture_scoped_ownership", test_fixture_scoped_ownership); // Batch 3 C
+    all_ok &= run_one("test_dmx_source_isolation", test_dmx_source_isolation); // Batch 3 D
+    all_ok &= run_one("test_dmx_sequence", test_dmx_sequence); // Batch 3 E
+    all_ok &= run_one("test_config_migration", test_config_migration); // Batch 3 F
 
     // Batch 4 Tests
-    all_ok &= test_batch4_physical_safety_race_model();       // Batch 4 Test A
-    all_ok &= test_batch4_explicit_output_fault_recovery();   // Batch 4 Test B
-    all_ok &= test_batch4_dmx_timeout_clearing();             // Batch 4 Test C
-    all_ok &= test_batch4_router_lock_boundary();             // Batch 4 Test D
-    all_ok &= test_batch4_config_validation();                // Batch 4 Test E
-    all_ok &= test_batch4_source_metrics();                   // Batch 4 Test F
-    all_ok &= test_batch4_sequence_protocol_semantics();      // Batch 4 Test G
+    all_ok &= run_one("test_batch4_physical_safety_race_model", test_batch4_physical_safety_race_model);       // Batch 4 Test A
+    all_ok &= run_one("test_batch4_explicit_output_fault_recovery", test_batch4_explicit_output_fault_recovery);   // Batch 4 Test B
+    all_ok &= run_one("test_batch4_dmx_timeout_clearing", test_batch4_dmx_timeout_clearing);             // Batch 4 Test C
+    all_ok &= run_one("test_batch4_router_lock_boundary", test_batch4_router_lock_boundary);             // Batch 4 Test D
+    all_ok &= run_one("test_batch4_config_validation", test_batch4_config_validation);                // Batch 4 Test E
+    all_ok &= run_one("test_batch4_source_metrics", test_batch4_source_metrics);                   // Batch 4 Test F
+    all_ok &= run_one("test_batch4_sequence_protocol_semantics", test_batch4_sequence_protocol_semantics);      // Batch 4 Test G
 
     // Batch 5 Tests
-    all_ok &= test_batch5_output_fault_latch();                 // Batch 5 Test A
-    all_ok &= test_batch5_live_frame_clear();                   // Batch 5 Test B
-    all_ok &= test_batch5_universe_timeout_and_patch_clear();   // Batch 5 Test C
-    all_ok &= test_batch5_patch_update_invalidation();          // Batch 5 Test D
-    all_ok &= test_batch5_dmx_span_validation();                // Batch 5 Test E
-    all_ok &= test_batch5_output_mapping_validation();          // Batch 5 Test F
-    all_ok &= test_batch5_submit_live_frame_return_value();     // Batch 5 Test G
-    all_ok &= test_batch5_config_reload_transactional_safety(); // Batch 5 Test H
+    all_ok &= run_one("test_batch5_output_fault_latch", test_batch5_output_fault_latch);                 // Batch 5 Test A
+    all_ok &= run_one("test_batch5_live_frame_clear", test_batch5_live_frame_clear);                   // Batch 5 Test B
+    all_ok &= run_one("test_batch5_universe_timeout_and_patch_clear", test_batch5_universe_timeout_and_patch_clear);   // Batch 5 Test C
+    all_ok &= run_one("test_batch5_patch_update_invalidation", test_batch5_patch_update_invalidation);          // Batch 5 Test D
+    all_ok &= run_one("test_batch5_dmx_span_validation", test_batch5_dmx_span_validation);                // Batch 5 Test E
+    all_ok &= run_one("test_batch5_output_mapping_validation", test_batch5_output_mapping_validation);          // Batch 5 Test F
+    all_ok &= run_one("test_batch5_submit_live_frame_return_value", test_batch5_submit_live_frame_return_value);     // Batch 5 Test G
+    all_ok &= run_one("test_batch5_config_reload_transactional_safety", test_batch5_config_reload_transactional_safety); // Batch 5 Test H
 
     // Batch 6 Tests
-    all_ok &= test_batch6_unused_output_slots();          // Batch 6 Test A
-    all_ok &= test_batch6_enabled_bad_output();           // Batch 6 Test B
-    all_ok &= test_batch6_unused_fixture();               // Batch 6 Test C
-    all_ok &= test_batch6_configured_fixture();           // Batch 6 Test D
-    all_ok &= test_batch6_output_fault_state_machine();   // Batch 6 Test E
-    all_ok &= test_batch6_live_frame_render_snapshot();   // Batch 6 Test F
-    all_ok &= test_batch6_patch_update_invalidation();    // Batch 6 Test G
-    all_ok &= test_batch6_universe_stats_expiry();        // Batch 6 Test H
-    all_ok &= test_batch6_htp_payload_lengths();          // Batch 6 Test I
-    all_ok &= test_batch6_ltp_newest_expires();           // Batch 6 Test J
-    all_ok &= test_batch6_config_migration();             // Batch 6 Test K
+    all_ok &= run_one("test_batch6_unused_output_slots", test_batch6_unused_output_slots);          // Batch 6 Test A
+    all_ok &= run_one("test_batch6_enabled_bad_output", test_batch6_enabled_bad_output);           // Batch 6 Test B
+    all_ok &= run_one("test_batch6_unused_fixture", test_batch6_unused_fixture);               // Batch 6 Test C
+    all_ok &= run_one("test_batch6_configured_fixture", test_batch6_configured_fixture);           // Batch 6 Test D
+    all_ok &= run_one("test_batch6_output_fault_state_machine", test_batch6_output_fault_state_machine);   // Batch 6 Test E
+    all_ok &= run_one("test_batch6_live_frame_render_snapshot", test_batch6_live_frame_render_snapshot);   // Batch 6 Test F
+    all_ok &= run_one("test_batch6_patch_update_invalidation", test_batch6_patch_update_invalidation);    // Batch 6 Test G
+    all_ok &= run_one("test_batch6_universe_stats_expiry", test_batch6_universe_stats_expiry);        // Batch 6 Test H
+    all_ok &= run_one("test_batch6_htp_payload_lengths", test_batch6_htp_payload_lengths);          // Batch 6 Test I
+    all_ok &= run_one("test_batch6_ltp_newest_expires", test_batch6_ltp_newest_expires);           // Batch 6 Test J
+    all_ok &= run_one("test_batch6_config_migration", test_batch6_config_migration);             // Batch 6 Test K
 
     // Batch 7 Tests
-    all_ok &= test_batch7_topology_validation();          // Batch 7 Test A
-    all_ok &= test_batch7_output_fault_state_machine();   // Batch 7 Test B
-    all_ok &= test_batch7_router_to_runtime_integration();// Batch 7 Test C
-    all_ok &= test_batch7_shutdown_restart();             // Batch 7 Test D
+    all_ok &= run_one("test_batch7_topology_validation", test_batch7_topology_validation);          // Batch 7 Test A
+    all_ok &= run_one("test_batch7_output_fault_state_machine", test_batch7_output_fault_state_machine);   // Batch 7 Test B
+    all_ok &= run_one("test_batch7_router_to_runtime_integration", test_batch7_router_to_runtime_integration);// Batch 7 Test C
+    all_ok &= run_one("test_batch7_shutdown_restart", test_batch7_shutdown_restart);             // Batch 7 Test D
 
     // Batch 8 Tests
-    all_ok &= test_batch8_double_start_and_cooperative_shutdown();         // Batch 8 Test A
-    all_ok &= test_batch8_factory_runner_abort_vs_estop();                 // Batch 8 Test B
-    all_ok &= test_batch8_output_transaction_and_fault_unification();       // Batch 8 Test C
-    all_ok &= test_batch8_dmx_ltp_same_ms_tie_and_expiry();               // Batch 8 Test D
-    all_ok &= test_batch8_dmx_source_capacity_policy();                   // Batch 8 Test E
-    all_ok &= test_batch8_protocol_consistency_and_artnet_serialization(); // Batch 8 Test F
-    all_ok &= test_batch8_observational_health_and_lifecycle_rollback();   // Batch 8 Test G
-    all_ok &= test_batch8_dmx_partial_expiration_both_directions_and_reuse(); // Batch 8 Test H
+    all_ok &= run_one("test_batch8_double_start_and_cooperative_shutdown", test_batch8_double_start_and_cooperative_shutdown);         // Batch 8 Test A
+    all_ok &= run_one("test_batch8_factory_runner_abort_vs_estop", test_batch8_factory_runner_abort_vs_estop);                 // Batch 8 Test B
+    all_ok &= run_one("test_batch8_output_transaction_and_fault_unification", test_batch8_output_transaction_and_fault_unification);       // Batch 8 Test C
+    all_ok &= run_one("test_batch8_dmx_ltp_same_ms_tie_and_expiry", test_batch8_dmx_ltp_same_ms_tie_and_expiry);               // Batch 8 Test D
+    all_ok &= run_one("test_batch8_dmx_source_capacity_policy", test_batch8_dmx_source_capacity_policy);                   // Batch 8 Test E
+    all_ok &= run_one("test_batch8_protocol_consistency_and_artnet_serialization", test_batch8_protocol_consistency_and_artnet_serialization); // Batch 8 Test F
+    all_ok &= run_one("test_batch8_observational_health_and_lifecycle_rollback", test_batch8_observational_health_and_lifecycle_rollback);   // Batch 8 Test G
+    all_ok &= run_one("test_batch8_dmx_partial_expiration_both_directions_and_reuse", test_batch8_dmx_partial_expiration_both_directions_and_reuse); // Batch 8 Test H
 
     // Batch 9 Tests
-    all_ok &= test_batch9_burnin_blockers();
-    all_ok &= test_batch9_checked_scene_activation_lifecycle_guard();
+    all_ok &= run_one("test_batch9_burnin_blockers", test_batch9_burnin_blockers);
+    all_ok &= run_one("test_batch9_checked_scene_activation_lifecycle_guard", test_batch9_checked_scene_activation_lifecycle_guard);
 
     // Batch 11 Phase 0 Tests
-    all_ok &= test_batch11_phase0_truthful_control_contract();
+    all_ok &= run_one("test_batch11_phase0_truthful_control_contract", test_batch11_phase0_truthful_control_contract);
 
     // LG-022 Show Engine Tests
-    all_ok &= test_lg022_show_engine();
+    all_ok &= run_one("test_lg022_show_engine", test_lg022_show_engine);
 
     // LG-024 Live Desk & Manual Override Tests
-    all_ok &= test_lg024_live_desk_and_manual_override();
+    all_ok &= run_one("test_lg024_live_desk_and_manual_override", test_lg024_live_desk_and_manual_override);
 
     // LG-025 Fleet Sync & Show Deployment Tests
-    all_ok &= test_lg025_fleet_sync_and_show_deployment();
+    all_ok &= run_one("test_lg025_fleet_sync_and_show_deployment", test_lg025_fleet_sync_and_show_deployment);
 
     // LG-026 Show Transport v2 & Synchronized Cue Playback Tests
-    all_ok &= test_lg026_show_transport_and_cue_sync();
+    all_ok &= run_one("test_lg026_show_transport_and_cue_sync", test_lg026_show_transport_and_cue_sync);
 
     // LG-027 NetworkSettings & Commissioning Tests
-    all_ok &= test_lg027_network_settings_and_commissioning();
+    all_ok &= run_one("test_lg027_network_settings_and_commissioning", test_lg027_network_settings_and_commissioning);
 
     // LG-028 Network Commissioning & Lifecycle Regressions (A..T)
-    all_ok &= test_lg028_network_commissioning_and_lifecycle();
+    all_ok &= run_one("test_lg028_network_commissioning_and_lifecycle", test_lg028_network_commissioning_and_lifecycle);
 
     // LG-029 Node-Backed Authentication & Sessions Regressions (A..AC)
-    all_ok &= test_lg0387_bootstrap_and_credentials();
-    all_ok &= test_lg029_node_backed_authentication();
+    all_ok &= run_one("test_lg0387_bootstrap_and_credentials", test_lg0387_bootstrap_and_credentials);
+    all_ok &= run_one("test_lg029_node_backed_authentication", test_lg029_node_backed_authentication);
 
     // LG-030 Fleet Discovery, Presence & Immutable Identity
-    all_ok &= test_lg030_fleet_discovery_and_identity();
+    all_ok &= run_one("test_lg030_fleet_discovery_and_identity", test_lg030_fleet_discovery_and_identity);
 
     // LG-031 Canonical Runtime State & API v1 Cutover
-    all_ok &= test_lg031_runtime_snapshot_and_api_cutover();
+    all_ok &= run_one("test_lg031_runtime_snapshot_and_api_cutover", test_lg031_runtime_snapshot_and_api_cutover);
 
     // LG-032 Scene Studio v2 & Safe Persistence
-    all_ok &= test_lg032_scene_studio_and_persistence();
+    all_ok &= run_one("test_lg032_scene_studio_and_persistence", test_lg032_scene_studio_and_persistence);
 
     // LG-033 Timeline Studio v2 & Safe Playback
-    all_ok &= test_lg033_timeline_studio_v2();
+    all_ok &= run_one("test_lg033_timeline_studio_v2", test_lg033_timeline_studio_v2);
 
     // LG-034 Cue Studio v2 & Cue Runtime Hardening
-    all_ok &= test_lg034_cue_studio_and_runtime_hardening();
+    all_ok &= run_one("test_lg034_cue_studio_and_runtime_hardening", test_lg034_cue_studio_and_runtime_hardening);
 
     // LG-035 Diagnostics, Factory Validation & Burn-In Workflow
-    all_ok &= test_lg035_diagnostics_and_factory_validation();
+    all_ok &= run_one("test_lg035_diagnostics_and_factory_validation", test_lg035_diagnostics_and_factory_validation);
 
     // LG-036 Configuration, Recovery, Backup/Restore & OTA Hardening
-    all_ok &= test_lg036_configuration_recovery_and_ota();
+    all_ok &= run_one("test_lg036_configuration_recovery_and_ota", test_lg036_configuration_recovery_and_ota);
 
     // LG-037 Hardware Certification Bench, Evidence & Production Bring-Up
-    all_ok &= test_lg037_hardware_certification();
+    all_ok &= run_one("test_lg037_hardware_certification", test_lg037_hardware_certification);
 
     // LG-038 Physical Output Engine Stabilization & Certification Truth Pass
-    all_ok &= test_lg038_physical_output_engine();
+    all_ok &= run_one("test_lg038_physical_output_engine", test_lg038_physical_output_engine);
 
     // LG-038.3 Runtime Memory Headroom & Lazy Service Lifecycle
-    all_ok &= test_lg0383_fresh_protocol_defaults();
-    all_ok &= test_lg0383_runtime_memory_helpers();
-    all_ok &= test_lg0383_service_plan();
-    all_ok &= test_lg0383_lazy_workers();
+    all_ok &= run_one("test_lg0383_fresh_protocol_defaults", test_lg0383_fresh_protocol_defaults);
+    all_ok &= run_one("test_lg0383_runtime_memory_helpers", test_lg0383_runtime_memory_helpers);
+    all_ok &= run_one("test_lg0383_service_plan", test_lg0383_service_plan);
+    all_ok &= run_one("test_lg0383_lazy_workers", test_lg0383_lazy_workers);
 
     // LG-038.6 Physical Output State Integrity & Power Safety
-    all_ok &= test_lg0386_physical_output_integrity_and_safety();
+    all_ok &= run_one("test_lg0386_physical_output_integrity_and_safety", test_lg0386_physical_output_integrity_and_safety);
 
     // LG-HW-001 Hardware Coexistence Foundation
-    all_ok &= test_lghw001_hardware_coexistence_foundation();
+    all_ok &= run_one("test_lghw001_hardware_coexistence_foundation", test_lghw001_hardware_coexistence_foundation);
 
     // LG-HW-002 Transactional Output + Wi-Fi Fault Containment
-    all_ok &= test_lghw002_transactional_output_and_wifi();
+    all_ok &= run_one("test_lghw002_transactional_output_and_wifi", test_lghw002_transactional_output_and_wifi);
 
     // LG-HW-003 PCA Bus Recovery + RMT Transmission Integrity
-    all_ok &= test_lghw003_pca_recovery_and_rmt_integrity();
+    all_ok &= run_one("test_lghw003_pca_recovery_and_rmt_integrity", test_lghw003_pca_recovery_and_rmt_integrity);
 
     // LG-HW-004 Electrical Boot Safety + Power-Step Control + Reset Forensics
-    all_ok &= test_lghw004_boot_safety_power_and_forensics();
+    all_ok &= run_one("test_lghw004_boot_safety_power_and_forensics", test_lghw004_boot_safety_power_and_forensics);
 
     // LG-HW-005 Production Power Model & Multi-Supply Integrity
-    all_ok &= test_lghw005_power_architecture();
+    all_ok &= run_one("test_lghw005_power_architecture", test_lghw005_power_architecture);
 
     if (all_ok) {
         ESP_LOGI(TAG, "==================================================");
@@ -7659,7 +7953,8 @@ bool run_runtime_hardening_tests() {
     } else {
         ESP_LOGE(TAG, "RUNTIME HARDENING TESTS ENCOUNTERED FAILURES!");
     }
-    return all_ok;
+    return all_ok ? RuntimeHardeningResult::Passed
+                   : RuntimeHardeningResult::Failed;
 }
 
 } // namespace lg

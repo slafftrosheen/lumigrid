@@ -94,7 +94,7 @@ esp_err_t ConfigStore::init() {
         ESP_LOGE(TAG, "ConfigStore: NVS initialization failed (%s); recovery required", esp_err_to_name(err));
         return err;
     }
-    ESP_RETURN_ON_ERROR(nvs_open("lumigrid", NVS_READWRITE, &handle_), TAG, "open");
+    ESP_RETURN_ON_ERROR(nvs_open(storage_namespace_, NVS_READWRITE, &handle_), TAG, "open");
 
     ESP_RETURN_ON_ERROR(ensure_defaults(), TAG, "defaults");
     ESP_LOGI(TAG, "ConfigStore ready (%u scenes)", scene_count());

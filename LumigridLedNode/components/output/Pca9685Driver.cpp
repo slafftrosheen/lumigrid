@@ -37,6 +37,9 @@ constexpr i2c_port_t kI2cPort = I2C_NUM_0;
 constexpr uint32_t kI2cHz = 100000;
 SemaphoreHandle_t s_i2c_mutex = nullptr;
 std::atomic<bool> s_outputs_enabled{false};
+#if defined(CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS) && CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS
+std::atomic<bool> s_test_output_enable_mock{false};
+#endif
 
 void disable_pwm_outputs() {
     // PCA9685 /OE is active-low. HIGH is the hardware fail-safe state.
@@ -45,6 +48,12 @@ void disable_pwm_outputs() {
 }
 
 void enable_pwm_outputs() {
+#if defined(CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS) && CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS
+    if (s_test_output_enable_mock.load(std::memory_order_acquire)) {
+        s_outputs_enabled.store(true, std::memory_order_release);
+        return;
+    }
+#endif
     gpio_set_level(lg::board::kPcaOe, 0);
     s_outputs_enabled.store(true, std::memory_order_release);
 }
@@ -222,6 +231,13 @@ void Pca9685Driver::disable_outputs() {
 bool Pca9685Driver::is_outputs_enabled() {
     return s_outputs_enabled.load(std::memory_order_acquire);
 }
+
+#if defined(CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS) && CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS
+void Pca9685Driver::enable_test_output_mock() {
+    s_test_output_enable_mock.store(true, std::memory_order_release);
+    disable_pwm_outputs();
+}
+#endif
 
 void Pca9685Driver::classify_and_record_failure(esp_err_t err) {
     transaction_failures_++;

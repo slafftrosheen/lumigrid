@@ -5,6 +5,8 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "RuntimeHardeningTests.hpp"
+#include "Pca9685Driver.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -23,6 +25,20 @@ static const char* reset_reason_to_name(esp_reset_reason_t reason) {
     default:                return "UNKNOWN";
   }
 }
+
+#if defined(CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS) && \
+    CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS
+static void runtime_hardening_test_task(void*) {
+  ESP_LOGW("lumigrid", "Dedicated runtime hardening test task started");
+  const lg::RuntimeHardeningResult result = lg::run_runtime_hardening_tests();
+  const char* result_name =
+      result == lg::RuntimeHardeningResult::Passed ? "PASS" :
+      result == lg::RuntimeHardeningResult::NotRun ? "NOT_RUN" : "FAIL";
+  ESP_LOGI("lumigrid", "RUNTIME_HARDENING_RESULT=%s",
+           result_name);
+  vTaskDelete(nullptr);
+}
+#endif
 
 extern "C" void app_main(void) {
   // LG-HW-004 §3/§4: Board-level early electrical output safety bootstrap
@@ -46,6 +62,21 @@ extern "C" void app_main(void) {
            (unsigned long)boot_mem.minimum_free_heap,
            (unsigned long)esp_get_minimum_free_heap_size());
 
+#if defined(CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS) && \
+    CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS
+  // The diagnostic image never initializes the product runtime, opens the
+  // provisioned config/auth namespaces, or initializes output drivers.
+  // RuntimeHardeningTests owns its isolated fixtures and test-only namespaces.
+  lg::Pca9685Driver::enable_test_output_mock();
+  constexpr uint32_t kHardeningTestTaskStackBytes = 16 * 1024;
+  if (xTaskCreate(runtime_hardening_test_task, "runtime_tests",
+                  kHardeningTestTaskStackBytes, nullptr, 1, nullptr) != pdPASS) {
+    ESP_LOGE("lumigrid", "RUNTIME_HARDENING_RESULT=NOT_RUN error=no-memory");
+    return;
+  }
+  ESP_LOGI("lumigrid", "Diagnostic test task started; app_main returns");
+  return;
+#else
   static lg::LumigridRuntime runtime;
 
   esp_err_t boot_err = runtime.init();
@@ -85,4 +116,5 @@ extern "C" void app_main(void) {
            (unsigned long)ready_mem.largest_8bit,
            runtime.startup_state_str());
   ESP_LOGI("lumigrid", "Startup complete: main task exiting (stack reclaimed)");
+#endif
 }

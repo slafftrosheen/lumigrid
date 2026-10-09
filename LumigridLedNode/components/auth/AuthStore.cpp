@@ -9,7 +9,6 @@ namespace lg::auth {
 namespace {
 
 static const char* TAG = "auth_store";
-static const char* kNvsNamespace = "node_auth";
 static const char* kKeyPrimary = "auth_cfg";
 static const char* kKeyBackup = "auth_cfg_b";
 
@@ -45,7 +44,7 @@ esp_err_t AuthStore::init() {
 
 esp_err_t AuthStore::load(AuthConfig& out_cfg) {
     nvs_handle_t handle;
-    esp_err_t err = nvs_open(kNvsNamespace, NVS_READONLY, &handle);
+    esp_err_t err = nvs_open(storage_namespace_, NVS_READONLY, &handle);
     if (err != ESP_OK) {
         return err;
     }
@@ -103,9 +102,9 @@ esp_err_t AuthStore::save(const AuthConfig& cfg) {
     to_save.checksum = calc_auth_config_crc(to_save);
 
     nvs_handle_t handle;
-    esp_err_t err = nvs_open(kNvsNamespace, NVS_READWRITE, &handle);
+    esp_err_t err = nvs_open(storage_namespace_, NVS_READWRITE, &handle);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to open NVS namespace %s: %s", kNvsNamespace, esp_err_to_name(err));
+        ESP_LOGE(TAG, "Failed to open NVS namespace %s: %s", storage_namespace_, esp_err_to_name(err));
         return err;
     }
 
@@ -127,7 +126,7 @@ esp_err_t AuthStore::save(const AuthConfig& cfg) {
 
 esp_err_t AuthStore::erase() {
     nvs_handle_t handle;
-    esp_err_t err = nvs_open(kNvsNamespace, NVS_READWRITE, &handle);
+    esp_err_t err = nvs_open(storage_namespace_, NVS_READWRITE, &handle);
     if (err == ESP_OK) {
         err = nvs_erase_all(handle);
         if (err == ESP_OK) err = nvs_commit(handle);

@@ -95,6 +95,9 @@ inline const char* persistence_state_to_name(ConfigPersistenceState st) {
 /// NVS-backed persistent storage for presets, device config, and schedules.
 class ConfigStore {
 public:
+    explicit ConfigStore(const char* storage_namespace = "lumigrid")
+        : storage_namespace_(storage_namespace) {}
+
     esp_err_t init();
 
     // ── Scenes (Product Grade) ──
@@ -183,6 +186,7 @@ public:
     static uint32_t compute_device_crc(const DeviceConfig& dc);
 
 private:
+    const char* storage_namespace_;
     nvs_handle_t handle_ = 0;
 
     ConfigPersistenceState persistence_state_ = ConfigPersistenceState::RecoveryRequired;

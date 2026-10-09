@@ -1,4 +1,5 @@
 #include "OutputController.hpp"
+#include "ConfigStore.hpp"
 #include "OutputCoreExecutor.hpp"
 #include "RuntimeMemory.hpp"
 #include "PowerConfigLimits.hpp"
@@ -97,10 +98,16 @@ void OutputController::unlock() {
 }
 
 esp_err_t OutputController::init() {
+#if defined(CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS) && CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS
+  if (test_mode_.load(std::memory_order_acquire)) return ESP_OK;
+#endif
   return OutputCoreExecutor::instance().execute_init(this);
 }
 
 esp_err_t OutputController::init_on_output_core() {
+#if defined(CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS) && CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS
+  if (test_mode_.load(std::memory_order_acquire)) return ESP_OK;
+#endif
   const int64_t t_init_start = esp_timer_get_time();
   const int core = xPortGetCoreID();
   ESP_LOGI("output", "Hardware lifecycle executing on core=%d", core);
@@ -155,10 +162,45 @@ esp_err_t OutputController::init_on_output_core() {
 }
 
 esp_err_t OutputController::reconfigure(const DeviceConfig& cfg) {
+#if defined(CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS) && CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS
+  if (test_mode_.load(std::memory_order_acquire)) {
+    topology_reconfigure_attempts_.fetch_add(1, std::memory_order_relaxed);
+    ConfigStore::ConfigValidationResult validation{};
+    const esp_err_t validation_err = ConfigStore::validate_config(cfg, &validation);
+    if (validation_err != ESP_OK) {
+      topology_reconfigure_failures_.fetch_add(1, std::memory_order_relaxed);
+      return validation_err;
+    }
+    for (uint8_t ch = 8; ch < 16; ++ch) {
+      if (cfg.channels[ch].enabled &&
+          !pwm_available_.load(std::memory_order_acquire)) {
+        topology_reconfigure_failures_.fetch_add(1, std::memory_order_relaxed);
+        return ESP_ERR_NOT_FOUND;
+      }
+    }
+    topology_generation_.fetch_add(1, std::memory_order_relaxed);
+    topology_valid_.store(true, std::memory_order_release);
+    last_known_good_snapshot_.valid = true;
+    last_known_good_snapshot_.generation = topology_generation_.load();
+    power_cfg_ = cfg;
+    if (!estop_latched_.load(std::memory_order_acquire)) {
+      output_enabled_.store(true, std::memory_order_release);
+    }
+    return ESP_OK;
+  }
+#endif
   return OutputCoreExecutor::instance().execute_reconfigure(this, cfg);
 }
 
 esp_err_t OutputController::rollback_to_last_good_topology() {
+#if defined(CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS) && CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS
+    if (test_mode_.load(std::memory_order_acquire)) {
+        if (!last_known_good_snapshot_.valid) return ESP_ERR_NOT_FOUND;
+        topology_rollbacks_.fetch_add(1, std::memory_order_relaxed);
+        topology_valid_.store(true, std::memory_order_release);
+        return ESP_OK;
+    }
+#endif
     Pca9685Driver::force_disable_outputs(); // /OE HIGH immediately
 
     if (!last_known_good_snapshot_.valid) {
@@ -229,6 +271,9 @@ esp_err_t OutputController::rollback_to_last_good_topology() {
 }
 
 esp_err_t OutputController::reconfigure_on_output_core(const DeviceConfig& cfg) {
+#if defined(CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS) && CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS
+    if (test_mode_.load(std::memory_order_acquire)) return reconfigure(cfg);
+#endif
     const int64_t t_start = esp_timer_get_time();
     topology_reconfigure_attempts_++;
 
@@ -384,6 +429,17 @@ esp_err_t OutputController::reconfigure_on_output_core(const DeviceConfig& cfg) 
 
 BlackoutResult OutputController::blackout_locked() {
     Pca9685Driver::disable_outputs();
+#if defined(CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS) && CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS
+    if (test_mode_.load(std::memory_order_acquire)) {
+        BlackoutResult res{};
+        res.addressable_result = ESP_OK;
+        res.pwm_result = ESP_OK;
+        res.addressable_confirmed = true;
+        res.pwm_confirmed = true;
+        last_blackout_result_ = res;
+        return res;
+    }
+#endif
     AddressableCommitResult a_res = pixels_.blackout();
     esp_err_t p_err = pwm_available_.load(std::memory_order_acquire) ? pwm_.clear() : ESP_OK;
 
@@ -423,11 +479,24 @@ esp_err_t OutputController::clear_estop() {
     // It must NOT immediately restore previous or stale output.
     lock();
     Pca9685Driver::disable_outputs();
+#if defined(CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS) && CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS
+    const bool mock = test_mode_.load(std::memory_order_acquire);
+    if (!mock) Pca9685Driver::disable_outputs();
+    esp_err_t p_err = mock ? ESP_OK :
+        (pwm_available_.load(std::memory_order_acquire) ? pwm_.clear() : ESP_OK);
+    AddressableCommitResult a_res{};
+    if (mock) a_res.result = ESP_OK;
+    else {
+        pixels_.clear();
+        a_res = pixels_.blackout();
+    }
+#else
 
     esp_err_t p_err = pwm_available_.load(std::memory_order_acquire) ? pwm_.clear() : ESP_OK;
     pixels_.clear();
     AddressableCommitResult a_res = pixels_.blackout();
 
+#endif
     BlackoutResult b_res;
     b_res.addressable_result = a_res.result;
     b_res.pwm_result = p_err;
@@ -452,10 +521,16 @@ esp_err_t OutputController::clear_estop() {
 
 esp_err_t OutputController::recover_pca() {
     return OutputCoreExecutor::instance().execute_pca_recovery(this);
+#if defined(CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS) && CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS
+    if (test_mode_.load(std::memory_order_acquire)) return ESP_OK;
+#endif
 }
 
 esp_err_t OutputController::recover_pca_on_output_core() {
     const int core = xPortGetCoreID();
+#if defined(CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS) && CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS
+    if (test_mode_.load(std::memory_order_acquire)) return ESP_OK;
+#endif
     if (core != 1) {
         ESP_LOGE("output", "PCA recovery called on invalid core=%d (CPU1 required)", core);
         return ESP_ERR_INVALID_STATE;
@@ -544,6 +619,30 @@ esp_err_t OutputController::try_commit_locked() {
     commit_metrics_.attempted++;
 
     if (estop_latched_.load(std::memory_order_acquire) ||
+#if defined(CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS) && CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS
+    if (test_mode_.load(std::memory_order_acquire)) {
+        esp_err_t result = ESP_OK;
+        if (estop_latched_.load(std::memory_order_acquire) ||
+            !output_enabled_.load(std::memory_order_acquire) ||
+            !topology_valid_.load(std::memory_order_acquire)) {
+            result = ESP_ERR_INVALID_STATE;
+        } else if (mock_failure_injections_ > 0) {
+            --mock_failure_injections_;
+            result = ESP_FAIL;
+        } else if (mock_pixel_failure_.load(std::memory_order_relaxed)) {
+            result = ESP_ERR_TIMEOUT;
+        } else if (mock_pwm_failure_.load(std::memory_order_relaxed)) {
+            result = ESP_ERR_INVALID_RESPONSE;
+        }
+        if (result == ESP_OK) commit_metrics_.successful++;
+        else commit_metrics_.failed++;
+        last_commit_error_.store(result, std::memory_order_release);
+        commit_metrics_.last_error = result;
+        if (commit_observer_) commit_observer_(result);
+        return result;
+    }
+#endif
+
         !output_enabled_.load(std::memory_order_acquire) ||
         !topology_valid_.load(std::memory_order_acquire)) {
         Pca9685Driver::disable_outputs();

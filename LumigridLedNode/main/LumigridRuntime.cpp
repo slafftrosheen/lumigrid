@@ -518,13 +518,8 @@ esp_err_t LumigridRuntime::init() {
     ESP_LOGE("lumigrid", "Failed to load device config! Entering SAFE MODE!");
   }
 
-#if defined(CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS) &&                           \
-    CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS
-  ESP_LOGW("lumigrid", "==================================================");
-  ESP_LOGW("lumigrid", "  RUNTIME HARDENING TESTS: ENABLED (TEST BUILD)   ");
-  ESP_LOGW("lumigrid", "==================================================");
-  run_runtime_hardening_tests();
-#else
+#if !defined(CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS) ||                           \
+    !CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS
   ESP_LOGI("lumigrid", "Runtime hardening tests: DISABLED (PRODUCTION IMAGE)");
 #endif
 
