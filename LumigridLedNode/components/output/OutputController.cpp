@@ -288,8 +288,9 @@ esp_err_t OutputController::reconfigure_on_output_core(const DeviceConfig& cfg) 
     lock();
     ESP_LOGI("output", "Reconfiguring OutputController drivers based on DeviceConfig on CPU1...");
 
-    const bool previous_topology_valid = topology_valid_.load(std::memory_order_acquire);
-    const bool previous_output_enabled = output_enabled_.load(std::memory_order_acquire);
+    const bool has_last_good = last_known_good_snapshot_.valid;
+    const bool previous_topology_valid = has_last_good && topology_valid_.load(std::memory_order_acquire);
+    const bool previous_output_enabled = has_last_good ? output_enabled_.load(std::memory_order_acquire) : false;
 
     auto abort_preswap = [&](esp_err_t err, const char* reason) -> esp_err_t {
         pixels_.cancel_candidate();

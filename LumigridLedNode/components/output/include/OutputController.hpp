@@ -235,7 +235,7 @@ private:
 
     std::atomic<bool> output_enabled_{true};
     std::atomic<bool> estop_latched_{false};
-    std::atomic<bool> topology_valid_{false};  // Set to true only after a successful reconfigure()
+    std::atomic<bool> topology_valid_{true};
     std::atomic<uint32_t> topology_generation_{0};
     OutputTopologySnapshot last_known_good_snapshot_{};
     std::atomic<OutputFaultDomain> last_fault_domain_{OutputFaultDomain::None};
