@@ -1,80 +1,59 @@
-
 <script lang="ts">
-	import { base } from '$app/paths';
+  import { base } from '$app/paths';
+  const sections = [
+    { title: 'Set up and operate', pages: [
+      ['GETTING_STARTED', 'Getting started', 'Build, connect and commission your first channel.'],
+      ['LED_NODE', 'Hardware and channels', 'Pin map, output types and physical limits.'],
+      ['ACCESS', 'Access and recovery', 'Admin keys, roles, sessions and recovery.'],
+      ['CONFIGURATION', 'Configuration', 'Topology, network changes and modeled power.'],
+      ['EFFECTS', 'Effects and playback', 'Scenes, automation, timelines and cues.'],
+      ['PROTOCOLS', 'Protocols', 'Art-Net, sACN, sync, discovery and MQTT.'],
+      ['UI', 'Dashboard', 'Device interface, external editors and live state.'],
+      ['FLASH_LAYOUT', 'Firmware updates', 'Partitions, wired migration and OTA verification.']
+    ]},
+    { title: 'Develop and verify', pages: [
+      ['ARCHITECTURE', 'Architecture', 'Service ownership and render flow.'],
+      ['API_REFERENCE', 'HTTP API', 'Registered routes extracted from firmware.'],
+      ['CONTRIBUTING', 'Development', 'Build commands and shared documentation workflow.'],
+      ['HARDWARE_VALIDATION', 'Hardware validation', 'Measurements needed for installation acceptance.'],
+      ['HARDWARE_CERTIFICATION', 'Certification tools', 'Internal test plans and evidence collection.'],
+      ['PCA9685_BRINGUP', 'PCA9685 bring-up', 'Current I²C transport and PWM verification.'],
+      ['RUNTIME_MEMORY_BUDGET', 'Runtime memory', 'Admission, diagnostics and build policy.'],
+      ['SOURCE_OF_TRUTH', 'Source audit', 'Supported claims and known implementation gaps.'],
+      ['ROADMAP', 'Open work', 'Unresolved work and required evidence.']
+    ]}
+  ];
 </script>
 
 <svelte:head>
-	<title>Documentation - LumiGrid</title>
-	<meta name="description" content="Centralized documentation for the LumiGrid project." />
+  <title>LumiGrid documentation</title>
+  <meta name="description" content="Source-backed setup, hardware, API, playback and validation guides for LumiGrid." />
 </svelte:head>
 
-<div class="container section">
-	<h1 class="hero-title">LumiGrid Documentation</h1>
-	<p class="lead">
-		Welcome to the central hub for all LumiGrid documentation. Whether you're a new user, a seasoned
-		developer, or a contributor, you'll find the resources you need here.
-	</p>
-
-	<div class="grid two">
-		<a href="{base}/docs/README" class="card" data-halo="1">
-			<h3>Project Overview</h3>
-			<p>High-level introduction to the LumiGrid project, its goals, and its architecture.</p>
-		</a>
-		<a href="{base}/docs/API_REFERENCE" class="card" data-halo="1">
-			<h3>API Reference</h3>
-			<p>Complete REST, MQTT, and SSE API documentation for LumiGrid nodes.</p>
-		</a>
-		<a href="{base}/docs/NODE_FAMILY" class="card" data-halo="1">
-			<h3>Node Family</h3>
-			<p>Detailed specifications for all LumiGrid hardware node types.</p>
-		</a>
-		<a href="{base}/docs/EMBEDDED_INTEGRATION" class="card" data-halo="1">
-			<h3>Embedded Integration</h3>
-			<p>Guides for integrating LumiGrid into LED Node Board and Raspberry Pi nodes.</p>
-		</a>
-		<a href="{base}/docs/StyleSystem" class="card" data-halo="1">
-			<h3>Style System</h3>
-			<p>Design token reference, component library, and usage examples.</p>
-		</a>
-		<a href="{base}/docs/CONTRIBUTING" class="card" data-halo="1">
-			<h3>Contributing Guide</h3>
-			<p>How to contribute to the SvelteKit development and StyleSystem.</p>
-		</a>
-	</div>
+<div class="container section" lang="en">
+  <a href={`${base}/`}>← LumiGrid</a>
+  <h1>LumiGrid documentation</h1>
+  <p class="lead">The controller and web project share these guides. Current behavior follows the firmware code; hardware acceptance requires evidence from the actual installation. Guides are maintained in English.</p>
+  {#each sections as section}
+    <section>
+      <h2>{section.title}</h2>
+      <div class="docs-grid">
+        {#each section.pages as page}
+          <a class="card" href={`${base}/docs/${page[0]}`}><h3>{page[1]}</h3><p>{page[2]}</p></a>
+        {/each}
+      </div>
+    </section>
+  {/each}
+  <p>Earlier reports remain available through the <a href={`${base}/docs/README`}>full index</a> and their original document URLs. They are labeled as historical and do not certify the current build.</p>
 </div>
 
 <style>
-	.hero-title {
-		font-size: var(--fs-display-lg);
-		margin-bottom: var(--spacing-mobile-md);
-	}
-
-	.lead {
-		font-size: var(--fs-body-lg);
-		color: var(--muted);
-		margin-bottom: var(--spacing-mobile-xl);
-		max-width: 65ch;
-	}
-
-	.card {
-		display: block;
-		text-decoration: none;
-		color: inherit;
-		transition: transform 0.3s var(--ease-default), box-shadow 0.3s var(--ease-default);
-	}
-
-	.card:hover {
-		transform: translateY(-4px);
-		box-shadow: var(--shadow);
-	}
-
-	.card h3 {
-		font-size: var(--fs-title-1);
-		margin-bottom: var(--spacing-mobile-sm);
-		color: var(--ink);
-	}
-
-	.card p {
-		color: var(--muted);
-	}
+  h1 { font-size:clamp(2rem,5vw,3.5rem); margin-block:1.5rem; }
+  h2 { margin:2.5rem 0 1rem; }
+  .lead { max-width:70ch; color:var(--muted); line-height:1.7; }
+  .docs-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,260px),1fr)); gap:1rem; }
+  .card { display:block; padding:1.4rem; color:var(--ink); text-decoration:none; }
+  .card h3 { margin:0 0 .6rem; }
+  .card p { color:var(--muted); line-height:1.6; margin:0; }
+  a:focus-visible { outline:2px solid currentColor; outline-offset:4px; }
 </style>

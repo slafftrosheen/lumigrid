@@ -1,0 +1,26 @@
+{
+  "limits": {
+    "addressable": 8,
+    "pwm": 8,
+    "pixels": 256,
+    "scenes": 32,
+    "zones": 8,
+    "layers": 3,
+    "timelineSteps": 16,
+    "cueLists": 8,
+    "cuesPerList": 16,
+    "effects": 12
+  },
+  "sources": {
+    "addressable": "LumigridLedNode/components/config/include/OutputCapabilities.hpp#kRmtLanes",
+    "pwm": "LumigridLedNode/components/config/include/OutputCapabilities.hpp#kPca9685Channels",
+    "pixels": "LumigridLedNode/components/config/include/SignageTypes.hpp#MAX_FIXTURE_PIXELS",
+    "scenes": "LumigridLedNode/components/config/include/SignageTypes.hpp#kMaxPresets",
+    "zones": "LumigridLedNode/components/config/include/Capabilities.hpp#kZones",
+    "layers": "LumigridLedNode/components/config/include/Capabilities.hpp#kLayersPerZone",
+    "timelineSteps": "LumigridLedNode/components/config/include/Capabilities.hpp#kTimelineSteps",
+    "cueLists": "LumigridLedNode/components/config/include/SignageTypes.hpp#kMaxCueLists",
+    "cuesPerList": "LumigridLedNode/components/config/include/SignageTypes.hpp#kMaxCuesPerList",
+    "effects": "LumigridLedNode/components/config/include/SignageTypes.hpp#kSignageEffectCount"
+  }
+}

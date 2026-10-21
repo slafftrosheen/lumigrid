@@ -1,54 +1,31 @@
-# LumiGrid Architecture
+# Architecture
 
-> **Status:** **IMPLEMENTED** (Unless explicitly marked as PLANNED, PARTIALLY IMPLEMENTED, or CONCEPTUAL)
+`main/main.cpp` enters the application; `main/LumigridRuntime.cpp` coordinates services. `RuntimeServices.hpp` computes the service plan from safe mode, commissioning, network and device configuration. Observed state is reported separately from requested state.
 
-The LumiGrid ecosystem consists of modular nodes designed for robust, real-time lighting control. Currently, the **LED Node** is the canonical implementation and the focus of the system.
+| Component | Ownership |
+| --- | --- |
+| board | Pin map, early inhibit, reset forensics |
+| config / storage | Schemas, validation, migration, NVS |
+| auth / api | Credentials, sessions, authorization, audit |
+| factory | HTTP routes, WS snapshots, memory diagnostics, test runner |
+| signage | Source priority, scenes, effects, composition, color, power |
+| output | Output controller/executor, RMT, PCA9685 |
+| scheduler / show | Clock, schedules, timelines, cues, transport |
+| protocols | Art-Net/sACN reception, DMX routing |
+| network / discovery / sync | Wi-Fi, MQTT, mDNS, fleet presence, peer playback |
+| ota | Storage contract, image preflight, boot verification |
+| control / certification | Commands, jobs, bounded certification evidence |
 
-## High-Level Topology
+Sources enter through manual commands, scene/schedule/cue playback, DMX or factory operations. Priority determines ownership. Rendering/composition produce frames; color processing and modeled power limits precede the output controller. Driver success is distinct from command acceptance.
 
-```mermaid
-graph TD
-    UI[LumiGrid Lander / Operator UI] -->|HTTP / WebSocket| Node[LED Node]
-    Node --> |RMT| LEDs[Addressable LEDs]
-    Node --> |I2C| PWM[PCA9685 PWM Drivers]
-    Node --> |Art-Net / sACN| DMX[DMX Output]
-```
+Memory admission governs scratch/output allocation. Factory and network-apply workers are lazy. First-boot/recovery plans keep access services while disabling lighting/protocol work. Discovery and sync require connected station LAN access.
 
-## Internal Node Architecture
+## Web ownership
 
-```text
-LumiGrid
-│
-┌──────────────┴──────────────┐
-│                             │
-Embedded Node UI        External/Lander UI
-FactoryApi              SvelteKit
-│                             │
-┌─────┴─────────────┐         │
-│                   │         │
-Signage Runtime     Factory Runtime
-Effect Renderer     Factory Effects
-Output Controller   Diagnostics
-│                   │
-┌─────┼─────────────┐         │
-│     │             │         │
-RMT   PWM           DMX       │
-│     │             │         │
-LEDs  PCA9685       Art-Net/sACN
-```
+The SvelteKit project contains public content, docs and the external operator dashboard. `src/lib/api/` owns adapters; `src/lib/state/nodeStore.ts` owns live WS/snapshots; `src/lib/auth/storage.ts` owns browser storage.
 
-## System Budgets & Hardware Constraints
+Storage consolidation is incomplete: `auth/nodeAuth.ts` and `fleet/registry.ts` also access browser storage directly. See the [source audit](SOURCE_OF_TRUTH.md) for this existing boundary-check failure.
 
-To ensure stable operation on embedded hardware, the system enforces the following JSON budgets and physical hardware constraints:
-- Normal API response `< 8 KB`
-- Large diagnostic response `< 16 KB`
-- Backup payload `< 32 KB`
-- WebSocket frame `< 4 KB`
-- JSON request body `< 8 KB`
+`embedded/dashboard.html` is a separate device interface. `scripts/build-embedded.mjs` minifies/compresses it into `LumigridLedNode/generated/dashboard_assets.hpp`.
 
-### Physical Output Engine Contracts (LG-038)
-- **Addressable Outputs**: 8 parallel RMT lanes, canonical maximum **256 pixels per lane** (2,048 pixels total). Submit-all-then-wait parallel transmission.
-- **PWM Auxiliary Outputs**: 8 channels via PCA9685 at standard-mode **100 kHz I2C** clock, ~1017 Hz PWM frequency (prescale 5). Direct GPIO `/OE` line fast cutoff (<1 µs).
-- **Framerate & Timing**: Target 40.0 FPS (25.0 ms frame period). Frame scheduler detects deadline misses and rebases without burst cycles.
-- **Safety Realities**: Software E-Stop and PCA `/OE` cut off immediately; addressable blackout is serial protocol bound (~7.68 ms WS2812 / ~10.24 ms SK6812 for 256 pixels). Sub-5ms addressable physical cutoff requires future hardware load-switch / power-gate.
-
+Root `docs/` is the current documentation source. `scripts/sync_documentation.py` extracts route registrations/limits and bundles guides for the site, avoiding deployment-working-directory file reads.

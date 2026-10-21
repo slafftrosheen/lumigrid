@@ -1,23 +1,31 @@
-# Configuration & Persistence
+# Configuration
 
-> **Status:** **IMPLEMENTED** (Unless explicitly marked as PLANNED, PARTIALLY IMPLEMENTED, or CONCEPTUAL)
+`DeviceConfig` schema **4** is current. `ConfigStore` owns validation, migration and persistence. Network settings use schema **2**; authentication has separate storage from deprecated device credential fields.
 
-LumiGrid employs a robust persistence layer to store the node's settings, scheduling, and effect presets.
+Configure 16 channels and up to eight groups. Addressable channels have type, order and pixel count; all channels have enable, brightness, gamma and DMX patch fields. A name alone does not configure a channel: `channel_is_configured()` checks output-relevant fields.
 
-## Transactional Persistence
+Use GET `/api/v1/config`, POST `/api/v1/config/validate`, then PUT `/api/v1/config`. Inspect validation and command results. Applying may reconfigure outputs/services; acceptance does not prove completion.
 
-All configuration writes follow a strict transactional policy:
-1. Prepare
-2. Validate
-3. Write Backup
-4. Write Primary
-5. Commit
-6. Verify
-7. Update Cached State
-8. Publish State Event
+| Model field | Declared default |
+| --- | --- |
+| Name / timezone | `lumigrid` / `UTC0` |
+| Gamma | `gamma_x10 = 22` (2.2) |
+| Soft start | enabled, 500 ms |
+| Art-Net / sACN / MQTT / sync | disabled |
+| DMX merge / timeout / layer | HTP / 2000 ms / 2 |
+| MQTT port | 1883 |
+| Global power ceiling | 0 (no configured ceiling) |
 
-Failure at any stage returns an error safely, guaranteeing consistency. The configuration layer manages checksums, backup slots, and version migration handling seamlessly.
+Defaults do not replace saved settings. `reset()` clears nested channel/group/supply storage explicitly; read normalized node configuration instead of assuming every C++ initializer survives reset.
 
-## Safe Data Handling
+## Power model
 
-Firmware is heavily validated to ensure memory bounds, preventing string-safety vulnerabilities (e.g. legacy name migrations strictly enforce null-termination bounds) and avoiding excessive heap allocations during serialization.
+Units are milliwatts, millivolts and milliamps. `rated_full_power_mw` describes PWM full-duty load; `channel_limit_mw` is the local ceiling; `max_milliwatts` is a compatibility field. Up to four logical supply domains assign channel masks and derive usable power from voltage, rated current and usable-capacity permille.
+
+`PowerBudget` applies channel/supply/global limits and soft start. Model states are `complete`, `partial`, `unknown`; missing data is not zero consumption. These are estimates, not sensors or electrical/thermal certification.
+
+## Network
+
+Modes: `ap_only`, `sta_only`, `sta_with_ap_fallback`. Apply states: `idle`, `applying`, `waiting_for_network`, `rolling_back`, `failed`. Use `/api/v1/network/config` and `/api/v1/network/status`; preserve recovery access while changing connection details. AP passwords differ from Admin keys.
+
+Sources: `LumigridLedNode/components/config/ConfigStore.cpp`, `ConfigApplyPlan.cpp`, `include/SignageTypes.hpp`, `NetworkSettings.hpp`, `ChannelConfiguration.hpp`, and `components/signage/PowerBudget.cpp`.

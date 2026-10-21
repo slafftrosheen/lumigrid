@@ -1,47 +1,27 @@
+<script>
+  import { base } from '$app/paths';
+</script>
 <svelte:head>
-  <title>Firmware Flasher - LumiGrid</title>
-  <script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
+  <title>Build and install firmware · LumiGrid</title>
+  <meta name="description" content="Build LumiGrid firmware and choose the correct installation or OTA path for your ESP32 node." />
 </svelte:head>
-
-<div class="container section">
-  <div class="flasher-header">
-    <h1>LumiGrid Node Flasher</h1>
-    <p>Connect your LumiGrid Node (LED Node Board) via USB and click below to install or update the firmware directly from your browser.</p>
+<div class="container section" lang="en">
+  <a href={`${base}/`}>← LumiGrid</a>
+  <h1>Build and install firmware</h1>
+  <p>This checkout targets an ESP32 with 8 MB flash. It does not include a verified browser-install release bundle.</p>
+  <div class="card">
+    <h2>Start with a local build</h2>
+    <p>Install the web dependencies, then build the firmware’s <code>factory</code> environment. The build generates the device interface and checks the partition layout.</p>
+    <a href={`${base}/docs/GETTING_STARTED`}>Build and first-time setup →</a>
   </div>
-
-  <div class="flasher-box">
-    <esp-web-install-button manifest="/latest_builds/manifest.json"></esp-web-install-button>
+  <div class="card">
+    <h2>Choose the correct update path</h2>
+    <p>An older partition table requires a wired migration. A node already on the current layout can use the Admin OTA workflow with a compatible application image. Verify the running version and boot status after updating.</p>
+    <a href={`${base}/docs/FLASH_LAYOUT`}>Partition layout, migration and OTA →</a>
   </div>
 </div>
-
 <style>
-  .flasher-header {
-    text-align: center;
-    margin-bottom: var(--spacing-mobile-xl);
-  }
-
-  .flasher-header h1 {
-    font-size: var(--fs-display-lg);
-    margin-bottom: var(--spacing-mobile-md);
-  }
-
-  .flasher-header p {
-    color: var(--muted);
-    max-width: 60ch;
-    margin: 0 auto;
-    font-size: var(--fs-body);
-  }
-
-  .flasher-box {
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    padding: var(--spacing-mobile-xl);
-    background: var(--glass-bg);
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    border-radius: var(--radius-lg);
-    max-width: 600px;
-    margin: 0 auto;
-    min-height: 200px;
-  }
+  h1 { font-size:clamp(2rem,4vw,3rem); margin-block:1.5rem; }
+  p { max-width:70ch; line-height:1.7; color:var(--muted); }
+  .card { padding:1.5rem; margin-top:1.5rem; max-width:80ch; }
 </style>

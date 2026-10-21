@@ -1,6 +1,6 @@
 # Component Design Guidelines
 
-> **Status:** **IMPLEMENTED** (Unless explicitly marked as PLANNED, PARTIALLY IMPLEMENTED, or CONCEPTUAL)
+> Design guidance, not an implementation or hardware acceptance report. Check the active Svelte components and [current firmware documentation](../docs/README.md) for implemented behavior.
 
 ## The LumiGrid Aesthetic
 

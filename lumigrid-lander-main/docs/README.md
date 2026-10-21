@@ -1,5 +1,3 @@
-# Documentation Moved
+# Web documentation
 
-All LumiGrid documentation is now centrally located in the repository root `docs/` directory to ensure consistency across the LED node, lander, and future ecosystem components.
-
-Please refer to `../../docs/ARCHITECTURE.md` to begin.
+The maintained guides are in the [repository index](../../docs/README.md). The public reader bundles those exact guides; do not create a second firmware guide set here. See [UI](../../docs/UI.md) and [development](../../docs/CONTRIBUTING.md).

@@ -1,40 +1,34 @@
-# Effects & Scene Engine
+# Effects and playback
 
-> **Status:** **IMPLEMENTED** (Unless explicitly marked as PLANNED, PARTIALLY IMPLEMENTED, or CONCEPTUAL)
+Read `/api/v1/effects` and `/api/v1/palettes` for the current metadata. Twelve effect IDs are implemented:
 
-The LumiGrid effect system is a full scene-driven lighting engine capable of multi-layered blending and timeline sequences.
+| ID | Label |
+| --- | --- |
+| solid | Steady color |
+| breathe | Smooth pulse |
+| chase | Moving comet |
+| sweep | Color sweep |
+| reveal | Soft reveal |
+| sparkle | Random twinkle |
+| gradient | Flowing glow |
+| strobe | Beat strobe |
+| fire | Living flame |
+| aurora | Aurora glow |
+| colorwave | Color wave |
+| staticpulse | Static pulse |
 
-## Scene Model
+Metadata defines speed, secondary-color/palette support, spatial behavior, PWM suitability and parameter bounds. Spatial effects cannot create spatial detail on one PWM dimmer.
 
-The runtime supports a rich scene model containing:
-- 32 discrete presets (scenes)
-- 8 output zones
-- 3 programmable layers per zone
-- 4 distinct blend modes
-- Global scene properties (brightness, transition times)
-- Overlay/finishing effects (e.g. Strobe) applied on top of the base scene.
+## Storage and playback
 
-## Available Dynamic Effects
+There are 32 preset slots, eight zones and three layers per zone. Blend modes: normal, add, multiply, screen. Scene motion supports four tracks of six points. Timelines expose 16 steps; cue storage supports eight lists of 16 cues. These are model capacities, not throughput benchmarks.
 
-The node includes a library of dynamic effects, not just static animations. Effects are retrieved dynamically from the API (`GET /api/v1/effects`), allowing UIs to construct controls without hardcoded assumptions.
+Scenes, Timeline and Cues dashboard pages author these documents. APIs separate storage, activation, motion, sequence and transport control. See [API reference](API_REFERENCE.md).
 
-Implemented effects include:
-- Solid
-- Breathe
-- Chase
-- Sweep
-- Reveal
-- Sparkle
-- Gradient
-- Strobe
-- Fire
-- Aurora
-- ColorWave
-- StaticPulse
+Priority, highest first: EStop, Factory, LiveDmx, ManualOverride, Scheduler, ScenePlayback, Fallback, Idle. Live input can override a saved scene; releasing manual control is different from saving a preset.
 
-Effect parameters include `label`, `description`, `parameter label`, `unit`, `min`, `max`, and `default` to drive dynamic UI rendering.
+`SceneManager::init()` loads the saved active scene, tries slot zero if unavailable, then defaults to blackout if neither loads. It does not promise exact cue/timeline-position restoration after power loss. Setup, safe mode, configuration failures and output faults can prevent playback.
 
-## Timelines & Scheduling
+Calendar operation uses the configured timezone and clock service. Validate clock readiness and schedules on the installation.
 
-The system includes a 16-step sequencer (timeline) across the 16 physical channels (A1–A8 addressable, P1–P8 PWM).
-Calendar-based scheduling allows automated preset and sequence activation based on days-of-week and minute-of-day.
+Sources: `LumigridLedNode/components/config/include/SignageTypes.hpp`, `signage/EffectRenderer.cpp`, `SceneManager.cpp`, `AutomationEngine.cpp`, `include/ControlSource.hpp`, `scheduler/`, and `show/`.

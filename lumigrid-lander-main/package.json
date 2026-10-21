@@ -15,7 +15,12 @@
     "test:ui": "playwright test --ui",
     "test:unit": "vitest run --passWithNoTests",
     "sync:tokens": "node scripts/sync-tokens.mjs",
-    "build:embedded": "node scripts/build-embedded.mjs"
+    "build:embedded": "node scripts/build-embedded.mjs",
+    "docs:sync": "python ../scripts/sync_documentation.py",
+    "docs:check": "python ../scripts/sync_documentation.py --check",
+    "predev": "npm run docs:sync",
+    "prebuild": "npm run docs:sync",
+    "precheck": "npm run docs:check"
   },
   "engines": {
     "node": ">=20.0.0"

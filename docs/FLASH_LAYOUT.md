@@ -1,114 +1,39 @@
-# LumiGrid production flash layout
+# Flash layout and updates
 
-LumiGrid production hardware uses 8 MB flash.
-
-Partition Layout v2 requires one wired migration from Layout v1.
-It cannot be installed safely using normal OTA.
-
-## Layout v2
+Layout v2 targets 8 MB flash. `partitions.factory.csv` defines:
 
 | Partition | Offset | Size |
 | --- | --- | --- |
-| NVS | `0x9000` | `0x4000` |
-| OTA selection metadata | `0xd000` | `0x2000` |
-| PHY | `0xf000` | `0x1000` |
-| factory | `0x10000` | `0x250000` |
-| ota_0 | `0x260000` | `0x250000` |
-| ota_1 | `0x4b0000` | `0x250000` |
-| littlefs reserve | `0x700000` | `0x100000` |
+| nvs | 0x9000 | 0x4000 |
+| otadata | 0xd000 | 0x2000 |
+| phy_init | 0xf000 | 0x1000 |
+| factory | 0x10000 | 0x250000 |
+| ota_0 | 0x260000 | 0x250000 |
+| ota_1 | 0x4b0000 | 0x250000 |
+| littlefs | 0x700000 | 0x100000 |
 
-The final address is exactly `0x800000`. Each app slot holds 2,424,832 bytes.
-The LittleFS-named partition retains the requested `spiffs` subtype; IDF can print
-a naming warning. It is reserved, not mounted or used for production data. The
-dashboard remains embedded and Scenes/configuration remain in NVS. No filesystem
-content migration is needed.
+The `littlefs` label has the CSV `spiffs` subtype; the name alone does not establish a mounted LittleFS content store. ConfigStore/NVS owns configuration persistence.
 
-## Build and wired migration on this workstation
+## Build and wired migration
 
-Export `.lgbak` and record node ID/version before migrating a provisioned unit.
-The current controller was never provisioned; its raw NVS was backed up privately
-under `.pio/lg0384-private` instead. A raw NVS backup can contain credentials and
-must never be committed. A normal `.lgbak` intentionally excludes authentication
-and network secrets.
+Build `factory`. Pre/post-build hooks generate embedded assets and check invariants, partition layout, ELF stack and image budget. `verify_partition_layout.py` checks layout/storage capacity.
+
+An older partition layout requires wired migration. `scripts/migrate_flash_v2.py` verifies artifact headers/table/physical flash, backs up NVS privately, writes bootloader/table/OTA initializer/application, then verifies NVS preservation. Its default build directory is historical; pass the actual fresh build and port from `LumigridLedNode/`:
 
 ```powershell
-Set-Location C:\Users\slavd\lumigrid\LumigridLedNode
-$env:PLATFORMIO_BUILD_DIR = "$PWD\.pio\build-lg0384"
-& C:\Users\slavd\AppData\Local\Programs\Python\Python312\Scripts\pio.exe run -e factory
-& C:\Users\slavd\AppData\Local\Programs\Python\Python312\python.exe scripts\migrate_flash_v2.py --port COM3
+python scripts/migrate_flash_v2.py --port COM_PORT --build-dir .pio/build/factory
 ```
 
-The migration script validates the freshly built image headers and partition
-binary, detects actual physical flash, saves NVS, writes the four artifacts,
-then compares NVS byte-for-byte **before the first application boot**. It refuses
-to overwrite an earlier migration backup. Archive those files privately before
-an intentional repeat migration. It does not issue a full-chip erase.
+Review the script and retain a backup first. Whole-chip erase is not a preservation migration.
 
-The underlying write command is:
+## OTA
 
-```powershell
-& C:\Users\slavd\AppData\Local\Programs\Python\Python312\python.exe `
-  C:\Users\slavd\.platformio\packages\tool-esptoolpy\esptool.py `
-  --chip esp32 --port COM3 --baud 115200 --after no_reset write_flash `
-  --flash_mode dio --flash_freq 40m --flash_size 8MB `
-  0x1000 .pio\build-lg0384\factory\bootloader.bin `
-  0x8000 .pio\build-lg0384\factory\partitions.bin `
-  0xd000 .pio\build-lg0384\factory\ota_data_initial.bin `
-  0x10000 .pio\build-lg0384\factory\firmware.bin
-```
+Admin-only POST `/api/v1/ota` accepts a raw application image. It checks maintenance conflicts, memory, image size, storage health, chip/image descriptor and project identity `lumigrid_led_node`, writes the next slot and persists a verification journal before reboot.
 
-Do not preserve v1 OTA selection metadata: both OTA application addresses move.
-Writing the fresh 8,192-byte initializer at `0xd000` resets selection; NVS at
-`0x9000` is not erased. Full factory reset is a separate acceptance test, after
-backup and migration-preservation checks.
+Boot policy requires 10 seconds of healthy dwell inside a 60-second window. Fatal startup, critical memory or timeout can request rollback. Inspect `/api/v1/ota/status`, recovery status and health after reconnecting. Upload completion is not boot acceptance.
 
-## Build and runtime contracts
+The manifest advertises `signedOta=true`, but the reviewed upload handler and checked-in defaults do not establish enforced signature verification. Do not advertise signed-image enforcement until that gap is resolved. ESP image validation and rollback are separate properties.
 
-Factory and test targets explicitly declare 8 MB flash and use the production v2
-table. The build validator enforces exact offsets/sizes, alignment, non-overlap,
-NVS preservation, factory plus exactly two OTA slots, and the 8 MB end address.
-After every image build, the storage report measures actual `firmware.bin` bytes:
-below 75% is healthy, 75–85% warns, above 85% fails the build.
+The web flasher provides build guidance: no verified `latest_builds/manifest.json` release bundle is supplied by this checkout.
 
-`/api/v1/info`, `/api/v1/health`, backup source metadata, OTA status and
-Installer-level `/api/v1/diagnostics/storage` expose the layout/capacity. Physical
-flash is read with pinned IDF's `esp_flash_get_physical_size`; configured flash
-uses `esp_flash_get_size`. Runtime checks exact partition addresses and sizes.
-Capacity/layout mismatch forces safe mode and outputs off, where startup can
-reach recovery. A physically undersized module can fail in the bootloader before
-application recovery is possible; it is not supported production hardware.
-
-OTA rejects declared bodies above the next slot capacity with HTTP 413 before
-`esp_ota_begin`. It reads and validates the image header, chip revision, 8 MB
-header, project and version descriptor before starting an OTA write. Final IDF
-image validation still applies; a valid descriptor alone does not authenticate
-an unsigned image. Progress is based on declared image length.
-
-Candidates require a continuous ten-second healthy local runtime interval.
-The existing recovery worker polls the gate; no new permanent task is created.
-API alone cannot confirm. Required planned services, valid configuration, Ready
-state and non-critical memory must hold. Internet, STA, DNS and SNTP are not
-requirements. Health loss restarts the dwell; fatal/critical conditions roll back,
-and sixty seconds without successful verification times out. State schema 2
-persists candidate boot/reset reason, dwell start/deadline and failure reason;
-schema 1 identity/reason data migrates. Boot-relative timestamps restart on a
-candidate boot, and a pending candidate reset is governed by IDF rollback.
-Unattributed safe-mode recovery is conservatively not confirmed; firmware does
-not invent evidence that it predates the candidate.
-
-## Serial-only bench access
-
-The PC stays on its current Wi-Fi. COM3 at 115200 baud provides bounded read-only
-`diagnostics`, `memory`, and `storage` commands, plus a settled snapshot ten
-seconds after startup. These use the existing recovery worker and UART FIFO;
-no additional task or UART receive allocation is introduced. They expose no
-credentials and cannot provision, reset, modify configuration or authorize OTA.
-
-```powershell
-& C:\Users\slavd\AppData\Local\Programs\Python\Python312\python.exe `
-  scripts\capture_serial.py --port COM3 --seconds 60 --command diagnostics
-```
-
-The capture reconnects after USB interruption and flushes each chunk to the
-acceptance log. Serial does not replace the authenticated HTTP OTA workflow or
-the phone/browser setup acceptance. Use a separate device for AP access.
+Sources: `LumigridLedNode/platformio.ini`, `partitions.factory.csv`, `scripts/pre_build.py`, `scripts/migrate_flash_v2.py`, `components/ota/`, `components/factory/FactoryApi.cpp`.

@@ -1,58 +1,29 @@
-# LED Node Hardware & Capabilities
+# LED node hardware contract
 
-> **Status:** **IMPLEMENTED** (Unless explicitly marked as PLANNED, PARTIALLY IMPLEMENTED, or CONCEPTUAL)
+The firmware targets ESP32 `esp32dev` with 8 MB flash. Its canonical topology is 16 channels: A1–A8 addressable and P1–P8 independent PWM dimmers. The PCA9685 has more chip outputs than the eight exposed by LumiGrid.
 
-The LumiGrid LED Node is the core hardware controller in the ecosystem.
+| Output | GPIO / interface |
+| --- | --- |
+| A1 | GPIO16 |
+| A2 | GPIO4 |
+| A3 | GPIO17 |
+| A4 | GPIO18 |
+| A5 | GPIO19 |
+| A6 | GPIO23 |
+| A7 | GPIO26 |
+| A8 | GPIO27 |
+| PCA9685 SDA / SCL | GPIO21 / GPIO22 |
+| PCA9685 address | `0x55` (A0, A2, A4 high) |
+| Active-low /OE | GPIO25 |
 
-## Hardware Output Contracts
+WS2812 accepts RGB/GRB; SK6812 accepts RGBW/GRBW. `MAX_FIXTURE_PIXELS` is 256. Topology admission also checks memory: a schema maximum does not promise every combination or fixed frame rate. Addressable output uses RMT; legacy SPI enum entries are not a supported new hardware family.
 
-The actual hardware/software contract for the LED Node is explicitly defined as **8 addressable LED lanes + 8 PWM channels**.
+PWM outputs are independent dimmers. Compound RGB/RGBW fixture values remain for migration, not new configurations. Indices 0–7 mean A1–A8; 8–15 mean P1–P8. Group masks use those positions.
 
-- **Addressable LED Lanes:** 8 lanes (numbered 0-7) driven by a custom parallel RMT driver:
-  - Canonical maximum: **256 pixels per lane** (2,048 pixels total per node).
-  - Supported protocols: WS2812B (RGB, 30 µs/pixel wire time) and SK6812 (RGBW, 40 µs/pixel wire time).
-  - Parallel submission invariant: all active lanes are submitted to RMT hardware before any lane is waited on.
-  - Zero heap allocation per frame.
-- **PWM Channels:** 8 channels (numbered 0-7) using PCA9685 via standard-mode **100 kHz I2C**:
-  - Operating frequency: ~1017 Hz (prescale 5).
-  - Fast fail-safe: `/OE` line is asserted HIGH directly via GPIO (<1 µs) without I2C transaction on emergency stop.
+## Electrical boundaries
 
-> [!WARNING]
-> Historical documentation previously described a 16-channel generalized PWM driver and 300 pixels per port. The node firmly asserts 8 lanes (max 256 px) + 8 PWM channels (100 kHz I2C) in its factory validation constraints.
+Early board safety holds /OE high and addressable data low. PWM enable depends on initialization and safe output state. Board flags report **no physical E-stop input** and **no addressable power gate**. Software blackout does not disconnect strip power.
 
-## Safety & Emergency Stop Contracts
+Supply ratings, voltage, wiring, fusing, level conversion and environmental suitability must be established for the actual assembly. Power telemetry is modeled; see [configuration](CONFIGURATION.md).
 
-- **Software E-Stop:** Latched atomically; immediately disables output commits and sets PCA `/OE HIGH`.
-- **PWM Cutoff:** Immediate (<1 µs via physical `/OE` assertion).
-- **Addressable Blackout:** Protocol-bound to serial frame wire transmission (~7.68 ms for 256 pixels of WS2812 / ~10.24 ms for SK6812 RGBW). Sub-5ms addressable physical cutoff requires future hardware load-switch / power-gate.
-
-## System Health & Output Engine Telemetry
-
-The node tracks system health and physical timing comprehensively:
-- Free heap & minimum free heap
-- Wi-Fi RSSI & network routes
-- NVS state & configuration validity
-- Startup diagnostics (startup stage, failing stage)
-- Output state (Healthy, Faulted, Armed, E-Stop) & commit failures
-- **Output Engine Timing (`/api/v1/diagnostics/output`)**:
-  - Target framerate (40.0 FPS / 25.0 ms period)
-  - Committed framerate
-  - Frame commit duration, RMT wire duration, PWM duration
-  - Frame headroom (ms)
-  - Frame deadline misses (rebased without catch-up burst cycles)
-- DMX statistics (drops, unpatched)
-- Watchdog fallback & sync packet loss
-
-## Power Limiting & Electrical Safety
-
-The node incorporates an in-place software power estimator and limiter (`PowerBudget`):
-- Models quiescent idle power (5 mW/pixel) and full active power (295 mW/pixel for WS2812 RGB, 380 mW/pixel for SK6812 RGBW).
-- Supports auxiliary PWM power modeling via per-channel `max_milliwatts` load configuration.
-- Enforces local channel constraints and the global device power supply budget (`max_power_mw`) via proportional scaling and soft-start ramp.
-- Telemetry exposes requested vs limited estimated power and complete model status (`estimateComplete`).
-
-> [!CAUTION]
-> **Power Estimation Disclaimer:**
-> Power limiting is an estimated software brightness limiter (WLED-style empirical modeling). It does **NOT** replace a correctly sized power supply unit (PSU), adequate wiring gauges, fuses, MOSFET thermal ratings, or physical branch circuit protection. Hardware installations must always be electrically safe regardless of software state.
-
-
+Sources: `LumigridLedNode/components/board/include/lg_board_pins.hpp`, `board/BoardOutputSafety.cpp`, `config/include/OutputCapabilities.hpp`, `config/include/SignageTypes.hpp`, and `output/`.

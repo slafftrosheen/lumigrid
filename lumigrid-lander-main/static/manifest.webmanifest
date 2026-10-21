@@ -1,7 +1,7 @@
 {
   "name": "LumiGrid Operator",
   "short_name": "LumiGrid",
-  "description": "LumiGrid LED Node operator dashboard — fleet management, thermal monitoring, schedule builder, and OTA firmware updates.",
+  "description": "Local LumiGrid node control, scenes, timelines, cues, diagnostics and firmware updates.",
   "start_url": "/dashboard",
   "scope": "/",
   "display": "standalone",
@@ -12,7 +12,7 @@
   "lang": "en",
   "icons": [
     {
-      "src": "/lumigrid-lander/icons/icon.svg",
+      "src": "/icons/icon.svg",
       "sizes": "any",
       "type": "image/svg+xml",
       "purpose": "any maskable"
@@ -38,10 +38,10 @@
       "description": "Edit animation schedule"
     },
     {
-      "name": "Thermal Monitor",
-      "short_name": "Thermal",
-      "url": "/dashboard/thermal",
-      "description": "Monitor temperatures"
+      "name": "Diagnostics",
+      "short_name": "Diagnostics",
+      "url": "/dashboard/diagnostics",
+      "description": "Inspect node diagnostics"
     }
   ]
 }

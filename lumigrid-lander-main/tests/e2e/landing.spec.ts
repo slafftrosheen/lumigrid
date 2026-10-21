@@ -1,31 +1,38 @@
 import { test, expect } from '@playwright/test';
 
-test('hero renders and CTAs are visible', async ({ page }) => {
+test('public capabilities link to working source guides', async ({ page }, testInfo) => {
   await page.goto('/');
   await expect(page.getByTestId('hero-title')).toBeVisible();
-  await expect(page.getByRole('link', { name: /see examples/i })).toBeVisible();
-  await expect(page.getByRole('link', { name: /talk to us/i })).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath('landing-desktop.png') });
+  await page.getByRole('link', { name: 'Set up your node', exact: true }).first().click();
+  await expect(page.getByRole('heading', { name: 'Getting started', exact: true })).toBeVisible();
+  await page.getByRole('link', { name: 'flash layout', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Flash layout and updates', exact: true })).toBeVisible();
 });
 
-test('process steps are numbered and visible', async ({ page }) => {
-  await page.goto('/');
-  // Process section is #process, not how-it-works (which is stories)
-  const processSection = page.locator('#process');
-  await expect(processSection).toBeVisible();
-
-  // Use regex to be flexible about case, but 'Brief', 'Plan', etc are in the process section
-  // We use .first() because the description might also contain the word
-  await expect(processSection.getByText(/brief/i).first()).toBeVisible();
-  await expect(processSection.getByText(/plan/i).first()).toBeVisible();
-  await expect(processSection.getByText(/install/i).first()).toBeVisible();
-  await expect(processSection.getByText(/support/i).first()).toBeVisible();
+test('documentation renders on direct load and unknown guides return 404', async ({ page }) => {
+  await page.goto('/docs/API_REFERENCE');
+  await expect(page.getByRole('heading', { name: 'HTTP API reference' })).toBeVisible();
+  await expect(page.getByRole('cell', { name: '/api/v1/ota', exact: true })).toBeVisible();
+  const response = await page.goto('/docs/not-a-real-guide');
+  expect(response?.status()).toBe(404);
 });
 
-test('feature grid shows all sections', async ({ page }) => {
+test('language selection changes public content and mobile layout fits', async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 390, height: 844 });
   await page.goto('/');
-  await expect(page.getByTestId('feature-grid-title')).toBeVisible();
-  await expect(page.getByTestId('feature-title-1')).toBeVisible();
-  await expect(page.getByTestId('feature-title-2')).toBeVisible();
-  await expect(page.getByTestId('feature-title-3')).toBeVisible();
-  await expect(page.getByTestId('feature-title-4')).toBeVisible();
+  await page.getByRole('combobox').selectOption('lv');
+  await expect(page.getByTestId('hero-title')).toHaveText('Katrai gaismai sava loma.');
+  await page.getByRole('combobox').selectOption('ru');
+  await expect(page.getByTestId('hero-title')).toHaveText('У каждого света своя роль.');
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath('landing-mobile.png'), fullPage: true });
+});
+
+test('history is labeled and flasher does not offer a nonexistent release', async ({ page }) => {
+  await page.goto('/docs/history/2026-10-21/LG-P0-BOOT-001_REPORT');
+  await expect(page.getByText('Historical record.', { exact: false }).first()).toBeVisible();
+  await page.goto('/flasher');
+  await expect(page.getByRole('heading', { name: 'Build and install firmware' })).toBeVisible();
+  await expect(page.locator('esp-web-install-button')).toHaveCount(0);
 });

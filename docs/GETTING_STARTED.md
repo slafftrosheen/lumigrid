@@ -1,65 +1,45 @@
-FIRST POWER-ON
+# Getting started
 
-1. Connect to Wi-Fi:
-   LumiGrid-Setup
+The target is `esp32dev` with **8 MB flash**. Verify the actual board and wiring against [LED node](LED_NODE.md). Begin commissioning with outputs disabled and a small known load.
 
-2. Password:
-   See serial console on first boot (random per-device WPA2 key)
+## Build
 
-3. Open:
-   http://192.168.4.1
+Install web dependencies first: firmware builds use the embedded asset generator.
 
-4. Create your Admin Access Key.
+```powershell
+cd lumigrid-lander-main
+npm ci
+npm run build:embedded
+cd ../LumigridLedNode
+pio run -e factory
+```
 
-5. Continue through the setup wizard.
+`platformio.ini` pins `espressif32@6.7.0`, with ESP-IDF supplied by that platform. Serial defaults are COM3 and 115200 baud; select the actual port. Read [flash layout](FLASH_LAYOUT.md) before updating an existing device: application-only OTA cannot migrate a partition table.
 
-## Secure your controller
+For a board already on the current layout:
 
-The dashboard detects a new controller and opens First Setup. Choose a new
-Admin Access Key of 16–64 characters and confirm it. You can also select
-**Generate Secure Key** and save the generated key before continuing.
-Setup saves the key and signs you in as Administrator in one action.
+```powershell
+pio run -e factory -t upload --upload-port COM_PORT
+pio device monitor --port COM_PORT --baud 115200
+```
 
-Wi-Fi password and Node Access Key are separate credentials in distinct security domains.
-The setup AP password is a random per-device WPA2 secret printed on the serial console.
-It is never derived from MAC or chip ID. The setup AP password does not grant Admin access.
+Replace `COM_PORT`. These commands write hardware; they are instructions, not evidence of a completed flash.
 
-## Normal login and accounts
+## First access
 
-Open the controller's address and enter your permanent Node Access Key.
-The browser uses a temporary session; it does not save the permanent key.
-Administrator can create/change Installer and Operator keys in **Access**
-from the dashboard's system navigation. Keys must be 16–64 characters.
-Saved secrets are never displayed. Keep your Admin key somewhere safe.
+1. Read the serial setup banner: `LumiGrid-Setup`, its generated Wi-Fi key and `http://192.168.4.1`.
+2. Join that AP with the displayed key. There is no universal production Wi-Fi password or Admin key.
+3. Open the device page and create a permanent Admin Access Key of 16–64 characters. Store it privately.
+4. Configure channels, pixel counts/order, load ratings and supply assignments. Inspect validation results.
+5. Test one channel at low brightness, then save a scene. Enable only needed protocols.
+6. If joining a LAN, choose station/fallback mode, follow apply status and reconnect at the reported address.
 
-Installer accounts support installation/configuration within their permitted
-role. Operator accounts support normal lighting operation. Administrator owns
-networking, credentials and maintenance. See [ACCESS.md](ACCESS.md).
+Factory-first-boot planning enables API/mDNS while lighting, scheduler and protocols remain off. Provisioning and configured operation are distinct states.
 
-## Network commissioning
+## Daily access
 
-After creating the Admin key, continue through identity, network, outputs,
-safety, hardware validation and backup. In the embedded dashboard, the setup
-guide provides Wi-Fi setup and links to output configuration, diagnostics and
-backup. Apply your Wi-Fi name and password only after securing the controller.
-Network changes may disconnect the browser. Connect your computer to the selected
-network, find the controller's new address through your router, and sign in
-with your permanent key. Review reported network status; a queued change is not
-proof that the controller joined Wi-Fi successfully.
+Use the controller's device-hosted page on its network. The external web dashboard is at `/dashboard`. An HTTPS-hosted dashboard may be blocked from contacting the node's HTTP/WS endpoints; open the node page directly when blocked.
 
-## Physical recovery
+If access fails, check power, serial diagnostics, active Wi-Fi and `/api/v1/auth/status`. A provisioned node requires its configured key. Read [Access](ACCESS.md) before using physical recovery.
 
-Recovery is distinct from first setup. A provisioned controller keeps its
-permanent keys during reboot, Wi-Fi loss, configuration errors and OTA rollback.
-The existing recovery AP policy and recovery safeguards still apply; recovery
-never grants the universal temporary setup key on a deployed controller.
-Use your existing Admin key for maintenance. Recovery access does not clear
-ownership. If the Admin key is lost, a physical full factory reset is required.
-
-## Physical full factory reset
-
-With power on, hold the controller's BOOT button (GPIO 0) for at least five
-seconds, then release it so the controller can reboot. This erases credentials,
-controller configuration and network settings. Back up configuration first
-when possible. Only this deliberate physical reset restores the first-power-on
-setup credentials above. An ordinary reboot does not reset access.
+Sources: `LumigridLedNode/platformio.ini`, `main/LumigridRuntime.cpp`, `components/auth/AuthManager.cpp`, `components/factory/include/RuntimeServices.hpp`; web `src/lib/api/transport.ts`.
