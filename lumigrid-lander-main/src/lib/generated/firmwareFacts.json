@@ -9,7 +9,7 @@
     "timelineSteps": 16,
     "cueLists": 8,
     "cuesPerList": 16,
-    "effects": 12
+    "effects": 24
   },
   "sources": {
     "addressable": "LumigridLedNode/components/config/include/OutputCapabilities.hpp#kRmtLanes",

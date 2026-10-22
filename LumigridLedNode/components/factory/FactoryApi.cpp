@@ -60,6 +60,9 @@ namespace lg {
 namespace {
 
 constexpr size_t kMaxBodyBytes = 8192;
+// A current scene contains 16 channels x 3 layers, plus bounded motion tracks.
+// Keep other API bodies capped at 8 KiB; JSON heap admission still applies.
+constexpr size_t kMaxPresetBodyBytes = 16384;
 
 
 esp_err_t send_json(httpd_req_t* request,
@@ -183,9 +186,9 @@ static cJSON* parse_admitted_json(const char* body, size_t length) {
     return cJSON_ParseWithLength(body, length);
 }
 
-esp_err_t read_json(httpd_req_t* request, cJSON** out) {
+esp_err_t read_json(httpd_req_t* request, cJSON** out, size_t max_body_bytes = kMaxBodyBytes) {
     if (request->content_len <= 0 ||
-        request->content_len > kMaxBodyBytes) {
+        request->content_len > max_body_bytes) {
         return ESP_ERR_INVALID_SIZE;
     }
 
@@ -2426,7 +2429,8 @@ static bool parse_and_validate_layer_obj(const cJSON* l_item, LayerConfig& layer
             }
             layer.effect = static_cast<uint8_t>(eff);
         } else if (cJSON_IsNumber(effect_j)) {
-            if (effect_j->valueint < 0 || effect_j->valueint >= static_cast<int>(kSignageEffectCount)) {
+            if (effect_j->valuedouble != effect_j->valueint ||
+                effect_j->valueint < 0 || effect_j->valueint >= static_cast<int>(kSignageEffectCount)) {
                 err_code = "invalid_layer_effect";
                 return false;
             }
@@ -2510,7 +2514,8 @@ static bool parse_and_validate_layer_obj(const cJSON* l_item, LayerConfig& layer
 
     const cJSON* pal = cJSON_GetObjectItemCaseSensitive(l_item, "paletteId");
     if (pal) {
-        if (!cJSON_IsNumber(pal) || pal->valuedouble < 0 || pal->valuedouble > 5) {
+        if (!cJSON_IsNumber(pal) || pal->valuedouble != pal->valueint ||
+            pal->valueint < 0 || pal->valueint >= static_cast<int>(kSignagePaletteCount)) {
             err_code = "invalid_layer_palette";
             return false;
         }
@@ -2710,7 +2715,10 @@ esp_err_t put_preset(httpd_req_t* request) {
     if (!api_ptr->config()) return send_error(request, "503 Service Unavailable", "config_not_ready");
 
     cJSON* root = nullptr;
-    if (read_json(request, &root) != ESP_OK) {
+    if (request->content_len > kMaxPresetBodyBytes) {
+        return send_error(request, "413 Payload Too Large", "scene_payload_too_large");
+    }
+    if (read_json(request, &root, kMaxPresetBodyBytes) != ESP_OK) {
         return send_error(request, "400 Bad Request", "invalid_json");
     }
 
@@ -5884,50 +5892,89 @@ esp_err_t delete_manual(httpd_req_t* request) {
 esp_err_t get_effects(httpd_req_t* request) {
     if (!api::authorize(request, api::ApiRole::Operator)) return ESP_OK;
 
-    cJSON* arr = cJSON_CreateArray();
+    // Encode one entry at a time. Growing the catalogue must not grow the peak
+    // JSON heap alongside Wi-Fi, RMT and scene playback buffers.
+    char json[640];
     for (size_t i = 0; i < kSignageEffectCount; ++i) {
         const EffectMetadata& meta = signage_effect_metadata(static_cast<SignageEffect>(i));
         cJSON* item = cJSON_CreateObject();
-        cJSON_AddStringToObject(item, "id", meta.id);
-        cJSON_AddStringToObject(item, "label", meta.label);
-        cJSON_AddStringToObject(item, "description", meta.description);
-        cJSON_AddBoolToObject(item, "supportsSpeed", meta.supports_speed);
-        cJSON_AddBoolToObject(item, "supportsSecondaryColor", meta.supports_secondary_color);
-        cJSON_AddBoolToObject(item, "supportsPalette", meta.supports_palette);
-        cJSON_AddBoolToObject(item, "spatial", meta.spatial);
-        cJSON_AddBoolToObject(item, "pwmRecommended", meta.pwm_recommended);
-        cJSON_AddBoolToObject(item, "hasParameter", meta.has_parameter);
+        bool valid = item &&
+            cJSON_AddStringToObject(item, "id", meta.id) &&
+            cJSON_AddStringToObject(item, "label", meta.label) &&
+            cJSON_AddStringToObject(item, "description", meta.description) &&
+            cJSON_AddBoolToObject(item, "supportsSpeed", meta.supports_speed) &&
+            cJSON_AddBoolToObject(item, "supportsSecondaryColor", meta.supports_secondary_color) &&
+            cJSON_AddBoolToObject(item, "supportsPalette", meta.supports_palette) &&
+            cJSON_AddBoolToObject(item, "spatial", meta.spatial) &&
+            cJSON_AddBoolToObject(item, "pwmRecommended", meta.pwm_recommended) &&
+            cJSON_AddBoolToObject(item, "hasParameter", meta.has_parameter);
         if (meta.has_parameter) {
-            cJSON_AddStringToObject(item, "parameterLabel", meta.parameter_label);
-            cJSON_AddStringToObject(item, "parameterUnit", meta.parameter_unit);
-            cJSON_AddNumberToObject(item, "parameterMin", meta.parameter_min);
-            cJSON_AddNumberToObject(item, "parameterMax", meta.parameter_max);
-            cJSON_AddNumberToObject(item, "parameterDefault", meta.parameter_default);
+            valid = valid &&
+                cJSON_AddStringToObject(item, "parameterLabel", meta.parameter_label) &&
+                cJSON_AddStringToObject(item, "parameterUnit", meta.parameter_unit) &&
+                cJSON_AddNumberToObject(item, "parameterMin", meta.parameter_min) &&
+                cJSON_AddNumberToObject(item, "parameterMax", meta.parameter_max) &&
+                cJSON_AddNumberToObject(item, "parameterDefault", meta.parameter_default);
         }
-        cJSON_AddItemToArray(arr, item);
+        valid = valid && cJSON_PrintPreallocated(item, json, sizeof(json), false);
+        cJSON_Delete(item);
+        if (!valid) {
+            note_api_allocation_failure();
+            // Once a chunk is sent, fail the connection instead of completing a
+            // truncated catalogue or appending a second JSON response.
+            return i == 0 ? send_error(request, "500 Internal Server Error", "out_of_memory")
+                          : ESP_ERR_NO_MEM;
+        }
+        if (i == 0) {
+            httpd_resp_set_status(request, "200 OK");
+            httpd_resp_set_type(request, "application/json");
+            httpd_resp_set_hdr(request, "Cache-Control", "no-store");
+            httpd_resp_set_hdr(request, "Access-Control-Allow-Origin", "*");
+            httpd_resp_set_hdr(request, "Access-Control-Allow-Headers", "Authorization, Content-Type, X-API-Key");
+            httpd_resp_set_hdr(request, "Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+        }
+        esp_err_t result = httpd_resp_send_chunk(request, i == 0 ? "[" : ",", 1);
+        if (result != ESP_OK) return result;
+        result = httpd_resp_send_chunk(request, json, strlen(json));
+        if (result != ESP_OK) return result;
     }
-    char* json = cJSON_PrintUnformatted(arr);
-    cJSON_Delete(arr);
-    if (!json) return send_error(request, "500 Internal Server Error", "out_of_memory");
-    esp_err_t res = send_json(request, json);
-    cJSON_free(json);
-    return res;
+    const esp_err_t result = httpd_resp_send_chunk(request, "]", 1);
+    return result == ESP_OK ? httpd_resp_send_chunk(request, nullptr, 0) : result;
 }
 
 esp_err_t get_palettes(httpd_req_t* request) {
     if (!api::authorize(request, api::ApiRole::Operator)) return ESP_OK;
 
-    static const char kPalettesJson[] =
-        "["
-        "{\"id\":0,\"label\":\"Custom\",\"usesSceneColors\":true},"
-        "{\"id\":1,\"label\":\"Rainbow\"},"
-        "{\"id\":2,\"label\":\"Ocean\"},"
-        "{\"id\":3,\"label\":\"Lava\"},"
-        "{\"id\":4,\"label\":\"Forest\"},"
-        "{\"id\":5,\"label\":\"Sunset\"}"
-        "]";
-
-    return send_json(request, kPalettesJson);
+    char json[128];
+    for (size_t i = 0; i < kSignagePaletteCount; ++i) {
+        const auto& meta = signage_palette_metadata(static_cast<uint8_t>(i));
+        cJSON* item = cJSON_CreateObject();
+        bool valid = item &&
+            cJSON_AddNumberToObject(item, "id", meta.id) &&
+            cJSON_AddStringToObject(item, "label", meta.name);
+        if (i == 0) valid = valid && cJSON_AddBoolToObject(item, "usesSceneColors", true);
+        valid = valid && cJSON_PrintPreallocated(item, json, sizeof(json), false);
+        cJSON_Delete(item);
+        if (!valid) {
+            note_api_allocation_failure();
+            return i == 0 ? send_error(request, "500 Internal Server Error", "out_of_memory")
+                          : ESP_ERR_NO_MEM;
+        }
+        if (i == 0) {
+            httpd_resp_set_status(request, "200 OK");
+            httpd_resp_set_type(request, "application/json");
+            httpd_resp_set_hdr(request, "Cache-Control", "no-store");
+            httpd_resp_set_hdr(request, "Access-Control-Allow-Origin", "*");
+            httpd_resp_set_hdr(request, "Access-Control-Allow-Headers", "Authorization, Content-Type, X-API-Key");
+            httpd_resp_set_hdr(request, "Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+        }
+        esp_err_t result = httpd_resp_send_chunk(request, i == 0 ? "[" : ",", 1);
+        if (result != ESP_OK) return result;
+        result = httpd_resp_send_chunk(request, json, strlen(json));
+        if (result != ESP_OK) return result;
+    }
+    const esp_err_t result = httpd_resp_send_chunk(request, "]", 1);
+    return result == ESP_OK ? httpd_resp_send_chunk(request, nullptr, 0) : result;
 }
 
 esp_err_t get_calendar_schedule(httpd_req_t* request) {

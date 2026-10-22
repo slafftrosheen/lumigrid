@@ -439,10 +439,23 @@ enum class SignageEffect : uint8_t {
     Fire     = 8,
     Aurora   = 9,
     ColorWave = 10,
-    StaticPulse = 11
+    StaticPulse = 11,
+    // Append only: these numeric values are persisted in saved scenes.
+    Rainbow = 12,
+    ColorFade = 13,
+    Scanner = 14,
+    Theater = 15,
+    Twinkle = 16,
+    Candle = 17,
+    Heartbeat = 18,
+    Ripple = 19,
+    Dissolve = 20,
+    Plasma = 21,
+    Lightning = 22,
+    Confetti = 23
 };
 
-constexpr size_t kSignageEffectCount = 12;
+constexpr size_t kSignageEffectCount = 24;
 
 struct EffectMetadata {
     const char* id;
@@ -469,18 +482,32 @@ struct EffectMetadata {
 inline const EffectMetadata& signage_effect_metadata(SignageEffect effect) {
     static constexpr EffectMetadata kMetadata[] = {
         {"solid",      "Steady color",  "A constant, even wash of color.",                             false, false, false, false, true,  "",              "",         0,   0,   0, false},
-        {"breathe",    "Smooth pulse",  "Gently fades between a soft glow and full brightness.",        true,  false, false, false, true,  "Minimum glow",  "%",        1, 100,   4, true},
+        {"breathe",    "Smooth pulse",  "Gently fades between a soft glow and full brightness.",        true,  true,  true,  false, true,  "Minimum glow",  "%",        1, 100,   4, true},
         {"chase",      "Moving comet",  "A bright comet travels along the strip.",                      true,  true,  true,  true,  false, "Tail length",   "pixels",   1,   8,   3, true},
-        {"sweep",      "Color sweep",   "Builds color across the strip from end to end.",               true,  true,  true,  true,  false, "",              "",         0,   0,   0, false},
-        {"reveal",     "Soft reveal",   "Fades the lane in for a polished sign-on.",                    true,  false, false, true,  true,  "Fade length",   "%",       10,  90,  25, true},
-        {"sparkle",    "Random twinkle","Adds crisp white twinkles over the base color.",               true,  true,  false, true,  false, "Twinkles",      "per lane", 1,  12,   2, true},
+        {"sweep",      "Color sweep",   "Builds the primary color across the strip from end to end.",   true,  false, false, true,  false, "",              "",         0,   0,   0, false},
+        {"reveal",     "Soft reveal",   "Fades the whole lane in for a polished sign-on.",              true,  false, false, false, true,  "Fade length",   "%",       10,  90,  25, true},
+        {"sparkle",    "Random twinkle","Adds crisp white twinkles over the base color every 50 ms.",   false, false, false, true,  false, "Twinkles",      "per lane", 1,  12,   2, true},
         {"gradient",   "Flowing glow",  "Moves a soft wave of light along the strip.",                  true,  true,  true,  true,  false, "Wave contrast", "%",        0, 100, 100, true},
         {"strobe",     "Beat strobe",   "Flashes the lane with an adjustable on-time.",                 true,  false, false, false, true,  "Flash time",    "%",        5,  95,  50, true},
         {"fire",       "Living flame",  "Creates a flickering flame texture from the selected color.",  true,  true,  true,  true,  false, "Flame height",  "%",       20, 100,  70, true},
-        {"aurora",     "Aurora glow",   "Gentle shifting colors across the strip.",                     true,  true,  true,  true,  false, "Hue shift",     "deg",      1, 255, 120, true},
+        {"aurora",     "Aurora glow",   "Gently modulates the primary color across the whole lane.",    true,  false, false, false, true,  "Color depth",   "/255",     1, 255, 120, true},
         {"colorwave",  "Color wave",    "Smooth sine wave color interpolation.",                        true,  true,  true,  true,  false, "Wave length",   "px",       10, 255,  50, true},
         {"staticpulse","Static pulse",  "Slow dimmer pulse for main/ambiance lights.",                 true,  false, false, false, true,  "Min dim",       "%",        0, 100,  20, true},
+        {"rainbow",    "Rainbow flow",  "Moves a continuous full spectrum along the strip.",           true,  false, false, true,  false, "Spectrum repeats", "",       1,   8,   1, true},
+        {"colorfade",  "Color fade",    "Blends the whole lane through colors, pausing at each end.",   true,  true,  true,  false, false, "Endpoint hold", "%",        0,  40,  10, true},
+        {"scanner",    "Soft scanner",  "A soft spotlight travels to the end of the strip and back.",  true,  true,  true,  true,  false, "Spot width",    "pixels",   1,  64,   6, true},
+        {"theater",    "Marquee chase", "Spaced lights move smoothly along the strip.",                true,  true,  true,  true,  false, "Spacing",       "pixels",   2,  32,   6, true},
+        {"twinkle",    "Soft twinkle",  "Independent colored stars gently appear and fade over black.",true,  true,  true,  true,  false, "Density",       "%",        1, 100,  25, true},
+        {"candle",     "Candlelight",   "An even wash flickers gently with an irregular dimmer rhythm.",true, false, false, false, true,  "Flicker depth", "%",        0, 100,  35, true},
+        {"heartbeat",  "Heartbeat",    "Two soft pulses followed by a quiet rest.",                   true,  false, false, false, true,  "Minimum glow",  "%",        0,  80,   4, true},
+        {"ripple",     "Center ripple", "Soft rings expand from the center and fade away.",            true,  true,  true,  true,  false, "Ring width",    "pixels",   1,  64,   8, true},
+        {"dissolve",   "Dissolve",      "Pixels blend between colors in a repeatable shuffled order.",  true,  true,  true,  true,  false, "Edge softness", "%",        1, 100,  15, true},
+        {"plasma",     "Plasma flow",   "Overlapping waves form a moving, colorful light texture.",    true,  true,  true,  true,  false, "Scale",         "waves",    1,   8,   3, true},
+        {"lightning",  "Lightning",     "A burst of flashes with varied strength, followed by a dark pause.",true,false,false,false,true,"Flashes",      "per burst",1,   5,   3, true},
+        {"confetti",   "Confetti",      "Scattered colored sparks appear and leave fading glows.",      true,  true,  true,  true,  false, "Density",       "%",        1, 100,  15, true},
     };
+    static_assert(sizeof(kMetadata) / sizeof(kMetadata[0]) == kSignageEffectCount,
+                  "Every persisted effect ID needs catalogue metadata");
 
     const uint8_t index = static_cast<uint8_t>(effect);
     return index < sizeof(kMetadata) / sizeof(kMetadata[0])
@@ -494,19 +521,46 @@ inline const char* signage_effect_name(SignageEffect e) {
 
 inline bool parse_signage_effect(const char* name, SignageEffect& out) {
     if (!name) return false;
-    if (strcmp(name, "solid")    == 0) { out = SignageEffect::Solid;    return true; }
-    if (strcmp(name, "breathe")  == 0) { out = SignageEffect::Breathe;  return true; }
-    if (strcmp(name, "chase")    == 0) { out = SignageEffect::Chase;    return true; }
-    if (strcmp(name, "sweep")    == 0) { out = SignageEffect::Sweep;    return true; }
-    if (strcmp(name, "reveal")   == 0) { out = SignageEffect::Reveal;   return true; }
-    if (strcmp(name, "sparkle")  == 0) { out = SignageEffect::Sparkle;  return true; }
-    if (strcmp(name, "gradient") == 0) { out = SignageEffect::Gradient; return true; }
-    if (strcmp(name, "strobe")   == 0) { out = SignageEffect::Strobe;   return true; }
-    if (strcmp(name, "fire")     == 0) { out = SignageEffect::Fire;     return true; }
-    if (strcmp(name, "aurora")   == 0) { out = SignageEffect::Aurora;   return true; }
-    if (strcmp(name, "colorwave")== 0) { out = SignageEffect::ColorWave;return true; }
-    if (strcmp(name, "staticpulse")== 0) { out = SignageEffect::StaticPulse; return true; }
+    for (size_t i = 0; i < kSignageEffectCount; ++i) {
+        const auto effect = static_cast<SignageEffect>(i);
+        if (strcmp(name, signage_effect_metadata(effect).id) == 0) {
+            out = effect;
+            return true;
+        }
+    }
     return false;
+}
+
+// Palette IDs are persisted too. The original six retain their rendering math;
+// additional palettes interpolate these four stops without frame allocations.
+constexpr size_t kSignagePaletteCount = 14;
+
+struct PaletteMetadata {
+    uint8_t id;
+    const char* name;
+    BrandColor colors[4];
+};
+
+inline const PaletteMetadata& signage_palette_metadata(uint8_t id) {
+    static constexpr PaletteMetadata kPalettes[] = {
+        {0, "Custom",   {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}}},
+        {1, "Rainbow",  {{0, 255, 0}, {255, 0, 0}, {0, 0, 255}, {0, 255, 0}}},
+        {2, "Ocean",    {{0, 100, 155}, {0, 151, 188}, {0, 203, 221}, {0, 255, 255}}},
+        {3, "Lava",     {{127, 0, 0}, {212, 85, 0}, {255, 169, 42}, {255, 254, 127}}},
+        {4, "Forest",   {{0, 128, 0}, {42, 170, 21}, {85, 213, 42}, {127, 255, 63}}},
+        {5, "Sunset",   {{255, 0, 0}, {255, 170, 85}, {213, 255, 170}, {128, 255, 255}}},
+        {6, "Amber",    {{36, 8, 0}, {156, 48, 2}, {255, 146, 18}, {255, 228, 154}}},
+        {7, "Ice",      {{2, 12, 64}, {0, 100, 186}, {70, 214, 255}, {226, 250, 255}}},
+        {8, "Neon",     {{0, 238, 255}, {178, 0, 255}, {255, 0, 108}, {160, 255, 0}}},
+        {9, "Lavender", {{30, 6, 70}, {100, 50, 164}, {194, 130, 230}, {255, 216, 240}}},
+        {10, "Candy",   {{156, 0, 30}, {255, 44, 94}, {255, 156, 188}, {255, 240, 228}}},
+        {11, "Festive", {{160, 0, 16}, {255, 154, 20}, {6, 142, 36}, {255, 236, 190}}},
+        {12, "Ember",   {{8, 0, 0}, {116, 4, 0}, {244, 54, 0}, {255, 202, 72}}},
+        {13, "Twilight",{{8, 4, 42}, {56, 20, 108}, {174, 44, 132}, {255, 142, 100}}},
+    };
+    static_assert(sizeof(kPalettes) / sizeof(kPalettes[0]) == kSignagePaletteCount,
+                  "Every persisted palette ID needs catalogue metadata");
+    return id < kSignagePaletteCount ? kPalettes[id] : kPalettes[0];
 }
 
 enum class SignageModifier : uint8_t {

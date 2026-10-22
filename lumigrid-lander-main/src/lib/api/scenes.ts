@@ -1,4 +1,5 @@
-import { apiJson } from './transport';
+import { apiJson, ApiError } from './transport';
+import { normalizeEffectCatalog, normalizePaletteCatalog } from './effectCatalog';
 import type { SceneMotionConfig, AutomationTrackConfig } from './sceneMotion';
 
 export const MAX_SCENE_NAME_BYTES = 23;
@@ -47,6 +48,16 @@ export interface SceneLayer {
   enabled: boolean;
 }
 
+// The renderer's PWM envelope is scaled by layer opacity, independently of RGB.
+export function getPwmIntensity(layer: SceneLayer): number {
+  return layer.opacity;
+}
+
+export function setPwmIntensity(layer: SceneLayer, value: number): void {
+  if (!Number.isFinite(value)) return;
+  layer.opacity = Math.max(0, Math.min(255, Math.round(value)));
+}
+
 export interface SceneZone {
   layers: [SceneLayer, SceneLayer, SceneLayer];
 }
@@ -86,6 +97,31 @@ export interface PaletteMeta {
   usesSceneColors?: boolean;
 }
 
+export interface SceneCatalog {
+  effects: readonly Pick<EffectMeta, 'id'>[];
+  palettes: readonly Pick<PaletteMeta, 'id'>[];
+}
+
+export function validateSceneCatalog(
+  scene: ScenePreset, catalog: SceneCatalog,
+): { valid: true } | { valid: false; error: string } {
+  const effects = new Set(catalog.effects.map(e => e.id));
+  const palettes = new Set(catalog.palettes.map(p => p.id));
+  const channels = scene.channels ?? scene.zones;
+  for (let c = 0; c < channels.length; c++) {
+    for (let l = 0; l < channels[c].layers.length; l++) {
+      const layer = channels[c].layers[l];
+      if (!effects.has(layer.effect)) {
+        return { valid: false, error: `Channel ${c + 1}, layer ${l + 1}: effect "${layer.effect}" is not available on this node` };
+      }
+      if (!palettes.has(layer.paletteId)) {
+        return { valid: false, error: `Channel ${c + 1}, layer ${l + 1}: palette ${layer.paletteId} is not available on this node` };
+      }
+    }
+  }
+  return { valid: true };
+}
+
 export interface SceneReferences {
   sceneIndex: number;
   active: boolean;
@@ -110,39 +146,47 @@ export function getPreset(ip: string, index: number): Promise<ScenePreset> {
   return apiJson<ScenePreset>(ip, `/api/v1/presets?index=${encodeURIComponent(index)}`);
 }
 
-export function getPalettes(ip: string): Promise<PaletteMeta[]> {
-  return apiJson<PaletteMeta[]>(ip, '/api/v1/palettes');
+export async function getPalettes(ip: string): Promise<PaletteMeta[]> {
+  return normalizePaletteCatalog(await apiJson<unknown>(ip, '/api/v1/palettes'));
 }
 
 export function getSceneReferences(ip: string, index: number): Promise<SceneReferences> {
   return apiJson<SceneReferences>(ip, `/api/v1/presets/references?index=${encodeURIComponent(index)}`);
 }
 
-export function getEffects(ip: string): Promise<EffectMeta[]> {
-  return apiJson<EffectMeta[]>(ip, '/api/v1/effects');
+export async function getEffects(ip: string): Promise<EffectMeta[]> {
+  return normalizeEffectCatalog(await apiJson<unknown>(ip, '/api/v1/effects'));
 }
 
 const effectsCache = new Map<string, EffectMeta[]>();
 const palettesCache = new Map<string, PaletteMeta[]>();
 
-export async function getEffectsCached(ip: string, cacheKey?: string): Promise<EffectMeta[]> {
-  if (cacheKey && effectsCache.has(cacheKey)) {
-    return effectsCache.get(cacheKey)!;
+export async function getEffectsCached(ip: string, cacheKey?: string, refresh = false): Promise<EffectMeta[]> {
+  const key = cacheKey ? `${ip}:${cacheKey}` : undefined;
+  if (key && !refresh && effectsCache.has(key)) {
+    return effectsCache.get(key)!;
   }
-  const data = await getEffects(ip);
-  if (cacheKey) {
-    effectsCache.set(cacheKey, data);
+  const data = await getEffects(ip).catch((error: unknown) => {
+    if (error instanceof ApiError && (error.status === 404 || error.status === 501)) return normalizeEffectCatalog(null);
+    throw error;
+  });
+  if (key) {
+    effectsCache.set(key, data);
   }
   return data;
 }
 
-export async function getPalettesCached(ip: string, cacheKey?: string): Promise<PaletteMeta[]> {
-  if (cacheKey && palettesCache.has(cacheKey)) {
-    return palettesCache.get(cacheKey)!;
+export async function getPalettesCached(ip: string, cacheKey?: string, refresh = false): Promise<PaletteMeta[]> {
+  const key = cacheKey ? `${ip}:${cacheKey}` : undefined;
+  if (key && !refresh && palettesCache.has(key)) {
+    return palettesCache.get(key)!;
   }
-  const data = await getPalettes(ip);
-  if (cacheKey) {
-    palettesCache.set(cacheKey, data);
+  const data = await getPalettes(ip).catch((error: unknown) => {
+    if (error instanceof ApiError && (error.status === 404 || error.status === 501)) return normalizePaletteCatalog(null);
+    throw error;
+  });
+  if (key) {
+    palettesCache.set(key, data);
   }
   return data;
 }
@@ -161,11 +205,15 @@ export function savePreset(
 export async function saveSceneDocument(
   ip: string,
   doc: SceneDocument,
-  options?: { expectedSceneChecksum?: number; expectedMotionChecksum?: number }
+  options?: { expectedSceneChecksum?: number; expectedMotionChecksum?: number; catalog?: SceneCatalog }
 ): Promise<{ saved: true; checksum?: number; motionChecksum?: number }> {
   const normScene = normalizeScene(doc.scene, doc.scene.index);
-  const channelsPayload = normScene.channels.map((ch) =>
-    ch.layers.map((l) => ({
+  if (options?.catalog) {
+    const validation = validateSceneCatalog(normScene, options.catalog);
+    if (validation.valid === false) throw new Error(validation.error);
+  }
+  const channelsPayload = normScene.channels!.map((ch) => ({
+    layers: ch.layers.map((l) => ({
       effect: l.effect,
       blendMode: l.blendMode,
       primaryColor: l.primaryColor,
@@ -175,8 +223,8 @@ export async function saveSceneDocument(
       paletteId: l.paletteId,
       opacity: l.opacity,
       enabled: l.enabled,
-    }))
-  );
+    })),
+  }));
 
   const payload: Record<string, unknown> = {
     index: normScene.index,
@@ -358,7 +406,7 @@ export function normalizeScene(preset: Partial<ScenePreset> | null, defaultIndex
   const rawChannels = preset?.channels || [];
   const zones: SceneZone[] = [];
   for (let z = 0; z < ZONE_COUNT; z++) {
-    zones.push(normalizeZone(rawZones[z] || rawChannels[z]));
+    zones.push(normalizeZone(rawChannels[z] || rawZones[z]));
   }
 
   const channels: SceneChannel[] = [];
@@ -454,7 +502,8 @@ export function exportSceneDocument(doc: SceneDocument): string {
 }
 
 export function validateImportedSceneDocument(
-  rawInput: unknown
+  rawInput: unknown,
+  catalog?: SceneCatalog,
 ): { valid: true; document: SceneDocument } | { valid: false; error: string } {
   let data: any = rawInput;
   if (typeof rawInput === 'string') {
@@ -523,6 +572,10 @@ export function validateImportedSceneDocument(
   }
 
   const normalizedScene = normalizeScene(s);
+  if (catalog) {
+    const validation = validateSceneCatalog(normalizedScene, catalog);
+    if (validation.valid === false) return validation;
+  }
   const normalizedMotion: SceneMotionConfig = {
     schema_version: 1,
     index: normalizedScene.index,

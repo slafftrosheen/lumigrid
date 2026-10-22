@@ -150,7 +150,21 @@ describe('canonical dashboard API contracts (/api/v1/*)', () => {
     vi.mocked(fetch).mockResolvedValue(new Response(JSON.stringify(mockEffects), { status: 200 }));
 
     const res = await getEffects('192.168.1.50');
-    expect(res).toEqual(mockEffects);
+    // The node owns the available IDs and explicit metadata; missing fields
+    // receive local defaults without advertising effects it did not report.
+    expect(res).toEqual([{
+      ...mockEffects[0],
+      supportsSpeed: true,
+      supportsSecondaryColor: false,
+      supportsPalette: false,
+      spatial: true,
+      pwmRecommended: false,
+      parameterLabel: 'Spectrum repeats',
+      parameterUnit: '',
+      parameterMin: 1,
+      parameterMax: 8,
+      parameterDefault: 1,
+    }]);
   });
 
   it('gets and saves timeline sequence via /api/v1/sequence', async () => {

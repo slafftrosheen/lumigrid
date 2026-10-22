@@ -21,6 +21,8 @@
     exportSceneDocument,
     validateImportedSceneDocument,
     computeZonePreviewColor,
+    getPwmIntensity,
+    setPwmIntensity,
     rgbToHex,
     hexToRgb,
     isValidSceneName,
@@ -145,8 +147,9 @@
 
       const [p, e, pals, chList] = await Promise.all([
         getPresets(targetIp),
-        getEffectsCached(targetIp, cacheKey),
-        getPalettesCached(targetIp, cacheKey),
+        // Refresh on entry so an upgraded or downgraded node owns its catalogue.
+        getEffectsCached(targetIp, cacheKey, true),
+        getPalettesCached(targetIp, cacheKey, true),
         getChannels(targetIp).catch(() => [] as HardwareChannel[]),
       ]);
 
@@ -258,6 +261,7 @@
       const res = await saveSceneDocument(nodeIp, workingDocument, {
         expectedSceneChecksum: persistedDocument?.sceneChecksum,
         expectedMotionChecksum: persistedDocument?.motionChecksum,
+        catalog: { effects, palettes },
       });
 
       // Update persisted state with server checksums
@@ -496,7 +500,7 @@
     const file = input.files[0];
     try {
       const text = await file.text();
-      const valRes = validateImportedSceneDocument(text);
+      const valRes = validateImportedSceneDocument(text, { effects, palettes });
       if (valRes.valid === false) {
         error = `Cannot import scene: ${valRes.error}`;
         return;
@@ -665,22 +669,10 @@
 
   // ── Effect Change Normalization ───────────────────────────────────────────────
   function handleEffectChange(layer: SceneLayer, newEffectId: string) {
-    layer.effect = newEffectId;
     const meta = effects.find(e => e.id === newEffectId);
-    if (meta && meta.hasParameter) {
-      layer.fxParam = meta.parameterDefault ?? 0;
-    }
-  }
-
-  // ── PWM Intensity Helper ──────────────────────────────────────────────────────
-  function getPwmIntensity(layer: SceneLayer): number {
-    return Math.max(layer.primaryColor.r, layer.primaryColor.g, layer.primaryColor.b);
-  }
-
-  function setPwmIntensity(layer: SceneLayer, val: number) {
-    const clamped = Math.max(0, Math.min(255, Math.round(val)));
-    layer.primaryColor = { r: clamped, g: clamped, b: clamped };
-    layer.secondaryColor = { r: 0, g: 0, b: 0 };
+    if (!meta) return;
+    layer.effect = newEffectId;
+    layer.fxParam = meta.hasParameter ? meta.parameterDefault ?? 0 : 0;
   }
 
   // ── Motion Helpers ────────────────────────────────────────────────────────────
@@ -1157,20 +1149,25 @@
                             onchange={(e) => handleEffectChange(layer, (e.target as HTMLSelectElement).value)}
                             class="input-select"
                           >
+                            {#if !effectMeta}
+                              <option value={layer.effect} disabled>{layer.effect} (Unavailable on this node)</option>
+                            {/if}
                             {#each effects as eff}
                               <option value={eff.id}>
-                                {eff.label} {isPwm && !eff.pwmRecommended ? '(Not recommended for PWM)' : ''}
+                                {eff.label} {isPwm && !(eff.pwmRecommended ?? !eff.spatial) ? '(Not recommended for PWM)' : ''}
                               </option>
                             {/each}
                           </select>
-                          {#if isPwm && effectMeta && !effectMeta.pwmRecommended}
+                          {#if !effectMeta}
+                            <span class="pwm-warn-badge">Choose an effect supported by this node before saving.</span>
+                          {:else if isPwm && !pwmRecommended}
                             <span class="pwm-warn-badge">⚠️ Not recommended for PWM dimmer</span>
                           {/if}
                         </div>
 
                         {#if isPwm}
                           <!-- PWM DIMMER-ORIENTED INSPECTOR (Requirement 22) -->
-                          <!-- NO RGB Color Wheel! Grayscale intensity slider -->
+                          <!-- PWM level uses the layer's compositing intensity. -->
                           <div class="ctrl-field">
                             <label for={`pwm-int-${lIdx}`}>Intensity ({Math.round((getPwmIntensity(layer) / 255) * 100)}%)</label>
                             <input
@@ -1259,6 +1256,9 @@
                             <div class="ctrl-field">
                               <label for={`pal-sel-${lIdx}`}>Palette</label>
                               <select id={`pal-sel-${lIdx}`} bind:value={layer.paletteId} class="input-select">
+                                {#if !palettes.some(p => p.id === layer.paletteId)}
+                                  <option value={layer.paletteId} disabled>Palette {layer.paletteId} (Unavailable on this node)</option>
+                                {/if}
                                 {#each palettes as pal}
                                   <option value={pal.id}>{pal.label}</option>
                                 {/each}
@@ -1268,7 +1268,7 @@
                         {/if}
 
                         <!-- Speed (when supported) -->
-                        {#if effectMeta?.supportsSpeed ?? true}
+                        {#if effectMeta?.supportsSpeed}
                           <div class="ctrl-field">
                             <label for={`spd-${lIdx}`}>Speed ({(layer.speedMs / 1000).toFixed(1)} s)</label>
                             <input
@@ -1301,18 +1301,19 @@
                           </div>
                         {/if}
 
-                        <!-- Opacity -->
-                        <div class="ctrl-field">
-                          <label for={`opac-${lIdx}`}>Opacity ({Math.round((layer.opacity / 255) * 100)}%)</label>
-                          <input
-                            id={`opac-${lIdx}`}
-                            type="range"
-                            min="0"
-                            max="255"
-                            bind:value={layer.opacity}
-                            class="range-slider"
-                          />
-                        </div>
+                        {#if !isPwm}
+                          <div class="ctrl-field">
+                            <label for={`opac-${lIdx}`}>Opacity ({Math.round((layer.opacity / 255) * 100)}%)</label>
+                            <input
+                              id={`opac-${lIdx}`}
+                              type="range"
+                              min="0"
+                              max="255"
+                              bind:value={layer.opacity}
+                              class="range-slider"
+                            />
+                          </div>
+                        {/if}
 
                         <!-- Blend Mode -->
                         <div class="ctrl-field">

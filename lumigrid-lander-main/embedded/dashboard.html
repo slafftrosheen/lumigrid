@@ -998,30 +998,64 @@
      ═══════════════════════════════════════════════════════ -->
 <script>
 window.lg = (() => {
-    // ── Default Effects Catalog ──
-    const fallbackEffects = [
-        {id:'solid',label:'Steady color',description:'A constant, even wash of color.',hasParameter:false},
-        {id:'breathe',label:'Smooth pulse',description:'Gently fades between soft glow and full brightness.',hasParameter:true,parameterLabel:'Minimum glow',parameterUnit:'%',parameterMin:1,parameterMax:100,parameterDefault:4},
-        {id:'chase',label:'Moving comet',description:'A bright comet travels along the strip.',hasParameter:true,parameterLabel:'Tail length',parameterUnit:'pixels',parameterMin:1,parameterMax:12,parameterDefault:3},
-        {id:'sweep',label:'Color sweep',description:'Builds color across the strip from end to end.',hasParameter:false},
-        {id:'reveal',label:'Soft reveal',description:'Fades the lane in for a polished sign-on.',hasParameter:true,parameterLabel:'Fade length',parameterUnit:'%',parameterMin:10,parameterMax:90,parameterDefault:25},
-        {id:'sparkle',label:'Random twinkle',description:'Crisp white twinkles over the base color.',hasParameter:true,parameterLabel:'Twinkles',parameterUnit:'per lane',parameterMin:1,parameterMax:16,parameterDefault:2},
-        {id:'gradient',label:'Flowing glow',description:'Moves a soft wave of light along the strip.',hasParameter:true,parameterLabel:'Wave contrast',parameterUnit:'%',parameterMin:1,parameterMax:100,parameterDefault:100},
-        {id:'strobe',label:'Beat strobe',description:'Flashes the lane with adjustable on-time.',hasParameter:true,parameterLabel:'Flash time',parameterUnit:'%',parameterMin:5,parameterMax:95,parameterDefault:50},
-        {id:'fire',label:'Living flame',description:'Flickering organic flame texture.',hasParameter:true,parameterLabel:'Flame height',parameterUnit:'%',parameterMin:20,parameterMax:100,parameterDefault:70},
-        {id:'aurora',label:'Aurora glow',description:'Gentle shifting spectrum across strip.',hasParameter:true,parameterLabel:'Hue shift',parameterUnit:'deg',parameterMin:1,parameterMax:360,parameterDefault:120},
-        {id:'colorwave',label:'Color wave',description:'Smooth sine wave color interpolation.',hasParameter:true,parameterLabel:'Wave length',parameterUnit:'px',parameterMin:10,parameterMax:255,parameterDefault:50},
-        {id:'staticpulse',label:'Static pulse',description:'Dimmer pulse for ambiance & main lights.',hasParameter:true,parameterLabel:'Min dim',parameterUnit:'%',parameterMin:0,parameterMax:100,parameterDefault:20}
+    // Defaults fill missing metadata, never add IDs to a successful node response.
+    const effectDefaults = [
+        {"id":"solid","label":"Steady color","description":"A constant, even wash of color.","supportsSpeed":false,"supportsSecondaryColor":false,"supportsPalette":false,"spatial":false,"pwmRecommended":true,"parameterLabel":"","parameterUnit":"","parameterMin":0,"parameterMax":0,"parameterDefault":0,"hasParameter":false},
+        {"id":"breathe","label":"Smooth pulse","description":"Gently fades between a soft glow and full brightness.","supportsSpeed":true,"supportsSecondaryColor":true,"supportsPalette":true,"spatial":false,"pwmRecommended":true,"parameterLabel":"Minimum glow","parameterUnit":"%","parameterMin":1,"parameterMax":100,"parameterDefault":4,"hasParameter":true},
+        {"id":"chase","label":"Moving comet","description":"A bright comet travels along the strip.","supportsSpeed":true,"supportsSecondaryColor":true,"supportsPalette":true,"spatial":true,"pwmRecommended":false,"parameterLabel":"Tail length","parameterUnit":"pixels","parameterMin":1,"parameterMax":8,"parameterDefault":3,"hasParameter":true},
+        {"id":"sweep","label":"Color sweep","description":"Builds the primary color across the strip from end to end.","supportsSpeed":true,"supportsSecondaryColor":false,"supportsPalette":false,"spatial":true,"pwmRecommended":false,"parameterLabel":"","parameterUnit":"","parameterMin":0,"parameterMax":0,"parameterDefault":0,"hasParameter":false},
+        {"id":"reveal","label":"Soft reveal","description":"Fades the whole lane in for a polished sign-on.","supportsSpeed":true,"supportsSecondaryColor":false,"supportsPalette":false,"spatial":false,"pwmRecommended":true,"parameterLabel":"Fade length","parameterUnit":"%","parameterMin":10,"parameterMax":90,"parameterDefault":25,"hasParameter":true},
+        {"id":"sparkle","label":"Random twinkle","description":"Adds crisp white twinkles over the base color every 50 ms.","supportsSpeed":false,"supportsSecondaryColor":false,"supportsPalette":false,"spatial":true,"pwmRecommended":false,"parameterLabel":"Twinkles","parameterUnit":"per lane","parameterMin":1,"parameterMax":12,"parameterDefault":2,"hasParameter":true},
+        {"id":"gradient","label":"Flowing glow","description":"Moves a soft wave of light along the strip.","supportsSpeed":true,"supportsSecondaryColor":true,"supportsPalette":true,"spatial":true,"pwmRecommended":false,"parameterLabel":"Wave contrast","parameterUnit":"%","parameterMin":0,"parameterMax":100,"parameterDefault":100,"hasParameter":true},
+        {"id":"strobe","label":"Beat strobe","description":"Flashes the lane with an adjustable on-time.","supportsSpeed":true,"supportsSecondaryColor":false,"supportsPalette":false,"spatial":false,"pwmRecommended":true,"parameterLabel":"Flash time","parameterUnit":"%","parameterMin":5,"parameterMax":95,"parameterDefault":50,"hasParameter":true},
+        {"id":"fire","label":"Living flame","description":"Creates a flickering flame texture from the selected color.","supportsSpeed":true,"supportsSecondaryColor":true,"supportsPalette":true,"spatial":true,"pwmRecommended":false,"parameterLabel":"Flame height","parameterUnit":"%","parameterMin":20,"parameterMax":100,"parameterDefault":70,"hasParameter":true},
+        {"id":"aurora","label":"Aurora glow","description":"Gently modulates the primary color across the whole lane.","supportsSpeed":true,"supportsSecondaryColor":false,"supportsPalette":false,"spatial":false,"pwmRecommended":true,"parameterLabel":"Color depth","parameterUnit":"/255","parameterMin":1,"parameterMax":255,"parameterDefault":120,"hasParameter":true},
+        {"id":"colorwave","label":"Color wave","description":"Smooth sine wave color interpolation.","supportsSpeed":true,"supportsSecondaryColor":true,"supportsPalette":true,"spatial":true,"pwmRecommended":false,"parameterLabel":"Wave length","parameterUnit":"px","parameterMin":10,"parameterMax":255,"parameterDefault":50,"hasParameter":true},
+        {"id":"staticpulse","label":"Static pulse","description":"Slow dimmer pulse for main/ambiance lights.","supportsSpeed":true,"supportsSecondaryColor":false,"supportsPalette":false,"spatial":false,"pwmRecommended":true,"parameterLabel":"Min dim","parameterUnit":"%","parameterMin":0,"parameterMax":100,"parameterDefault":20,"hasParameter":true},
+        {"id":"rainbow","label":"Rainbow flow","description":"Moves a continuous full spectrum along the strip.","supportsSpeed":true,"supportsSecondaryColor":false,"supportsPalette":false,"spatial":true,"pwmRecommended":false,"parameterLabel":"Spectrum repeats","parameterUnit":"","parameterMin":1,"parameterMax":8,"parameterDefault":1,"hasParameter":true},
+        {"id":"colorfade","label":"Color fade","description":"Blends the whole lane through colors, pausing at each end.","supportsSpeed":true,"supportsSecondaryColor":true,"supportsPalette":true,"spatial":false,"pwmRecommended":false,"parameterLabel":"Endpoint hold","parameterUnit":"%","parameterMin":0,"parameterMax":40,"parameterDefault":10,"hasParameter":true},
+        {"id":"scanner","label":"Soft scanner","description":"A soft spotlight travels to the end of the strip and back.","supportsSpeed":true,"supportsSecondaryColor":true,"supportsPalette":true,"spatial":true,"pwmRecommended":false,"parameterLabel":"Spot width","parameterUnit":"pixels","parameterMin":1,"parameterMax":64,"parameterDefault":6,"hasParameter":true},
+        {"id":"theater","label":"Marquee chase","description":"Spaced lights move smoothly along the strip.","supportsSpeed":true,"supportsSecondaryColor":true,"supportsPalette":true,"spatial":true,"pwmRecommended":false,"parameterLabel":"Spacing","parameterUnit":"pixels","parameterMin":2,"parameterMax":32,"parameterDefault":6,"hasParameter":true},
+        {"id":"twinkle","label":"Soft twinkle","description":"Independent colored stars gently appear and fade over black.","supportsSpeed":true,"supportsSecondaryColor":true,"supportsPalette":true,"spatial":true,"pwmRecommended":false,"parameterLabel":"Density","parameterUnit":"%","parameterMin":1,"parameterMax":100,"parameterDefault":25,"hasParameter":true},
+        {"id":"candle","label":"Candlelight","description":"An even wash flickers gently with an irregular dimmer rhythm.","supportsSpeed":true,"supportsSecondaryColor":false,"supportsPalette":false,"spatial":false,"pwmRecommended":true,"parameterLabel":"Flicker depth","parameterUnit":"%","parameterMin":0,"parameterMax":100,"parameterDefault":35,"hasParameter":true},
+        {"id":"heartbeat","label":"Heartbeat","description":"Two soft pulses followed by a quiet rest.","supportsSpeed":true,"supportsSecondaryColor":false,"supportsPalette":false,"spatial":false,"pwmRecommended":true,"parameterLabel":"Minimum glow","parameterUnit":"%","parameterMin":0,"parameterMax":80,"parameterDefault":4,"hasParameter":true},
+        {"id":"ripple","label":"Center ripple","description":"Soft rings expand from the center and fade away.","supportsSpeed":true,"supportsSecondaryColor":true,"supportsPalette":true,"spatial":true,"pwmRecommended":false,"parameterLabel":"Ring width","parameterUnit":"pixels","parameterMin":1,"parameterMax":64,"parameterDefault":8,"hasParameter":true},
+        {"id":"dissolve","label":"Dissolve","description":"Pixels blend between colors in a repeatable shuffled order.","supportsSpeed":true,"supportsSecondaryColor":true,"supportsPalette":true,"spatial":true,"pwmRecommended":false,"parameterLabel":"Edge softness","parameterUnit":"%","parameterMin":1,"parameterMax":100,"parameterDefault":15,"hasParameter":true},
+        {"id":"plasma","label":"Plasma flow","description":"Overlapping waves form a moving, colorful light texture.","supportsSpeed":true,"supportsSecondaryColor":true,"supportsPalette":true,"spatial":true,"pwmRecommended":false,"parameterLabel":"Scale","parameterUnit":"waves","parameterMin":1,"parameterMax":8,"parameterDefault":3,"hasParameter":true},
+        {"id":"lightning","label":"Lightning","description":"A burst of flashes with varied strength, followed by a dark pause.","supportsSpeed":true,"supportsSecondaryColor":false,"supportsPalette":false,"spatial":false,"pwmRecommended":true,"parameterLabel":"Flashes","parameterUnit":"per burst","parameterMin":1,"parameterMax":5,"parameterDefault":3,"hasParameter":true},
+        {"id":"confetti","label":"Confetti","description":"Scattered colored sparks appear and leave fading glows.","supportsSpeed":true,"supportsSecondaryColor":true,"supportsPalette":true,"spatial":true,"pwmRecommended":false,"parameterLabel":"Density","parameterUnit":"%","parameterMin":1,"parameterMax":100,"parameterDefault":15,"hasParameter":true}
     ];
+    const fallbackEffects = effectDefaults.slice(0, 12);
+    const paletteDefaults = ['Custom', 'Rainbow', 'Ocean', 'Lava', 'Forest', 'Sunset', 'Amber', 'Ice', 'Neon', 'Lavender', 'Candy', 'Festive', 'Ember', 'Twilight']
+        .map((label, id) => ({ id, label, usesSceneColors: id === 0 }));
+    const fallbackPalettes = paletteDefaults.slice(0, 6);
 
-    const palettes = [
-        { id: 0, name: "Solid (Primary → Secondary)" },
-        { id: 1, name: "Rainbow Spectrum" },
-        { id: 2, name: "Ocean Breeze" },
-        { id: 3, name: "Lava Glow" },
-        { id: 4, name: "Forest Canopy" },
-        { id: 5, name: "Sunset Horizon" }
-    ];
+    function resolveEffects(data) {
+        if (!Array.isArray(data)) return fallbackEffects.map(e => ({ ...e }));
+        const seen = new Set();
+        return data.filter(e => e && typeof e.id === 'string' && e.id.trim() && !seen.has(e.id.trim()) && seen.add(e.id.trim()))
+            .map(e => {
+                const id = e.id.trim();
+                const known = effectDefaults.find(item => item.id === id);
+                const meta = { id, label: id, description: '', supportsSpeed: false, supportsSecondaryColor: false, supportsPalette: false, spatial: false, pwmRecommended: false, hasParameter: false, ...known, ...e, id };
+                for (const key of ['supportsSpeed', 'supportsSecondaryColor', 'supportsPalette', 'spatial', 'pwmRecommended', 'hasParameter']) {
+                    meta[key] = typeof e[key] === 'boolean' ? e[key] : known?.[key] ?? false;
+                }
+                if (typeof e.pwmRecommended !== 'boolean' && !known && typeof e.spatial === 'boolean') meta.pwmRecommended = !e.spatial;
+                meta.label = typeof e.label === 'string' && e.label.trim() ? e.label : known?.label ?? id;
+                meta.parameterMin = clamp(e.parameterMin ?? known?.parameterMin ?? 0, 0, 255);
+                meta.parameterMax = clamp(e.parameterMax ?? known?.parameterMax ?? 255, meta.parameterMin, 255);
+                meta.parameterDefault = clamp(e.parameterDefault ?? known?.parameterDefault ?? meta.parameterMin, meta.parameterMin, meta.parameterMax);
+                return meta;
+            });
+    }
+
+    function resolvePalettes(data) {
+        if (!Array.isArray(data)) return fallbackPalettes.map(p => ({ ...p }));
+        const seen = new Set();
+        return data.filter(p => p && Number.isInteger(p.id) && p.id >= 0 && p.id <= 255 && !seen.has(p.id) && seen.add(p.id))
+            .map(p => ({ id: p.id, label: p.label || paletteDefaults.find(item => item.id === p.id)?.label || `Palette ${p.id}`, usesSceneColors: p.usesSceneColors ?? p.id === 0 }));
+    }
 
     const fixtureProfiles = [
         { id: 0, name: "Unused / None" },
@@ -1037,6 +1071,8 @@ window.lg = (() => {
         token: '',
         host: '',
         effects: fallbackEffects,
+        palettes: fallbackPalettes,
+        hardwareChannels: [],
         presets: [],
         sequence: { bpm: 120, enabled: false, tracks: [] },
         schedules: null,
@@ -1044,6 +1080,7 @@ window.lg = (() => {
         status: null,
         health: null,
         editing: null,
+        editorBaseline: null,
         activeTimelineStep: { track: 0, step: 0 },
         targetZones: [true, false, false, false, false, false, false, false],
         activeTab: 'dashboard',
@@ -1099,7 +1136,12 @@ window.lg = (() => {
     }
 
     function effectMeta(id) {
-        return state.effects.find(e => e.id === id) || state.effects[0];
+        return state.effects.find(e => e.id === id) || {
+            id, label: `${id || 'Unknown effect'} (Unavailable on this node)`,
+            description: 'Choose an effect supported by this node before saving.',
+            supportsSpeed: false, supportsSecondaryColor: false, supportsPalette: false,
+            hasParameter: false, pwmRecommended: false, unavailable: true
+        };
     }
     function colorToHex(col) {
         if (!col) return '#ffffff';
@@ -1583,7 +1625,12 @@ window.lg = (() => {
     async function refresh() {
         const status = state.status || await api('/api/v1/status').catch(() => ({}));
         const config = await api('/api/v1/config').catch(() => ({}));
-        const effects = await api('/api/v1/effects').catch(() => fallbackEffects);
+        const [effects, palettes, hardwareChannels] = await Promise.all([
+            api('/api/v1/effects').catch(() => null),
+            api('/api/v1/palettes').catch(() => null),
+            Array.isArray(config.channels) ? Promise.resolve(config.channels)
+                : api('/api/v1/channels').then(data => data.channels).catch(() => [])
+        ]);
         const presets = await api('/api/v1/presets').catch(() => []);
         const sequence = await api('/api/v1/sequence').catch(() => ({ bpm: 120, enabled: false, tracks: [] }));
         const health = await api('/api/v1/health').catch(() => ({}));
@@ -1591,21 +1638,10 @@ window.lg = (() => {
         const cueLists = await api('/api/v1/cue-lists').catch(() => []);
         state.cueLists = Array.isArray(cueLists) ? cueLists : [];
 
-        state.effects = Array.isArray(effects) && effects.length ? effects : fallbackEffects;
-        state.presets = (Array.isArray(presets) ? presets : []).map(p => {
-            const sc = {...p};
-            sc.zones = Array.from({length:8}, (_, z) => ({
-                layers: Array.from({length:3}, (_, l) => ({
-                    effect: 'solid', blendMode: 'normal',
-                    primaryColor: {r:255,g:255,b:255}, secondaryColor: {r:0,g:0,b:0},
-                    speedMs: 2000, fxParam: 0, paletteId: 0, opacity: 255, enabled: l === 0,
-                    ...(sc.zones?.[z]?.layers?.[l] || {})
-                }))
-            }));
-            sc.globalBrightness = clamp(sc.globalBrightness ?? 255, 0, 255);
-            sc.transitionMs = clamp(sc.transitionMs ?? 1000, 0, 10000);
-            return sc;
-        });
+        state.effects = resolveEffects(effects);
+        state.palettes = resolvePalettes(palettes);
+        state.hardwareChannels = Array.isArray(hardwareChannels) ? hardwareChannels : [];
+        state.presets = (Array.isArray(presets) ? presets : []).map(normalizeEditorScene);
 
         state.status = status;
         if (!sequence || typeof sequence !== 'object') {
@@ -1899,6 +1935,35 @@ window.lg = (() => {
         `).join('') || '<div class="empty-state">No scenes stored. Create a new scene to begin.</div>';
     }
 
+    function editorTargets(scene = state.editing) {
+        return Array.isArray(scene?.channels) && scene.channels.length ? scene.channels : scene?.zones || [];
+    }
+
+    function normalizeEditorScene(scene) {
+        const hasChannels = Array.isArray(scene.channels) && scene.channels.length > 0;
+        const source = hasChannels ? scene.channels : scene.zones;
+        const targets = Array.from({length: hasChannels ? 16 : 8}, (_, c) => ({
+            layers: Array.from({length:3}, (_, l) => ({
+                effect: 'solid', blendMode: 'normal',
+                primaryColor: {r:255,g:255,b:255}, secondaryColor: {r:0,g:0,b:0},
+                speedMs: 2000, fxParam: 0, paletteId: 0, opacity: 255, enabled: c < 8 && l === 0,
+                ...(source?.[c]?.layers?.[l] || {})
+            }))
+        }));
+        const normalized = {...scene, zones: targets.slice(0, 8),
+            globalBrightness: clamp(scene.globalBrightness ?? 255, 0, 255),
+            transitionMs: clamp(scene.transitionMs ?? 1000, 0, 10000)};
+        if (hasChannels) normalized.channels = targets;
+        else delete normalized.channels;
+        return normalized;
+    }
+
+    function channelDescriptor(index) {
+        return state.hardwareChannels.find(channel => channel?.index === index)
+            || state.config?.channels?.find(channel => channel?.index === index)
+            || { index, port: index < 8 ? `A${index + 1}` : `P${index - 7}`, kind: index < 8 ? 'addressable' : 'pwm' };
+    }
+
     function createNewScene() {
         let idx = -1;
         for(let i=0; i<32; i++) {
@@ -1909,20 +1974,16 @@ window.lg = (() => {
         }
         if (idx === -1) return toast('All 32 scene slots are full.', true);
         
-        state.editing = {
+        const hasChannels = state.hardwareChannels.length > 0 || state.config?.channels?.length > 0
+            || state.presets.some(scene => Array.isArray(scene.channels));
+        state.editing = normalizeEditorScene({
             index: idx,
             name: 'New Scene',
             globalBrightness: 255,
             transitionMs: 1000,
-            zones: Array.from({length:8}, (_, z) => ({
-                layers: Array.from({length:3}, (_, l) => ({
-                    effect: 'solid', blendMode: 'normal',
-                    primaryColor: {r:255,g:255,b:255}, secondaryColor: {r:0,g:0,b:0},
-                    speedMs: 2000, fxParam: 0, paletteId: 0, opacity: 255, enabled: l === 0
-                }))
-            }))
-        };
-        state.targetZones = [true, false, false, false, false, false, false, false];
+            ...(hasChannels ? { channels: Array.from({length:16}, () => ({})) } : { zones: [] })
+        });
+        state.targetZones = editorTargets().map((_, c) => c === 0);
         nav('scene-editor');
         renderSceneEditor();
     }
@@ -1944,7 +2005,7 @@ window.lg = (() => {
         cloneScene.index = newIdx;
         cloneScene.name = (cloneScene.name || 'Untitled') + ' (Copy)';
         try {
-            await api('/api/v1/presets', 'PUT', cloneScene);
+            await api('/api/v1/presets', 'PUT', prepareScenePayload(cloneScene));
             toast('Scene duplicated successfully.');
             await refresh();
         } catch (e) { toast(e.message, true); }
@@ -1962,24 +2023,25 @@ window.lg = (() => {
     function editScene(idx) {
         const existing = state.presets.find(p => Number(p.index) === Number(idx));
         if (!existing) return toast('Scene not found', true);
-        state.editing = clone(existing);
-        state.targetZones = [true, false, false, false, false, false, false, false];
+        state.editing = normalizeEditorScene(clone(existing));
+        state.targetZones = editorTargets().map((_, c) => c === 0);
         nav('scene-editor');
         renderSceneEditor();
     }
 
     function backToScenes() { nav('scenes'); }
 
-    function toggleTargetZone(z) {
+    function toggleTargetZone(z, multiple = false) {
+        if (!editorTargets()[z]) return;
         readSceneEditor();
-        state.targetZones[z] = !state.targetZones[z];
+        state.targetZones = editorTargets().map((_, c) => multiple ? (c === z ? !state.targetZones[c] : !!state.targetZones[c]) : c === z);
         if (!state.targetZones.includes(true)) state.targetZones[z] = true;
         renderSceneEditor();
     }
 
     function selectAllTargetZones(all) {
         readSceneEditor();
-        state.targetZones = state.targetZones.map(() => all);
+        state.targetZones = editorTargets().map(() => all);
         if (!all) state.targetZones[0] = true;
         renderSceneEditor();
     }
@@ -1987,6 +2049,10 @@ window.lg = (() => {
     function renderSceneEditor() {
         const scene = state.editing;
         if (!scene) return;
+        const targets = editorTargets(scene);
+        const hasChannels = Array.isArray(scene.channels) && scene.channels.length > 0;
+        if (hasChannels) scene.zones = scene.channels.slice(0, 8);
+        state.targetZones = targets.map((_, c) => !!state.targetZones[c]);
         byId('scene-editor-title').textContent = scene.name || 'Untitled Scene';
         byId('scene-name').value = scene.name || '';
         byId('scene-brightness').value = Math.round(scene.globalBrightness * 100 / 255);
@@ -2000,28 +2066,38 @@ window.lg = (() => {
         const zoneChips = `
             <div class="product-card" style="margin-bottom:1rem;">
                 <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.65rem;">
-                    <h5>Target Zones</h5>
+                    <h5>${hasChannels ? 'Target Outputs' : 'Target Zones'}</h5>
                     <div style="display:flex; gap:0.35rem;">
                         <button class="button-secondary" style="font-size:0.7rem; padding:0.25rem 0.5rem;" onclick="lg.selectAllTargetZones(true)">Select All</button>
                         <button class="button-secondary" style="font-size:0.7rem; padding:0.25rem 0.5rem;" onclick="lg.selectAllTargetZones(false)">Clear</button>
                     </div>
                 </div>
                 <div style="display:flex; gap:0.4rem; flex-wrap:wrap;">
-                    ${[0,1,2,3,4,5,6,7].map(z => {
-                        const name = state.config?.zones?.[z]?.name || `Zone ${z+1}`;
+                    ${targets.map((_, z) => {
+                        const descriptor = channelDescriptor(z);
+                        const port = descriptor.port || (z < 8 ? `A${z + 1}` : `P${z - 7}`);
+                        const name = hasChannels ? `${port}${descriptor.name && descriptor.name !== port ? ` · ${descriptor.name}` : ''}`
+                            : state.config?.zones?.[z]?.name || `Zone ${z+1}`;
                         const sel = state.targetZones[z];
-                        return `<button class="${sel ? 'button-primary' : 'button-secondary'}" style="font-size:0.75rem; padding:0.4rem 0.75rem;" onclick="lg.toggleTargetZone(${z})">${sel ? '✓ ' : ''}${esc(name)}</button>`;
+                        return `<button class="${sel ? 'button-primary' : 'button-secondary'}" style="font-size:0.75rem; padding:0.4rem 0.75rem;" aria-pressed="${sel}" onclick="lg.toggleTargetZone(${z}, event.shiftKey || event.ctrlKey || event.metaKey)">${sel ? '✓ ' : ''}${esc(name)}</button>`;
                     }).join('')}
                 </div>
+                <p class="help" style="margin-top:0.5rem;">Click to edit one ${hasChannels ? 'output' : 'zone'}. Shift-click to select several. Only the controls you change apply to the selection.</p>
             </div>
         `;
 
         const layersHtml = [0,1,2].map(l => {
-            const layer = scene.zones[firstZ].layers[l];
+            const layer = targets[firstZ].layers[l];
             const meta = effectMeta(layer.effect);
-            const param = clamp(layer.fxParam || meta.parameterDefault || 0, meta.parameterMin || 0, meta.parameterMax || 255);
+            const min = meta.parameterMin ?? 0;
+            const max = meta.parameterMax ?? 255;
+            const param = Number.isFinite(layer.fxParam) && layer.fxParam >= min && layer.fxParam <= max
+                ? layer.fxParam : meta.parameterDefault ?? min;
             const hexPrimary = colorToHex(layer.primaryColor);
             const hexSecondary = colorToHex(layer.secondaryColor);
+            const isPwm = hasChannels && channelDescriptor(firstZ).kind === 'pwm';
+            const hasPwmTarget = hasChannels ? state.targetZones.some((selected, c) => selected && channelDescriptor(c).kind === 'pwm')
+                : (state.config?.fixtures || []).some(f => f && state.targetZones[f.zoneId] && f.profile >= 3 && f.profile <= 5);
 
             return `
                 <div class="layer-box" style="background: linear-gradient(135deg, ${hexPrimary}1a, ${hexSecondary}0d), rgba(255,255,255,0.03); border-left: 4px solid ${hexPrimary}; margin-bottom: 1rem; padding: 1.25rem; border-radius: 8px; border-top: 1px solid rgba(255,255,255,0.05); border-right: 1px solid rgba(255,255,255,0.05); border-bottom: 1px solid rgba(255,255,255,0.05); transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1), background 0.3s;" onmouseenter="this.style.transform='translateX(6px)'" onmouseleave="this.style.transform='translateX(0)'">
@@ -2040,15 +2116,19 @@ window.lg = (() => {
                         <div>
                             <label style="font-size:0.75rem; font-weight:700; color:var(--text-secondary); display:block; margin-bottom:0.4rem;">Effect Algorithm</label>
                             <select id="l${l}-effect" onchange="lg.changeLayerEffect(${l}, this.value)" style="width:100%;">
+                                ${meta.unavailable ? `<option value="${esc(layer.effect)}" selected disabled>${esc(meta.label)}</option>` : ''}
                                 ${state.effects.map(e => `<option value="${esc(e.id)}" ${e.id === layer.effect ? 'selected' : ''}>${esc(e.label)}</option>`).join('')}
                             </select>
+                            ${meta.unavailable ? `<p class="help">${esc(meta.description)}</p>` : ''}
+                            ${hasPwmTarget && !meta.pwmRecommended ? '<p class="help">This effect is not recommended for the selected PWM dimmers.</p>' : ''}
                         </div>
-                        <div>
+                        ${meta.supportsPalette && !isPwm ? `<div>
                             <label style="font-size:0.75rem; font-weight:700; color:var(--text-secondary); display:block; margin-bottom:0.4rem;">Color Palette</label>
                             <select id="l${l}-palette" style="width:100%;">
-                                ${palettes.map(p => `<option value="${p.id}" ${p.id === (layer.paletteId || 0) ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}
+                                ${!state.palettes.some(p => p.id === (layer.paletteId ?? 0)) ? `<option value="${Number(layer.paletteId)}" selected disabled>Palette ${Number(layer.paletteId)} (Unavailable on this node)</option>` : ''}
+                                ${state.palettes.map(p => `<option value="${p.id}" ${p.id === (layer.paletteId ?? 0) ? 'selected' : ''}>${esc(p.label)}</option>`).join('')}
                             </select>
-                        </div>
+                        </div>` : ''}
                         <div>
                             <label style="font-size:0.75rem; font-weight:700; color:var(--text-secondary); display:block; margin-bottom:0.4rem;">Blend Mode</label>
                             <select id="l${l}-blend" style="width:100%;">
@@ -2060,7 +2140,7 @@ window.lg = (() => {
                         </div>
                     </div>
 
-                    <div class="color-inputs" style="display:flex; gap:1rem; margin-bottom:1.5rem;">
+                    ${!isPwm ? `<div class="color-inputs" style="display:flex; gap:1rem; margin-bottom:1.5rem;">
                         <div class="color-swatch-btn" style="display:flex; align-items:center; gap:0.75rem; background:rgba(0,0,0,0.25); padding:0.6rem 0.75rem; border-radius:8px; flex:1; border: 1px solid rgba(255,255,255,0.03);">
                             <input type="color" id="l${l}-pcolor" value="${hexPrimary}" style="width:36px; height:36px; padding:0; border:2px solid rgba(255,255,255,0.2); cursor:pointer; background:none; border-radius:50%; box-shadow: 0 0 10px ${hexPrimary}40;">
                             <div style="display:flex; flex-direction:column; gap:0.15rem;">
@@ -2068,26 +2148,26 @@ window.lg = (() => {
                                 <span style="font-size:0.65rem; color:var(--text-muted); font-family:monospace;">${hexPrimary.toUpperCase()}</span>
                             </div>
                         </div>
-                        <div class="color-swatch-btn" style="display:flex; align-items:center; gap:0.75rem; background:rgba(0,0,0,0.25); padding:0.6rem 0.75rem; border-radius:8px; flex:1; border: 1px solid rgba(255,255,255,0.03);">
+                        ${meta.supportsSecondaryColor ? `<div class="color-swatch-btn" style="display:flex; align-items:center; gap:0.75rem; background:rgba(0,0,0,0.25); padding:0.6rem 0.75rem; border-radius:8px; flex:1; border: 1px solid rgba(255,255,255,0.03);">
                             <input type="color" id="l${l}-scolor" value="${hexSecondary}" style="width:36px; height:36px; padding:0; border:2px solid rgba(255,255,255,0.2); cursor:pointer; background:none; border-radius:50%; box-shadow: 0 0 10px ${hexSecondary}40;">
                             <div style="display:flex; flex-direction:column; gap:0.15rem;">
                                 <span style="font-size:0.75rem; font-weight:700; color:var(--text-primary);">Secondary</span>
                                 <span style="font-size:0.65rem; color:var(--text-muted); font-family:monospace;">${hexSecondary.toUpperCase()}</span>
                             </div>
-                        </div>
-                    </div>
+                        </div>` : ''}
+                    </div>` : ''}
 
                     <div class="range-row">
-                        <label>Layer Opacity</label>
+                        <label>${isPwm ? 'Layer level' : 'Layer Opacity'}</label>
                         <input id="l${l}-opacity" type="range" min="0" max="100" value="${Math.round(layer.opacity * 100 / 255)}" oninput="lg.updateText('l${l}-opacity-out', this.value + '%')">
                         <output id="l${l}-opacity-out">${Math.round(layer.opacity * 100 / 255)}%</output>
                     </div>
 
-                    <div class="range-row">
+                    ${meta.supportsSpeed ? `<div class="range-row">
                         <label>Effect Speed</label>
                         <input id="l${l}-speed" type="range" min="1" max="100" value="${msToSpeed(layer.speedMs)}" oninput="lg.updateText('l${l}-speed-out', lg.speedLabel(this.value))">
                         <output id="l${l}-speed-out">${speedLabel(msToSpeed(layer.speedMs))}</output>
-                    </div>
+                    </div>` : ''}
 
                     ${meta.hasParameter ? `
                     <div class="range-row">
@@ -2100,47 +2180,62 @@ window.lg = (() => {
         }).join('');
 
         byId('scene-zones-editor').innerHTML = zoneChips + layersHtml;
+        state.editorBaseline = captureSceneEditor();
+    }
+
+    function captureSceneEditor() {
+        const value = id => byId(id) ? String(byId(id).value) : undefined;
+        return {
+            name: value('scene-name'), brightness: value('scene-brightness'), fade: value('scene-fade'),
+            layers: [0,1,2].map(l => ({
+                ...Object.fromEntries(['effect', 'blend', 'palette', 'pcolor', 'scolor', 'speed', 'opacity', 'param']
+                    .map(key => [key, value(`l${l}-${key}`)])),
+                enabled: byId(`l${l}-enabled`)?.checked
+            }))
+        };
     }
 
     function readSceneEditor() {
         const scene = state.editing;
-        if (!scene || !byId('scene-name')) return;
-        scene.name = byId('scene-name').value.trim();
-        scene.globalBrightness = Math.round(clamp(byId('scene-brightness').value,0,100) * 255 / 100);
-        scene.transitionMs = clamp(byId('scene-fade').value, 0, 10000);
-
-        const newLayers = [0,1,2].map(l => {
-            const eff = byId(`l${l}-effect`)?.value || 'solid';
-            const meta = effectMeta(eff);
-            const phex = byId(`l${l}-pcolor`)?.value || '#ffffff';
-            const shex = byId(`l${l}-scolor`)?.value || '#000000';
-            return {
-                effect: eff,
-                blendMode: byId(`l${l}-blend`)?.value || 'normal',
-                paletteId: Number(byId(`l${l}-palette`)?.value || 0),
-                primaryColor: hexToRgb(phex),
-                secondaryColor: hexToRgb(shex),
-                speedMs: speedToMs(byId(`l${l}-speed`)?.value ?? 50),
-                opacity: Math.round(clamp(byId(`l${l}-opacity`)?.value ?? 100, 0, 100) * 255 / 100),
-                enabled: Boolean(byId(`l${l}-enabled`)?.checked),
-                fxParam: meta.hasParameter ? clamp(byId(`l${l}-param`)?.value ?? meta.parameterDefault, meta.parameterMin, meta.parameterMax) : 0
-            };
+        const baseline = state.editorBaseline;
+        if (!scene || !baseline || !byId('scene-name')) return;
+        const current = captureSceneEditor();
+        if (current.name !== baseline.name) scene.name = current.name.trim();
+        if (current.brightness !== baseline.brightness) scene.globalBrightness = Math.round(clamp(current.brightness,0,100) * 255 / 100);
+        if (current.fade !== baseline.fade) scene.transitionMs = clamp(current.fade, 0, 10000);
+        // Apply only changed controls. Merely selecting another output or saving
+        // must not quantize speeds/opacity or replace a stored default sentinel.
+        editorTargets(scene).forEach((channel, c) => {
+            if (!state.targetZones[c]) return;
+            channel.layers.forEach((layer, l) => {
+                const values = current.layers[l];
+                const changed = key => values[key] !== undefined && values[key] !== baseline.layers[l][key];
+                if (changed('effect')) layer.effect = values.effect;
+                if (changed('blend')) layer.blendMode = values.blend;
+                if (changed('palette')) layer.paletteId = Number(values.palette);
+                if (changed('pcolor')) layer.primaryColor = hexToRgb(values.pcolor);
+                if (changed('scolor')) layer.secondaryColor = hexToRgb(values.scolor);
+                if (changed('speed')) layer.speedMs = speedToMs(values.speed);
+                if (changed('opacity')) layer.opacity = Math.round(clamp(values.opacity, 0, 100) * 255 / 100);
+                if (changed('enabled')) layer.enabled = Boolean(values.enabled);
+                if (changed('param')) {
+                    const meta = effectMeta(layer.effect);
+                    layer.fxParam = clamp(values.param, meta.parameterMin ?? 0, meta.parameterMax ?? 255);
+                }
+            });
         });
-
-        scene.zones.forEach((zone, z) => {
-            if (state.targetZones[z]) {
-                zone.layers = clone(newLayers);
-            }
-        });
+        state.editorBaseline = current;
     }
 
     function changeLayerEffect(l, val) {
-        readSceneEditor();
         const meta = effectMeta(val);
+        if (meta.unavailable) return;
+        readSceneEditor();
+        const targets = editorTargets();
         state.targetZones.forEach((sel, z) => {
             if (sel) {
-                state.editing.zones[z].layers[l].effect = val;
-                state.editing.zones[z].layers[l].fxParam = meta.parameterDefault || 0;
+                targets[z].layers[l].effect = val;
+                targets[z].layers[l].fxParam = meta.hasParameter ? meta.parameterDefault ?? 0 : 0;
             }
         });
         renderSceneEditor();
@@ -2148,17 +2243,32 @@ window.lg = (() => {
 
     function changeLayerEnabled(l, val) {
         readSceneEditor();
+        const targets = editorTargets();
         state.targetZones.forEach((sel, z) => {
-            if (sel) state.editing.zones[z].layers[l].enabled = val;
+            if (sel) targets[z].layers[l].enabled = val;
         });
         renderSceneEditor();
+    }
+
+    function prepareScenePayload(scene) {
+        // Current nodes accept the full sixteen-channel scene; do not duplicate
+        // the legacy mirror in this bounded request. Older nodes keep zones.
+        const payload = {...scene};
+        if (Array.isArray(scene.channels)) delete payload.zones;
+        for (const [c, channel] of (payload.channels || payload.zones || []).entries()) {
+            for (const [l, layer] of (channel.layers || []).entries()) {
+                if (!state.effects.some(e => e.id === layer.effect)) throw new Error(`Channel ${c + 1}, layer ${l + 1}: effect "${layer.effect}" is unavailable on this node.`);
+                if (!state.palettes.some(p => p.id === (layer.paletteId ?? 0))) throw new Error(`Channel ${c + 1}, layer ${l + 1}: palette ${layer.paletteId} is unavailable on this node.`);
+            }
+        }
+        return payload;
     }
 
     async function saveScene() {
         readSceneEditor();
         if (!state.editing.name) return toast('Name required', true);
         try {
-            await api('/api/v1/presets', 'PUT', state.editing);
+            await api('/api/v1/presets', 'PUT', prepareScenePayload(state.editing));
             await refresh();
             toast('Scene saved successfully.');
             backToScenes();
@@ -2168,7 +2278,7 @@ window.lg = (() => {
     async function testSceneLive() {
         readSceneEditor();
         try {
-            await api('/api/v1/presets', 'PUT', state.editing);
+            await api('/api/v1/presets', 'PUT', prepareScenePayload(state.editing));
             await api('/api/v1/activate', 'POST', { preset: state.editing.index });
             toast('Scene update accepted. Waiting for node state.');
         } catch (e) { toast(e.message, true); }

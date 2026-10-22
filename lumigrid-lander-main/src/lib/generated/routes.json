@@ -4,615 +4,615 @@
     "method": "GET",
     "handler": "get_status",
     "access": "Installer",
-    "line": 8051
+    "line": 8098
   },
   {
     "path": "/api/v1/factory/effect",
     "method": "POST",
     "handler": "post_effect",
     "access": "Installer",
-    "line": 8052
+    "line": 8099
   },
   {
     "path": "/api/v1/factory/lane",
     "method": "POST",
     "handler": "post_lane",
     "access": "Installer",
-    "line": 8053
+    "line": 8100
   },
   {
     "path": "/api/v1/factory/pwm",
     "method": "POST",
     "handler": "post_pwm",
     "access": "Installer",
-    "line": 8054
+    "line": 8101
   },
   {
     "path": "/api/v1/factory/abort",
     "method": "POST",
     "handler": "post_abort",
     "access": "Installer",
-    "line": 8055
+    "line": 8102
   },
   {
     "path": "/api/v1/factory/auto-loop",
     "method": "POST",
     "handler": "post_auto_loop",
     "access": "Installer",
-    "line": 8056
+    "line": 8103
   },
   {
     "path": "/api/v1/factory/test/start",
     "method": "POST",
     "handler": "post_factory_test_start",
     "access": "Installer",
-    "line": 8057
+    "line": 8104
   },
   {
     "path": "/api/v1/factory/test/confirm",
     "method": "POST",
     "handler": "post_factory_test_confirm",
     "access": "Installer",
-    "line": 8058
+    "line": 8105
   },
   {
     "path": "/api/v1/factory/test/abort",
     "method": "POST",
     "handler": "post_factory_test_abort",
     "access": "Installer",
-    "line": 8059
+    "line": 8106
   },
   {
     "path": "/api/v1/factory/test/report",
     "method": "GET",
     "handler": "get_factory_test_report",
     "access": "Operator",
-    "line": 8060
+    "line": 8107
   },
   {
     "path": "/api/v1/factory/burn-in/start",
     "method": "POST",
     "handler": "post_factory_burn_in_start",
     "access": "Installer",
-    "line": 8061
+    "line": 8108
   },
   {
     "path": "/api/v1/factory/burn-in/stop",
     "method": "POST",
     "handler": "post_factory_burn_in_stop",
     "access": "Installer",
-    "line": 8062
+    "line": 8109
   },
   {
     "path": "/api/v1/factory/boot-safe",
     "method": "GET",
     "handler": "get_boot_safe_verify",
     "access": "Installer",
-    "line": 8063
+    "line": 8110
   },
   {
     "path": "/ws",
     "method": "GET",
     "handler": "ws_handler",
     "access": "Handler-specific; inspect source",
-    "line": 8068
+    "line": 8115
   },
   {
     "path": "/",
     "method": "GET",
     "handler": "serve_dashboard",
     "access": "Handler-specific; inspect source",
-    "line": 8070
+    "line": 8117
   },
   {
     "path": "/index.html",
     "method": "GET",
     "handler": "serve_dashboard",
     "access": "Handler-specific; inspect source",
-    "line": 8071
+    "line": 8118
   },
   {
     "path": "/dashboard",
     "method": "GET",
     "handler": "serve_dashboard",
     "access": "Handler-specific; inspect source",
-    "line": 8072
+    "line": 8119
   },
   {
     "path": "/favicon.ico",
     "method": "GET",
     "handler": "get_favicon",
     "access": "Handler-specific; inspect source",
-    "line": 8073
+    "line": 8120
   },
   {
     "path": "/api/v1/*",
     "method": "OPTIONS",
     "handler": "options_handler",
     "access": "Handler-specific; inspect source",
-    "line": 8074
+    "line": 8121
   },
   {
     "path": "/api/v1/info",
     "method": "GET",
     "handler": "get_info",
     "access": "Handler-specific; inspect source",
-    "line": 8077
+    "line": 8124
   },
   {
     "path": "/api/v1/identity",
     "method": "GET",
     "handler": "get_identity",
     "access": "Operator",
-    "line": 8078
+    "line": 8125
   },
   {
     "path": "/api/v1/fleet/nodes",
     "method": "GET",
     "handler": "get_fleet_nodes",
     "access": "Operator",
-    "line": 8079
+    "line": 8126
   },
   {
     "path": "/api/v1/auth/status",
     "method": "GET",
     "handler": "get_auth_status",
     "access": "Handler-specific; inspect source",
-    "line": 8082
+    "line": 8129
   },
   {
     "path": "/api/v1/auth/bootstrap",
     "method": "POST",
     "handler": "post_auth_bootstrap",
     "access": "Handler-specific; inspect source",
-    "line": 8083
+    "line": 8130
   },
   {
     "path": "/api/v1/auth/session",
     "method": "POST",
     "handler": "post_auth_session",
     "access": "Handler-specific; inspect source",
-    "line": 8084
+    "line": 8131
   },
   {
     "path": "/api/v1/auth/session",
     "method": "GET",
     "handler": "get_auth_session",
     "access": "Operator",
-    "line": 8085
+    "line": 8132
   },
   {
     "path": "/api/v1/auth/session",
     "method": "DELETE",
     "handler": "delete_auth_session",
     "access": "Operator",
-    "line": 8086
+    "line": 8133
   },
   {
     "path": "/api/v1/auth/ws-ticket",
     "method": "POST",
     "handler": "post_auth_ws_ticket",
     "access": "Operator",
-    "line": 8087
+    "line": 8134
   },
   {
     "path": "/api/v1/auth/credentials",
     "method": "GET",
     "handler": "get_auth_credentials",
     "access": "Admin",
-    "line": 8088
+    "line": 8135
   },
   {
     "path": "/api/v1/auth/credentials",
     "method": "POST",
     "handler": "post_auth_credentials",
     "access": "Admin",
-    "line": 8089
+    "line": 8136
   },
   {
     "path": "/api/v1/auth/credentials",
     "method": "DELETE",
     "handler": "delete_auth_credentials",
     "access": "Admin",
-    "line": 8090
+    "line": 8137
   },
   {
     "path": "/api/v1/capabilities",
     "method": "GET",
     "handler": "get_capabilities",
     "access": "Operator",
-    "line": 8093
+    "line": 8140
   },
   {
     "path": "/api/v1/jobs/current",
     "method": "GET",
     "handler": "get_current_job",
     "access": "Operator",
-    "line": 8094
+    "line": 8141
   },
   {
     "path": "/api/v1/channels",
     "method": "GET",
     "handler": "get_channels",
     "access": "Operator",
-    "line": 8095
+    "line": 8142
   },
   {
     "path": "/api/v1/channel/test",
     "method": "POST",
     "handler": "post_channel_test",
     "access": "Operator",
-    "line": 8096
+    "line": 8143
   },
   {
     "path": "/api/v1/presets/references",
     "method": "GET",
     "handler": "get_preset_references",
     "access": "Operator",
-    "line": 8097
+    "line": 8144
   },
   {
     "path": "/api/v1/presets",
     "method": "GET",
     "handler": "get_presets",
     "access": "Operator",
-    "line": 8098
+    "line": 8145
   },
   {
     "path": "/api/v1/presets",
     "method": "PUT",
     "handler": "put_preset",
     "access": "Operator",
-    "line": 8099
+    "line": 8146
   },
   {
     "path": "/api/v1/presets",
     "method": "DELETE",
     "handler": "delete_preset",
     "access": "Operator",
-    "line": 8100
+    "line": 8147
   },
   {
     "path": "/api/v1/activate",
     "method": "POST",
     "handler": "post_activate",
     "access": "Operator",
-    "line": 8101
+    "line": 8148
   },
   {
     "path": "/api/v1/config",
     "method": "GET",
     "handler": "get_device_config",
     "access": "Operator",
-    "line": 8102
+    "line": 8149
   },
   {
     "path": "/api/v1/config",
     "method": "PUT",
     "handler": "put_device_config",
     "access": "Admin",
-    "line": 8103
+    "line": 8150
   },
   {
     "path": "/api/v1/config/validate",
     "method": "POST",
     "handler": "post_config_validate",
     "access": "Admin",
-    "line": 8104
+    "line": 8151
   },
   {
     "path": "/api/v1/network/config",
     "method": "GET",
     "handler": "get_network_config",
     "access": "Operator",
-    "line": 8105
+    "line": 8152
   },
   {
     "path": "/api/v1/network/config",
     "method": "PUT",
     "handler": "put_network_config",
     "access": "Admin",
-    "line": 8106
+    "line": 8153
   },
   {
     "path": "/api/v1/network/status",
     "method": "GET",
     "handler": "get_network_status",
     "access": "Operator",
-    "line": 8107
+    "line": 8154
   },
   {
     "path": "/api/v1/status",
     "method": "GET",
     "handler": "get_signage_status",
     "access": "Operator",
-    "line": 8108
+    "line": 8155
   },
   {
     "path": "/api/v1/dmx/frame",
     "method": "GET",
     "handler": "get_dmx_frame",
     "access": "Installer",
-    "line": 8109
+    "line": 8156
   },
   {
     "path": "/api/v1/manual",
     "method": "PUT",
     "handler": "put_manual",
     "access": "Operator",
-    "line": 8110
+    "line": 8157
   },
   {
     "path": "/api/v1/manual",
     "method": "DELETE",
     "handler": "delete_manual",
     "access": "Operator",
-    "line": 8111
+    "line": 8158
   },
   {
     "path": "/api/v1/effects",
     "method": "GET",
     "handler": "get_effects",
     "access": "Operator",
-    "line": 8112
+    "line": 8159
   },
   {
     "path": "/api/v1/palettes",
     "method": "GET",
     "handler": "get_palettes",
     "access": "Operator",
-    "line": 8113
+    "line": 8160
   },
   {
     "path": "/api/v1/health",
     "method": "GET",
     "handler": "get_health",
     "access": "Installer",
-    "line": 8114
+    "line": 8161
   },
   {
     "path": "/api/v1/diagnostics/output",
     "method": "GET",
     "handler": "get_diagnostics_output",
     "access": "Installer",
-    "line": 8115
+    "line": 8162
   },
   {
     "path": "/api/v1/diagnostics/storage",
     "method": "GET",
     "handler": "get_diagnostics_storage",
     "access": "Installer",
-    "line": 8116
+    "line": 8163
   },
   {
     "path": "/api/v1/diagnostics/memory",
     "method": "GET",
     "handler": "get_diagnostics_memory",
     "access": "Installer",
-    "line": 8117
+    "line": 8164
   },
   {
     "path": "/api/v1/logs",
     "method": "GET",
     "handler": "get_logs",
     "access": "Installer",
-    "line": 8118
+    "line": 8165
   },
   {
     "path": "/api/v1/sequence",
     "method": "GET",
     "handler": "get_sequence",
     "access": "Operator",
-    "line": 8119
+    "line": 8166
   },
   {
     "path": "/api/v1/sequence",
     "method": "PUT",
     "handler": "put_sequence",
     "access": "Operator",
-    "line": 8120
+    "line": 8167
   },
   {
     "path": "/api/v1/schedules",
     "method": "GET",
     "handler": "get_calendar_schedule",
     "access": "Operator",
-    "line": 8121
+    "line": 8168
   },
   {
     "path": "/api/v1/schedules",
     "method": "PUT",
     "handler": "put_calendar_schedule",
     "access": "Operator",
-    "line": 8122
+    "line": 8169
   },
   {
     "path": "/api/v1/scene-motion",
     "method": "GET",
     "handler": "get_scene_motion",
     "access": "Operator",
-    "line": 8123
+    "line": 8170
   },
   {
     "path": "/api/v1/scene-motion",
     "method": "PUT",
     "handler": "put_scene_motion",
     "access": "Operator",
-    "line": 8124
+    "line": 8171
   },
   {
     "path": "/api/v1/scene-motion",
     "method": "DELETE",
     "handler": "delete_scene_motion",
     "access": "Operator",
-    "line": 8125
+    "line": 8172
   },
   {
     "path": "/api/v1/cue-lists",
     "method": "GET",
     "handler": "get_cue_lists",
     "access": "Operator",
-    "line": 8126
+    "line": 8173
   },
   {
     "path": "/api/v1/cue-list",
     "method": "GET",
     "handler": "get_cue_list",
     "access": "Operator",
-    "line": 8127
+    "line": 8174
   },
   {
     "path": "/api/v1/cue-list",
     "method": "PUT",
     "handler": "put_cue_list",
     "access": "Operator",
-    "line": 8128
+    "line": 8175
   },
   {
     "path": "/api/v1/cue-list",
     "method": "DELETE",
     "handler": "delete_cue_list",
     "access": "Operator",
-    "line": 8129
+    "line": 8176
   },
   {
     "path": "/api/v1/cue/control",
     "method": "POST",
     "handler": "post_cue_control",
     "access": "Operator",
-    "line": 8130
+    "line": 8177
   },
   {
     "path": "/api/v1/cue/status",
     "method": "GET",
     "handler": "get_cue_status",
     "access": "Operator",
-    "line": 8131
+    "line": 8178
   },
   {
     "path": "/api/v1/show/status",
     "method": "GET",
     "handler": "get_show_status",
     "access": "Operator",
-    "line": 8132
+    "line": 8179
   },
   {
     "path": "/api/v1/show/control",
     "method": "POST",
     "handler": "post_show_control",
     "access": "Operator",
-    "line": 8133
+    "line": 8180
   },
   {
     "path": "/api/v1/sync",
     "method": "GET",
     "handler": "get_sync_status",
     "access": "Operator",
-    "line": 8134
+    "line": 8181
   },
   {
     "path": "/api/v1/show-manifest",
     "method": "GET",
     "handler": "get_show_manifest",
     "access": "Operator",
-    "line": 8135
+    "line": 8182
   },
   {
     "path": "/api/v1/audit",
     "method": "GET",
     "handler": "get_audit_log",
     "access": "Admin",
-    "line": 8136
+    "line": 8183
   },
   {
     "path": "/api/v1/ota",
     "method": "POST",
     "handler": "post_ota",
     "access": "Admin",
-    "line": 8137
+    "line": 8184
   },
   {
     "path": "/api/v1/ota/status",
     "method": "GET",
     "handler": "get_ota_status",
     "access": "Operator",
-    "line": 8138
+    "line": 8185
   },
   {
     "path": "/api/v1/recovery/status",
     "method": "GET",
     "handler": "get_recovery_status",
     "access": "Operator",
-    "line": 8139
+    "line": 8186
   },
   {
     "path": "/api/v1/backup",
     "method": "GET",
     "handler": "get_backup",
     "access": "Admin",
-    "line": 8140
+    "line": 8187
   },
   {
     "path": "/api/v1/restore/validate",
     "method": "POST",
     "handler": "post_restore_validate",
     "access": "Admin",
-    "line": 8141
+    "line": 8188
   },
   {
     "path": "/api/v1/restore",
     "method": "POST",
     "handler": "post_restore",
     "access": "Admin",
-    "line": 8142
+    "line": 8189
   },
   {
     "path": "/api/v1/certification/plan",
     "method": "GET",
     "handler": "get_certification_plan",
     "access": "Operator",
-    "line": 8143
+    "line": 8190
   },
   {
     "path": "/api/v1/certification/status",
     "method": "GET",
     "handler": "get_certification_status",
     "access": "Operator",
-    "line": 8144
+    "line": 8191
   },
   {
     "path": "/api/v1/certification/start",
     "method": "POST",
     "handler": "post_certification_start",
     "access": "Admin",
-    "line": 8145
+    "line": 8192
   },
   {
     "path": "/api/v1/certification/test/start",
     "method": "POST",
     "handler": "post_certification_test_start",
     "access": "Admin",
-    "line": 8146
+    "line": 8193
   },
   {
     "path": "/api/v1/certification/test/result",
     "method": "POST",
     "handler": "post_certification_test_result",
     "access": "Admin",
-    "line": 8147
+    "line": 8194
   },
   {
     "path": "/api/v1/certification/abort",
     "method": "POST",
     "handler": "post_certification_abort",
     "access": "Admin",
-    "line": 8148
+    "line": 8195
   },
   {
     "path": "/api/v1/certification/report",
     "method": "GET",
     "handler": "get_certification_report",
     "access": "Operator",
-    "line": 8149
+    "line": 8196
   }
 ]

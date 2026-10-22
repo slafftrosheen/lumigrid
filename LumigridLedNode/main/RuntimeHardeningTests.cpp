@@ -4821,7 +4821,7 @@ bool test_lg029_node_backed_authentication() {
         ESP_LOGI(TAG, "Testing LG-032 Scene Studio v2 & Safe Persistence...");
 
         // 1. Authoritative Effect Metadata
-        assert(kSignageEffectCount == 12);
+        assert(kSignageEffectCount == 24);
         for (size_t i = 0; i < kSignageEffectCount; ++i) {
             const auto& meta = signage_effect_metadata(static_cast<SignageEffect>(i));
             assert(meta.id != nullptr && strlen(meta.id) > 0);

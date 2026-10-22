@@ -2,13 +2,15 @@
 
 Audit date: 2026-10-21. Baseline `8afd6f04eb9fed6db82af102db07bfbed3e120ed`, branch `codex/lg-p0-boot-001`. Origin was fetched; main was already an ancestor, four commits behind. Pre-existing OutputController.cpp/.hpp edits were preserved and included in working-tree inspection. This is not hardware qualification.
 
+The effect/palette capacity row below follows the current catalogue. The audit findings retain the baseline and evidence scope above.
+
 | Public fact | Authority under firmware components | Boundary |
 | --- | --- | --- |
 | 8 addressable + 8 PWM | config/include/OutputCapabilities.hpp, board/include/lg_board_pins.hpp | Eight independent dimmers, not all PCA chip outputs |
 | WS2812 RGB / SK6812 RGBW | config/include/SignageTypes.hpp, output/ | Correct order/wiring and memory admission |
 | 32 scenes, 8 zones, 3 layers | config/include/Capabilities.hpp, SignageTypes.hpp | Capacity, not throughput |
 | 16 timeline steps; 8 × 16 cues | Same headers, scheduler/, show/ | Valid matching content |
-| 12 effects | signage_effect_metadata, signage/EffectRenderer.cpp | Per-effect parameters |
+| 24 effects, 14 palettes | config/include/SignageTypes.hpp: signage_effect_metadata and signage_palette_metadata; signage/EffectRenderer.cpp | Per-effect controls and PWM suitability; see [Effects](EFFECTS.md) |
 | Local control | factory/FactoryApi.cpp, web API/embedded sources | HTTP/WS browser restrictions |
 | Art-Net/sACN | protocols/, service planner | Disabled by default |
 | Node sync | sync/NodeSync.cpp, RuntimeServices.hpp | Shared LAN, no accuracy guarantee |

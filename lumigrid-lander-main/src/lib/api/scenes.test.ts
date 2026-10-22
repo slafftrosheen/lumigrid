@@ -16,6 +16,7 @@ import {
   getPreset,
 } from './scenes';
 import * as scenesApi from './scenes';
+import { EFFECT_METADATA, PALETTE_METADATA, LEGACY_EFFECTS, LEGACY_PALETTES } from './effectCatalog';
 
 describe('scenes model & serialization', () => {
   it('creates valid default layers and zones', () => {
@@ -60,7 +61,7 @@ describe('scenes model & serialization', () => {
     expect(isPresetDirty(p2, p1)).toBe(true);
 
     const p3 = clonePreset(p1);
-    p3.zones[2].layers[1].primaryColor.r = 120;
+    p3.channels![2].layers[1].primaryColor.r = 120;
     expect(isPresetDirty(p3, p1)).toBe(true);
   });
 
@@ -295,6 +296,9 @@ describe('scenes model & serialization', () => {
       expect(url).toBe('http://192.168.1.50/api/v1/presets');
       expect(opts.method).toBe('PUT');
       const parsedBody = JSON.parse(opts.body);
+      expect(parsedBody.channels).toHaveLength(16);
+      expect(parsedBody.channels[0].layers).toHaveLength(3);
+      expect(parsedBody.channels[0].layers[0].effect).toBe('solid');
       expect(parsedBody.expectedSceneChecksum).toBe(123);
       expect(parsedBody.expectedMotionChecksum).toBe(456);
       expect(parsedBody.motion).toBeDefined();
@@ -327,5 +331,140 @@ describe('scenes model & serialization', () => {
     } finally {
       vi.stubGlobal('fetch', originalFetch);
     }
+  });
+
+  it('prefers full channel values over the abbreviated legacy zones mirror', () => {
+    const preset = createDefaultPreset(0);
+    Object.assign(preset.channels![0].layers[0], { effect: 'confetti', paletteId: 13, fxParam: 15, speedMs: 4500 });
+    const normalized = normalizeScene(preset);
+    expect(normalized.zones[0].layers[0]).toEqual(normalized.channels![0].layers[0]);
+    expect(normalized.zones[0].layers[0].paletteId).toBe(13);
+  });
+
+  it('round trips expanded effects, palettes and zero parameters through export and import', () => {
+    const scene = createDefaultPreset(2, 'Expanded FX');
+    Object.assign(scene.channels![0].layers[0], { effect: 'confetti', paletteId: 13, fxParam: 15 });
+    Object.assign(scene.channels![1].layers[0], { effect: 'candle', fxParam: 0 });
+    const document = { scene, motion: { index: 2, transitionCurve: 'linear' as const, tracks: [] } };
+    const json = scenesApi.exportSceneDocument(document);
+    const result = scenesApi.validateImportedSceneDocument(json, { effects: EFFECT_METADATA, palettes: PALETTE_METADATA });
+    expect(result.valid).toBe(true);
+    if (result.valid) {
+      expect(result.document.scene.channels![0].layers[0].effect).toBe('confetti');
+      expect(result.document.scene.channels![0].layers[0].paletteId).toBe(13);
+      expect(result.document.scene.channels![1].layers[0].fxParam).toBe(0);
+    }
+    const olderNode = scenesApi.validateImportedSceneDocument(json, { effects: LEGACY_EFFECTS, palettes: LEGACY_PALETTES });
+    expect(olderNode.valid).toBe(false);
+    if (olderNode.valid === false) expect(olderNode.error).toContain('confetti');
+  });
+
+  it('validates palette membership against reported IDs, including sparse catalogues', () => {
+    const scene = createDefaultPreset(0);
+    scene.channels![0].layers[0].paletteId = 13;
+    expect(scenesApi.validateSceneCatalog(scene, { effects: EFFECT_METADATA, palettes: [{ id: 0 }, { id: 13 }] }).valid).toBe(true);
+    const result = scenesApi.validateSceneCatalog(scene, { effects: EFFECT_METADATA, palettes: LEGACY_PALETTES });
+    expect(result.valid).toBe(false);
+    if (result.valid === false) expect(result.error).toContain('palette 13');
+  });
+
+  it('saves new FX inside channel objects and refuses an unsupported catalogue before sending', async () => {
+    const originalFetch = globalThis.fetch;
+    const mockFetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ saved: true })));
+    vi.stubGlobal('fetch', mockFetch);
+    try {
+      const scene = createDefaultPreset(0);
+      Object.assign(scene.channels![0].layers[0], { effect: 'candle', paletteId: 13, fxParam: 0 });
+      const doc = { scene, motion: { index: 0, transitionCurve: 'linear' as const, tracks: [] } };
+      await scenesApi.saveSceneDocument('192.168.1.51', doc, { catalog: { effects: EFFECT_METADATA, palettes: PALETTE_METADATA } });
+      const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+      expect(body.channels).toHaveLength(16);
+      expect(body.zones).toBeUndefined();
+      expect(body.channels[0].layers[0].effect).toBe('candle');
+      expect(body.channels[0].layers[0].paletteId).toBe(13);
+      expect(body.channels[0].layers[0].fxParam).toBe(0);
+      mockFetch.mockClear();
+      await expect(scenesApi.saveSceneDocument('192.168.1.51', doc, { catalog: { effects: LEGACY_EFFECTS, palettes: LEGACY_PALETTES } })).rejects.toThrow('not available');
+      expect(mockFetch).not.toHaveBeenCalled();
+    } finally {
+      vi.stubGlobal('fetch', originalFetch);
+    }
+  });
+
+  it('refreshes catalogue caches after firmware changes and isolates node addresses', async () => {
+    const originalFetch = globalThis.fetch;
+    let effects = EFFECT_METADATA;
+    let palettes = PALETTE_METADATA;
+    const mockFetch = vi.fn().mockImplementation((url: string) => Promise.resolve(
+      new Response(JSON.stringify(url.includes('/palettes') ? palettes : effects))
+    ));
+    vi.stubGlobal('fetch', mockFetch);
+    try {
+      expect(await scenesApi.getEffectsCached('192.168.1.60', 'cache-test', true)).toHaveLength(24);
+      expect(await scenesApi.getPalettesCached('192.168.1.60', 'cache-test', true)).toHaveLength(14);
+      effects = LEGACY_EFFECTS;
+      palettes = LEGACY_PALETTES;
+      expect(await scenesApi.getEffectsCached('192.168.1.60', 'cache-test', true)).toHaveLength(12);
+      expect(await scenesApi.getPalettesCached('192.168.1.60', 'cache-test', true)).toHaveLength(6);
+      expect(await scenesApi.getEffectsCached('192.168.1.61', 'cache-test')).toHaveLength(12);
+      expect(mockFetch).toHaveBeenCalledTimes(5);
+    } finally {
+      vi.stubGlobal('fetch', originalFetch);
+    }
+  });
+
+  it('falls back for unavailable legacy endpoints, but propagates authentication failures', async () => {
+    const originalFetch = globalThis.fetch;
+    let status = 404;
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(() => Promise.resolve(new Response('{}', { status }))));
+    try {
+      expect(await scenesApi.getEffectsCached('192.168.1.62')).toHaveLength(12);
+      expect(await scenesApi.getPalettesCached('192.168.1.62')).toHaveLength(6);
+      status = 401;
+      await expect(scenesApi.getEffectsCached('192.168.1.62')).rejects.toThrow('401');
+    } finally {
+      vi.stubGlobal('fetch', originalFetch);
+    }
+  });
+
+  it('saves PWM intensity through opacity without changing colors or unrelated channels', async () => {
+    const originalFetch = globalThis.fetch;
+    const mockFetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ saved: true })));
+    vi.stubGlobal('fetch', mockFetch);
+    try {
+      const scene = createDefaultPreset(0, 'PWM levels');
+      for (const [channel, effect] of [[8, 'candle'], [15, 'heartbeat']] as const) {
+        Object.assign(scene.channels![channel].layers[0], {
+          effect, opacity: 200, paletteId: 13, fxParam: 35, speedMs: 3456,
+          primaryColor: { r: 16, g: 32, b: 64 },
+          secondaryColor: { r: 120, g: 80, b: 40 },
+        });
+      }
+      const before = clonePreset(scene);
+      expect(scenesApi.getPwmIntensity(scene.channels![8].layers[0])).toBe(200);
+      scenesApi.setPwmIntensity(scene.channels![8].layers[0], 0);
+      scenesApi.setPwmIntensity(scene.channels![15].layers[0], 127.5);
+
+      await scenesApi.saveSceneDocument('192.168.1.63', {
+        scene, motion: { index: 0, transitionCurve: 'linear', tracks: [] },
+      });
+      const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+      expect(body.channels[8].layers[0]).toEqual({ ...before.channels![8].layers[0], opacity: 0 });
+      expect(body.channels[15].layers[0]).toEqual({ ...before.channels![15].layers[0], opacity: 128 });
+      expect(body.channels.slice(0, 8)).toEqual(before.channels!.slice(0, 8));
+      expect(body.channels.slice(9, 15)).toEqual(before.channels!.slice(9, 15));
+    } finally {
+      vi.stubGlobal('fetch', originalFetch);
+    }
+  });
+
+  it('keeps PWM intensity in the wire range and ignores nonfinite input', () => {
+    const layer = createDefaultLayer();
+    scenesApi.setPwmIntensity(layer, -1);
+    expect(scenesApi.getPwmIntensity(layer)).toBe(0);
+    scenesApi.setPwmIntensity(layer, 256);
+    expect(scenesApi.getPwmIntensity(layer)).toBe(255);
+    scenesApi.setPwmIntensity(layer, NaN);
+    expect(scenesApi.getPwmIntensity(layer)).toBe(255);
   });
 });
