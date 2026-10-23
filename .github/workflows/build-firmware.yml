@@ -16,12 +16,13 @@ jobs:
   firmware-build:
     name: Firmware Build (PlatformIO / ESP-IDF)
     runs-on: ubuntu-latest
-    env:
-      PLATFORMIO_CORE_DIR: ${{ runner.temp }}/lumigrid-platformio
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Configure PlatformIO directory
+        run: echo "PLATFORMIO_CORE_DIR=$RUNNER_TEMP/lumigrid-platformio" >> "$GITHUB_ENV"
 
       - name: Set up Python
         uses: actions/setup-python@v5
