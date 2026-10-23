@@ -7,6 +7,8 @@
 
 namespace lg {
 
+constexpr size_t kCertificationTestIdCapacity = 24;
+
 enum class EvidenceSource : uint8_t {
     Automatic = 0,
     OperatorObservation = 1,
@@ -195,7 +197,7 @@ struct CertificationTestDefinition {
 };
 
 struct CertificationTestResult {
-    char test_id[16] = {0};
+    char test_id[kCertificationTestIdCapacity] = {0};
     CertificationTestState state = CertificationTestState::Pending;
     EvidenceSource evidence_source = EvidenceSource::Automatic;
     uint64_t started_ms = 0;

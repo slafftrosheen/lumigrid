@@ -20,7 +20,9 @@ namespace {
 
 void safe_strncpy(char* dst, const char* src, size_t dst_size) {
     if (dst_size == 0) return;
-    std::memcpy(dst, src, dst_size - 1);
+    // Source may be a short literal or a fixed-width legacy NVS field. Stop at
+    // its terminator and zero-pad, without reading past a short source object.
+    std::strncpy(dst, src, dst_size - 1);
     dst[dst_size - 1] = '\0';
 }
 

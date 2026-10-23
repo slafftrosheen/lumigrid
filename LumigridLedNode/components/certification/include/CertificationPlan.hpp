@@ -5,8 +5,8 @@
 
 namespace lg {
 
-static constexpr uint16_t kCertificationPlanVersion = 1;
-static constexpr size_t kMaxCertificationTests = 40;
+static constexpr uint16_t kCertificationPlanVersion = 2;
+static constexpr size_t kMaxCertificationTests = 46;
 
 class CertificationPlan {
 public:

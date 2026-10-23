@@ -7751,6 +7751,7 @@ static esp_err_t get_certification_status(httpd_req_t* request) {
     if (!api_ptr->certification_service()) {
         return send_error(request, "503 Service Unavailable", "CertificationService not available");
     }
+    api_ptr->certification_service()->tick(esp_timer_get_time() / 1000ULL);
 
     const auto& s = api_ptr->certification_service()->session();
     const auto& r = api_ptr->certification_service()->record();
@@ -7812,6 +7813,7 @@ static esp_err_t post_certification_start(httpd_req_t* request) {
     if (!api_ptr->certification_service()) {
         return send_error(request, "503 Service Unavailable", "CertificationService not available");
     }
+    api_ptr->certification_service()->tick(esp_timer_get_time() / 1000ULL);
 
     cJSON* root = nullptr;
     read_json(request, &root);
@@ -7854,6 +7856,7 @@ static esp_err_t post_certification_test_start(httpd_req_t* request) {
     if (!api_ptr->certification_service()) {
         return send_error(request, "503 Service Unavailable", "CertificationService not available");
     }
+    api_ptr->certification_service()->tick(esp_timer_get_time() / 1000ULL);
 
     cJSON* root = nullptr;
     if (read_json(request, &root) != ESP_OK || !root) {
@@ -7886,6 +7889,7 @@ static esp_err_t post_certification_test_result(httpd_req_t* request) {
     if (!api_ptr->certification_service()) {
         return send_error(request, "503 Service Unavailable", "CertificationService not available");
     }
+    api_ptr->certification_service()->tick(esp_timer_get_time() / 1000ULL);
 
     cJSON* root = nullptr;
     if (read_json(request, &root) != ESP_OK || !root) {
@@ -7893,46 +7897,89 @@ static esp_err_t post_certification_test_result(httpd_req_t* request) {
     }
 
     cJSON* tid = cJSON_GetObjectItem(root, "testId");
-    if (!tid || !tid->valuestring) {
+    if (!cJSON_IsString(tid) || !tid->valuestring[0]) {
         cJSON_Delete(root);
         return send_error(request, "400 Bad Request", "Missing testId");
+    }
+    const auto* definition = CertificationPlan::find_test(tid->valuestring);
+    if (!definition) {
+        cJSON_Delete(root);
+        return send_error(request, "400 Bad Request", "Unknown certification test");
     }
 
     bool passed = false;
     cJSON* p = cJSON_GetObjectItem(root, "passed");
+    if (p && !cJSON_IsBool(p)) {
+        cJSON_Delete(root);
+        return send_error(request, "400 Bad Request", "passed must be boolean");
+    }
     if (p) passed = cJSON_IsTrue(p);
 
     CertificationTestState state = passed ? CertificationTestState::Passed : CertificationTestState::Failed;
     cJSON* st_item = cJSON_GetObjectItem(root, "state");
-    if (st_item && st_item->valuestring) {
-        parse_cert_test_state(st_item->valuestring, state);
+    if ((!p && !st_item) ||
+        (st_item && (!cJSON_IsString(st_item) || !parse_cert_test_state(st_item->valuestring, state))) ||
+        (state != CertificationTestState::Passed && state != CertificationTestState::Failed &&
+         state != CertificationTestState::Skipped && state != CertificationTestState::Blocked)) {
+        cJSON_Delete(root);
+        return send_error(request, "400 Bad Request", "Invalid terminal certification state");
     }
 
     EvidenceSource src = EvidenceSource::OperatorObservation;
     cJSON* src_item = cJSON_GetObjectItem(root, "evidenceSource");
-    if (src_item && src_item->valuestring) {
-        parse_evidence_source(src_item->valuestring, src);
+    if ((src_item && (!cJSON_IsString(src_item) || !parse_evidence_source(src_item->valuestring, src))) ||
+        src == EvidenceSource::Automatic) {
+        // Automatic results are created by executed internal probes/jobs.
+        // HTTP submissions represent operator observations or measurements.
+        cJSON_Delete(root);
+        return send_error(request, "400 Bad Request", "Invalid external evidence source");
     }
 
     float measured_val = 0.0f;
     cJSON* mv = cJSON_GetObjectItem(root, "measuredValue");
-    if (mv && cJSON_IsNumber(mv)) {
+    const bool instrument_result = definition->required_evidence == EvidenceSource::InstrumentMeasurement &&
+        (state == CertificationTestState::Passed || state == CertificationTestState::Failed);
+    if ((instrument_result && !mv) || (mv && (!cJSON_IsNumber(mv) || !std::isfinite(mv->valuedouble)))) {
+        cJSON_Delete(root);
+        return send_error(request, "400 Bad Request", "A finite numeric measurement is required");
+    }
+    if (mv) {
         measured_val = static_cast<float>(mv->valuedouble);
+        if (!std::isfinite(measured_val)) {
+            cJSON_Delete(root);
+            return send_error(request, "400 Bad Request", "Measurement exceeds supported range");
+        }
     }
 
     const char* unit = "";
     cJSON* u = cJSON_GetObjectItem(root, "unit");
-    if (u && u->valuestring) unit = u->valuestring;
+    if (u && !cJSON_IsString(u)) {
+        cJSON_Delete(root);
+        return send_error(request, "400 Bad Request", "unit must be a string");
+    }
+    if (u) unit = u->valuestring;
+    if (instrument_result && strcmp(unit, definition->unit) != 0) {
+        cJSON_Delete(root);
+        return send_error(request, "400 Bad Request", "Measurement unit does not match the test plan");
+    }
 
     const char* note = "";
     cJSON* n = cJSON_GetObjectItem(root, "note");
-    if (n && n->valuestring) note = n->valuestring;
+    if (n && !cJSON_IsString(n)) {
+        cJSON_Delete(root);
+        return send_error(request, "400 Bad Request", "note must be a string");
+    }
+    if (n) note = n->valuestring;
 
     esp_err_t err = api_ptr->certification_service()->record_result(
         tid->valuestring, state, src, measured_val, unit, note);
     cJSON_Delete(root);
 
     if (err != ESP_OK) {
+        if (err == ESP_ERR_NO_MEM)
+            return send_error(request, "503 Service Unavailable", "Certification storage unavailable");
+        if (err != ESP_ERR_INVALID_ARG && err != ESP_ERR_INVALID_STATE && err != ESP_ERR_NOT_FOUND)
+            return send_error(request, "500 Internal Server Error", "Certification evidence was not persisted");
         return send_error(request, "400 Bad Request", "Failed to record test result (validation / anti-spoof check failed)");
     }
 
@@ -7950,8 +7997,12 @@ static esp_err_t post_certification_abort(httpd_req_t* request) {
     if (!api_ptr->certification_service()) {
         return send_error(request, "503 Service Unavailable", "CertificationService not available");
     }
+    api_ptr->certification_service()->tick(esp_timer_get_time() / 1000ULL);
 
-    api_ptr->certification_service()->abort();
+    const esp_err_t err = api_ptr->certification_service()->abort();
+    if (err != ESP_OK) {
+        return send_error(request, "500 Internal Server Error", "Certification abort was not persisted");
+    }
     cJSON* resp = cJSON_CreateObject();
     cJSON_AddStringToObject(resp, "status", "aborted");
     api_ptr->notify_status_async();
@@ -7965,6 +8016,7 @@ static esp_err_t get_certification_report(httpd_req_t* request) {
     if (!api_ptr->certification_service()) {
         return send_error(request, "503 Service Unavailable", "CertificationService not available");
     }
+    api_ptr->certification_service()->tick(esp_timer_get_time() / 1000ULL);
 
     // Fixed report headers plus one test tree/string at a time. Never retain
     // all test objects and their serialized document simultaneously.
@@ -8306,6 +8358,13 @@ esp_err_t FactoryApi::start(
 
 void FactoryApi::ws_broadcast_work(void* arg) {
     std::unique_ptr<WsBroadcastArg> msg(static_cast<WsBroadcastArg*>(arg));
+
+    // Certification mutations and NVS persistence share the HTTP owner with
+    // its request handlers. The periodic status work also runs without a WS
+    // client, keeping timeouts and burn-in completion off the lighting task.
+    if (msg->api->cert_service_) {
+        msg->api->cert_service_->tick(esp_timer_get_time() / 1000ULL);
+    }
 
     // LG-038.3 §55/§82: fixed bounded array; no heap vector per broadcast.
     int client_fds[kMaxClientListFds];

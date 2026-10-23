@@ -116,8 +116,8 @@ Typical errors include 400 invalid payload, 401 authorization/session expiry,
 the server response rather than turning every error into a connectivity message.
 
 OTA is Admin-only, checks image/storage conditions and requires post-reboot
-verification. See [Flash layout](FLASH_LAYOUT.md), including the unresolved
-signed-OTA capability claim. Backup and restore are separate from credential
+verification. See [Flash layout](FLASH_LAYOUT.md), including the effective
+signed-OTA setting. Backup and restore are separate from credential
 recovery; inspect validation/scope before applying a restore.
 
 ## Registered routes

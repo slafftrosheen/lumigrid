@@ -6,6 +6,7 @@
 #include <cstring>
 #include <array>
 #include "ChannelHardware.hpp"
+#include "CertificationTypes.hpp"
 
 namespace lg {
 
@@ -206,7 +207,7 @@ struct ChannelSnapshot {
 
 struct CertificationSnapshot {
     char state[16] = {0};
-    char current_test[16] = {0};
+    char current_test[kCertificationTestIdCapacity] = {0};
     uint16_t passed = 0;
     uint16_t failed = 0;
     uint16_t total = 0;

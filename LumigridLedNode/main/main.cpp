@@ -42,7 +42,11 @@ static void runtime_hardening_test_task(void*) {
 
 extern "C" void app_main(void) {
   // LG-HW-004 §3/§4: Board-level early electrical output safety bootstrap
-  lg::board::force_outputs_safe_early();
+  const esp_err_t safety_err = lg::board::force_outputs_safe_early();
+  if (safety_err != ESP_OK) {
+    ESP_LOGE("lumigrid", "BOOT_FAILED stage=early_output_safety error=%s", esp_err_to_name(safety_err));
+    return;
+  }
   // LG-HW-004 §10/§16: Initialize reset forensics and print concise serial banner
   lg::board::init_reset_forensics();
 

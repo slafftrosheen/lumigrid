@@ -461,13 +461,15 @@ BlackoutResult OutputController::blackout() {
 }
 
 void OutputController::latch_estop() {
-    // 1. Atomically latch state
+    // Serialize the latch/GPIO write against the commit's final enable. A frame
+    // already inside I2C/RMT must not lower /OE after this stop was observed.
+    portENTER_CRITICAL(&safety_gate_mux_);
+    estop_generation_.fetch_add(1, std::memory_order_relaxed);
     estop_latched_.store(true, std::memory_order_release);
     output_enabled_.store(false, std::memory_order_release);
     last_fault_domain_.store(OutputFaultDomain::Safety, std::memory_order_release);
-
-    // 2. Assert PCA /OE HIGH immediately without waiting on output lock or RMT
     Pca9685Driver::force_disable_outputs();
+    portEXIT_CRITICAL(&safety_gate_mux_);
 
     // 3. Acquire output lock and blackout
     lock();
@@ -479,6 +481,7 @@ esp_err_t OutputController::clear_estop() {
     // Clearing the physical latch only re-arms the controller with known-zero outputs.
     // It must NOT immediately restore previous or stale output.
     lock();
+    const uint32_t clear_generation = estop_generation_.load(std::memory_order_acquire);
 #if defined(CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS) && CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS
     const bool mock = test_mode_.load(std::memory_order_acquire);
     if (!mock) Pca9685Driver::disable_outputs();
@@ -505,12 +508,20 @@ esp_err_t OutputController::clear_estop() {
     b_res.pwm_confirmed = (p_err == ESP_OK);
     last_blackout_result_ = b_res;
 
-    const esp_err_t err = (a_res.result != ESP_OK) ? a_res.result : p_err;
+    esp_err_t err = (a_res.result != ESP_OK) ? a_res.result : p_err;
 
     if (err == ESP_OK) {
-        estop_latched_.store(false, std::memory_order_release);
-        output_enabled_.store(true, std::memory_order_release);
-        last_fault_domain_.store(OutputFaultDomain::None, std::memory_order_release);
+        portENTER_CRITICAL(&safety_gate_mux_);
+        if (estop_generation_.load(std::memory_order_relaxed) != clear_generation) {
+            // A newer stop arrived while zeroing hardware. Only a later explicit
+            // clear may acknowledge that stop, even though this zero succeeded.
+            err = ESP_ERR_INVALID_STATE;
+        } else {
+            estop_latched_.store(false, std::memory_order_release);
+            output_enabled_.store(true, std::memory_order_release);
+            last_fault_domain_.store(OutputFaultDomain::None, std::memory_order_release);
+        }
+        portEXIT_CRITICAL(&safety_gate_mux_);
         // Leave /OE HIGH! The next successful commit exposes PWM.
     } else {
         ESP_LOGE("output", "clear_estop failed to zero hardware cleanly (addr=%s, pwm=%s)",
@@ -543,6 +554,9 @@ esp_err_t OutputController::recover_pca_on_output_core() {
         last_fault_domain_.store(OutputFaultDomain::PcaI2c, std::memory_order_release);
         Pca9685Driver::disable_outputs();
     } else {
+        // init may have left PWM unavailable. Verified recovery restores it,
+        // while OE and the controller's emergency/output gates stay unchanged.
+        pwm_available_.store(true, std::memory_order_release);
         if (last_fault_domain_.load(std::memory_order_relaxed) == OutputFaultDomain::PcaI2c) {
             last_fault_domain_.store(OutputFaultDomain::None, std::memory_order_release);
         }
@@ -681,9 +695,6 @@ esp_err_t OutputController::try_commit_locked() {
         pwm_us = static_cast<uint32_t>(t_pwm_end - t_pwm_start);
     }
 
-    const int64_t t_total_end = esp_timer_get_time();
-    const uint32_t total_us = static_cast<uint32_t>(t_total_end - t_total_start);
-
     esp_err_t err1 = a_res.result;
     esp_err_t err2 = pwm_err;
 
@@ -700,7 +711,23 @@ esp_err_t OutputController::try_commit_locked() {
     }
 #endif
 
+    // OE exposure is part of a successful physical commit. A driver that still
+    // requires recovery must fail the transaction even if its zero write worked.
+    if (err1 == ESP_OK && err2 == ESP_OK) {
+        portENTER_CRITICAL(&safety_gate_mux_);
+        if (estop_latched_.load(std::memory_order_acquire) ||
+            !output_enabled_.load(std::memory_order_acquire) ||
+            !topology_valid_.load(std::memory_order_acquire)) {
+            Pca9685Driver::force_disable_outputs();
+            err2 = ESP_ERR_INVALID_STATE;
+        } else if (pwm_available_.load(std::memory_order_acquire)) {
+            err2 = pwm_.enable_outputs();
+        }
+        portEXIT_CRITICAL(&safety_gate_mux_);
+    }
     esp_err_t final_err = (err1 != ESP_OK) ? err1 : err2;
+    const int64_t t_total_end = esp_timer_get_time();
+    const uint32_t total_us = static_cast<uint32_t>(t_total_end - t_total_start);
 
     commit_metrics_.last_addressable_us = addr_us;
     if (addr_us > commit_metrics_.max_addressable_us) commit_metrics_.max_addressable_us = addr_us;
@@ -720,7 +747,9 @@ esp_err_t OutputController::try_commit_locked() {
     if (final_err != ESP_OK) {
         commit_metrics_.failed++;
         failed_commit_count_.fetch_add(1, std::memory_order_relaxed);
-        if (err1 != ESP_OK) {
+        if (estop_latched_.load(std::memory_order_acquire)) {
+            last_fault_domain_.store(OutputFaultDomain::Safety, std::memory_order_release);
+        } else if (err1 != ESP_OK) {
             last_fault_domain_.store(OutputFaultDomain::AddressableRmt, std::memory_order_release);
         } else if (err2 != ESP_OK) {
             last_fault_domain_.store(OutputFaultDomain::PcaI2c, std::memory_order_release);
@@ -730,9 +759,6 @@ esp_err_t OutputController::try_commit_locked() {
     } else {
         if (last_fault_domain_.load(std::memory_order_relaxed) != OutputFaultDomain::Safety) {
             last_fault_domain_.store(OutputFaultDomain::None, std::memory_order_release);
-        }
-        if (pwm_available_.load(std::memory_order_acquire)) {
-            pwm_.enable_outputs();
         }
         commit_metrics_.successful++;
     }
@@ -747,6 +773,7 @@ esp_err_t OutputController::try_commit_locked() {
 void OutputController::enforce_power_guard_locked() {
     uint64_t ch_mw[kChannelCount] = {};
     uint64_t total_mw = 0;
+    const bool legacy_power_fields = power_cfg_.schema_version < 4;
 
     for (uint8_t lane = 0; lane < AddressableDriver::kLanes; ++lane) {
         if (!pixels_.configured(lane)) continue;
@@ -785,8 +812,13 @@ void OutputController::enforce_power_guard_locked() {
         const auto& pwm_vals = pwm_.values();
         for (uint8_t ch = 8; ch < kChannelCount; ++ch) {
             const auto& ccfg = power_cfg_.channels[ch];
+            if (!ccfg.enabled) {
+                pwm_.set(ch - 8, 0);
+                continue;
+            }
             const uint16_t duty = pwm_vals[ch - 8];
-            const uint32_t rated = ccfg.rated_full_power_mw > 0 ? ccfg.rated_full_power_mw : ccfg.max_milliwatts;
+            const uint32_t rated = legacy_power_fields && ccfg.rated_full_power_mw == 0
+                ? ccfg.max_milliwatts : ccfg.rated_full_power_mw;
             if (duty > 0 && rated > 0) {
                 const uint64_t pwm_mw = (static_cast<uint64_t>(duty) * rated) / 4095u;
                 ch_mw[ch] = pwm_mw;
@@ -798,7 +830,10 @@ void OutputController::enforce_power_guard_locked() {
     // 2. Local channel limit enforcement
     for (uint8_t ch = 0; ch < kChannelCount; ++ch) {
         const auto& ccfg = power_cfg_.channels[ch];
-        const uint32_t ch_limit = ccfg.channel_limit_mw > 0 ? ccfg.channel_limit_mw : ccfg.max_milliwatts;
+        // Schema v4 zero is intentional (unlimited/unknown). Migration populates
+        // canonical fields once; a stale legacy value must not revive a limit.
+        const uint32_t ch_limit = legacy_power_fields && ccfg.channel_limit_mw == 0
+            ? ccfg.max_milliwatts : ccfg.channel_limit_mw;
         if (ch_limit > 0 && ch_mw[ch] > ch_limit) {
             const uint16_t scale_256 = static_cast<uint16_t>((static_cast<uint64_t>(ch_limit) * 256u) / ch_mw[ch]);
             if (ch < 8) {

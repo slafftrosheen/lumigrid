@@ -216,7 +216,10 @@ void Pca9685Driver::force_disable_outputs() {
 }
 
 esp_err_t Pca9685Driver::enable_outputs() {
-    if (!initialized_ || !valid_frame_confirmed_ || !zero_confirmed_) {
+    // init/recover establish the first verified zero frame. Later valid frames
+    // may contain light; zero_confirmed_ describes the current frame only.
+    // A successful blackout write must not bypass an outstanding recovery latch.
+    if (!initialized_ || !valid_frame_confirmed_ || recovery_required_) {
         disable_pwm_outputs();
         return ESP_ERR_INVALID_STATE;
     }
@@ -400,9 +403,10 @@ esp_err_t Pca9685Driver::init() {
 
     // Keep hardware disabled until the controller is configured, verified and a
     // known-safe frame has been written. This prevents boot-time PWM flashes.
+    disable_pwm_outputs(); // preload HIGH before enabling/reconfiguring the pad
     const gpio_config_t oe_conf = {
         .pin_bit_mask = (1ULL << lg::board::kPcaOe),
-        .mode = GPIO_MODE_OUTPUT,
+        .mode = GPIO_MODE_INPUT_OUTPUT,
         .pull_up_en = GPIO_PULLUP_ENABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
         .intr_type = GPIO_INTR_DISABLE,
@@ -428,6 +432,12 @@ esp_err_t Pca9685Driver::init() {
 
 esp_err_t Pca9685Driver::recover() {
     disable_pwm_outputs();
+    // Recovery can also be requested while healthy. Invalidate the previous
+    // readiness before touching the bus so every failure remains disabled.
+    initialized_ = false;
+    zero_confirmed_ = false;
+    valid_frame_confirmed_ = false;
+    recovery_required_ = true;
     recovery_attempts_++;
 
     ESP_LOGW(TAG, "Starting PCA bus recovery (attempt #%lu)...", (unsigned long)recovery_attempts_);

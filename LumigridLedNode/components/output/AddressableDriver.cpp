@@ -94,7 +94,8 @@ esp_err_t AddressableDriver::init() {
     ESP_LOGI(TAG, "Initialising AddressableDriver (%u lanes, max %u px/lane, parallel RMT)",
              kLanes, kPixels);
     for (uint8_t lane = 0; lane < kLanes; ++lane) {
-        clear_lane(lane);
+        const esp_err_t err = clear_lane(lane);
+        if (err != ESP_OK) return err;
     }
     return ESP_OK;
 }
@@ -117,7 +118,8 @@ esp_err_t AddressableDriver::configure_lane(
 
     // Tear down any existing lane first so state is always consistent with the
     // current (potentially zero-length) configuration.
-    clear_lane(lane);
+    const esp_err_t release_err = clear_lane(lane);
+    if (release_err != ESP_OK) return release_err;
 
     if (num_pixels == 0) {
         ESP_LOGI(TAG, "Lane %u deconfigured (num_pixels=0)", lane);
@@ -148,17 +150,20 @@ esp_err_t AddressableDriver::configure_lane(
 // clear() zeroes staged wire data and the diagnostic shadow. It does NOT transmit;
 // call show()/blackout() to push zeros to the LEDs.
 void AddressableDriver::clear() {
-    rmt_.stage_clear_all();
     for (uint8_t lane = 0; lane < kLanes; ++lane) {
-        if (shadow_[lane]) memset(shadow_[lane], 0, rmt_.pixels(lane) * sizeof(AddressableShadowPixel));
+        if (rmt_.stage_clear_lane(lane) && shadow_[lane]) {
+            memset(shadow_[lane], 0, rmt_.pixels(lane) * sizeof(AddressableShadowPixel));
+        }
     }
 }
 
 // clear_lane() releases the RMT resources of this lane and resets all its state.
-void AddressableDriver::clear_lane(uint8_t lane) {
-    if (lane >= kLanes) return;
-    rmt_.release_lane(lane);
+esp_err_t AddressableDriver::clear_lane(uint8_t lane) {
+    if (lane >= kLanes) return ESP_ERR_INVALID_ARG;
+    const esp_err_t err = rmt_.release_lane(lane);
+    if (err != ESP_OK) return err;
     free_shadow(lane);
+    return ESP_OK;
 }
 
 // clear_buffer() zeroes staged data without touching the hardware.
@@ -172,7 +177,7 @@ void AddressableDriver::set(uint8_t lane, uint16_t pixel, uint8_t r, uint8_t g, 
     if (lane >= kLanes || !rmt_.configured(lane)) return;
     if (pixel >= rmt_.pixels(lane)) return; // bounds: configured length, not kPixels
 
-    rmt_.stage_pixel(lane, pixel, r, g, b, w);
+    if (!rmt_.stage_pixel(lane, pixel, r, g, b, w)) return;
 
     if (shadow_[lane]) {
         // Shadow reflects what was actually staged: W only exists on RGBW lanes.
@@ -206,7 +211,15 @@ AddressableCommitResult AddressableDriver::show() {
 // cannot transmit a zero frame is NOT confirmed dark.
 AddressableCommitResult AddressableDriver::blackout() {
     clear();
-    return rmt_.commit(true);
+    const auto result = rmt_.commit(true);
+    // A faulted lane may have drained and staged its deferred zero inside commit.
+    // Keep the diagnostic shadow truthful for lanes whose buffers are now idle.
+    for (uint8_t lane = 0; lane < kLanes; ++lane) {
+        if (!rmt_.wire_in_flight(lane) && shadow_[lane]) {
+            memset(shadow_[lane], 0, rmt_.pixels(lane) * sizeof(AddressableShadowPixel));
+        }
+    }
+    return result;
 }
 
 } // namespace lg

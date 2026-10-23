@@ -230,6 +230,10 @@ private:
     AddressableDriver pixels_;
     Pca9685Driver pwm_;
     SemaphoreHandle_t mutex_ = nullptr;
+    // Only the final GPIO enable and immediate stop latch share this short
+    // critical section. Never hold it across I2C, RMT, or a blocking mutex.
+    portMUX_TYPE safety_gate_mux_ = portMUX_INITIALIZER_UNLOCKED;
+    std::atomic<uint32_t> estop_generation_{0};
 
     CommitObserver commit_observer_{};
 

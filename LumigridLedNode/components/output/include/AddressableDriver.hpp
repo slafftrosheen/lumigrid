@@ -41,7 +41,7 @@ public:
     esp_err_t configure_lane(uint8_t lane, uint8_t gpio, FixtureProfile profile, PixelOrder order, uint16_t num_pixels);
 
     void clear();
-    void clear_lane(uint8_t lane);
+    esp_err_t clear_lane(uint8_t lane);
     void clear_buffer();
     void set(uint8_t lane, uint16_t pixel, uint8_t r, uint8_t g, uint8_t b, uint8_t w);
     void fill(uint8_t lane, uint8_t r, uint8_t g, uint8_t b, uint8_t w = 0);

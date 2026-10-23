@@ -8,9 +8,11 @@
 
 namespace lg {
 
+constexpr uint16_t kCertificationRecordSchemaVersion = 2;
+
 struct CertificationRecord {
     uint32_t magic = 0x4C474354; // "LGCT"
-    uint16_t schema_version = 1;
+    uint16_t schema_version = kCertificationRecordSchemaVersion;
     uint16_t reserved = 0;
     uint32_t sequence = 0;
     CertificationSession session{};
@@ -44,6 +46,8 @@ public:
 
 private:
     bool initialized_ = false;
+    int8_t active_slot_ = -1;
+    uint32_t committed_sequence_ = 0;
     CertificationRecord record_{};
 };
 

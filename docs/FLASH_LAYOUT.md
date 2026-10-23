@@ -32,7 +32,15 @@ Admin-only POST `/api/v1/ota` accepts a raw application image. It checks mainten
 
 Boot policy requires 10 seconds of healthy dwell inside a 60-second window. Fatal startup, critical memory or timeout can request rollback. Inspect `/api/v1/ota/status`, recovery status and health after reconnecting. Upload completion is not boot acceptance.
 
-The manifest advertises `signedOta=true`, but the reviewed upload handler and checked-in defaults do not establish enforced signature verification. Do not advertise signed-image enforcement until that gap is resolved. ESP image validation and rollback are separate properties.
+The `signedOta` capability follows ESP-IDF's effective `CONFIG_SECURE_SIGNED_ON_UPDATE` setting. The checked-in defaults leave it disabled, so the default build reports `signedOta=false`. Image validation and rollback do not establish cryptographic signature enforcement. A signed production provisioning/update process remains separate work.
+
+## Traceable candidate artifacts
+
+The firmware workflow builds both `factory` and `test`, then packages their binaries, ELF files, effective configurations, source/tool hashes and the checked partition table with `scripts/firmware_release_manifest.py`. The factory image is the production candidate; the test image contains diagnostic/development flags. The manifest explicitly records hardware validation as `NOT_RUN` and compliance assessment as `NOT_PERFORMED`.
+
+The merged image declares **8 MB** flash. It is a fresh-install image at offset zero: its padding covers NVS and OTA metadata and can erase saved credentials/configuration if written to an existing device. Use the preserving migration above for an older layout, or application-only OTA on a compatible layout. Do not treat the merged image as a preserving update.
+
+See [firmware candidate and bench gates](FIRMWARE_RELEASE_CANDIDATE.md) before handing an image to a test lab.
 
 The web flasher provides build guidance: no verified `latest_builds/manifest.json` release bundle is supplied by this checkout.
 

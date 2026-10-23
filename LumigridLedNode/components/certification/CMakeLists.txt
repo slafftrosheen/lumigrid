@@ -13,6 +13,7 @@ idf_component_register(
         output
         board
         esp_timer
+        esp_app_format
         nvs_flash
         esp_rom
         freertos

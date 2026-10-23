@@ -6,8 +6,8 @@ namespace lg {
 
 namespace {
 
-// Static const table of all certification tests in Plan v1
-static constexpr CertificationTestDefinition kPlanV1Tests[] = {
+// Plan v2 requires complete, correctly sized evidence for every required test.
+static constexpr CertificationTestDefinition kPlanTests[] = {
     // ── BOOT ──
     { "BOOT-001", "BOOT", "Boot Sequence & Identity Assertion",
       EvidenceSource::Automatic, RequirementLevel::Required, RequirementLevel::Required, RequirementLevel::Required,
@@ -191,23 +191,33 @@ static constexpr CertificationTestDefinition kPlanV1Tests[] = {
       300000, 0.0f, 5000.0f, "us" }
 };
 
-static constexpr size_t kPlanV1TestCount = sizeof(kPlanV1Tests) / sizeof(kPlanV1Tests[0]);
+static constexpr size_t kPlanTestCount = sizeof(kPlanTests) / sizeof(kPlanTests[0]);
+static_assert(kPlanTestCount <= kMaxCertificationTests, "Certification plan exceeds result capacity");
+constexpr bool plan_ids_fit() {
+    for (const auto& test : kPlanTests) {
+        size_t length = 0;
+        while (test.id[length]) ++length;
+        if (length == 0 || length >= kCertificationTestIdCapacity) return false;
+    }
+    return true;
+}
+static_assert(plan_ids_fit(), "Certification ID exceeds a result/runner/status buffer");
 
 } // namespace
 
 size_t CertificationPlan::test_count() {
-    return kPlanV1TestCount;
+    return kPlanTestCount;
 }
 
 const CertificationTestDefinition* CertificationPlan::test_definitions() {
-    return kPlanV1Tests;
+    return kPlanTests;
 }
 
 const CertificationTestDefinition* CertificationPlan::find_test(const char* test_id) {
     if (!test_id) return nullptr;
-    for (size_t i = 0; i < kPlanV1TestCount; ++i) {
-        if (strcmp(kPlanV1Tests[i].id, test_id) == 0) {
-            return &kPlanV1Tests[i];
+    for (size_t i = 0; i < kPlanTestCount; ++i) {
+        if (strcmp(kPlanTests[i].id, test_id) == 0) {
+            return &kPlanTests[i];
         }
     }
     return nullptr;
@@ -215,8 +225,8 @@ const CertificationTestDefinition* CertificationPlan::find_test(const char* test
 
 int CertificationPlan::find_test_index(const char* test_id) {
     if (!test_id) return -1;
-    for (size_t i = 0; i < kPlanV1TestCount; ++i) {
-        if (strcmp(kPlanV1Tests[i].id, test_id) == 0) {
+    for (size_t i = 0; i < kPlanTestCount; ++i) {
+        if (strcmp(kPlanTests[i].id, test_id) == 0) {
             return static_cast<int>(i);
         }
     }

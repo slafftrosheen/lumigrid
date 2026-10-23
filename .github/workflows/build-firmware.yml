@@ -16,6 +16,8 @@ jobs:
   firmware-build:
     name: Firmware Build (PlatformIO / ESP-IDF)
     runs-on: ubuntu-latest
+    env:
+      PLATFORMIO_CORE_DIR: ${{ runner.temp }}/lumigrid-platformio
 
     steps:
       - name: Checkout code
@@ -24,12 +26,19 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.x"
+          python-version: "3.12"
 
-      - name: Install dependencies
+      - name: Set up Node.js for embedded dashboard generation
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: lumigrid-lander-main/package-lock.json
+
+      - name: Install firmware and locked embedded dashboard dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install platformio esptool
+          python -m pip install platformio==6.2.0
+          npm ci --prefix lumigrid-lander-main
 
       - name: Static Architecture & Lifecycle Sanity Checks
         run: |
@@ -57,6 +66,15 @@ jobs:
           # 5. Dedicated invariant checker
           python LumigridLedNode/scripts/test_boot_config.py
           python LumigridLedNode/scripts/test_boot_stack.py
+          python LumigridLedNode/scripts/test_partition_layout.py
+          python LumigridLedNode/scripts/test_firmware_release_manifest.py
+          python LumigridLedNode/scripts/test_output_drivers.py
+          python LumigridLedNode/scripts/test_wifi_recovery.py
+          python LumigridLedNode/scripts/test_config_strings.py
+          python LumigridLedNode/scripts/test_board_bootstrap.py
+          python LumigridLedNode/scripts/test_certification_service.py
+          python LumigridLedNode/scripts/test_certification_api.py
+          python LumigridLedNode/scripts/test_certification_store.py
           python LumigridLedNode/scripts/check_invariants.py
           # 6. Runtime mathematical and protocol simulation tests
           python LumigridLedNode/scripts/verify_runtime_math.py
@@ -92,32 +110,21 @@ jobs:
       - name: Merge Binaries
         run: |
           cd LumigridLedNode
-          esptool.py --chip esp32 merge_bin -o merged_firmware.bin --flash_mode dio --flash_freq 40m --flash_size 4MB 0x1000 .pio/build/factory/bootloader.bin 0x8000 .pio/build/factory/partitions.bin 0x10000 .pio/build/factory/firmware.bin
+          python "$PLATFORMIO_CORE_DIR/packages/tool-esptoolpy/esptool.py" --chip esp32 merge_bin -o .pio/build/merged_firmware.bin --flash_mode dio --flash_freq 40m --flash_size 8MB 0x1000 .pio/build/factory/bootloader.bin 0x8000 .pio/build/factory/partitions.bin 0x10000 .pio/build/factory/firmware.bin
+
+      - name: Validate and package traceable firmware candidate
+        run: |
+          python LumigridLedNode/scripts/firmware_release_manifest.py \
+            --merged-firmware LumigridLedNode/.pio/build/merged_firmware.bin \
+            --output LumigridLedNode/.pio/release-candidate
 
       - name: Upload Firmware Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: lumigrid-firmware-binaries
-          path: |
-            LumigridLedNode/merged_firmware.bin
-            LumigridLedNode/.pio/build/factory/firmware.bin
-            LumigridLedNode/.pio/build/test/firmware.bin
-          if-no-files-found: warn
-
-      - name: Prepare Latest Builds
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        run: |
-          mkdir -p lumigrid-lander-main/static/latest_builds
-          cp LumigridLedNode/merged_firmware.bin lumigrid-lander-main/static/latest_builds/
-          cp LumigridLedNode/.pio/build/factory/firmware.bin lumigrid-lander-main/static/latest_builds/
-
-      - name: Commit and Push Firmware (Main branch only)
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        continue-on-error: true
-        uses: stefanzweifel/git-auto-commit-action@v5
-        with:
-          commit_message: "chore: auto-build latest firmware binaries [skip ci]"
-          file_pattern: 'lumigrid-lander-main/static/latest_builds/*.bin'
+          name: lumigrid-firmware-candidate-${{ github.sha }}
+          path: LumigridLedNode/.pio/release-candidate/
+          if-no-files-found: error
+          include-hidden-files: true
 
   web-build:
     name: Web Application Build (SvelteKit)
@@ -135,7 +142,7 @@ jobs:
       - name: Install dependencies
         run: |
           cd lumigrid-lander-main
-          npm install
+          npm ci
 
       - name: Build SvelteKit Web App
         run: |

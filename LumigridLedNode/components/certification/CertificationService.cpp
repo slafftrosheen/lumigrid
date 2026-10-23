@@ -7,6 +7,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_rom_crc.h"
+#include "esp_app_desc.h"
 #include "cJSON.h"
 #include <cmath>
 #include <cstdio>
@@ -20,8 +21,8 @@ namespace {
 
 static const char* TAG = "cert_service";
 
-static uint32_t now_ms() {
-    return static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
+static uint64_t now_ms() {
+    return static_cast<uint64_t>(esp_timer_get_time() / 1000ULL);
 }
 
 } // namespace
@@ -84,12 +85,22 @@ uint32_t CertificationService::compute_hardware_fingerprint(const DeviceConfig& 
 }
 
 esp_err_t CertificationService::start_session(CertificationProfile profile, const char* serial_number) {
+    if (!store_.is_initialized() || is_in_progress() || current_test_[0] != '\0' || burn_in_active_) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (profile > CertificationProfile::ReleaseCandidate ||
+        CertificationPlan::test_count() > kMaxCertificationTests) {
+        return ESP_ERR_INVALID_ARG;
+    }
     const char* sn = serial_number;
-    DeviceConfig cfg{};
+    std::unique_ptr<DeviceConfig> cfg;
     if (config_) {
-        config_->load_config(cfg);
+        cfg.reset(new (std::nothrow) DeviceConfig{});
+        if (!cfg) return ESP_ERR_NO_MEM;
+        const esp_err_t config_err = config_->load_config(*cfg);
+        if (config_err != ESP_OK) return config_err;
         if (!sn || sn[0] == '\0') {
-            sn = cfg.serial_number;
+            sn = cfg->serial_number;
         }
     }
 
@@ -111,10 +122,10 @@ esp_err_t CertificationService::start_session(CertificationProfile profile, cons
 
     CertificationRecord& rec = store_.current_record();
     reset_certification_record(rec);
-    rec.schema_version = 1;
+    rec.schema_version = kCertificationRecordSchemaVersion;
 
     // Unique immutable session ID
-    uint32_t t = now_ms();
+    uint32_t t = static_cast<uint32_t>(now_ms());
     snprintf(rec.session.identity.certification_id, sizeof(rec.session.identity.certification_id),
              "cert-%.8s-%08lx", identity_.id, (unsigned long)t);
     strncpy(rec.session.identity.node_id, identity_.id, sizeof(rec.session.identity.node_id) - 1);
@@ -136,7 +147,7 @@ esp_err_t CertificationService::start_session(CertificationProfile profile, cons
     rec.session.skipped_count = 0;
 
     if (config_) {
-        rec.session.config_fingerprint = compute_hardware_fingerprint(cfg, identity_.hw_revision);
+        rec.session.config_fingerprint = compute_hardware_fingerprint(*cfg, identity_.hw_revision);
     }
 
     // Initialize all test results
@@ -165,13 +176,13 @@ esp_err_t CertificationService::start_session(CertificationProfile profile, cons
              certification_profile_to_string(profile),
              rec.result_count);
 
-    return store_.save(rec);
+    return persist_record();
 }
 
 int CertificationService::find_result_index(const char* test_id) const {
     if (!test_id) return -1;
     const auto& rec = store_.current_record();
-    for (size_t i = 0; i < rec.result_count; ++i) {
+    for (size_t i = 0; i < rec.result_count && i < kMaxCertificationTests; ++i) {
         if (strcmp(rec.results[i].test_id, test_id) == 0) {
             return static_cast<int>(i);
         }
@@ -186,7 +197,7 @@ const CertificationTestResult* CertificationService::get_test_result(const char*
 }
 
 esp_err_t CertificationService::start_test(const char* test_id) {
-    if (!is_in_progress()) {
+    if (!is_in_progress() || current_test_[0] != '\0' || burn_in_active_) {
         ESP_LOGE(TAG, "Cannot start test %s: no certification session in progress", test_id ? test_id : "");
         return ESP_ERR_INVALID_STATE;
     }
@@ -349,11 +360,11 @@ esp_err_t CertificationService::start_test(const char* test_id) {
             auto_pass = (identity_.id[0] != '\0' && identity_.fw_version[0] != '\0');
             if (!auto_pass) note_str = "Identity missing";
         } else if (strcmp(test_id, "BOOT-REBOOT-001") == 0) {
-            auto_pass = (config_ != nullptr);
-            if (!auto_pass) note_str = "ConfigStore unavailable";
+            auto_blocked = true;
+            note_str = "Reboot persistence requires before/after fixture evidence";
         } else if (strcmp(test_id, "SAFE-ESTOP-LOGIC") == 0) {
-            auto_pass = true;
-            note_str = "Logic latch & try_commit suppression verified";
+            auto_blocked = true;
+            note_str = "E-stop latch/suppression requires an executed fixture test";
         } else if (strcmp(test_id, "NET-AP-001") == 0) {
             if (probe.ap_active) {
                 auto_pass = true;
@@ -404,7 +415,7 @@ esp_err_t CertificationService::start_test(const char* test_id) {
             if (note_str) strncpy(res.note, note_str, sizeof(res.note) - 1);
             current_test_[0] = '\0';
             evaluate_overall_state();
-            return store_.save(rec);
+            return persist_record();
         } else if (auto_fail) {
             res.state = CertificationTestState::Failed;
             res.completed_ms = esp_timer_get_time() / 1000ULL;
@@ -413,7 +424,7 @@ esp_err_t CertificationService::start_test(const char* test_id) {
             if (note_str) strncpy(res.note, note_str, sizeof(res.note) - 1);
             current_test_[0] = '\0';
             evaluate_overall_state();
-            return store_.save(rec);
+            return persist_record();
         } else if (auto_blocked) {
             res.state = CertificationTestState::Blocked;
             res.completed_ms = esp_timer_get_time() / 1000ULL;
@@ -422,11 +433,20 @@ esp_err_t CertificationService::start_test(const char* test_id) {
             if (note_str) strncpy(res.note, note_str, sizeof(res.note) - 1);
             current_test_[0] = '\0';
             evaluate_overall_state();
-            return store_.save(rec);
+            return persist_record();
         }
+    } else {
+        // Instrument-only and external observation tests have no local output
+        // sequence. They still need the bounded operator-evidence timeout.
+        res.state = CertificationTestState::WaitingForOperator;
     }
 
-    return store_.save(rec);
+    if (res.state == CertificationTestState::Blocked || res.state == CertificationTestState::Skipped) {
+        res.completed_ms = esp_timer_get_time() / 1000ULL;
+        current_test_[0] = '\0';
+        evaluate_overall_state();
+    }
+    return persist_record();
 }
 
 esp_err_t CertificationService::record_result(const char* test_id,
@@ -437,6 +457,12 @@ esp_err_t CertificationService::record_result(const char* test_id,
                                               const char* note) {
     if (!is_in_progress()) {
         return ESP_ERR_INVALID_STATE;
+    }
+    if (source > EvidenceSource::InstrumentMeasurement ||
+        (state != CertificationTestState::Passed && state != CertificationTestState::Failed &&
+         state != CertificationTestState::Skipped && state != CertificationTestState::Blocked) ||
+        !std::isfinite(measured_value)) {
+        return ESP_ERR_INVALID_ARG;
     }
 
     const auto* def = CertificationPlan::find_test(test_id);
@@ -452,9 +478,10 @@ esp_err_t CertificationService::record_result(const char* test_id,
     CertificationRecord& rec = store_.current_record();
     CertificationTestResult& res = rec.results[idx];
 
-    // Spec §113 R: Physical test cannot use Automatic evidence
-    if (def->required_evidence == EvidenceSource::OperatorObservation && source == EvidenceSource::Automatic) {
-        ESP_LOGE(TAG, "Rejected: Physical test %s cannot use Automatic evidence", test_id);
+    // Physical observations and instrument measurements cannot be replaced by
+    // weaker evidence (including an Automatic label supplied by a client).
+    if (source < def->required_evidence) {
+        ESP_LOGE(TAG, "Rejected: Test %s requires stronger evidence", test_id);
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -494,19 +521,14 @@ esp_err_t CertificationService::record_result(const char* test_id,
 
     // Spec §43, §113 T, U, V: Instrument measurement validation
     CertificationTestState final_state = state;
-    if (def->required_evidence == EvidenceSource::InstrumentMeasurement) {
-        if (measured_value == 0.0f && (!unit || unit[0] == '\0')) {
-            final_state = CertificationTestState::Blocked;
-            if (!note || note[0] == '\0') {
-                snprintf(res.note, sizeof(res.note), "measurement missing");
-            }
-        } else if (def->tolerance > 0.0f) {
-            float diff = std::fabs(measured_value - def->expected_value);
-            if (diff > def->tolerance) {
-                final_state = CertificationTestState::Failed;
-            } else {
-                final_state = CertificationTestState::Passed;
-            }
+    if (def->required_evidence == EvidenceSource::InstrumentMeasurement &&
+        (state == CertificationTestState::Passed || state == CertificationTestState::Failed)) {
+        if (!unit || strcmp(unit, def->unit) != 0) return ESP_ERR_INVALID_ARG;
+        // Never turn an explicitly reported failure into a pass merely because
+        // one recorded numeric sample happens to be inside the tolerance.
+        if (state == CertificationTestState::Passed && def->tolerance > 0.0f &&
+            std::fabs(measured_value - def->expected_value) > def->tolerance) {
+            final_state = CertificationTestState::Failed;
         }
     }
 
@@ -531,7 +553,7 @@ esp_err_t CertificationService::record_result(const char* test_id,
         strncpy(res.note, note, sizeof(res.note) - 1);
         res.note[sizeof(res.note) - 1] = '\0';
     }
-    res.attempts++;
+    if (res.attempts < UINT8_MAX) ++res.attempts;
 
     if (strcmp(current_test_, test_id) == 0) {
         current_test_[0] = '\0';
@@ -547,7 +569,27 @@ esp_err_t CertificationService::record_result(const char* test_id,
     }
 
     evaluate_overall_state();
-    return store_.save(rec);
+    return persist_record();
+}
+
+esp_err_t CertificationService::persist_record() {
+    const esp_err_t err = store_.save(store_.current_record());
+    if (err == ESP_OK) return ESP_OK;
+
+    // An in-memory result is not durable evidence. Keep the result available
+    // for export, but stop the session and expose why it cannot be accepted.
+    auto& rec = store_.current_record();
+    rec.session.state = CertificationState::Incomplete;
+    rec.session.completed_ms = esp_timer_get_time() / 1000ULL;
+    is_stale_ = true;
+    snprintf(stale_reason_, sizeof(stale_reason_), "persistence_failed");
+    current_test_[0] = '\0';
+    if (burn_in_active_ && job_mgr_) job_mgr_->cancel_job(burn_in_job_id_);
+    if (runner_ && (burn_in_active_ || runner_->status().session.owner == FactorySessionOwner::Certification))
+        runner_->abort();
+    burn_in_active_ = false;
+    ESP_LOGE(TAG, "Certification evidence not persisted: %s", esp_err_to_name(err));
+    return err;
 }
 
 void CertificationService::evaluate_overall_state() {
@@ -558,26 +600,39 @@ void CertificationService::evaluate_overall_state() {
 
     bool has_pending_required = false;
     bool has_failed_required = false;
+    bool has_incomplete_required = rec.result_count > kMaxCertificationTests ||
+        rec.result_count != CertificationPlan::test_count() ||
+        rec.session.test_count != rec.result_count;
 
-    for (size_t i = 0; i < rec.result_count; ++i) {
+    for (size_t i = 0; i < rec.result_count && i < kMaxCertificationTests; ++i) {
         const auto& r = rec.results[i];
-        RequirementLevel req = CertificationPlan::get_requirement(r.test_id, rec.session.profile);
 
         if (r.state == CertificationTestState::Passed) {
             passed_count++;
         } else if (r.state == CertificationTestState::Failed) {
             failed_count++;
-            if (req == RequirementLevel::Required) {
-                has_failed_required = true;
-            }
         } else if (r.state == CertificationTestState::Skipped) {
             skipped_count++;
-        } else if (r.state == CertificationTestState::Pending ||
-                   r.state == CertificationTestState::Running ||
-                   r.state == CertificationTestState::WaitingForOperator) {
-            if (req == RequirementLevel::Required) {
-                has_pending_required = true;
-            }
+        }
+    }
+
+    // Walk the required plan, not only the records that happen to be present.
+    // Missing, skipped and blocked evidence can never certify the session.
+    const auto* definitions = CertificationPlan::test_definitions();
+    for (size_t i = 0; i < CertificationPlan::test_count(); ++i) {
+        if (definitions[i].requirement_for_profile(rec.session.profile) != RequirementLevel::Required) continue;
+        const int index = find_result_index(definitions[i].id);
+        if (index < 0) {
+            has_incomplete_required = true;
+            continue;
+        }
+        switch (rec.results[index].state) {
+        case CertificationTestState::Passed: break;
+        case CertificationTestState::Failed: has_failed_required = true; break;
+        case CertificationTestState::Pending:
+        case CertificationTestState::Running:
+        case CertificationTestState::WaitingForOperator: has_pending_required = true; break;
+        default: has_incomplete_required = true; break;
         }
     }
 
@@ -588,22 +643,31 @@ void CertificationService::evaluate_overall_state() {
     if (has_failed_required) {
         rec.session.state = CertificationState::Failed;
         rec.session.completed_ms = esp_timer_get_time() / 1000ULL;
-    } else if (!has_pending_required) {
-        // All required tests evaluated and passed!
-        rec.session.state = CertificationState::Passed;
+    } else if (has_pending_required) {
+        rec.session.state = CertificationState::InProgress;
+        rec.session.completed_ms = 0;
+    } else if (has_incomplete_required) {
+        rec.session.state = CertificationState::Incomplete;
         rec.session.completed_ms = esp_timer_get_time() / 1000ULL;
     } else {
-        rec.session.state = CertificationState::InProgress;
+        rec.session.state = CertificationState::Passed;
+        rec.session.completed_ms = esp_timer_get_time() / 1000ULL;
     }
 }
 
 esp_err_t CertificationService::abort() {
+    // Burn-in uses the FactoryRunner's generic job path, so its session owner
+    // need not be Certification. Cancel the owned job and stop its output even
+    // when the normal certification-owner check does not match.
+    if (burn_in_active_ && job_mgr_) job_mgr_->cancel_job(burn_in_job_id_);
     if (runner_) {
         FactoryStatus fstat = runner_->status();
-        if (fstat.session.owner == FactorySessionOwner::Certification) {
+        if (burn_in_active_ || fstat.session.owner == FactorySessionOwner::Certification) {
             runner_->abort();
         }
     }
+    burn_in_active_ = false;
+    burn_in_job_id_ = 0;
 
     if (current_test_[0] != '\0') {
         int idx = find_result_index(current_test_);
@@ -622,7 +686,7 @@ esp_err_t CertificationService::abort() {
         rec.session.completed_ms = esp_timer_get_time() / 1000ULL;
     }
 
-    return store_.save(rec);
+    return persist_record();
 }
 
 void CertificationService::check_invalidation(const DeviceConfig& current_cfg, const char* current_hw_rev, const char* current_fw_ver) {
@@ -639,7 +703,7 @@ void CertificationService::check_invalidation(const DeviceConfig& current_cfg, c
         rec.session.state = CertificationState::Invalidated;
         is_stale_ = true;
         snprintf(stale_reason_, sizeof(stale_reason_), "hardware_revision_changed");
-        store_.save(rec);
+        persist_record();
         return;
     }
 
@@ -648,7 +712,7 @@ void CertificationService::check_invalidation(const DeviceConfig& current_cfg, c
         rec.session.state = CertificationState::Invalidated;
         is_stale_ = true;
         snprintf(stale_reason_, sizeof(stale_reason_), "plan_version_changed");
-        store_.save(rec);
+        persist_record();
         return;
     }
 
@@ -658,7 +722,7 @@ void CertificationService::check_invalidation(const DeviceConfig& current_cfg, c
         rec.session.state = CertificationState::Invalidated;
         is_stale_ = true;
         snprintf(stale_reason_, sizeof(stale_reason_), "hardware_config_changed");
-        store_.save(rec);
+        persist_record();
         return;
     }
 
@@ -735,7 +799,7 @@ void CertificationService::tick(uint64_t now_ms) {
                     }
                     current_test_[0] = '\0';
                     evaluate_overall_state();
-                    store_.save(rec);
+                    persist_record();
                     return;
                 }
             } else if (res.state == CertificationTestState::Running && runner_) {
@@ -745,7 +809,7 @@ void CertificationService::tick(uint64_t now_ms) {
                     strcmp(fstat.session.certification_test_id, current_test_) == 0) {
                     if (fstat.session.state == FactoryTestState::WaitingForOperator) {
                         res.state = CertificationTestState::WaitingForOperator;
-                        store_.save(rec);
+                        persist_record();
                     } else if (fstat.session.state == FactoryTestState::Failed) {
                         res.state = CertificationTestState::Failed;
                         res.completed_ms = now_ms;
@@ -753,7 +817,7 @@ void CertificationService::tick(uint64_t now_ms) {
                         snprintf(res.note, sizeof(res.note), "Factory sequence failed");
                         current_test_[0] = '\0';
                         evaluate_overall_state();
-                        store_.save(rec);
+                        persist_record();
                         return;
                     }
                 }
@@ -810,7 +874,7 @@ void CertificationService::tick(uint64_t now_ms) {
                         current_test_[0] = '\0';
                     }
                     evaluate_overall_state();
-                    store_.save(rec);
+                    persist_record();
                 } else if (job.state == JobState::Failed) {
                     bres.state = CertificationTestState::Failed;
                     bres.completed_ms = now_ms;
@@ -824,7 +888,7 @@ void CertificationService::tick(uint64_t now_ms) {
                         current_test_[0] = '\0';
                     }
                     evaluate_overall_state();
-                    store_.save(rec);
+                    persist_record();
                 } else if (job.state == JobState::Cancelled) {
                     bres.state = CertificationTestState::Blocked;
                     bres.completed_ms = now_ms;
@@ -837,7 +901,7 @@ void CertificationService::tick(uint64_t now_ms) {
                         current_test_[0] = '\0';
                     }
                     evaluate_overall_state();
-                    store_.save(rec);
+                    persist_record();
                 }
             }
         }
@@ -859,7 +923,7 @@ CertificationStatusSummary CertificationService::get_status_summary() const {
 
 cJSON* CertificationService::generate_report_result_json(size_t index) const {
     const auto& rec = store_.current_record();
-    if (index >= rec.result_count) return nullptr;
+    if (index >= rec.result_count || index >= kMaxCertificationTests) return nullptr;
     const auto& r = rec.results[index];
     const auto* def = CertificationPlan::find_test(r.test_id);
     cJSON* t_obj = cJSON_CreateObject();
@@ -884,6 +948,7 @@ cJSON* CertificationService::generate_report_result_json(size_t index) const {
 cJSON* CertificationService::generate_report_json(bool include_results) const {
     const auto& rec = store_.current_record();
     cJSON* root = cJSON_CreateObject();
+    if (!root) return nullptr;
 
     // Spec §124: SECRET INVARIANT: Never include credentials, Wi-Fi password, session tokens, sync tokens!
     cJSON_AddStringToObject(root, "schema", "lumigrid-certification-v1");
@@ -894,6 +959,18 @@ cJSON* CertificationService::generate_report_json(bool include_results) const {
     cJSON_AddStringToObject(root, "hardwareRevision", rec.session.identity.hardware_revision);
     cJSON_AddStringToObject(root, "projectName", rec.session.identity.project_name);
     cJSON_AddNumberToObject(root, "planVersion", rec.session.identity.plan_version);
+    // This identifies the image exporting the report, not an older session's
+    // image. Record layout v2 deliberately does not reinterpret old evidence.
+    if (const auto* app = esp_app_get_description()) {
+        char hash[65]{};
+        constexpr char hex[] = "0123456789abcdef";
+        for (size_t i = 0; i < sizeof(app->app_elf_sha256); ++i) {
+            hash[2 * i] = hex[app->app_elf_sha256[i] >> 4];
+            hash[2 * i + 1] = hex[app->app_elf_sha256[i] & 0x0f];
+        }
+        cJSON_AddStringToObject(root, "reportingFirmwareElfSha256", hash);
+        cJSON_AddStringToObject(root, "reportingFirmwareVersion", app->version);
+    }
 
     cJSON_AddStringToObject(root, "profile", certification_profile_to_string(rec.session.profile));
     cJSON_AddStringToObject(root, "state", certification_state_to_string(rec.session.state));
@@ -922,7 +999,7 @@ cJSON* CertificationService::generate_report_json(bool include_results) const {
     // Tests array
     cJSON* tests_arr = cJSON_CreateArray();
     if (include_results) {
-        for (size_t i = 0; i < rec.result_count; ++i)
+        for (size_t i = 0; i < rec.result_count && i < kMaxCertificationTests; ++i)
             cJSON_AddItemToArray(tests_arr, generate_report_result_json(i));
     }
     cJSON_AddItemToObject(root, "tests", tests_arr);

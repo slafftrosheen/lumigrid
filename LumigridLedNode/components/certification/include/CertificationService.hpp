@@ -23,7 +23,7 @@ using CertificationProbeProvider = std::function<CertificationProbeSnapshot()>;
 
 struct CertificationStatusSummary {
     CertificationState state = CertificationState::NotStarted;
-    char current_test[16] = {0};
+    char current_test[kCertificationTestIdCapacity] = {0};
     uint16_t passed = 0;
     uint16_t failed = 0;
     uint16_t total = 0;
@@ -94,6 +94,7 @@ public:
     static uint32_t compute_hardware_fingerprint(const DeviceConfig& cfg, const char* hw_rev);
 
 private:
+    esp_err_t persist_record();
     void evaluate_overall_state();
     int find_result_index(const char* test_id) const;
 
@@ -102,7 +103,7 @@ private:
     NodeIdentity identity_{};
     CertificationStore store_{};
 
-    char current_test_[16] = {0};
+    char current_test_[kCertificationTestIdCapacity] = {0};
     uint64_t current_test_started_ms_ = 0;
     bool is_stale_ = false;
     char stale_reason_[64] = {0};

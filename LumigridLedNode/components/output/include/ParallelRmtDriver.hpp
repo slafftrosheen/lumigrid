@@ -224,10 +224,13 @@ public:
     /// Allocate TX channel + encoder for the lane and leave the channel enabled.
     virtual esp_err_t create(uint8_t lane, int gpio, bool rgbw) = 0;
     /// Queue a complete frame (data + latch). Must not block on wire completion.
+    /// On success the transport borrows data until wait() succeeds. An error
+    /// from wait(), including timeout, does not release that ownership.
     virtual esp_err_t submit(uint8_t lane, const uint8_t* data, size_t len) = 0;
     /// Bounded wait for the previously submitted frame.
     virtual esp_err_t wait(uint8_t lane, uint32_t timeout_us) = 0;
-    /// Disable + delete channel and encoder.
+    /// Disable + delete an idle channel and encoder. On error the transport
+    /// retains any resources not confirmed deleted and rejects new submissions.
     virtual esp_err_t destroy(uint8_t lane) = 0;
     // Prepare resources without disturbing the live channel. Existing channels
     // retain their GPIO and replace only their encoder on commit.
@@ -253,7 +256,7 @@ public:
 
     explicit ParallelRmtDriver(IRmtTransport* transport = nullptr)
         : transport_(transport) {}
-    ~ParallelRmtDriver() { release_all(); }
+    ~ParallelRmtDriver() { cancel_candidate(); release_all(); }
 
     ParallelRmtDriver(const ParallelRmtDriver&) = delete;
     ParallelRmtDriver& operator=(const ParallelRmtDriver&) = delete;
@@ -269,17 +272,21 @@ public:
     esp_err_t commit_candidate();
     void cancel_candidate();
     bool has_candidate() const { return has_candidate_; }
-    void release_lane(uint8_t lane);
-    void release_all();
+    /// Failed drains retain the channel and wire allocation, including during
+    /// destruction: leaking quarantined memory is safer than an ISR use-after-free.
+    esp_err_t release_lane(uint8_t lane);
+    esp_err_t release_all();
 
     // ── Staging (no allocation, no locking) ──────────────────────────────────
-    void stage_pixel(uint8_t lane, uint16_t pixel, uint8_t r, uint8_t g, uint8_t b, uint8_t w);
-    void stage_clear_lane(uint8_t lane);
+    /// False means staging was rejected; a borrowed wire buffer is immutable.
+    bool stage_pixel(uint8_t lane, uint16_t pixel, uint8_t r, uint8_t g, uint8_t b, uint8_t w);
+    bool stage_clear_lane(uint8_t lane);
     void stage_clear_all();
     void scale_lane(uint8_t lane, uint16_t scale_256);
 
-    /// Submit every active lane, then wait for every submitted lane. Faulted lanes are
-    /// rejected (ESP_ERR_INVALID_STATE) unless `allow_faulted` is set (blackout recovery).
+    /// Submit every active lane, then wait for every submitted lane. Faulted lanes
+    /// require blackout recovery: drain any borrowed frame with the same bounded
+    /// timeout, then transmit fresh zeros before accepting normal content again.
     AddressableCommitResult commit(bool allow_faulted = false);
 
     // ── Introspection ────────────────────────────────────────────────────────
@@ -292,6 +299,7 @@ public:
     uint32_t  longest_wire_time_us() const;
     const uint8_t* wire_data(uint8_t lane) const { return lane < kLanes ? lanes_[lane].wire : nullptr; }
     size_t    wire_len(uint8_t lane) const { return lane < kLanes ? lanes_[lane].wire_len : 0; }
+    bool      wire_in_flight(uint8_t lane) const { return lane < kLanes && lanes_[lane].in_flight; }
     /// Frame (wire) byte index for each logical component of this lane.
     uint8_t   pos_r(uint8_t lane) const { return lane < kLanes ? lanes_[lane].pos[0] : 0; }
     uint8_t   pos_g(uint8_t lane) const { return lane < kLanes ? lanes_[lane].pos[1] : 0; }
@@ -313,16 +321,23 @@ private:
         uint8_t*  wire   = nullptr;
         size_t    wire_len = 0;
         uint32_t  submitted_generation = 0;
+        bool      in_flight = false;
+        bool      staging_rejected = false;
+        // Topology metadata/wire survive a failed retirement, but cannot submit
+        // again until the physical channel has been recreated by reconfigure.
+        bool      channel_ready = false;
     };
 
     static void configure_pixel_order(Lane& lane, PixelOrder order);
 
     IRmtTransport& tx() const;
+    esp_err_t wait_for_lane(uint8_t lane);
 
     IRmtTransport* transport_ = nullptr;
     Lane lanes_[kLanes];
     Lane candidate_[kLanes]{};
     bool candidate_prepared_[kLanes]{};
+    bool candidate_retained_channel_[kLanes]{};
     bool has_candidate_ = false;
     bool first_black_frame_confirmed_ = false;
     mutable RmtDiagnostics diagnostics_{};

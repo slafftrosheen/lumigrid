@@ -179,7 +179,8 @@ class EspRmtTransport final : public IRmtTransport {
 public:
     esp_err_t prepare(uint8_t lane, int gpio, bool rgbw, bool existing) override {
         if (!existing) return create(lane, gpio, rgbw);
-        if (lane >= ParallelRmtDriver::kLanes || !chan_[lane] || pending_[lane])
+        if (lane >= ParallelRmtDriver::kLanes || !chan_[lane] || !enabled_[lane] ||
+            cleanup_pending_[lane] || pending_[lane])
             return ESP_ERR_INVALID_STATE;
         return new_strip_encoder(rgbw, &pending_[lane]);
     }
@@ -197,7 +198,13 @@ public:
     }
     esp_err_t create(uint8_t lane, int gpio, bool rgbw) override {
         if (lane >= ParallelRmtDriver::kLanes) return ESP_ERR_INVALID_ARG;
-        if (chan_[lane] != nullptr) return ESP_ERR_INVALID_STATE;
+        // A failed create or cancelled candidate can leave an owned, idle SDK
+        // channel. Finish that cleanup before allocating a replacement slot.
+        if (cleanup_pending_[lane]) {
+            const esp_err_t err = destroy(lane);
+            if (err != ESP_OK) return err;
+        }
+        if (chan_[lane] || enc_[lane] || pending_[lane]) return ESP_ERR_INVALID_STATE;
 
         static bool s_policy_logged = false;
         if (!s_policy_logged) {
@@ -238,36 +245,30 @@ public:
         err = rmt_tx_register_event_callbacks(chan_[lane], &cbs, &s_ledgers[lane]);
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "RMT register event callbacks failed for lane %u: %s", lane, esp_err_to_name(err));
-            rmt_del_channel(chan_[lane]);
-            chan_[lane] = nullptr;
-            return err;
+            return cleanup_failed_create(lane, err);
         }
 
         err = new_strip_encoder(rgbw, &enc_[lane]);
         if (err != ESP_OK) {
-            rmt_del_channel(chan_[lane]);
-            chan_[lane] = nullptr;
-            enc_[lane] = nullptr;
-            return err;
+            return cleanup_failed_create(lane, err);
         }
 
         err = rmt_enable(chan_[lane]);   // stays enabled between frames
         if (err != ESP_OK) {
-            rmt_del_encoder(enc_[lane]);
-            rmt_del_channel(chan_[lane]);
-            chan_[lane] = nullptr;
-            enc_[lane] = nullptr;
-            return err;
+            return cleanup_failed_create(lane, err);
         }
+        enabled_[lane] = true;
 
         ESP_LOGI(TAG, "lane=%u gpio=%d created core=%d", lane, gpio, core);
         return ESP_OK;
     }
 
     esp_err_t submit(uint8_t lane, const uint8_t* data, size_t len) override {
-        if (lane >= ParallelRmtDriver::kLanes || !chan_[lane]) return ESP_ERR_INVALID_STATE;
+        if (lane >= ParallelRmtDriver::kLanes || !chan_[lane] || !enabled_[lane] ||
+            cleanup_pending_[lane]) return ESP_ERR_INVALID_STATE;
         rmt_transmit_config_t tc = {};
         tc.loop_count = 0;
+        tc.flags.queue_nonblocking = 1;
         return rmt_transmit(chan_[lane], enc_[lane], data, len, &tc);
     }
 
@@ -278,16 +279,46 @@ public:
     }
 
     esp_err_t destroy(uint8_t lane) override {
-        if (lane >= ParallelRmtDriver::kLanes || !chan_[lane]) return ESP_OK;
-        s_ledgers[lane].completions.store(0, std::memory_order_relaxed);
-        s_ledgers[lane].last_num_symbols.store(0, std::memory_order_relaxed);
-        esp_err_t first = rmt_disable(chan_[lane]);
-        esp_err_t e2 = rmt_del_channel(chan_[lane]);
-        if (first == ESP_OK) first = e2;
-        if (enc_[lane]) rmt_del_encoder(enc_[lane]);
-        chan_[lane] = nullptr;
-        enc_[lane] = nullptr;
-        return first;
+        if (lane >= ParallelRmtDriver::kLanes) return ESP_ERR_INVALID_ARG;
+        cleanup_pending_[lane] = true;
+#if defined(CONFIG_PM_ENABLE) && CONFIG_PM_ENABLE
+        // IDF 5.2.1 can free the interrupt before a PM-lock deletion failure,
+        // without clearing its internal pointer. Such a handle is not safely
+        // retryable. The production ESP32 configs disable PM and DMA; preserve
+        // ownership and fail closed if that policy is ever changed.
+        if (delete_error_[lane] != ESP_OK) return delete_error_[lane];
+#endif
+        if (chan_[lane]) {
+            if (enabled_[lane]) {
+                const esp_err_t err = rmt_disable(chan_[lane]);
+                if (err != ESP_OK) return err;
+                enabled_[lane] = false;
+            }
+            // Deletion resets GPIO routing even when it fails. Do not re-enable
+            // this handle; complete deletion and recreate it before reuse.
+            const esp_err_t err = rmt_del_channel(chan_[lane]);
+            if (err != ESP_OK) {
+#if defined(CONFIG_PM_ENABLE) && CONFIG_PM_ENABLE
+                delete_error_[lane] = err;
+#endif
+                return err;
+            }
+            chan_[lane] = nullptr;
+            s_ledgers[lane].completions.store(0, std::memory_order_relaxed);
+            s_ledgers[lane].last_num_symbols.store(0, std::memory_order_relaxed);
+        }
+        if (enc_[lane]) {
+            const esp_err_t err = rmt_del_encoder(enc_[lane]);
+            if (err != ESP_OK) return err;
+            enc_[lane] = nullptr;
+        }
+        if (pending_[lane]) {
+            const esp_err_t err = rmt_del_encoder(pending_[lane]);
+            if (err != ESP_OK) return err;
+            pending_[lane] = nullptr;
+        }
+        cleanup_pending_[lane] = false;
+        return ESP_OK;
     }
 
     uint32_t get_completed_count(uint8_t lane) const override {
@@ -299,9 +330,19 @@ public:
     }
 
 private:
+    esp_err_t cleanup_failed_create(uint8_t lane, esp_err_t create_error) {
+        const esp_err_t cleanup_error = destroy(lane);
+        return cleanup_error == ESP_OK ? create_error : cleanup_error;
+    }
+
     rmt_channel_handle_t chan_[ParallelRmtDriver::kLanes] = {};
     rmt_encoder_handle_t enc_[ParallelRmtDriver::kLanes] = {};
     rmt_encoder_handle_t pending_[ParallelRmtDriver::kLanes] = {};
+    bool enabled_[ParallelRmtDriver::kLanes] = {};
+    bool cleanup_pending_[ParallelRmtDriver::kLanes] = {};
+#if defined(CONFIG_PM_ENABLE) && CONFIG_PM_ENABLE
+    esp_err_t delete_error_[ParallelRmtDriver::kLanes] = {};
+#endif
 };
 
 EspRmtTransport s_production_transport;
@@ -342,7 +383,8 @@ esp_err_t ParallelRmtDriver::configure_lane(uint8_t lane, int gpio, bool rgbw,
     if (!pixel_order_valid(rgbw ? AddressableType::SK6812 : AddressableType::WS2812, order)) {
         return ESP_ERR_INVALID_ARG;
     }
-    release_lane(lane);
+    const esp_err_t release_err = release_lane(lane);
+    if (release_err != ESP_OK) return release_err;
     if (pixels == 0) return ESP_OK;
 
     Lane& L = lanes_[lane];
@@ -371,33 +413,65 @@ esp_err_t ParallelRmtDriver::configure_lane(uint8_t lane, int gpio, bool rgbw,
         return mapped;
     }
     L.state = LaneState::Ready;
+    L.channel_ready = true;
     first_black_frame_confirmed_ = false;
     return ESP_OK;
 }
 
-void ParallelRmtDriver::release_lane(uint8_t lane) {
-    if (lane >= kLanes) return;
+esp_err_t ParallelRmtDriver::release_lane(uint8_t lane) {
+    if (lane >= kLanes) return ESP_ERR_INVALID_ARG;
     Lane& L = lanes_[lane];
+    if (L.in_flight) {
+        const esp_err_t err = wait_for_lane(lane);
+        if (err != ESP_OK) return err;
+    }
     if (L.state != LaneState::Unconfigured) {
-        tx().destroy(lane);
+        L.channel_ready = false;
+        first_black_frame_confirmed_ = false;
+        const esp_err_t err = tx().destroy(lane);
+        if (err != ESP_OK) {
+            L.state = LaneState::Faulted;
+            diagnostics_.lanes[lane].last_error = err;
+            return err;
+        }
     }
     heap_caps_free(L.wire);
     L = Lane{};
     first_black_frame_confirmed_ = false;
+    return ESP_OK;
 }
 
-void ParallelRmtDriver::release_all() {
-    for (uint8_t i = 0; i < kLanes; ++i) release_lane(i);
+esp_err_t ParallelRmtDriver::release_all() {
+    esp_err_t first = ESP_OK;
+    for (uint8_t i = 0; i < kLanes; ++i) {
+        const esp_err_t err = release_lane(i);
+        if (first == ESP_OK) first = err;
+    }
     first_black_frame_confirmed_ = false;
+    return first;
 }
 
 esp_err_t ParallelRmtDriver::prepare_candidate(const DeviceConfig& cfg, uint32_t generic_reserve, uint32_t internal_reserve) {
     cancel_candidate();
 
     for (uint8_t lane = 0; lane < kLanes; ++lane) {
-        if (!configured(lane)) continue;
-        const esp_err_t err = tx().wait(lane, addressable_timeout_us(lanes_[lane].pixels, lanes_[lane].rgbw));
+        if (!lanes_[lane].in_flight) continue;
+        const esp_err_t err = wait_for_lane(lane);
         if (err != ESP_OK) return err;
+    }
+
+    // A previous candidate retirement can have removed only some channels.
+    // Old metadata/wires remain coherent; finish any retained cleanup before
+    // preparing fresh channels for rollback or a retry of the new topology.
+    for (uint8_t lane = 0; lane < kLanes; ++lane) {
+        auto& old = lanes_[lane];
+        if (!configured(lane) || old.channel_ready) continue;
+        const esp_err_t err = tx().destroy(lane);
+        if (err != ESP_OK) {
+            diagnostics_.lanes[lane].last_error = err;
+            return err;
+        }
+        old.submitted_generation = 0;
     }
 
     esp_err_t err = ESP_OK;
@@ -416,8 +490,10 @@ esp_err_t ParallelRmtDriver::prepare_candidate(const DeviceConfig& cfg, uint32_t
         if (!next.wire) { err = kErrInsufficientRuntimeMemory; break; }
         configure_pixel_order(next, cc.pixel_order);
         next.state = LaneState::Ready;
-        err = tx().prepare(lane, board::kAledPins[lane], next.rgbw, configured(lane));
+        candidate_retained_channel_[lane] = lanes_[lane].channel_ready;
+        err = tx().prepare(lane, board::kAledPins[lane], next.rgbw, candidate_retained_channel_[lane]);
         if (err != ESP_OK) { err = map_create_error(err); break; }
+        next.channel_ready = true;
         candidate_prepared_[lane] = true;
     }
 
@@ -441,19 +517,43 @@ esp_err_t ParallelRmtDriver::prepare_candidate(const DeviceConfig& cfg, uint32_t
 
 esp_err_t ParallelRmtDriver::commit_candidate() {
     if (!has_candidate_) return ESP_ERR_INVALID_STATE;
+    // A caller can submit the old topology between prepare and swap. Never
+    // replace its encoder or free its buffer while that transaction is borrowed.
+    for (uint8_t lane = 0; lane < kLanes; ++lane) {
+        if (lanes_[lane].in_flight) return ESP_ERR_INVALID_STATE;
+    }
 
     diagnostics_.allocation_core = xPortGetCoreID();
+    // Complete every fallible retirement before publishing any candidate
+    // encoder, wire, pixel count, or shadow. Failed retirement retains the old
+    // buffers and marks the affected hardware unavailable for rollback/retry.
     for (uint8_t lane = 0; lane < kLanes; ++lane) {
+        if (candidate_prepared_[lane] || !configured(lane)) continue;
+        auto& old = lanes_[lane];
+        old.channel_ready = false;
+        old.state = LaneState::Faulted;
+        first_black_frame_confirmed_ = false;
+        const esp_err_t err = tx().destroy(lane);
+        if (err != ESP_OK) {
+            diagnostics_.lanes[lane].last_error = err;
+            return err;
+        }
+        old.submitted_generation = 0;
+    }
+
+    for (uint8_t lane = 0; lane < kLanes; ++lane) {
+        const bool retained_channel = candidate_retained_channel_[lane];
         if (candidate_prepared_[lane]) {
             tx().commit_prepared(lane);
-        } else if (configured(lane)) {
-            tx().destroy(lane);
         }
-        candidate_[lane].submitted_generation = lanes_[lane].submitted_generation;
+        // Encoder-only updates retain the channel's ISR completion ledger.
+        // Destroyed/recreated channels start a new ledger at zero.
+        candidate_[lane].submitted_generation = retained_channel ? lanes_[lane].submitted_generation : 0;
         heap_caps_free(lanes_[lane].wire);
         lanes_[lane] = candidate_[lane];
         candidate_[lane] = Lane{};
         candidate_prepared_[lane] = false;
+        candidate_retained_channel_[lane] = false;
     }
     has_candidate_ = false;
     first_black_frame_confirmed_ = false;
@@ -463,7 +563,7 @@ esp_err_t ParallelRmtDriver::commit_candidate() {
 void ParallelRmtDriver::cancel_candidate() {
     for (uint8_t lane = 0; lane < kLanes; ++lane) {
         if (candidate_prepared_[lane]) {
-            tx().cancel_prepared(lane, configured(lane));
+            tx().cancel_prepared(lane, candidate_retained_channel_[lane]);
             candidate_prepared_[lane] = false;
         }
         if (candidate_[lane].wire) {
@@ -471,6 +571,7 @@ void ParallelRmtDriver::cancel_candidate() {
             candidate_[lane].wire = nullptr;
         }
         candidate_[lane] = Lane{};
+        candidate_retained_channel_[lane] = false;
     }
     has_candidate_ = false;
 }
@@ -481,20 +582,27 @@ esp_err_t ParallelRmtDriver::reconfigure(const DeviceConfig& cfg, uint32_t gener
     return commit_candidate();
 }
 
-void ParallelRmtDriver::stage_pixel(uint8_t lane, uint16_t pixel, uint8_t r, uint8_t g, uint8_t b, uint8_t w) {
-    if (lane >= kLanes) return;
+bool ParallelRmtDriver::stage_pixel(uint8_t lane, uint16_t pixel, uint8_t r, uint8_t g, uint8_t b, uint8_t w) {
+    if (lane >= kLanes) return false;
     Lane& L = lanes_[lane];
-    if (L.wire == nullptr || pixel >= L.pixels) return;
+    if (L.wire == nullptr || pixel >= L.pixels || !L.channel_ready) return false;
+    if (L.in_flight) { L.staging_rejected = true; return false; }
     uint8_t* p = L.wire + static_cast<size_t>(pixel) * (L.rgbw ? 4u : 3u);
     p[L.pos[0]] = r;
     p[L.pos[1]] = g;
     p[L.pos[2]] = b;
     if (L.rgbw) p[L.pos[3]] = w;
+    return true;
 }
 
-void ParallelRmtDriver::stage_clear_lane(uint8_t lane) {
-    if (lane >= kLanes || lanes_[lane].wire == nullptr) return;
-    memset(lanes_[lane].wire, 0, lanes_[lane].wire_len);
+bool ParallelRmtDriver::stage_clear_lane(uint8_t lane) {
+    if (lane >= kLanes || lanes_[lane].wire == nullptr) return false;
+    Lane& L = lanes_[lane];
+    if (!L.channel_ready) return false;
+    if (L.in_flight) { L.staging_rejected = true; return false; }
+    memset(L.wire, 0, L.wire_len);
+    L.staging_rejected = false;
+    return true;
 }
 
 void ParallelRmtDriver::stage_clear_all() {
@@ -502,7 +610,8 @@ void ParallelRmtDriver::stage_clear_all() {
 }
 
 void ParallelRmtDriver::scale_lane(uint8_t lane, uint16_t scale_256) {
-    if (lane >= kLanes || lanes_[lane].wire == nullptr || scale_256 >= 256) return;
+    if (lane >= kLanes || lanes_[lane].wire == nullptr || !lanes_[lane].channel_ready || scale_256 >= 256) return;
+    if (lanes_[lane].in_flight) { lanes_[lane].staging_rejected = true; return; }
     uint8_t* wire = lanes_[lane].wire;
     const size_t len = lanes_[lane].wire_len;
     for (size_t i = 0; i < len; ++i) {
@@ -528,9 +637,44 @@ uint32_t ParallelRmtDriver::longest_wire_time_us() const {
 
 void ParallelRmtDriver::clear_faults() {
     for (uint8_t i = 0; i < kLanes; ++i) {
-        if (lanes_[i].state == LaneState::Faulted) lanes_[i].state = LaneState::Ready;
+        if (lanes_[i].state == LaneState::Faulted && lanes_[i].channel_ready &&
+            !lanes_[i].in_flight && !lanes_[i].staging_rejected) {
+            lanes_[i].state = LaneState::Ready;
+        }
     }
     first_black_frame_confirmed_ = false;
+}
+
+esp_err_t ParallelRmtDriver::wait_for_lane(uint8_t lane) {
+    Lane& L = lanes_[lane];
+    const uint32_t timeout_us = addressable_timeout_us(L.pixels, L.rgbw);
+    const uint32_t wire_us = addressable_wire_time_us(L.pixels, L.rgbw);
+    const int64_t started = esp_timer_get_time();
+    const esp_err_t err = tx().wait(lane, timeout_us);
+    const uint32_t wait_us = static_cast<uint32_t>(esp_timer_get_time() - started);
+    auto& ldiag = diagnostics_.lanes[lane];
+    if (wait_us > ldiag.max_wait_us) ldiag.max_wait_us = wait_us;
+    if (wait_us > wire_us && wait_us - wire_us > ldiag.max_wait_over_wire_us) {
+        ldiag.max_wait_over_wire_us = wait_us - wire_us;
+    }
+    if (timeout_us >= wait_us && timeout_us - wait_us <= kRmtNearDeadlineMarginUs) {
+        ldiag.deadline_near_misses++;
+        diagnostics_.deadline_near_misses++;
+    }
+    if (err == ESP_OK) {
+        L.in_flight = false;
+    } else {
+        // A timeout is not cancellation. Keep the payload leased and immutable
+        // until a later bounded wait confirms the SDK has returned ownership.
+        L.state = LaneState::Faulted;
+        if (err == ESP_ERR_TIMEOUT) ldiag.wait_timeouts++;
+        else ldiag.other_failures++;
+        if (ldiag.last_error != err) {
+            ESP_LOGE(TAG, "lane %u wait failed: %s", lane, output_err_name(err));
+        }
+        ldiag.last_error = err;
+    }
+    return err;
 }
 
 AddressableCommitResult ParallelRmtDriver::commit(bool allow_faulted) {
@@ -546,11 +690,39 @@ AddressableCommitResult ParallelRmtDriver::commit(bool allow_faulted) {
     static esp_err_t s_last_sub_err[kLanes] = {};
     static esp_err_t s_last_wait_err[kLanes] = {};
 
+    // Only fault recovery can drain a prior borrowed frame. If it remains busy,
+    // leave it untouched and do not queue another transaction behind it.
+    bool blocked[kLanes] = {};
+    const int64_t drain_started = esp_timer_get_time();
+    for (uint8_t lane = 0; lane < kLanes; ++lane) {
+        Lane& L = lanes_[lane];
+        if (configured(lane) && !L.channel_ready) {
+            blocked[lane] = true;
+            note(ESP_ERR_INVALID_STATE, lane);
+            continue;
+        }
+        if (L.in_flight) {
+            const esp_err_t err = allow_faulted ? wait_for_lane(lane) : ESP_ERR_INVALID_STATE;
+            if (err != ESP_OK) {
+                L.state = LaneState::Faulted;
+                blocked[lane] = true;
+                note(err, lane);
+                continue;
+            }
+        }
+        if (allow_faulted && (L.state == LaneState::Faulted || L.staging_rejected)) {
+            // Ownership has returned. Recovery always confirms a fresh black
+            // frame before previously rejected content can be staged again.
+            stage_clear_lane(lane);
+        }
+    }
+    const uint32_t drain_us = static_cast<uint32_t>(esp_timer_get_time() - drain_started);
+
     // HW-004 §8/§25: Gate normal content until the first black frame has been confirmed
     bool is_black_frame = true;
     for (uint8_t lane = 0; lane < kLanes; ++lane) {
         Lane& L = lanes_[lane];
-        if (L.state == LaneState::Unconfigured) continue;
+        if (L.state == LaneState::Unconfigured || blocked[lane]) continue;
         for (size_t b = 0; b < L.wire_len; ++b) {
             if (L.wire[b] != 0) {
                 is_black_frame = false;
@@ -573,7 +745,8 @@ AddressableCommitResult ParallelRmtDriver::commit(bool allow_faulted) {
         Lane& L = lanes_[lane];
         if (L.state == LaneState::Unconfigured) continue;
         ++res.active_lanes;
-        if (L.state == LaneState::Faulted && !allow_faulted) {
+        if (blocked[lane]) continue;
+        if (L.staging_rejected || (L.state == LaneState::Faulted && !allow_faulted)) {
             note(ESP_ERR_INVALID_STATE, lane);
             continue;
         }
@@ -599,52 +772,21 @@ AddressableCommitResult ParallelRmtDriver::commit(bool allow_faulted) {
         }
         s_last_sub_err[lane] = ESP_OK;
         L.state = LaneState::Transmitting;
+        L.in_flight = true;
         L.submitted_generation++;
         submitted[lane] = true;
     }
     const int64_t t1 = esp_timer_get_time();
 
     // Phase 2: bounded waits. A failed wait never abandons the remaining lanes:
-    // every submitted lane is waited on so nothing is left in flight.
+    // every submitted lane is waited on; a timeout keeps its buffer quarantined.
     for (uint8_t lane = 0; lane < kLanes; ++lane) {
         if (!submitted[lane]) continue;
         Lane& L = lanes_[lane];
-        const uint32_t timeout_us = addressable_timeout_us(L.pixels, L.rgbw);
-        const uint32_t wire_us = addressable_wire_time_us(L.pixels, L.rgbw);
-        const int64_t wait_t0 = esp_timer_get_time();
-        const esp_err_t err = tx().wait(lane, timeout_us);
-        const uint32_t wait_us = static_cast<uint32_t>(esp_timer_get_time() - wait_t0);
-
+        const esp_err_t err = wait_for_lane(lane);
         auto& ldiag = diagnostics_.lanes[lane];
-        if (wait_us > ldiag.max_wait_us) ldiag.max_wait_us = wait_us;
-
-        // HW-003: Latency overhead telemetry (wait time exceeding wire time)
-        if (wait_us > wire_us) {
-            const uint32_t overhead_us = wait_us - wire_us;
-            if (overhead_us > ldiag.max_wait_over_wire_us) {
-                ldiag.max_wait_over_wire_us = overhead_us;
-            }
-        }
-
-        // HW-003: Deadline near-miss detection
-        if (timeout_us >= wait_us && (timeout_us - wait_us) <= kRmtNearDeadlineMarginUs) {
-            ldiag.deadline_near_misses++;
-            diagnostics_.deadline_near_misses++;
-        }
-
         if (err != ESP_OK) {
-            L.state = LaneState::Faulted;
             note(err, lane);
-            if (err == ESP_ERR_TIMEOUT) {
-                ldiag.wait_timeouts++;
-            } else {
-                ldiag.other_failures++;
-            }
-            ldiag.last_error = err;
-            if (s_last_wait_err[lane] != err) {
-                s_last_wait_err[lane] = err;
-                ESP_LOGE(TAG, "lane %u wait failed: %s", lane, output_err_name(err));
-            }
             continue;
         }
 
@@ -692,8 +834,8 @@ AddressableCommitResult ParallelRmtDriver::commit(bool allow_faulted) {
     }
     const int64_t t2 = esp_timer_get_time();
 
-    res.submit_us = static_cast<uint32_t>(t1 - t0);
-    res.wait_us   = static_cast<uint32_t>(t2 - t1);
+    res.submit_us = static_cast<uint32_t>(t1 - t0) - drain_us;
+    res.wait_us   = static_cast<uint32_t>(t2 - t1) + drain_us;
     res.total_us  = static_cast<uint32_t>(t2 - t0);
 
     if (res.result == ESP_OK) {

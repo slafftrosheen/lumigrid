@@ -68,7 +68,6 @@ LumigridRuntime::LumigridRuntime()
   });
   lighting_.set_maintenance_callback([this](uint32_t now_ms) {
     dmx_router_.tick(now_ms);
-    cert_service_.tick(now_ms);
   });
 }
 
@@ -567,7 +566,9 @@ esp_err_t LumigridRuntime::init() {
         auto wifi_stat = wifi_.status();
         probe.ap_active = wifi_stat.ap_active;
         probe.sta_connected = wifi_stat.sta_connected;
-        probe.backup_serializer_healthy = true;
+        // No serializer roundtrip has been measured by this probe. A working
+        // runtime must not be promoted into passing backup evidence.
+        probe.backup_serializer_healthy = false;
         probe.reset_reason = static_cast<uint32_t>(esp_reset_reason());
         return probe;
       });
@@ -676,7 +677,17 @@ esp_err_t LumigridRuntime::stop() {
     started_subsystems_.api = false;
   }
   if (started_subsystems_.wifi) {
-    wifi_.stop();
+    const esp_err_t wifi_err = wifi_.stop();
+    if (wifi_err != ESP_OK) {
+      // The Wi-Fi owner can still have an entered callback. Keep its ownership
+      // and readiness semaphore intact so a later stop can finish safely.
+      lifecycle_state_ = RuntimeLifecycle::Faulted;
+      failing_stage_ = StartupStage::NetworkConfigured;
+      failing_error_ = wifi_err;
+      ESP_LOGE("lumigrid", "Wi-Fi shutdown incomplete: %s",
+               esp_err_to_name(wifi_err));
+      return wifi_err;
+    }
     started_subsystems_.wifi = false;
   }
 
@@ -693,7 +704,9 @@ esp_err_t LumigridRuntime::start() {
   if (lifecycle_state_ == RuntimeLifecycle::Running ||
       lifecycle_state_ == RuntimeLifecycle::Initializing ||
       lifecycle_state_ == RuntimeLifecycle::NetworkReady ||
-      lifecycle_state_ == RuntimeLifecycle::ServicesStarting) {
+      lifecycle_state_ == RuntimeLifecycle::ServicesStarting ||
+      lifecycle_state_ == RuntimeLifecycle::Stopping ||
+      started_subsystems_.wifi) {
     ESP_LOGW("lumigrid", "start() rejected: runtime is already %s",
              lifecycle_state_str());
     return ESP_ERR_INVALID_STATE;
@@ -813,7 +826,8 @@ esp_err_t LumigridRuntime::start() {
     if (state == WifiState::Connected) {
       auth_manager_.set_commissioning_state(auth::CommissioningState::None);
     }
-    if (state == WifiState::Connected || state == WifiState::ApActive) {
+    if (state == WifiState::Connected || state == WifiState::ApActive ||
+        state == WifiState::FallbackAp || state == WifiState::Failed) {
       // Load with acquire so we see the semaphore written by the creator task
       SemaphoreHandle_t sem = net_ready_sem_.load(std::memory_order_acquire);
       if (sem) {
@@ -821,12 +835,14 @@ esp_err_t LumigridRuntime::start() {
       }
     }
   });
+  // A timed-out start can still own an entered callback; retain the owner so
+  // stop() must drain it before any readiness semaphore is replaced.
+  started_subsystems_.wifi = (err == ESP_OK || err == ESP_ERR_TIMEOUT);
   if (err != ESP_OK) {
     ESP_LOGE("lumigrid", "wifi.start() FAILED: %s", esp_err_to_name(err));
     rollback_services(StartupStage::NetworkConfigured, err);
     return err;
   }
-  started_subsystems_.wifi = true;
   log_heap_stage("wifi");
 
   // Wait synchronously for network readiness (10s bounded timeout)
@@ -1261,10 +1277,12 @@ void LumigridRuntime::execute_network_apply(const NetworkApplyRequest &req) {
   // Snapshot of the DeviceConfig in force before this apply; used as the
   // "old plan" baseline when reconciling services afterwards (В§65).
   std::unique_ptr<DeviceConfig> config_storage(new (std::nothrow) DeviceConfig{});
-  if (!config_storage || config_.load_config(*config_storage) != ESP_OK) {
+  const esp_err_t config_err = config_storage
+      ? config_.load_config(*config_storage) : ESP_ERR_NO_MEM;
+  if (config_err != ESP_OK) {
     note_network_task_start_failure();
-    api_.command_journal().failed(req.command_id, ESP_ERR_NO_MEM);
-    last_apply_error_ = "config_allocation_failed";
+    api_.command_journal().failed(req.command_id, config_err);
+    last_apply_error_ = config_storage ? "config_load_failed" : "config_allocation_failed";
     apply_state_.store(NetworkApplyState::Failed);
     pending_apply_command_id_.store(0);
     return;
@@ -1276,7 +1294,14 @@ void LumigridRuntime::execute_network_apply(const NetworkApplyRequest &req) {
 
   // 3. Stop Wi-Fi intentionally
   if (started_subsystems_.wifi) {
-    wifi_.stop();
+    const esp_err_t stop_err = wifi_.stop();
+    if (stop_err != ESP_OK) {
+      api_.command_journal().failed(req.command_id, stop_err);
+      last_apply_error_ = "wifi_stop_failed";
+      apply_state_.store(NetworkApplyState::Failed);
+      pending_apply_command_id_.store(0);
+      return;
+    }
     started_subsystems_.wifi = false;
   }
 
@@ -1333,11 +1358,18 @@ void LumigridRuntime::execute_network_apply(const NetworkApplyRequest &req) {
 
   // Recreate readiness semaphore
   {
+    SemaphoreHandle_t new_sem = xSemaphoreCreateBinary();
+    if (!new_sem) {
+      api_.command_journal().failed(req.command_id, ESP_ERR_NO_MEM);
+      last_apply_error_ = "network_semaphore_allocation_failed";
+      apply_state_.store(NetworkApplyState::Failed);
+      pending_apply_command_id_.store(0);
+      return;
+    }
     SemaphoreHandle_t old_sem =
-        net_ready_sem_.exchange(nullptr, std::memory_order_acq_rel);
+        net_ready_sem_.exchange(new_sem, std::memory_order_acq_rel);
     if (old_sem)
       vSemaphoreDelete(old_sem);
-    net_ready_sem_.store(xSemaphoreCreateBinary(), std::memory_order_release);
   }
 
   esp_err_t err = wifi_.start(wifi_cfg, [this](WifiState state) {
@@ -1355,8 +1387,8 @@ void LumigridRuntime::execute_network_apply(const NetworkApplyRequest &req) {
     }
   });
 
+  started_subsystems_.wifi = (err == ESP_OK || err == ESP_ERR_TIMEOUT);
   if (err == ESP_OK) {
-    started_subsystems_.wifi = true;
     // Wait up to 15s for network to achieve ready state
     xSemaphoreTake(net_ready_sem_.load(std::memory_order_acquire),
                    pdMS_TO_TICKS(15000));
@@ -1364,7 +1396,7 @@ void LumigridRuntime::execute_network_apply(const NetworkApplyRequest &req) {
 
   // Determine success
   bool success = false;
-  if (started_subsystems_.wifi) {
+  if (err == ESP_OK && started_subsystems_.wifi) {
     if (req.desired.mode == NetworkMode::ApOnly &&
         wifi_.state() == WifiState::ApActive) {
       success = true;
@@ -1417,7 +1449,7 @@ void LumigridRuntime::execute_network_apply(const NetworkApplyRequest &req) {
   api_.command_journal().failed(req.command_id, ESP_FAIL);
   last_apply_error_ = "sta_connect_failed";
 
-  if (req.desired.mode == NetworkMode::StaWithApFallback &&
+  if (err == ESP_OK && req.desired.mode == NetworkMode::StaWithApFallback &&
       wifi_.is_fallback_ap()) {
     ESP_LOGI("lumigrid",
              "StaWithApFallback: Recovery AP active at 192.168.4.1. Keeping "
@@ -1434,7 +1466,14 @@ void LumigridRuntime::execute_network_apply(const NetworkApplyRequest &req) {
   apply_state_.store(NetworkApplyState::RollingBack);
 
   if (started_subsystems_.wifi) {
-    wifi_.stop();
+    const esp_err_t stop_err = wifi_.stop();
+    if (stop_err != ESP_OK) {
+      api_.command_journal().failed(req.command_id, stop_err);
+      last_apply_error_ = "wifi_rollback_stop_failed";
+      apply_state_.store(NetworkApplyState::Failed);
+      pending_apply_command_id_.store(0);
+      return;
+    }
     started_subsystems_.wifi = false;
   }
 
@@ -1471,11 +1510,18 @@ void LumigridRuntime::execute_network_apply(const NetworkApplyRequest &req) {
                       .max_retry = 3};
 
   {
+    SemaphoreHandle_t new_sem = xSemaphoreCreateBinary();
+    if (!new_sem) {
+      api_.command_journal().failed(req.command_id, ESP_ERR_NO_MEM);
+      last_apply_error_ = "network_semaphore_allocation_failed";
+      apply_state_.store(NetworkApplyState::Failed);
+      pending_apply_command_id_.store(0);
+      return;
+    }
     SemaphoreHandle_t old_sem =
-        net_ready_sem_.exchange(nullptr, std::memory_order_acq_rel);
+        net_ready_sem_.exchange(new_sem, std::memory_order_acq_rel);
     if (old_sem)
       vSemaphoreDelete(old_sem);
-    net_ready_sem_.store(xSemaphoreCreateBinary(), std::memory_order_release);
   }
 
   err = wifi_.start(prev_cfg, [this](WifiState state) {
@@ -1490,10 +1536,18 @@ void LumigridRuntime::execute_network_apply(const NetworkApplyRequest &req) {
     }
   });
 
+  started_subsystems_.wifi = (err == ESP_OK || err == ESP_ERR_TIMEOUT);
   if (err == ESP_OK) {
-    started_subsystems_.wifi = true;
     xSemaphoreTake(net_ready_sem_.load(std::memory_order_acquire),
                    pdMS_TO_TICKS(15000));
+  } else {
+    // Retained callback ownership after a timeout does not establish a usable
+    // link. Do not restart services based on state from the previous session.
+    api_.command_journal().failed(req.command_id, err);
+    last_apply_error_ = "wifi_rollback_start_failed";
+    apply_state_.store(NetworkApplyState::Failed);
+    pending_apply_command_id_.store(0);
+    return;
   }
 
   // Rollback path: previous network restored. DHCP/identity is immutable;

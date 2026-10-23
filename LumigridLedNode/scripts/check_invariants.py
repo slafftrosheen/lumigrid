@@ -553,10 +553,14 @@ else:
     bs_text = board_safety_cpp.read_text(encoding="utf-8")
     if "gpio_hold_en" in bs_text:
         errors.append("BoardOutputSafety.cpp: gpio_hold_en must NOT be used on addressable pins (LG-HW-004)")
-    if "kPcaOe" not in bs_text or "gpio_set_level(kPcaOe, 1)" not in bs_text:
+    if "kPcaOe" not in bs_text or "make_safe_pin(kPcaOe, 1)" not in bs_text:
         errors.append("BoardOutputSafety.cpp: PCA /OE must be driven HIGH immediately (LG-HW-004)")
-    if "kAledPins" not in bs_text or "gpio_set_level(pin, 0)" not in bs_text:
+    if "kAledPins" not in bs_text or "make_safe_pin(pin, 0)" not in bs_text:
         errors.append("BoardOutputSafety.cpp: ALED pins must be driven LOW immediately (LG-HW-004)")
+    latch_pos = bs_text.find("gpio_set_level(pin, level)")
+    direction_pos = bs_text.find("gpio_set_direction(pin, GPIO_MODE_INPUT_OUTPUT)")
+    if latch_pos < 0 or direction_pos < 0 or latch_pos >= direction_pos:
+        errors.append("BoardOutputSafety.cpp: preload safe output latch before enabling readable output pads")
 
 reset_forensics_cpp = NODE_DIR / "components" / "board" / "ResetForensics.cpp"
 if not reset_forensics_cpp.exists():

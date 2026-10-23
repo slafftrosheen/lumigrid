@@ -2,6 +2,7 @@
 #pragma once
 #include <cstdint>
 #include <cstring>
+#include "CertificationTypes.hpp"
 
 namespace lg {
 
@@ -139,7 +140,7 @@ struct FactoryTestSession {
     int32_t error_code = 0;
     char notes[64] = {0};
     FactorySessionOwner owner = FactorySessionOwner::ManualFactory;
-    char certification_test_id[16] = {0};
+    char certification_test_id[kCertificationTestIdCapacity] = {0};
     FactoryTestStage stage = FactoryTestStage::None;
     uint8_t stage_index = 0;
     uint8_t stage_count = 0;
@@ -198,7 +199,7 @@ struct FactoryCommand {
     bool session_passed = false;
     char session_notes[64] = {0};
     FactorySessionOwner session_owner = FactorySessionOwner::ManualFactory;
-    char session_cert_test_id[16] = {0};
+    char session_cert_test_id[kCertificationTestIdCapacity] = {0};
 
     StreamFramePayload stream{};
 };

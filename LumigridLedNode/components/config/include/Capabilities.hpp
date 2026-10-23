@@ -1,5 +1,8 @@
 #pragma once
 #include <cstdint>
+#ifdef ESP_PLATFORM
+#include "sdkconfig.h"
+#endif
 #include "OutputCapabilities.hpp"
 #include "SignageTypes.hpp"
 
@@ -28,7 +31,13 @@ struct CapabilitiesManifest {
     static constexpr bool kFeatureMqtt = true;
     static constexpr bool kFeatureFactory = true;
     static constexpr bool kFeatureOta = true;
+    // Report the same effective option that ESP-IDF's image verifier uses.
+    // Authentication and an image checksum alone do not verify a signature.
+#if defined(CONFIG_SECURE_SIGNED_ON_UPDATE) && CONFIG_SECURE_SIGNED_ON_UPDATE
     static constexpr bool kFeatureSignedOta = true;
+#else
+    static constexpr bool kFeatureSignedOta = false;
+#endif
     static constexpr bool kFeatureBackup = true;
     static constexpr bool kFeatureSceneMotion = true;
     static constexpr bool kFeatureCueLists = true;

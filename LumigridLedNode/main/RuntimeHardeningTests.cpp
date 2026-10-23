@@ -5756,13 +5756,15 @@ bool test_lg029_node_backed_authentication() {
     // 1. CertificationPlan and Catalog Invariants (§110)
     {
         size_t count = CertificationPlan::test_count();
-        assert(kCertificationPlanVersion == 1); // plan version check
+        assert(kCertificationPlanVersion == 2); // complete evidence / bounded record plan
         const CertificationTestDefinition* tests = CertificationPlan::test_definitions();
         assert(tests != nullptr);
-        assert(count == 38); // 38 tests in plan v1 (LG-038 truth pass)
+        assert(count == 46);
+        assert(count <= kMaxCertificationTests);
 
         for (size_t i = 0; i < count; ++i) {
             assert(strlen(tests[i].id) > 0);
+            assert(strlen(tests[i].id) < kCertificationTestIdCapacity);
             assert(strlen(tests[i].category) > 0);
             assert(strlen(tests[i].title) > 0);
             for (size_t j = i + 1; j < count; ++j) {
@@ -5847,7 +5849,7 @@ bool test_lg029_node_backed_authentication() {
             strncpy(identity.hw_revision, "A", sizeof(identity.hw_revision) - 1);
             strncpy(identity.fw_version, "0.8.0", sizeof(identity.fw_version) - 1);
 
-            CertificationService svc;
+            LG_TEST_HEAP(CertificationService, svc);
             assert(svc.init(&cs, nullptr, identity) == ESP_OK);
             assert(!svc.is_in_progress());
 
@@ -5859,7 +5861,7 @@ bool test_lg029_node_backed_authentication() {
             assert(svc.start_session(CertificationProfile::ProductionUnit, "LG-PROD-2026-0042") == ESP_OK);
             assert(svc.is_in_progress());
             assert(svc.session().state == CertificationState::InProgress);
-            assert(svc.session().identity.plan_version == 1);
+            assert(svc.session().identity.plan_version == kCertificationPlanVersion);
             assert(strcmp(svc.session().identity.serial_number, "LG-PROD-2026-0042") == 0);
 
             // Second session start while one is in progress must fail
@@ -5887,8 +5889,10 @@ bool test_lg029_node_backed_authentication() {
                 "LEDs illuminated sequentially in blue"
             ) == ESP_OK);
 
-            // Instrument measurement tolerance check for PWR-01 (expected 5.0, tolerance 0.25 -> 4.75 .. 5.25)
-            assert(svc.start_test("PWR-01") == ESP_OK);
+            // A development session keeps optional measurement failures
+            // retryable while required tests remain pending.
+            assert(svc.abort() == ESP_OK);
+            assert(svc.start_session(CertificationProfile::Development, "LG-DEV-2026-0042") == ESP_OK);
             // Out-of-tolerance value (measured 6000mW vs 0 expected, tolerance 5000mW)
             // POWER-LIMIT-001: expected=0, tolerance=5000 => range [0, 5000]
             // 6000 > 5000 -> Failed
@@ -5922,7 +5926,7 @@ bool test_lg029_node_backed_authentication() {
             // Status summary
             CertificationStatusSummary summary = svc.get_status_summary();
             assert(summary.state == CertificationState::InProgress);
-            assert(summary.passed >= 2);
+            assert(summary.passed >= 1);
 
             // Check invalidation on configuration drift
             LG_TEST_HEAP(DeviceConfig, drift_cfg);
@@ -5931,10 +5935,10 @@ bool test_lg029_node_backed_authentication() {
             assert(svc.is_stale());
             assert(strlen(svc.stale_reason()) > 0);
 
-            // Abort preserves results and transitions state to Incomplete
+            // Abort preserves the stronger invalidated state after config drift.
             assert(svc.abort() == ESP_OK);
             assert(!svc.is_in_progress());
-            assert(svc.session().state == CertificationState::Incomplete);
+            assert(svc.session().state == CertificationState::Invalidated);
         }
 
         // 4. Report Generation & Zero-Secrets Invariant (§117, §118)
@@ -5945,7 +5949,7 @@ bool test_lg029_node_backed_authentication() {
             strncpy(identity.hw_revision, "A", sizeof(identity.hw_revision) - 1);
             strncpy(identity.fw_version, "0.8.0", sizeof(identity.fw_version) - 1);
 
-            CertificationService svc;
+            LG_TEST_HEAP(CertificationService, svc);
             svc.init(&cs, nullptr, identity);
             svc.start_session(CertificationProfile::Development, "DEV-UNIT-01");
 
@@ -5974,9 +5978,9 @@ bool test_lg029_node_backed_authentication() {
 
         // 5. Dual-slot NVS Persistence CRC Invariants (§115, §116)
         {
-            CertificationRecord rec{};
+            LG_TEST_HEAP(CertificationRecord, rec);
             rec.magic = 0x4C474354;
-            rec.schema_version = 1;
+            rec.schema_version = kCertificationRecordSchemaVersion;
             rec.sequence = 1;
             strncpy(rec.session.identity.certification_id, "CERT-TEST-CRC", sizeof(rec.session.identity.certification_id) - 1);
             rec.checksum = CertificationStore::calculate_crc(rec);
@@ -6156,7 +6160,7 @@ bool test_lg029_node_backed_authentication() {
             strncpy(identity.hw_revision, "A", sizeof(identity.hw_revision) - 1);
             strncpy(identity.fw_version, "0.8.0", sizeof(identity.fw_version) - 1);
 
-            CertificationService svc;
+            LG_TEST_HEAP(CertificationService, svc);
             LG_TEST_HEAP(CertificationProbeSnapshot, mock_probe);
             mock_probe.ap_active = false;
             mock_probe.api_running = false;
@@ -6171,6 +6175,8 @@ bool test_lg029_node_backed_authentication() {
             const auto* res_ap = svc.get_test_result("NET-AP-001");
             assert(res_ap != nullptr);
             assert(res_ap->state == CertificationTestState::Failed);
+            assert(svc.session().state == CertificationState::Failed);
+            assert(svc.start_session(CertificationProfile::Development, "DEV-TRUTH-02") == ESP_OK);
 
             // API-001 must be BLOCKED when probe says API not running (No constant true!)
             assert(svc.start_test("API-001") == ESP_OK);
@@ -6183,6 +6189,7 @@ bool test_lg029_node_backed_authentication() {
             const auto* res_ws = svc.get_test_result("WS-001");
             assert(res_ws != nullptr);
             assert(res_ws->state == CertificationTestState::Failed);
+            assert(svc.start_session(CertificationProfile::Development, "DEV-TRUTH-03") == ESP_OK);
 
             // REC-BACKUP-001 must be BLOCKED when serializer unhealthy
             assert(svc.start_test("REC-BACKUP-001") == ESP_OK);
@@ -6208,9 +6215,9 @@ bool test_lg029_node_backed_authentication() {
             assert(svc.start_test("REC-BACKUP-001") == ESP_OK);
             assert(svc.get_test_result("REC-BACKUP-001")->state == CertificationTestState::Passed);
 
-            // Split E-stop logic test passes automatically
+            // No executed latch probe means no automatic E-stop pass.
             assert(svc.start_test("SAFE-ESTOP-LOGIC") == ESP_OK);
-            assert(svc.get_test_result("SAFE-ESTOP-LOGIC")->state == CertificationTestState::Passed);
+            assert(svc.get_test_result("SAFE-ESTOP-LOGIC")->state == CertificationTestState::Blocked);
 
             // Unsupported automatic test without a probe becomes BLOCKED
             assert(svc.start_test("SYNC-ID-001") == ESP_OK);

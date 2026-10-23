@@ -27,7 +27,7 @@ The old docs index linked missing Node Family, Embedded Integration, StyleSystem
 
 ## Open gaps
 
-- `kFeatureSignedOta` is true, but reviewed upload/default configuration does not establish signature enforcement. Firmware behavior is unchanged by this rewrite.
+- At the audit baseline, `kFeatureSignedOta` was true without established signature enforcement. The 2026-10-23 candidate now derives this flag from `CONFIG_SECURE_SIGNED_ON_UPDATE`; the default build correctly reports false. A signed production provisioning/update process remains open. See [candidate evidence](FIRMWARE_RELEASE_CANDIDATE.md).
 - MQTT lacks a dedicated broker credential/certificate provisioning workflow in the reviewed service.
 - Browser flasher referenced an absent release manifest; the page now explains installation prerequisites.
 - Physical timing, combined-load endurance, electrical/thermal behavior and current-revision OTA recovery require target evidence.

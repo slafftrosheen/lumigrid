@@ -10,7 +10,7 @@ struct NodeIdentity {
     char family[16];     // "led-node"
     char model[24];      // "lg-led-v1"
     char hw_revision[8]; // "A"
-    char fw_version[16]; // "0.8.0"
+    char fw_version[32]; // Full ESP-IDF app descriptor version, including RC suffix.
 };
 
 NodeIdentity get_node_identity(const char* device_name = nullptr);

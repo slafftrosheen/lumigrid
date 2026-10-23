@@ -10,13 +10,16 @@ CHECKER = Path(__file__).with_name("check_invariants.py")
 READ_TEXT = Path.read_text
 
 class BootConfigTests(unittest.TestCase):
-    def check(self, mutation=None, allow_owner=False, platform=None, hook=False, async_i2c=False):
+    def check(self, mutation=None, allow_owner=False, platform=None, hook=False, forbidden_i2c=None):
         def read(path, *args, **kwargs):
             text = READ_TEXT(path, *args, **kwargs)
             if path.name == "platformio.ini" and platform:
                 text = text.replace("espressif32@6.7.0", platform)
-            if path.name == "Pca9685Driver.cpp" and async_i2c:
-                text = text.replace(".trans_queue_depth = 0,", ".trans_queue_depth = 4,")
+            if path.name == "Pca9685Driver.cpp" and forbidden_i2c:
+                # The driver uses the legacy synchronous API, so there is no
+                # queue-depth field to mutate. Simulate introducing the new
+                # transport or async callbacks and verify that the gate rejects it.
+                text += "\n" + forbidden_i2c + "\n"
             if path.name == "main.cpp" and hook:
                 text += "\nvoid vApplicationGetTimerTaskMemory() {}\n"
             if path.name == "boot_memory_policy.json" and not allow_owner:
@@ -57,9 +60,13 @@ class BootConfigTests(unittest.TestCase):
         self.assertIn("scheduler memory hook forbidden", output)
 
     def test_async_i2c_rejected_for_stack_buffers(self):
-        code, output = self.check(async_i2c=True)
-        self.assertEqual(code, 1)
-        self.assertIn("stack buffers require synchronous I2C", output)
+        for forbidden in ('#include "driver/i2c_master.h"',
+                          'config.trans_queue_depth = 4;',
+                          'i2c_master_register_event_callbacks(bus, callbacks, context);'):
+            with self.subTest(forbidden=forbidden):
+                code, output = self.check(forbidden_i2c=forbidden)
+                self.assertEqual(code, 1)
+                self.assertIn("PCA9685 must use legacy synchronous I2C", output)
 
     def test_invalid_timer_stack_rejected(self):
         code, output = self.check(lambda n, t: t.replace("CONFIG_FREERTOS_TIMER_TASK_STACK_DEPTH=2048", "CONFIG_FREERTOS_TIMER_TASK_STACK_DEPTH=0"))
