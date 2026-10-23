@@ -1,160 +1,489 @@
-// Public copy describes implemented behavior; numeric limits come from firmwareFacts.json.
+// Customer-facing LED Node messaging. Component and chip specifications belong in the engineering guides.
+// Counts on the landing page are read from generated firmwareFacts.json, not duplicated here.
 export const publicContent = {
-  en: {
-    nav: ['Capabilities', 'Setup', 'Documentation', 'Dashboard'],
-    kicker: 'LumiGrid · local lighting control',
-    title: 'Give every light a part to play.',
-    intro: 'Control addressable strips and independent PWM dimmers from your browser. Save scenes, build a timeline, or run a cue list on an ESP32 controller.',
-    start: 'Set up your node', explore: 'Explore the dashboard',
-    topology: 'One node. Two output types.', addressable: 'Addressable lanes', pwm: 'PWM dimmers', scenes: 'Scene slots', effects: 'Effects',
-    hardware: 'WS2812 RGB and SK6812 RGBW · PCA9685 PWM · 8 MB ESP32 target',
-    capacity: 'Firmware capacities. Accepted topology depends on configuration and available memory.',
-    featuresTitle: 'From a saved look to a running show',
-    features: [
-      ['Configure the outputs', 'Set strip type, pixel order and count. Name channels and combine them into groups.', 'LED_NODE'],
-      ['Save and shape scenes', 'Choose effects, colors and brightness. Layer looks and add motion with scene automation.', 'EFFECTS'],
-      ['Build playback', 'Arrange timeline steps, prepare cue lists and configure calendar schedules with a valid clock.', 'EFFECTS'],
-      ['Bring in live control', 'Enable Art-Net or sACN and patch channels. Source priority determines which control is active.', 'PROTOCOLS'],
-      ['Coordinate nodes', 'Use a shared LAN and matching show content for node sync. Inspect peer and transport status.', 'PROTOCOLS'],
-      ['See what the node reports', 'Inspect output, memory and storage diagnostics. Configure modeled channel and supply power budgets.', 'CONFIGURATION']
+  "en": {
+    "metaTitle": "LumiGrid LED Node | Control your lighting in one place",
+    "metaDescription": "Bring animated LED strips and dimmable lighting together. Create scenes, effects and schedules with LumiGrid LED Node on your local network.",
+    "nav": [
+      "What it does",
+      "Outputs",
+      "Guides",
+      "Control app"
     ],
-    read: 'Read the guide', setupTitle: 'Start with one channel',
-    steps: [
-      ['Connect', 'Join LumiGrid-Setup using the generated Wi-Fi key printed over serial. Open the device page.'],
-      ['Secure and configure', 'Create your Admin key, configure the connected outputs and test one channel at low brightness.'],
-      ['Save and run', 'Save a scene, then add schedules, live input or cues as your installation needs them.']
+    "language": "Language",
+    "kicker": "LumiGrid LED Node · lighting control",
+    "title": "Your lighting. One place to control it.",
+    "intro": "Bring colorful LED strips and dimmable lights together. Set the mood, create movement and run your lighting from one browser-based control space.",
+    "start": "Get started",
+    "explore": "Open control app",
+    "dashboardNote": "Connect to an LED Node to use live controls.",
+    "visualEyebrow": "LIGHT IN MOTION",
+    "visualTitle": "One node. Different kinds of light.",
+    "visualLabel": "Illustration of the lighting LED Node can control",
+    "visualCaption": "Illustrative lighting preview, not a product photograph.",
+    "totalOutputs": "independent lighting outputs",
+    "pixelTag": "for animated strips",
+    "dimmerTag": "for dimmable lights",
+    "featuresEyebrow": "CREATE · CONTROL · REPEAT",
+    "featuresTitle": "More than switching lights on and off",
+    "featuresIntro": "Go from a simple color to a coordinated lighting setup without managing each light separately.",
+    "features": [
+      [
+        "Build the look",
+        "Choose colors, brightness and built-in effects. Save your favorite combinations as scenes.",
+        "EFFECTS"
+      ],
+      [
+        "Control every area",
+        "Adjust each connected output on its own, or bring several together in a group.",
+        "LED_NODE"
+      ],
+      [
+        "Add movement",
+        "Layer effects and animate changes for lighting that evolves through a scene.",
+        "EFFECTS"
+      ],
+      [
+        "Plan the moment",
+        "Use timelines, cue lists and schedules to change lighting at the right time.",
+        "EFFECTS"
+      ],
+      [
+        "Connect show controls",
+        "Bring in a compatible live lighting source when an event needs direct control.",
+        "PROTOCOLS"
+      ],
+      [
+        "Expand your setup",
+        "Coordinate several LED Nodes on the same local network with matching show content.",
+        "PROTOCOLS"
+      ]
     ],
-    localTitle: 'Control stays on your network',
-    localText: 'The node serves its own interface over HTTP. The separate web dashboard provides editors and live status; HTTPS browser restrictions may block its connection to a local node. Open the device interface directly when blocked.',
-    limitsTitle: 'Know what is implemented—and what needs measuring',
-    limitsText: 'The documentation follows the current code. Sync accuracy, flicker, electrical load and endurance need measurements on your actual installation. Power values are estimates, and the internal certification tools collect evidence rather than grant regulatory approval.',
-    audit: 'View the source audit', docsTitle: 'The details, in one place',
-    docsText: 'Setup, wiring, access, API routes, playback, updates and validation share the firmware documentation source.',
-    docs: 'Open documentation', firmware: 'Build and install firmware', footer: 'LumiGrid · ESP32 firmware and browser tools',
-    language: 'Language',
+    "read": "Explore the guide",
+    "outputsEyebrow": "YOUR LIGHTS, YOUR LAYOUT",
+    "outputsTitle": "Two lighting styles. One LED Node.",
+    "outputsIntro": "Connect different kinds of lighting without needing a separate controller for every effect or area.",
+    "pixelTitle": "Animated LED strips",
+    "pixelText": "Eight connections for compatible strips that can show colors and effects across individual points of light.",
+    "dimmerTitle": "Dimmable lighting",
+    "dimmerText": "Eight separate brightness controls for suitable conventional LED lighting, such as signs and accent zones.",
+    "outputsNote": "The number of lights and usable output limits depend on your setup and the connected loads.",
+    "scenesStat": "scenes to save",
+    "effectsStat": "built-in effects",
+    "setupEyebrow": "FROM FIRST CONNECTION TO FIRST SCENE",
+    "setupTitle": "Make it yours in three steps",
+    "steps": [
+      [
+        "Connect your lights",
+        "Choose lighting, wiring and a suitable external power supply for your installation."
+      ],
+      [
+        "Set up LED Node",
+        "Join its setup network, open the control page and create your private access key."
+      ],
+      [
+        "Create your first look",
+        "Name and test your outputs at low brightness. Save a scene, then add timing when you need it."
+      ]
+    ],
+    "localTitle": "Your lighting stays under your control",
+    "localText": "LED Node has its own browser interface on your local network. Everyday lighting control does not require a LumiGrid cloud account.",
+    "localDetail": "The separate control app offers editors and status views when it can reach your node. You can also open the node's own interface directly.",
+    "essentialsTitle": "What comes with the idea—and what you choose",
+    "essentialsText": "LED Node is the controller. LED strips, connected lights, wiring and an appropriately rated external power supply are selected for each installation.",
+    "ctaTitle": "Ready to put your lights to work?",
+    "ctaText": "Start with one connected light and build from there. The guides cover setup and compatibility; the control app is where your scenes take shape.",
+    "docs": "Read the setup guide",
+    "app": "Open the control app",
+    "footer": "LumiGrid LED Node · Lighting control on your network",
+    "technical": "Technical guides"
   },
-  lv: {
-    nav: ['Iespējas', 'Iestatīšana', 'Dokumentācija', 'Vadības panelis'],
-    kicker: 'LumiGrid · lokāla apgaismojuma vadība', title: 'Katrai gaismai sava loma.',
-    intro: 'Vadiet adresējamas LED lentes un neatkarīgus PWM kanālus pārlūkā. Saglabājiet ainas, veidojiet laika secības un atskaņojiet soļu sarakstus ar ESP32 kontrolieri.',
-    start: 'Iestatīt kontrolieri', explore: 'Atvērt vadības paneli', topology: 'Viens kontrolieris. Divi izeju veidi.',
-    addressable: 'Adresējamas izejas', pwm: 'PWM kanāli', scenes: 'Ainu vietas', effects: 'Efekti',
-    hardware: 'WS2812 RGB un SK6812 RGBW · PCA9685 PWM · ESP32 ar 8 MB zibatmiņu',
-    capacity: 'Programmaparatūras ietilpība. Pieļaujamā konfigurācija ir atkarīga arī no pieejamās atmiņas.',
-    featuresTitle: 'No saglabātas ainas līdz gaismu programmai',
-    features: [
-      ['Konfigurējiet izejas', 'Norādiet lentes veidu, krāsu secību un pikseļu skaitu. Nosauciet kanālus un apvienojiet tos grupās.', 'LED_NODE'],
-      ['Veidojiet ainas', 'Izvēlieties efektus, krāsas un spilgtumu. Kombinējiet slāņus un pievienojiet ainu automatizāciju.', 'EFFECTS'],
-      ['Plānojiet atskaņošanu', 'Sakārtojiet laika secības un soļu sarakstus. Kalendāra grafikiem vajadzīgs pareizs sistēmas laiks.', 'EFFECTS'],
-      ['Pievienojiet ārēju vadību', 'Ieslēdziet Art-Net vai sACN un piesaistiet kanālus. Aktīvo vadību nosaka avotu prioritāte.', 'PROTOCOLS'],
-      ['Saskaņojiet kontrolierus', 'Sinhronizācijai izmantojiet kopīgu lokālo tīklu un atbilstošu saturu. Pārbaudiet mezglu un atskaņošanas stāvokli.', 'PROTOCOLS'],
-      ['Pārbaudiet darbību', 'Skatiet izeju, atmiņas un datu glabāšanas diagnostiku. Iestatiet kanālu un barošanas avotu jaudas aprēķinus.', 'CONFIGURATION']
+  "lv": {
+    "metaTitle": "LumiGrid LED Node | Visas gaismas vienuviet",
+    "metaDescription": "Apvienojiet animētas LED lentes un regulējamu apgaismojumu. Veidojiet ainas, efektus un grafikus savā lokālajā tīklā.",
+    "nav": [
+      "Iespējas",
+      "Izejas",
+      "Pamācības",
+      "Vadības lietotne"
     ],
-    read: 'Lasīt rokasgrāmatu', setupTitle: 'Sāciet ar vienu kanālu',
-    steps: [
-      ['Pievienojieties', 'Pievienojieties LumiGrid-Setup tīklam ar seriālajā konsolē parādīto Wi-Fi paroli. Atveriet ierīces lapu.'],
-      ['Iestatiet piekļuvi un izejas', 'Izveidojiet administratora atslēgu, konfigurējiet izejas un pārbaudiet vienu kanālu ar mazu spilgtumu.'],
-      ['Saglabājiet un palaidiet', 'Saglabājiet ainu un pēc vajadzības pievienojiet grafikus, ārējo vadību vai atskaņošanas soļus.']
+    "language": "Valoda",
+    "kicker": "LumiGrid LED Node · apgaismojuma vadība",
+    "title": "Visas jūsu gaismas. Vienuviet.",
+    "intro": "Apvienojiet krāsainas LED lentes un regulējamas gaismas. Radiet noskaņu, pievienojiet kustību un vadiet apgaismojumu vienā pārlūka saskarnē.",
+    "start": "Sākt lietošanu",
+    "explore": "Atvērt vadības lietotni",
+    "dashboardNote": "Tiešai vadībai nepieciešams savienojums ar LED Node.",
+    "visualEyebrow": "GAISMA KUSTĪBĀ",
+    "visualTitle": "Viens kontrolieris. Dažādas gaismas.",
+    "visualLabel": "Ilustrācija ar apgaismojumu, ko var vadīt LED Node",
+    "visualCaption": "Ilustratīvs apgaismojuma attēlojums, nevis produkta fotogrāfija.",
+    "totalOutputs": "neatkarīgas apgaismojuma izejas",
+    "pixelTag": "animētām lentēm",
+    "dimmerTag": "regulējamām gaismām",
+    "featuresEyebrow": "RADI · VADI · ATKĀRTO",
+    "featuresTitle": "Vairāk nekā tikai ieslēgt un izslēgt",
+    "featuresIntro": "No vienkāršas krāsas līdz saskaņotam apgaismojumam — bez katras gaismas atsevišķas pārvaldīšanas.",
+    "features": [
+      [
+        "Veidojiet noskaņu",
+        "Izvēlieties krāsas, spilgtumu un gatavus efektus. Saglabājiet iemīļotās kombinācijas ainās.",
+        "EFFECTS"
+      ],
+      [
+        "Vadiet katru zonu",
+        "Regulējiet katru pieslēgto izeju atsevišķi vai apvienojiet vairākas grupā.",
+        "LED_NODE"
+      ],
+      [
+        "Pievienojiet kustību",
+        "Kombinējiet efektus un animējiet pārmaiņas ainas laikā.",
+        "EFFECTS"
+      ],
+      [
+        "Plānojiet norises",
+        "Ar laika secībām, gaismu komandām un grafikiem mainiet apgaismojumu īstajā brīdī.",
+        "EFFECTS"
+      ],
+      [
+        "Pieslēdziet ārēju vadību",
+        "Pasākumos izmantojiet saderīgu tiešās apgaismojuma vadības avotu.",
+        "PROTOCOLS"
+      ],
+      [
+        "Paplašiniet sistēmu",
+        "Saskaņojiet vairākus LED Node vienā lokālajā tīklā ar atbilstošu programmas saturu.",
+        "PROTOCOLS"
+      ]
     ],
-    localTitle: 'Vadība jūsu tīklā',
-    localText: 'Kontrolieris nodrošina savu HTTP saskarni. Atsevišķais vadības panelis piedāvā redaktorus un darbības datus, taču HTTPS pārlūka ierobežojumi var bloķēt savienojumu. Tad atveriet ierīces lapu tieši.',
-    limitsTitle: 'Ieviestās iespējas un praksē pārbaudāmais',
-    limitsText: 'Dokumentācija balstās pašreizējā kodā. Sinhronizācijas precizitāte, mirgošana, elektriskā slodze un ilgstoša darbība jāpārbauda konkrētajā instalācijā. Jaudas dati ir aprēķini; iekšējie pārbaudes rīki neaizstāj normatīvo sertifikāciju.',
-    audit: 'Skatīt koda auditu', docsTitle: 'Visa tehniskā informācija vienuviet',
-    docsText: 'Iestatīšana, savienojumi, piekļuve, API, atskaņošana un atjauninājumi izmanto kopīgu programmaparatūras dokumentāciju angļu valodā.',
-    docs: 'Atvērt dokumentāciju', firmware: 'Būvēt un instalēt programmaparatūru', footer: 'LumiGrid · ESP32 programmaparatūra un pārlūka rīki', language: 'Valoda',
+    "read": "Skatīt pamācību",
+    "outputsEyebrow": "JŪSU GAISMAS, JŪSU IZKĀRTOJUMS",
+    "outputsTitle": "Divi gaismu veidi. Viens LED Node.",
+    "outputsIntro": "Apvienojiet dažādus apgaismojuma veidus, neizmantojot atsevišķu kontrolieri katrai zonai.",
+    "pixelTitle": "Animētas LED lentes",
+    "pixelText": "Astoņi pieslēgumi saderīgām lentēm, kurās krāsas un efekti var mainīties pa atsevišķiem gaismas punktiem.",
+    "dimmerTitle": "Regulējamas gaismas",
+    "dimmerText": "Astoņi neatkarīgi spilgtuma kanāli piemērotam parastajam LED apgaismojumam, piemēram, izkārtnēm un akcentiem.",
+    "outputsNote": "Pieslēdzamo gaismu daudzums un iespējamā slodze ir atkarīga no konkrētās instalācijas.",
+    "scenesStat": "saglabājamas ainas",
+    "effectsStat": "iebūvēti efekti",
+    "setupEyebrow": "NO PIRMĀ PIESLĒGUMA LĪDZ PIRMAJAI AINAI",
+    "setupTitle": "Trīs soļi līdz savai gaismai",
+    "steps": [
+      [
+        "Pieslēdziet gaismas",
+        "Izvēlieties piemērotu apgaismojumu, vadus un ārējo barošanas avotu."
+      ],
+      [
+        "Iestatiet LED Node",
+        "Pievienojieties iestatīšanas tīklam, atveriet vadības lapu un izveidojiet privātu piekļuves atslēgu."
+      ],
+      [
+        "Saglabājiet pirmo ainu",
+        "Nosauciet izejas un pārbaudiet tās ar mazu spilgtumu. Saglabājiet ainu un vēlāk pievienojiet grafiku."
+      ]
+    ],
+    "localTitle": "Gaismas paliek jūsu kontrolē",
+    "localText": "LED Node piedāvā savu pārlūka saskarni lokālajā tīklā. Ikdienas vadībai nav nepieciešams LumiGrid mākoņkonts.",
+    "localDetail": "Atsevišķā vadības lietotnē ir redaktori un statusa skati, ja tā var sasniegt kontrolieri. Varat atvērt arī paša LED Node lapu.",
+    "essentialsTitle": "Ko nodrošina kontrolieris un ko izvēlaties jūs",
+    "essentialsText": "LED Node ir kontrolieris. LED lentes, gaismas, vadus un atbilstošas jaudas ārējo barošanas avotu izvēlas katrai instalācijai atsevišķi.",
+    "ctaTitle": "Gatavi piešķirt gaismām savu lomu?",
+    "ctaText": "Sāciet ar vienu gaismu un paplašiniet sistēmu. Pamācībās ir pieslēgšana un saderība; ainas veidojiet vadības lietotnē.",
+    "docs": "Atvērt iestatīšanas pamācību",
+    "app": "Atvērt vadības lietotni",
+    "footer": "LumiGrid LED Node · Apgaismojuma vadība jūsu tīklā",
+    "technical": "Tehniskās pamācības"
   },
-  ru: {
-    nav: ['Возможности', 'Настройка', 'Документация', 'Панель управления'],
-    kicker: 'LumiGrid · локальное управление светом', title: 'У каждого света своя роль.',
-    intro: 'Управляйте адресными лентами и независимыми ШИМ-каналами из браузера. Сохраняйте сцены, стройте временные последовательности и запускайте списки световых команд на контроллере ESP32.',
-    start: 'Настроить контроллер', explore: 'Открыть панель', topology: 'Один контроллер. Два типа выходов.',
-    addressable: 'Адресных линий', pwm: 'ШИМ-каналов', scenes: 'Слотов сцен', effects: 'Эффектов',
-    hardware: 'WS2812 RGB и SK6812 RGBW · PCA9685 PWM · ESP32 с 8 МБ флеш-памяти',
-    capacity: 'Пределы модели прошивки. Допустимая конфигурация также зависит от доступной памяти.',
-    featuresTitle: 'От сохранённой сцены до световой программы',
-    features: [
-      ['Настройте выходы', 'Выберите тип ленты, порядок цветов и число пикселей. Назовите каналы и объедините их в группы.', 'LED_NODE'],
-      ['Создавайте сцены', 'Выбирайте эффекты, цвет и яркость. Комбинируйте слои и добавляйте автоматизацию сцены.', 'EFFECTS'],
-      ['Планируйте воспроизведение', 'Собирайте временные последовательности и списки команд. Для расписания нужны корректные системные часы.', 'EFFECTS'],
-      ['Подключите внешний источник', 'Включите Art-Net или sACN и настройте каналы. Активное управление определяется приоритетом источников.', 'PROTOCOLS'],
-      ['Согласуйте контроллеры', 'Для синхронизации нужны общая локальная сеть и совпадающее содержимое программы. Проверяйте состояние узлов и воспроизведения.', 'PROTOCOLS'],
-      ['Проверяйте состояние', 'Просматривайте диагностику выходов, памяти и хранилища. Задавайте расчётные ограничения мощности каналов и блоков питания.', 'CONFIGURATION']
+  "ru": {
+    "metaTitle": "LumiGrid LED Node | Управление светом в одном месте",
+    "metaDescription": "Объедините адресные LED-ленты и диммируемый свет. Создавайте сцены, эффекты и расписания в локальной сети.",
+    "nav": [
+      "Возможности",
+      "Выходы",
+      "Руководства",
+      "Панель управления"
     ],
-    read: 'Читать руководство', setupTitle: 'Начните с одного канала',
-    steps: [
-      ['Подключитесь', 'Подключитесь к LumiGrid-Setup с паролем Wi-Fi из последовательной консоли. Откройте страницу устройства.'],
-      ['Настройте доступ и выходы', 'Создайте ключ администратора, настройте подключённые выходы и проверьте один канал на малой яркости.'],
-      ['Сохраните и запустите', 'Сохраните сцену, затем добавляйте расписание, внешний источник или команды по мере необходимости.']
+    "language": "Язык",
+    "kicker": "LumiGrid LED Node · управление освещением",
+    "title": "Весь ваш свет. В одном месте.",
+    "intro": "Объедините цветные LED-ленты и регулируемые светильники. Создавайте атмосферу, добавляйте движение и управляйте освещением через браузер.",
+    "start": "Начать",
+    "explore": "Открыть панель",
+    "dashboardNote": "Для управления в реальном времени требуется подключение к LED Node.",
+    "visualEyebrow": "СВЕТ В ДВИЖЕНИИ",
+    "visualTitle": "Один контроллер. Разный свет.",
+    "visualLabel": "Иллюстрация типов освещения, которыми может управлять LED Node",
+    "visualCaption": "Иллюстрация световых возможностей, не фотография устройства.",
+    "totalOutputs": "независимых световых выходов",
+    "pixelTag": "для анимированных лент",
+    "dimmerTag": "для регулируемого света",
+    "featuresEyebrow": "СОЗДАВАЙ · УПРАВЛЯЙ · ПОВТОРЯЙ",
+    "featuresTitle": "Больше, чем включить и выключить",
+    "featuresIntro": "От одного цвета до согласованной световой картины — без управления каждым источником отдельно.",
+    "features": [
+      [
+        "Создавайте атмосферу",
+        "Выбирайте цвета, яркость и встроенные эффекты. Сохраняйте любимые сочетания как сцены.",
+        "EFFECTS"
+      ],
+      [
+        "Управляйте каждой зоной",
+        "Настраивайте каждый подключённый выход отдельно или объединяйте несколько в группу.",
+        "LED_NODE"
+      ],
+      [
+        "Добавляйте движение",
+        "Сочетайте эффекты и плавно меняйте свет по ходу сцены.",
+        "EFFECTS"
+      ],
+      [
+        "Планируйте моменты",
+        "Меняйте освещение по временной программе, списку команд или расписанию.",
+        "EFFECTS"
+      ],
+      [
+        "Подключайте внешнее управление",
+        "Используйте совместимый источник светового управления для мероприятий и шоу.",
+        "PROTOCOLS"
+      ],
+      [
+        "Расширяйте систему",
+        "Координируйте несколько LED Node в одной локальной сети с одинаковым содержимым шоу.",
+        "PROTOCOLS"
+      ]
     ],
-    localTitle: 'Управление в вашей сети',
-    localText: 'Контроллер предоставляет собственный HTTP-интерфейс. Внешняя панель содержит редакторы и данные состояния, но ограничения HTTPS могут блокировать доступ к локальному узлу. В таком случае откройте страницу устройства напрямую.',
-    limitsTitle: 'Что реализовано, а что требует измерений',
-    limitsText: 'Документация следует текущему коду. Точность синхронизации, мерцание, электрическую нагрузку и длительную работу нужно проверять на вашей установке. Мощность рассчитывается программно; внутренние проверки не заменяют нормативную сертификацию.',
-    audit: 'Посмотреть аудит кода', docsTitle: 'Технические сведения в одном месте',
-    docsText: 'Настройка, подключение, доступ, API, воспроизведение и обновления используют общую документацию прошивки на английском языке.',
-    docs: 'Открыть документацию', firmware: 'Сборка и установка прошивки', footer: 'LumiGrid · прошивка ESP32 и инструменты браузера', language: 'Язык',
+    "read": "Подробнее",
+    "outputsEyebrow": "ВАШ СВЕТ, ВАША КОНФИГУРАЦИЯ",
+    "outputsTitle": "Два вида освещения. Один LED Node.",
+    "outputsIntro": "Подключайте разные источники света без отдельного контроллера для каждой зоны.",
+    "pixelTitle": "Анимированные LED-ленты",
+    "pixelText": "Восемь выходов для совместимых лент, где цвет и эффекты могут меняться по отдельным световым точкам.",
+    "dimmerTitle": "Регулируемый свет",
+    "dimmerText": "Восемь независимых каналов яркости для подходящих обычных LED-источников — например, вывесок и подсветки интерьера.",
+    "outputsNote": "Допустимое количество светильников и нагрузка зависят от подключённого оборудования и его настройки.",
+    "scenesStat": "сохранённых сцен",
+    "effectsStat": "встроенных эффектов",
+    "setupEyebrow": "ОТ ПОДКЛЮЧЕНИЯ ДО ПЕРВОЙ СЦЕНЫ",
+    "setupTitle": "Три шага к своему свету",
+    "steps": [
+      [
+        "Подключите освещение",
+        "Подберите подходящие источники света, проводку и внешний блок питания."
+      ],
+      [
+        "Настройте LED Node",
+        "Подключитесь к сети настройки, откройте страницу управления и создайте личный ключ доступа."
+      ],
+      [
+        "Создайте первую сцену",
+        "Назовите и проверьте выходы на небольшой яркости. Сохраните сцену и при необходимости добавьте расписание."
+      ]
+    ],
+    "localTitle": "Ваш свет — под вашим контролем",
+    "localText": "У LED Node есть собственная страница управления в локальной сети. Для повседневной работы не нужен облачный аккаунт LumiGrid.",
+    "localDetail": "Отдельная панель предлагает редакторы и состояние системы, если может подключиться к узлу. Страницу самого LED Node можно открыть напрямую.",
+    "essentialsTitle": "Что даёт контроллер, а что выбираете вы",
+    "essentialsText": "LED Node — это контроллер. LED-ленты, светильники, проводка и внешний блок питания нужной мощности подбираются для конкретной установки.",
+    "ctaTitle": "Готовы оживить своё освещение?",
+    "ctaText": "Начните с одного источника света и расширяйте систему. Руководство поможет с подключением, а сцены создаются в панели управления.",
+    "docs": "Руководство по настройке",
+    "app": "Открыть панель управления",
+    "footer": "LumiGrid LED Node · Управление светом в вашей сети",
+    "technical": "Технические руководства"
   },
-  nl: {
-    nav: ['Mogelijkheden', 'Instellen', 'Documentatie', 'Dashboard'],
-    kicker: 'LumiGrid · lokale lichtregeling', title: 'Geef elk licht een eigen rol.',
-    intro: 'Bedien adresseerbare ledstrips en onafhankelijke PWM-kanalen vanuit je browser. Bewaar scènes, maak een tijdlijn of speel een cuelijst af op een ESP32-controller.',
-    start: 'Stel je controller in', explore: 'Open het dashboard', topology: 'Eén controller. Twee soorten uitgangen.',
-    addressable: 'Adresseerbare lijnen', pwm: 'PWM-kanalen', scenes: 'Scèneplaatsen', effects: 'Effecten',
-    hardware: 'WS2812 RGB en SK6812 RGBW · PCA9685 PWM · ESP32 met 8 MB flash',
-    capacity: 'Capaciteiten van de firmware. De toegestane configuratie hangt ook af van het beschikbare geheugen.',
-    featuresTitle: 'Van opgeslagen scène naar lichtprogramma',
-    features: [
-      ['Configureer uitgangen', 'Kies striptype, kleurvolgorde en aantal pixels. Geef kanalen namen en groepeer ze.', 'LED_NODE'],
-      ['Maak scènes', 'Kies effecten, kleuren en helderheid. Combineer lagen en voeg scèneautomatisering toe.', 'EFFECTS'],
-      ['Plan de weergave', 'Maak tijdlijnen en cuelijsten. Kalenderschema’s vereisen een geldige systeemklok.', 'EFFECTS'],
-      ['Sluit livebesturing aan', 'Schakel Art-Net of sACN in en koppel kanalen. De bronprioriteit bepaalt welke besturing actief is.', 'PROTOCOLS'],
-      ['Coördineer controllers', 'Gebruik hetzelfde lokale netwerk en overeenkomende inhoud voor synchronisatie. Controleer peer- en afspeelstatus.', 'PROTOCOLS'],
-      ['Bekijk de status', 'Inspecteer uitgangen, geheugen en opslag. Stel berekende vermogensbudgetten voor kanalen en voedingen in.', 'CONFIGURATION']
+  "nl": {
+    "metaTitle": "LumiGrid LED Node | Al je verlichting op één plek",
+    "metaDescription": "Breng geanimeerde ledstrips en dimbare verlichting samen. Maak scènes, effecten en schema's op je eigen netwerk.",
+    "nav": [
+      "Mogelijkheden",
+      "Uitgangen",
+      "Handleidingen",
+      "Bediening"
     ],
-    read: 'Lees de handleiding', setupTitle: 'Begin met één kanaal',
-    steps: [
-      ['Verbind', 'Verbind met LumiGrid-Setup via de gegenereerde wifi-sleutel uit de seriële console. Open de apparaatpagina.'],
-      ['Beveilig en configureer', 'Maak een beheerderssleutel, configureer de uitgangen en test één kanaal op lage helderheid.'],
-      ['Bewaar en speel af', 'Bewaar een scène en voeg naar behoefte schema’s, live-invoer of cues toe.']
+    "language": "Taal",
+    "kicker": "LumiGrid LED Node · lichtbediening",
+    "title": "Al je verlichting. Eén plek om te bedienen.",
+    "intro": "Breng kleurrijke ledstrips en dimbare lampen samen. Creëer sfeer, voeg beweging toe en bedien je verlichting vanuit één plek in de browser.",
+    "start": "Aan de slag",
+    "explore": "Open de bediening",
+    "dashboardNote": "Verbind een LED Node om live verlichting te bedienen.",
+    "visualEyebrow": "LICHT IN BEWEGING",
+    "visualTitle": "Eén controller. Verschillende soorten licht.",
+    "visualLabel": "Illustratie van verlichting die LED Node kan bedienen",
+    "visualCaption": "Illustratieve lichtopstelling, geen productfoto.",
+    "totalOutputs": "onafhankelijke lichtuitgangen",
+    "pixelTag": "voor geanimeerde strips",
+    "dimmerTag": "voor dimbare verlichting",
+    "featuresEyebrow": "MAAK · BEDIEN · HERHAAL",
+    "featuresTitle": "Veel meer dan aan- en uitzetten",
+    "featuresIntro": "Van één kleur naar een samenhangend lichtplan, zonder elke lamp apart te beheren.",
+    "features": [
+      [
+        "Maak de sfeer",
+        "Kies kleuren, helderheid en ingebouwde effecten. Bewaar favoriete combinaties als scènes.",
+        "EFFECTS"
+      ],
+      [
+        "Bedien elke zone",
+        "Pas elke aangesloten uitgang apart aan of combineer meerdere uitgangen in een groep.",
+        "LED_NODE"
+      ],
+      [
+        "Voeg beweging toe",
+        "Combineer effecten en animeer veranderingen in een scène.",
+        "EFFECTS"
+      ],
+      [
+        "Plan het juiste moment",
+        "Gebruik tijdlijnen, cuelijsten en schema's om je licht op het juiste moment te veranderen.",
+        "EFFECTS"
+      ],
+      [
+        "Sluit showbediening aan",
+        "Gebruik een compatibele live lichtbron voor directe bediening tijdens evenementen.",
+        "PROTOCOLS"
+      ],
+      [
+        "Breid je opstelling uit",
+        "Coördineer meerdere LED Nodes op hetzelfde lokale netwerk met bijpassende show-inhoud.",
+        "PROTOCOLS"
+      ]
     ],
-    localTitle: 'Bediening op je eigen netwerk',
-    localText: 'De controller biedt een eigen HTTP-interface. Het aparte dashboard bevat editors en statusinformatie; HTTPS-browserbeperkingen kunnen lokaal contact blokkeren. Open dan de apparaatpagina rechtstreeks.',
-    limitsTitle: 'Wat de code biedt en wat je moet meten',
-    limitsText: 'De documentatie volgt de huidige code. Synchronisatienauwkeurigheid, flikkering, elektrische belasting en duurgedrag vereisen metingen aan jouw installatie. Vermogenswaarden zijn schattingen; interne tests zijn geen wettelijke certificering.',
-    audit: 'Bekijk de code-audit', docsTitle: 'Alle technische details bij elkaar',
-    docsText: 'Installatie, aansluitingen, toegang, API, afspelen en updates gebruiken dezelfde Engelstalige firmwaredocumentatie.',
-    docs: 'Open documentatie', firmware: 'Firmware bouwen en installeren', footer: 'LumiGrid · ESP32-firmware en browsertools', language: 'Taal',
+    "read": "Lees meer",
+    "outputsEyebrow": "JOUW LICHT, JOUW INDELING",
+    "outputsTitle": "Twee soorten licht. Eén LED Node.",
+    "outputsIntro": "Combineer verschillende soorten verlichting zonder voor elke zone een aparte controller.",
+    "pixelTitle": "Geanimeerde ledstrips",
+    "pixelText": "Acht aansluitingen voor compatibele strips met kleuren en effecten per lichtpunt.",
+    "dimmerTitle": "Dimbare verlichting",
+    "dimmerText": "Acht afzonderlijke helderheidsregelingen voor geschikte gewone ledverlichting, zoals reclameletters en accentzones.",
+    "outputsNote": "Het aantal lampen en de bruikbare vermogensgrenzen hangen af van de aangesloten installatie.",
+    "scenesStat": "op te slaan scènes",
+    "effectsStat": "ingebouwde effecten",
+    "setupEyebrow": "VAN EERSTE AANSLUITING TOT EERSTE SCÈNE",
+    "setupTitle": "In drie stappen naar jouw licht",
+    "steps": [
+      [
+        "Sluit je verlichting aan",
+        "Kies passende verlichting, bedrading en een geschikte externe voeding."
+      ],
+      [
+        "Stel LED Node in",
+        "Verbind met het instelnetwerk, open de bedieningspagina en maak een eigen toegangssleutel."
+      ],
+      [
+        "Maak je eerste scène",
+        "Geef uitgangen een naam en test met lage helderheid. Sla een scène op en voeg later timing toe."
+      ]
+    ],
+    "localTitle": "De bediening blijft bij jou",
+    "localText": "LED Node heeft een eigen browserinterface op je lokale netwerk. Voor de dagelijkse bediening is geen LumiGrid-cloudaccount nodig.",
+    "localDetail": "De aparte bedieningsapp biedt editors en statusinformatie als de node bereikbaar is. Je kunt ook direct de eigen nodepagina openen.",
+    "essentialsTitle": "Wat de controller doet en wat je zelf kiest",
+    "essentialsText": "LED Node is de controller. Ledstrips, lampen, bedrading en een externe voeding met passend vermogen kies je per installatie.",
+    "ctaTitle": "Klaar om je verlichting vorm te geven?",
+    "ctaText": "Begin met één lamp en bouw uit. De handleidingen helpen bij installatie en compatibiliteit; in de bediening maak je scènes.",
+    "docs": "Lees de instelhandleiding",
+    "app": "Open de bediening",
+    "footer": "LumiGrid LED Node · Lichtbediening op je eigen netwerk",
+    "technical": "Technische handleidingen"
   },
-  de: {
-    nav: ['Funktionen', 'Einrichtung', 'Dokumentation', 'Dashboard'],
-    kicker: 'LumiGrid · lokale Lichtsteuerung', title: 'Jedes Licht bekommt seine Aufgabe.',
-    intro: 'Steuere adressierbare LED-Streifen und unabhängige PWM-Kanäle im Browser. Speichere Szenen, erstelle Zeitabläufe oder spiele Cue-Listen auf einem ESP32-Controller ab.',
-    start: 'Controller einrichten', explore: 'Dashboard öffnen', topology: 'Ein Controller. Zwei Ausgangstypen.',
-    addressable: 'Adressierbare Leitungen', pwm: 'PWM-Kanäle', scenes: 'Szenenplätze', effects: 'Effekte',
-    hardware: 'WS2812 RGB und SK6812 RGBW · PCA9685 PWM · ESP32 mit 8 MB Flash',
-    capacity: 'Kapazitäten der Firmware. Die zulässige Konfiguration hängt auch vom verfügbaren Speicher ab.',
-    featuresTitle: 'Von der gespeicherten Szene zum Lichtprogramm',
-    features: [
-      ['Ausgänge konfigurieren', 'Streifentyp, Farbreihenfolge und Pixelanzahl festlegen. Kanäle benennen und gruppieren.', 'LED_NODE'],
-      ['Szenen gestalten', 'Effekte, Farben und Helligkeit wählen. Ebenen kombinieren und Szenen automatisieren.', 'EFFECTS'],
-      ['Wiedergabe planen', 'Zeitabläufe und Cue-Listen erstellen. Kalenderpläne benötigen eine gültige Systemzeit.', 'EFFECTS'],
-      ['Live-Steuerung nutzen', 'Art-Net oder sACN aktivieren und Kanäle zuordnen. Die Quellenpriorität bestimmt die aktive Steuerung.', 'PROTOCOLS'],
-      ['Controller koordinieren', 'Für die Synchronisation ein gemeinsames LAN und übereinstimmende Inhalte verwenden. Teilnehmer- und Wiedergabestatus prüfen.', 'PROTOCOLS'],
-      ['Betrieb prüfen', 'Ausgangs-, Speicher- und Ablagediagnosen ansehen. Berechnete Leistungsgrenzen für Kanäle und Netzteile festlegen.', 'CONFIGURATION']
+  "de": {
+    "metaTitle": "LumiGrid LED Node | Lichtsteuerung an einem Ort",
+    "metaDescription": "Kombiniere animierte LED-Streifen und dimmbares Licht. Erstelle Szenen, Effekte und Zeitpläne im lokalen Netzwerk.",
+    "nav": [
+      "Möglichkeiten",
+      "Ausgänge",
+      "Anleitungen",
+      "Steuerung"
     ],
-    read: 'Anleitung lesen', setupTitle: 'Mit einem Kanal beginnen',
-    steps: [
-      ['Verbinden', 'Mit LumiGrid-Setup verbinden. Der erzeugte WLAN-Schlüssel steht in der seriellen Konsole. Geräteseite öffnen.'],
-      ['Zugang und Ausgänge einrichten', 'Admin-Schlüssel erstellen, Ausgänge konfigurieren und einen Kanal mit geringer Helligkeit testen.'],
-      ['Speichern und starten', 'Eine Szene speichern und bei Bedarf Zeitpläne, Live-Eingang oder Cues ergänzen.']
+    "language": "Sprache",
+    "kicker": "LumiGrid LED Node · Lichtsteuerung",
+    "title": "Dein Licht. Alles an einem Ort.",
+    "intro": "Verbinde farbige LED-Streifen und dimmbare Leuchten. Gestalte Atmosphäre, bring Bewegung ins Licht und steuere alles bequem im Browser.",
+    "start": "Jetzt starten",
+    "explore": "Steuerung öffnen",
+    "dashboardNote": "Für die Live-Steuerung muss ein LED Node verbunden sein.",
+    "visualEyebrow": "LICHT IN BEWEGUNG",
+    "visualTitle": "Ein Controller. Verschiedene Lichtarten.",
+    "visualLabel": "Illustration der Beleuchtung, die LED Node steuern kann",
+    "visualCaption": "Illustration einer Lichtanordnung, kein Produktfoto.",
+    "totalOutputs": "unabhängige Lichtausgänge",
+    "pixelTag": "für animierte Streifen",
+    "dimmerTag": "für dimmbares Licht",
+    "featuresEyebrow": "GESTALTEN · STEUERN · WIEDERHOLEN",
+    "featuresTitle": "Mehr als nur an und aus",
+    "featuresIntro": "Von einer Farbe bis zum abgestimmten Lichtkonzept, ohne jede Leuchte einzeln bedienen zu müssen.",
+    "features": [
+      [
+        "Gestalte die Stimmung",
+        "Wähle Farben, Helligkeit und integrierte Effekte. Speichere Lieblingskombinationen als Szenen.",
+        "EFFECTS"
+      ],
+      [
+        "Steuere jeden Bereich",
+        "Passe jeden angeschlossenen Ausgang einzeln an oder fasse mehrere zu einer Gruppe zusammen.",
+        "LED_NODE"
+      ],
+      [
+        "Bring Bewegung hinein",
+        "Kombiniere Effekte und animiere Veränderungen innerhalb einer Szene.",
+        "EFFECTS"
+      ],
+      [
+        "Plane den richtigen Moment",
+        "Nutze Zeitabläufe, Cue-Listen und Zeitpläne für passende Lichtwechsel.",
+        "EFFECTS"
+      ],
+      [
+        "Verbinde Show-Steuerung",
+        "Nutze eine kompatible Live-Lichtsteuerung für Veranstaltungen und Shows.",
+        "PROTOCOLS"
+      ],
+      [
+        "Erweitere dein System",
+        "Koordiniere mehrere LED Nodes im selben lokalen Netzwerk mit passenden Show-Inhalten.",
+        "PROTOCOLS"
+      ]
     ],
-    localTitle: 'Steuerung im eigenen Netzwerk',
-    localText: 'Der Controller stellt eine eigene HTTP-Oberfläche bereit. Das separate Dashboard bietet Editoren und Statusdaten; HTTPS-Browserregeln können lokale Verbindungen blockieren. Dann die Geräteseite direkt öffnen.',
-    limitsTitle: 'Implementierte Funktionen und notwendige Messungen',
-    limitsText: 'Die Dokumentation folgt dem aktuellen Code. Synchronisationsgenauigkeit, Flimmern, elektrische Last und Dauerbetrieb müssen an der tatsächlichen Installation gemessen werden. Leistungswerte sind Schätzungen; interne Prüfungen ersetzen keine behördliche Zertifizierung.',
-    audit: 'Code-Audit ansehen', docsTitle: 'Technische Details an einem Ort',
-    docsText: 'Einrichtung, Anschlüsse, Zugang, API, Wiedergabe und Updates verwenden dieselbe englischsprachige Firmwaredokumentation.',
-    docs: 'Dokumentation öffnen', firmware: 'Firmware bauen und installieren', footer: 'LumiGrid · ESP32-Firmware und Browserwerkzeuge', language: 'Sprache',
-  },
+    "read": "Mehr erfahren",
+    "outputsEyebrow": "DEIN LICHT, DEINE ANORDNUNG",
+    "outputsTitle": "Zwei Lichtarten. Ein LED Node.",
+    "outputsIntro": "Kombiniere verschiedene Beleuchtungen, ohne für jeden Bereich einen eigenen Controller zu benötigen.",
+    "pixelTitle": "Animierte LED-Streifen",
+    "pixelText": "Acht Anschlüsse für kompatible Streifen, die Farben und Effekte an einzelnen Lichtpunkten zeigen können.",
+    "dimmerTitle": "Dimmbares Licht",
+    "dimmerText": "Acht unabhängige Helligkeitsregler für geeignete klassische LED-Beleuchtung, etwa Schilder und Akzentbereiche.",
+    "outputsNote": "Anzahl der Leuchten und nutzbare Leistungsgrenzen hängen von der angeschlossenen Installation ab.",
+    "scenesStat": "speicherbare Szenen",
+    "effectsStat": "integrierte Effekte",
+    "setupEyebrow": "VOM ANSCHLUSS ZUR ERSTEN SZENE",
+    "setupTitle": "Dein Licht in drei Schritten",
+    "steps": [
+      [
+        "Schließe dein Licht an",
+        "Wähle geeignete Beleuchtung, Verkabelung und ein passendes externes Netzteil."
+      ],
+      [
+        "Richte LED Node ein",
+        "Verbinde dich mit dem Einrichtungsnetzwerk, öffne die Steuerungsseite und erstelle deinen privaten Zugangsschlüssel."
+      ],
+      [
+        "Erstelle deine erste Szene",
+        "Benenne und prüfe die Ausgänge bei niedriger Helligkeit. Speichere eine Szene und ergänze bei Bedarf Zeitpläne."
+      ]
+    ],
+    "localTitle": "Dein Licht bleibt unter deiner Kontrolle",
+    "localText": "LED Node hat eine eigene Browseroberfläche im lokalen Netzwerk. Für die tägliche Steuerung ist kein LumiGrid-Cloudkonto erforderlich.",
+    "localDetail": "Die separate Steuerungsapp bietet Editoren und Statusansichten, wenn der Node erreichbar ist. Du kannst auch seine eigene Seite direkt öffnen.",
+    "essentialsTitle": "Was der Controller bietet und was du auswählst",
+    "essentialsText": "LED Node ist der Controller. LED-Streifen, Leuchten, Verkabelung und ein ausreichend dimensioniertes externes Netzteil werden je Installation ausgewählt.",
+    "ctaTitle": "Bereit, deinem Licht eine Bühne zu geben?",
+    "ctaText": "Beginne mit einer Leuchte und baue aus. Die Anleitungen helfen bei Einrichtung und Kompatibilität; Szenen gestaltest du in der Steuerungsapp.",
+    "docs": "Einrichtungsanleitung lesen",
+    "app": "Steuerung öffnen",
+    "footer": "LumiGrid LED Node · Lichtsteuerung im eigenen Netzwerk",
+    "technical": "Technische Anleitungen"
+  }
 } as const;

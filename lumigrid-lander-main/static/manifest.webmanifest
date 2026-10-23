@@ -1,14 +1,17 @@
 {
-  "name": "LumiGrid Operator",
+  "name": "LumiGrid LED Node Control",
   "short_name": "LumiGrid",
-  "description": "Local LumiGrid node control, scenes, timelines, cues, diagnostics and firmware updates.",
+  "description": "Control LED Node lights, scenes, effects and schedules on your local network.",
   "start_url": "/dashboard",
   "scope": "/",
   "display": "standalone",
   "background_color": "#050505",
   "theme_color": "#ff2d55",
   "orientation": "any",
-  "categories": ["utilities", "productivity"],
+  "categories": [
+    "utilities",
+    "productivity"
+  ],
   "lang": "en",
   "icons": [
     {
@@ -29,7 +32,7 @@
       "name": "Channel Control",
       "short_name": "Channels",
       "url": "/dashboard/channels",
-      "description": "Control PWM channels"
+      "description": "Control individual lights and dimming channels"
     },
     {
       "name": "Schedule Builder",

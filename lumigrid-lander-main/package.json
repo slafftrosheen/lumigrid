@@ -10,7 +10,7 @@
     "preview": "vite preview",
     "start": "node build",
     "lint:copy": "node scripts/lint-copy.mjs",
-    "check": "svelte-kit sync && npm run lint:copy && svelte-check --fail-on-warnings",
+    "check": "svelte-kit sync && npm run lint:copy && npm run test:marketing && svelte-check --fail-on-warnings",
     "test": "playwright test",
     "test:ui": "playwright test --ui",
     "test:unit": "vitest run --passWithNoTests",
@@ -21,7 +21,8 @@
     "docs:check": "python ../scripts/sync_documentation.py --check",
     "predev": "npm run docs:sync",
     "prebuild": "npm run docs:sync",
-    "precheck": "npm run docs:check"
+    "precheck": "npm run docs:check",
+    "test:marketing": "node scripts/test-public-copy.mjs"
   },
   "engines": {
     "node": ">=20.0.0"
