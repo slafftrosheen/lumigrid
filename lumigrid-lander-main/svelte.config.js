@@ -8,7 +8,7 @@ const config = {
     adapter: adapter(),
     paths: { base: '', relative: false },
     prerender: { 
-      entries: ['/', '/style-demo', '/flasher'],
+      entries: ['/', '/start', '/style-demo', '/flasher'],
       handleHttpError: ({ path, referrer, message }) => {
         // Ignore 404 errors for removed routes or client-only dashboard
         if (path.endsWith('/cases') || path.endsWith('/contact') || path.startsWith('/dashboard')) {

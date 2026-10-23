@@ -1,7 +1,7 @@
 {
   "name": "LumiGrid LED Node Control",
   "short_name": "LumiGrid",
-  "description": "Control LED Node lights, scenes, effects and schedules on your local network.",
+  "description": "Control LED Node lights, create scenes and schedule changes on your local network.",
   "start_url": "/dashboard",
   "scope": "/",
   "display": "standalone",
@@ -23,28 +23,28 @@
   ],
   "shortcuts": [
     {
-      "name": "Fleet Manager",
-      "short_name": "Fleet",
-      "url": "/dashboard",
-      "description": "Monitor all nodes"
-    },
-    {
-      "name": "Channel Control",
-      "short_name": "Channels",
+      "name": "Your lights",
+      "short_name": "Lights",
       "url": "/dashboard/channels",
-      "description": "Control individual lights and dimming channels"
+      "description": "Adjust connected lights and brightness"
     },
     {
-      "name": "Schedule Builder",
-      "short_name": "Schedule",
+      "name": "Lighting scenes",
+      "short_name": "Scenes",
+      "url": "/dashboard/scenes",
+      "description": "Create and recall lighting looks"
+    },
+    {
+      "name": "Lighting schedules",
+      "short_name": "Schedules",
       "url": "/dashboard/schedule",
-      "description": "Edit animation schedule"
+      "description": "Plan how your lighting changes"
     },
     {
-      "name": "Diagnostics",
-      "short_name": "Diagnostics",
-      "url": "/dashboard/diagnostics",
-      "description": "Inspect node diagnostics"
+      "name": "Control dashboard",
+      "short_name": "Dashboard",
+      "url": "/dashboard",
+      "description": "View and manage your connected LED Nodes"
     }
   ]
 }

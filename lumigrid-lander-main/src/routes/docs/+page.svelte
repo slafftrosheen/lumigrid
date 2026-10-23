@@ -1,8 +1,8 @@
 <script lang="ts">
   import { base } from '$app/paths';
   const sections = [
-    { title: 'Set up and operate', pages: [
-      ['GETTING_STARTED', 'Getting started', 'Build, connect and commission your first channel.'],
+    { title: 'Use LED Node', pages: [
+      ['/start', 'Start with LED Node', 'Connect one light, secure access and save your first scene.'],
       ['LED_NODE', 'LED Node connections', 'Lighting output types and connection guidance.'],
       ['ACCESS', 'Access and recovery', 'Admin keys, roles, sessions and recovery.'],
       ['CONFIGURATION', 'Configuration', 'Topology, network changes and modeled power.'],
@@ -12,6 +12,7 @@
       ['FLASH_LAYOUT', 'LED Node updates', 'Safe update routes and recovery guidance.']
     ]},
     { title: 'Develop and verify', pages: [
+      ['GETTING_STARTED', 'Installer commissioning', 'Advanced device preparation and first-time installation.'],
       ['ARCHITECTURE', 'Architecture', 'Service ownership and render flow.'],
       ['API_REFERENCE', 'HTTP API', 'Registered routes extracted from firmware.'],
       ['CONTRIBUTING', 'Development', 'Build commands and shared documentation workflow.'],
@@ -33,14 +34,14 @@
 <div class="container section" lang="en">
   <a href={`${base}/`}>← LumiGrid</a>
   <h1>LED Node guides</h1>
-  <p class="lead">Start with setup and lighting control. Detailed development and verification references are available in the advanced section below. Guides are maintained in English.</p>
+  <p class="lead">Start with the first-time setup guide in your own language. Installation and engineering references are available in the advanced section below; these references are maintained in English.</p>
   {#each sections as section, index}
     {#if index === 0}
       <section>
         <h2>{section.title}</h2>
         <div class="docs-grid">
           {#each section.pages as page}
-            <a class="card" href={`${base}/docs/${page[0]}`}><h3>{page[1]}</h3><p>{page[2]}</p></a>
+            <a class="card" href={page[0].startsWith('/') ? `${base}${page[0]}` : `${base}/docs/${page[0]}`}><h3>{page[1]}</h3><p>{page[2]}</p></a>
           {/each}
         </div>
       </section>
@@ -49,7 +50,7 @@
         <summary>{section.title} · advanced reference</summary>
         <div class="docs-grid">
           {#each section.pages as page}
-            <a class="card" href={`${base}/docs/${page[0]}`}><h3>{page[1]}</h3><p>{page[2]}</p></a>
+            <a class="card" href={page[0].startsWith('/') ? `${base}${page[0]}` : `${base}/docs/${page[0]}`}><h3>{page[1]}</h3><p>{page[2]}</p></a>
           {/each}
         </div>
       </details>
@@ -64,6 +65,7 @@
   .lead { max-width:70ch; color:var(--muted); line-height:1.7; }
   .docs-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,260px),1fr)); gap:1rem; }
   .card { display:block; padding:1.4rem; color:var(--ink); text-decoration:none; }
+  .docs-grid .card:first-child { border-top:2px solid var(--accent-primary); }
   .card h3 { margin:0 0 .6rem; }
   .card p { color:var(--muted); line-height:1.6; margin:0; }
   .advanced { margin:3rem 0 0; border-top:1px solid var(--glass-border); padding-top:1.5rem; }

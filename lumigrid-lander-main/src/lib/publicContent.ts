@@ -1,5 +1,5 @@
-// Customer-facing LED Node messaging. Component and chip specifications belong in the engineering guides.
-// Counts on the landing page are read from generated firmwareFacts.json, not duplicated here.
+// Customer-facing LED Node copy, kept separate from engineering reference material.
+// Capacities are imported from the connected firmware fact catalogue by the landing page.
 export const publicContent = {
   "en": {
     "metaTitle": "LumiGrid LED Node | Control your lighting in one place",
@@ -7,7 +7,7 @@ export const publicContent = {
     "nav": [
       "What it does",
       "Outputs",
-      "Guides",
+      "Getting started",
       "Control app"
     ],
     "language": "Language",
@@ -30,33 +30,27 @@ export const publicContent = {
     "features": [
       [
         "Build the look",
-        "Choose colors, brightness and built-in effects. Save your favorite combinations as scenes.",
-        "EFFECTS"
+        "Choose colors, brightness and built-in effects. Save your favorite combinations as scenes."
       ],
       [
         "Control every area",
-        "Adjust each connected output on its own, or bring several together in a group.",
-        "LED_NODE"
+        "Adjust each connected output on its own, or bring several together in a group."
       ],
       [
         "Add movement",
-        "Layer effects and animate changes for lighting that evolves through a scene.",
-        "EFFECTS"
+        "Layer effects and animate changes for lighting that evolves through a scene."
       ],
       [
         "Plan the moment",
-        "Use timelines, cue lists and schedules to change lighting at the right time.",
-        "EFFECTS"
+        "Use timelines, cue lists and schedules to change lighting at the right time."
       ],
       [
         "Connect show controls",
-        "Bring in a compatible live lighting source when an event needs direct control.",
-        "PROTOCOLS"
+        "Bring in a compatible live lighting source when an event needs direct control."
       ],
       [
         "Expand your setup",
-        "Coordinate several LED Nodes on the same local network with matching show content.",
-        "PROTOCOLS"
+        "Coordinate several LED Nodes on the same local network with matching show content."
       ]
     ],
     "read": "Explore the guide",
@@ -96,7 +90,61 @@ export const publicContent = {
     "docs": "Read the setup guide",
     "app": "Open the control app",
     "footer": "LumiGrid LED Node · Lighting control on your network",
-    "technical": "Technical guides"
+    "technical": "Technical guides",
+    "previewTitle": "Try a lighting mood",
+    "previewCalm": "Warm glow",
+    "previewMotion": "Soft pulse",
+    "previewColor": "Color flow",
+    "previewNote": "An illustrative preview, not a connection to your lights.",
+    "casesEyebrow": "LIGHTING IN REAL SPACES",
+    "casesTitle": "Make every space feel different",
+    "casesIntro": "From a welcoming storefront to a creative installation, LED Node helps compatible lights work together.",
+    "cases": [
+      [
+        "Signs & displays",
+        "Give letters, window displays and focal points a consistent look that you can save and recall."
+      ],
+      [
+        "Interiors & accents",
+        "Shape the atmosphere around shelves, architectural lines and quieter corners."
+      ],
+      [
+        "Events & installations",
+        "Combine color, timed changes and cues when the setting calls for something more expressive."
+      ]
+    ],
+    "casesNote": "These are illustrative scenarios, not photographs or installation ratings.",
+    "startGuideTag": "YOUR FIRST CONNECTION",
+    "startGuideTitle": "Start with your LED Node",
+    "startGuideIntro": "Set up one light first. Once it is working, you can add the rest of your lighting and create scenes.",
+    "startGuideReadyTitle": "Before connecting",
+    "startGuideReady": "Have a prepared LED Node, compatible lights, appropriate wiring and a suitable external power supply. The power supply and lights are selected for each installation; they are not part of the controller.",
+    "startGuideSteps": [
+      [
+        "Prepare the lights",
+        "Disconnect power before working on the wiring. Check the lighting, supply voltage, total load and the connection guidance for your setup."
+      ],
+      [
+        "Find the setup network",
+        "For a new node, connect to its LumiGrid-Setup Wi-Fi network. The unique password is shown during commissioning and must be provided by whoever prepares the controller."
+      ],
+      [
+        "Open and secure the controls",
+        "While connected to the setup network, open the device address below in your browser. Create a private administrator access key and keep it safe."
+      ],
+      [
+        "Test one light, then save a scene",
+        "Configure a single output, start at low brightness and check the actual light. Save your first scene, then add other outputs, effects or schedules."
+      ]
+    ],
+    "startGuideAddressTitle": "LED Node setup address",
+    "startGuideAddressNote": "Available when LED Node is running its setup network. This address is not a public website.",
+    "startGuideHelpTitle": "Already set up—or cannot connect?",
+    "startGuideHelp": "Your LED Node may already be on a different network and require its previously created access key. Open the device’s own page or ask the installer to check its connection. A reset can erase saved settings.",
+    "startGuideOpen": "Open the control app",
+    "startGuideAdvanced": "Installer setup and maintenance",
+    "startGuideBack": "Back to LED Node",
+    "startGuideFootnote": "Control happens over the local network. Some browsers restrict a hosted dashboard from connecting directly; the device’s own page remains the alternative."
   },
   "lv": {
     "metaTitle": "LumiGrid LED Node | Visas gaismas vienuviet",
@@ -104,7 +152,7 @@ export const publicContent = {
     "nav": [
       "Iespējas",
       "Izejas",
-      "Pamācības",
+      "Kā sākt",
       "Vadības lietotne"
     ],
     "language": "Valoda",
@@ -127,33 +175,27 @@ export const publicContent = {
     "features": [
       [
         "Veidojiet noskaņu",
-        "Izvēlieties krāsas, spilgtumu un gatavus efektus. Saglabājiet iemīļotās kombinācijas ainās.",
-        "EFFECTS"
+        "Izvēlieties krāsas, spilgtumu un gatavus efektus. Saglabājiet iemīļotās kombinācijas ainās."
       ],
       [
         "Vadiet katru zonu",
-        "Regulējiet katru pieslēgto izeju atsevišķi vai apvienojiet vairākas grupā.",
-        "LED_NODE"
+        "Regulējiet katru pieslēgto izeju atsevišķi vai apvienojiet vairākas grupā."
       ],
       [
         "Pievienojiet kustību",
-        "Kombinējiet efektus un animējiet pārmaiņas ainas laikā.",
-        "EFFECTS"
+        "Kombinējiet efektus un animējiet pārmaiņas ainas laikā."
       ],
       [
         "Plānojiet norises",
-        "Ar laika secībām, gaismu komandām un grafikiem mainiet apgaismojumu īstajā brīdī.",
-        "EFFECTS"
+        "Ar laika secībām, gaismu komandām un grafikiem mainiet apgaismojumu īstajā brīdī."
       ],
       [
         "Pieslēdziet ārēju vadību",
-        "Pasākumos izmantojiet saderīgu tiešās apgaismojuma vadības avotu.",
-        "PROTOCOLS"
+        "Pasākumos izmantojiet saderīgu tiešās apgaismojuma vadības avotu."
       ],
       [
         "Paplašiniet sistēmu",
-        "Saskaņojiet vairākus LED Node vienā lokālajā tīklā ar atbilstošu programmas saturu.",
-        "PROTOCOLS"
+        "Saskaņojiet vairākus LED Node vienā lokālajā tīklā ar atbilstošu programmas saturu."
       ]
     ],
     "read": "Skatīt pamācību",
@@ -193,7 +235,61 @@ export const publicContent = {
     "docs": "Atvērt iestatīšanas pamācību",
     "app": "Atvērt vadības lietotni",
     "footer": "LumiGrid LED Node · Apgaismojuma vadība jūsu tīklā",
-    "technical": "Tehniskās pamācības"
+    "technical": "Tehniskās pamācības",
+    "previewTitle": "Izmēģiniet gaismas noskaņu",
+    "previewCalm": "Silts mirdzums",
+    "previewMotion": "Maiga pulsācija",
+    "previewColor": "Krāsu plūsma",
+    "previewNote": "Ilustratīvs priekšskatījums, nevis savienojums ar jūsu gaismām.",
+    "casesEyebrow": "GAISMA ĪSTĀS VIETĀS",
+    "casesTitle": "Katrai telpai sava noskaņa",
+    "casesIntro": "No viesmīlīgas vitrīnas līdz radošai instalācijai — LED Node palīdz saskaņot piemērotas gaismas.",
+    "cases": [
+      [
+        "Izkārtnes un vitrīnas",
+        "Piešķiriet burtiem, skatlogiem un akcentiem vienotu izskatu, ko var saglabāt un atjaunot."
+      ],
+      [
+        "Interjeri un akcenti",
+        "Radiet noskaņu plauktiem, arhitektūras līnijām un mierīgākiem stūrīšiem."
+      ],
+      [
+        "Pasākumi un instalācijas",
+        "Apvienojiet krāsas, laika maiņas un gaismu komandas izteiksmīgākām norisēm."
+      ]
+    ],
+    "casesNote": "Tie ir ilustratīvi piemēri, nevis fotogrāfijas vai apliecinājums piemērotībai konkrētiem apstākļiem.",
+    "startGuideTag": "PIRMAIS SAVIENOJUMS",
+    "startGuideTitle": "Sāciet lietot LED Node",
+    "startGuideIntro": "Vispirms iestatiet vienu gaismu. Kad tā darbojas, pievienojiet pārējo apgaismojumu un veidojiet ainas.",
+    "startGuideReadyTitle": "Pirms pievienošanās",
+    "startGuideReady": "Sagatavojiet LED Node, saderīgas gaismas, piemērotus vadus un atbilstošu ārējo barošanas avotu. Barošanas avots un gaismas jāizvēlas katrai instalācijai atsevišķi.",
+    "startGuideSteps": [
+      [
+        "Sagatavojiet gaismas",
+        "Pirms vadu pievienošanas atslēdziet barošanu. Pārbaudiet apgaismojumu, spriegumu, kopējo slodzi un pieslēgšanas norādes."
+      ],
+      [
+        "Atrodiet iestatīšanas tīklu",
+        "Jaunam kontrolierim pievienojieties LumiGrid-Setup Wi-Fi tīklam. Unikālā parole tiek parādīta sākotnējās iestatīšanas laikā, un to nodrošina kontroliera sagatavotājs."
+      ],
+      [
+        "Atveriet un aizsargājiet vadību",
+        "Kad esat iestatīšanas tīklā, pārlūkā atveriet zemāk norādīto ierīces adresi. Izveidojiet privātu administratora piekļuves atslēgu un glabājiet to drošībā."
+      ],
+      [
+        "Pārbaudiet vienu gaismu un saglabājiet ainu",
+        "Iestatiet vienu izeju, pārbaudiet to ar mazu spilgtumu un pārliecinieties par faktisko gaismas darbību. Saglabājiet pirmo ainu, tad pievienojiet citas izejas un grafikus."
+      ]
+    ],
+    "startGuideAddressTitle": "LED Node iestatīšanas adrese",
+    "startGuideAddressNote": "Pieejama, kad LED Node darbojas iestatīšanas tīkls. Tā nav publiska interneta vietne.",
+    "startGuideHelpTitle": "Jau iestatīts vai nevarat pieslēgties?",
+    "startGuideHelp": "LED Node var būt pieslēgts citam tīklam un pieprasīt iepriekš izveidoto piekļuves atslēgu. Atveriet ierīces lapu vai lūdziet uzstādītājam pārbaudīt savienojumu. Atiestatīšana var izdzēst saglabātos iestatījumus.",
+    "startGuideOpen": "Atvērt vadības lietotni",
+    "startGuideAdvanced": "Uzstādītāja iestatīšana un apkope",
+    "startGuideBack": "Atpakaļ pie LED Node",
+    "startGuideFootnote": "Vadība notiek lokālajā tīklā. Daži pārlūki ierobežo ārējās vadības lietotnes savienojumu; ierīces paša lapa ir alternatīva."
   },
   "ru": {
     "metaTitle": "LumiGrid LED Node | Управление светом в одном месте",
@@ -201,7 +297,7 @@ export const publicContent = {
     "nav": [
       "Возможности",
       "Выходы",
-      "Руководства",
+      "Начало работы",
       "Панель управления"
     ],
     "language": "Язык",
@@ -224,33 +320,27 @@ export const publicContent = {
     "features": [
       [
         "Создавайте атмосферу",
-        "Выбирайте цвета, яркость и встроенные эффекты. Сохраняйте любимые сочетания как сцены.",
-        "EFFECTS"
+        "Выбирайте цвета, яркость и встроенные эффекты. Сохраняйте любимые сочетания как сцены."
       ],
       [
         "Управляйте каждой зоной",
-        "Настраивайте каждый подключённый выход отдельно или объединяйте несколько в группу.",
-        "LED_NODE"
+        "Настраивайте каждый подключённый выход отдельно или объединяйте несколько в группу."
       ],
       [
         "Добавляйте движение",
-        "Сочетайте эффекты и плавно меняйте свет по ходу сцены.",
-        "EFFECTS"
+        "Сочетайте эффекты и плавно меняйте свет по ходу сцены."
       ],
       [
         "Планируйте моменты",
-        "Меняйте освещение по временной программе, списку команд или расписанию.",
-        "EFFECTS"
+        "Меняйте освещение по временной программе, списку команд или расписанию."
       ],
       [
         "Подключайте внешнее управление",
-        "Используйте совместимый источник светового управления для мероприятий и шоу.",
-        "PROTOCOLS"
+        "Используйте совместимый источник светового управления для мероприятий и шоу."
       ],
       [
         "Расширяйте систему",
-        "Координируйте несколько LED Node в одной локальной сети с одинаковым содержимым шоу.",
-        "PROTOCOLS"
+        "Координируйте несколько LED Node в одной локальной сети с одинаковым содержимым шоу."
       ]
     ],
     "read": "Подробнее",
@@ -290,7 +380,61 @@ export const publicContent = {
     "docs": "Руководство по настройке",
     "app": "Открыть панель управления",
     "footer": "LumiGrid LED Node · Управление светом в вашей сети",
-    "technical": "Технические руководства"
+    "technical": "Технические руководства",
+    "previewTitle": "Пример световой атмосферы",
+    "previewCalm": "Тёплый свет",
+    "previewMotion": "Мягкая пульсация",
+    "previewColor": "Поток цвета",
+    "previewNote": "Это иллюстрация, а не управление подключёнными светильниками.",
+    "casesEyebrow": "СВЕТ В РЕАЛЬНЫХ ПРОСТРАНСТВАХ",
+    "casesTitle": "Своё настроение для каждого пространства",
+    "casesIntro": "От витрины магазина до творческой инсталляции — LED Node помогает подходящим светильникам работать вместе.",
+    "cases": [
+      [
+        "Вывески и витрины",
+        "Создавайте запоминающееся оформление букв, окон и акцентов, которое легко сохранить и повторить."
+      ],
+      [
+        "Интерьеры и акценты",
+        "Подчеркните полки, архитектурные линии и уютные уголки светом."
+      ],
+      [
+        "События и инсталляции",
+        "Соединяйте цвет, смену света по времени и последовательности команд для выразительных сцен."
+      ]
+    ],
+    "casesNote": "Иллюстративные примеры, не фотографии или подтверждение пригодности к условиям эксплуатации.",
+    "startGuideTag": "ПЕРВОЕ ПОДКЛЮЧЕНИЕ",
+    "startGuideTitle": "Начните работу с LED Node",
+    "startGuideIntro": "Сначала настройте один источник света. Когда всё работает, добавляйте остальные и создавайте сцены.",
+    "startGuideReadyTitle": "Перед подключением",
+    "startGuideReady": "Вам понадобятся подготовленный LED Node, совместимые светильники, подходящая проводка и внешний блок питания. Светильники и блок питания подбираются отдельно для каждой установки.",
+    "startGuideSteps": [
+      [
+        "Подготовьте освещение",
+        "Перед подключением проводов отключите питание. Проверьте совместимость светильников, напряжение, суммарную нагрузку и рекомендации по подключению."
+      ],
+      [
+        "Найдите сеть настройки",
+        "На новом контроллере подключитесь к сети Wi-Fi LumiGrid-Setup. Уникальный пароль появляется при первоначальной настройке; его должен предоставить установщик."
+      ],
+      [
+        "Откройте панель и защитите доступ",
+        "В сети настройки откройте указанный ниже адрес устройства. Создайте личный ключ администратора и сохраните его в надёжном месте."
+      ],
+      [
+        "Проверьте один светильник и сохраните сцену",
+        "Настройте один выход, начните с небольшой яркости и проверьте реальный свет. Сохраните первую сцену, затем добавляйте другие выходы и расписания."
+      ]
+    ],
+    "startGuideAddressTitle": "Адрес настройки LED Node",
+    "startGuideAddressNote": "Доступен, когда LED Node работает в режиме настройки. Это не публичный сайт.",
+    "startGuideHelpTitle": "Уже настроен или не подключается?",
+    "startGuideHelp": "LED Node может находиться в другой локальной сети и запрашивать ранее созданный ключ доступа. Откройте страницу самого устройства или попросите установщика проверить подключение. Сброс может удалить сохранённые настройки.",
+    "startGuideOpen": "Открыть панель управления",
+    "startGuideAdvanced": "Настройка и обслуживание для установщика",
+    "startGuideBack": "Назад к LED Node",
+    "startGuideFootnote": "Управление работает в локальной сети. Некоторые браузеры ограничивают подключение внешней панели; используйте страницу самого устройства."
   },
   "nl": {
     "metaTitle": "LumiGrid LED Node | Al je verlichting op één plek",
@@ -298,7 +442,7 @@ export const publicContent = {
     "nav": [
       "Mogelijkheden",
       "Uitgangen",
-      "Handleidingen",
+      "Aan de slag",
       "Bediening"
     ],
     "language": "Taal",
@@ -321,33 +465,27 @@ export const publicContent = {
     "features": [
       [
         "Maak de sfeer",
-        "Kies kleuren, helderheid en ingebouwde effecten. Bewaar favoriete combinaties als scènes.",
-        "EFFECTS"
+        "Kies kleuren, helderheid en ingebouwde effecten. Bewaar favoriete combinaties als scènes."
       ],
       [
         "Bedien elke zone",
-        "Pas elke aangesloten uitgang apart aan of combineer meerdere uitgangen in een groep.",
-        "LED_NODE"
+        "Pas elke aangesloten uitgang apart aan of combineer meerdere uitgangen in een groep."
       ],
       [
         "Voeg beweging toe",
-        "Combineer effecten en animeer veranderingen in een scène.",
-        "EFFECTS"
+        "Combineer effecten en animeer veranderingen in een scène."
       ],
       [
         "Plan het juiste moment",
-        "Gebruik tijdlijnen, cuelijsten en schema's om je licht op het juiste moment te veranderen.",
-        "EFFECTS"
+        "Gebruik tijdlijnen, cuelijsten en schema's om je licht op het juiste moment te veranderen."
       ],
       [
         "Sluit showbediening aan",
-        "Gebruik een compatibele live lichtbron voor directe bediening tijdens evenementen.",
-        "PROTOCOLS"
+        "Gebruik een compatibele live lichtbron voor directe bediening tijdens evenementen."
       ],
       [
         "Breid je opstelling uit",
-        "Coördineer meerdere LED Nodes op hetzelfde lokale netwerk met bijpassende show-inhoud.",
-        "PROTOCOLS"
+        "Coördineer meerdere LED Nodes op hetzelfde lokale netwerk met bijpassende show-inhoud."
       ]
     ],
     "read": "Lees meer",
@@ -387,7 +525,61 @@ export const publicContent = {
     "docs": "Lees de instelhandleiding",
     "app": "Open de bediening",
     "footer": "LumiGrid LED Node · Lichtbediening op je eigen netwerk",
-    "technical": "Technische handleidingen"
+    "technical": "Technische handleidingen",
+    "previewTitle": "Probeer een lichtsfeer",
+    "previewCalm": "Warme gloed",
+    "previewMotion": "Zachte puls",
+    "previewColor": "Kleurverloop",
+    "previewNote": "Alleen een illustratie, geen verbinding met je verlichting.",
+    "casesEyebrow": "LICHT IN ECHTE RUIMTES",
+    "casesTitle": "Elke ruimte een eigen sfeer",
+    "casesIntro": "Van een uitnodigende etalage tot een creatieve installatie: LED Node helpt passende verlichting samenwerken.",
+    "cases": [
+      [
+        "Reclame en etalages",
+        "Geef letters, winkelramen en blikvangers een herkenbare uitstraling die je kunt bewaren en oproepen."
+      ],
+      [
+        "Interieurs en accenten",
+        "Breng sfeer aan op planken, langs architectonische lijnen en in rustige hoeken."
+      ],
+      [
+        "Evenementen en installaties",
+        "Combineer kleuren, getimede veranderingen en lichtcues voor expressieve momenten."
+      ]
+    ],
+    "casesNote": "Dit zijn illustratieve toepassingen, geen productfoto's of keurmerken voor een installatie.",
+    "startGuideTag": "EERSTE VERBINDING",
+    "startGuideTitle": "Aan de slag met LED Node",
+    "startGuideIntro": "Stel eerst één lamp in. Als die werkt, kun je andere verlichting toevoegen en scènes maken.",
+    "startGuideReadyTitle": "Voordat je begint",
+    "startGuideReady": "Zorg voor een voorbereide LED Node, geschikte lampen, passende bedrading en een geschikte externe voeding. Verlichting en voeding worden per installatie gekozen en horen niet bij de controller.",
+    "startGuideSteps": [
+      [
+        "Bereid je verlichting voor",
+        "Schakel de voeding uit voordat je bedrading aansluit. Controleer de verlichting, spanning, totale belasting en aansluitinstructies."
+      ],
+      [
+        "Zoek het instelnetwerk",
+        "Verbind bij een nieuwe node met LumiGrid-Setup Wi-Fi. Het unieke wachtwoord verschijnt tijdens de eerste ingebruikname; de installateur moet dit doorgeven."
+      ],
+      [
+        "Open de bediening en beveilig je toegang",
+        "Open vanaf het instelnetwerk het onderstaande adres in je browser. Maak een persoonlijke beheerderssleutel en bewaar deze veilig."
+      ],
+      [
+        "Test één lamp en bewaar een scène",
+        "Stel één uitgang in, begin met weinig helderheid en controleer het echte licht. Bewaar je eerste scène en voeg daarna andere uitgangen en schema's toe."
+      ]
+    ],
+    "startGuideAddressTitle": "Insteladres van LED Node",
+    "startGuideAddressNote": "Beschikbaar wanneer LED Node het instelnetwerk gebruikt. Dit is geen openbare website.",
+    "startGuideHelpTitle": "Al ingesteld of geen verbinding?",
+    "startGuideHelp": "LED Node kan al met een ander netwerk verbonden zijn en een eerder gemaakte toegangssleutel vragen. Open de eigen apparaatpagina of vraag de installateur de verbinding te controleren. Resetten kan opgeslagen instellingen wissen.",
+    "startGuideOpen": "Open de bediening",
+    "startGuideAdvanced": "Installatie en onderhoud voor installateurs",
+    "startGuideBack": "Terug naar LED Node",
+    "startGuideFootnote": "Bediening werkt via het lokale netwerk. Sommige browsers blokkeren de verbinding vanuit een extern dashboard; de apparaatpagina blijft een alternatief."
   },
   "de": {
     "metaTitle": "LumiGrid LED Node | Lichtsteuerung an einem Ort",
@@ -395,7 +587,7 @@ export const publicContent = {
     "nav": [
       "Möglichkeiten",
       "Ausgänge",
-      "Anleitungen",
+      "Erste Schritte",
       "Steuerung"
     ],
     "language": "Sprache",
@@ -418,33 +610,27 @@ export const publicContent = {
     "features": [
       [
         "Gestalte die Stimmung",
-        "Wähle Farben, Helligkeit und integrierte Effekte. Speichere Lieblingskombinationen als Szenen.",
-        "EFFECTS"
+        "Wähle Farben, Helligkeit und integrierte Effekte. Speichere Lieblingskombinationen als Szenen."
       ],
       [
         "Steuere jeden Bereich",
-        "Passe jeden angeschlossenen Ausgang einzeln an oder fasse mehrere zu einer Gruppe zusammen.",
-        "LED_NODE"
+        "Passe jeden angeschlossenen Ausgang einzeln an oder fasse mehrere zu einer Gruppe zusammen."
       ],
       [
         "Bring Bewegung hinein",
-        "Kombiniere Effekte und animiere Veränderungen innerhalb einer Szene.",
-        "EFFECTS"
+        "Kombiniere Effekte und animiere Veränderungen innerhalb einer Szene."
       ],
       [
         "Plane den richtigen Moment",
-        "Nutze Zeitabläufe, Cue-Listen und Zeitpläne für passende Lichtwechsel.",
-        "EFFECTS"
+        "Nutze Zeitabläufe, Cue-Listen und Zeitpläne für passende Lichtwechsel."
       ],
       [
         "Verbinde Show-Steuerung",
-        "Nutze eine kompatible Live-Lichtsteuerung für Veranstaltungen und Shows.",
-        "PROTOCOLS"
+        "Nutze eine kompatible Live-Lichtsteuerung für Veranstaltungen und Shows."
       ],
       [
         "Erweitere dein System",
-        "Koordiniere mehrere LED Nodes im selben lokalen Netzwerk mit passenden Show-Inhalten.",
-        "PROTOCOLS"
+        "Koordiniere mehrere LED Nodes im selben lokalen Netzwerk mit passenden Show-Inhalten."
       ]
     ],
     "read": "Mehr erfahren",
@@ -484,6 +670,60 @@ export const publicContent = {
     "docs": "Einrichtungsanleitung lesen",
     "app": "Steuerung öffnen",
     "footer": "LumiGrid LED Node · Lichtsteuerung im eigenen Netzwerk",
-    "technical": "Technische Anleitungen"
+    "technical": "Technische Anleitungen",
+    "previewTitle": "Lichtstimmung ausprobieren",
+    "previewCalm": "Warmes Leuchten",
+    "previewMotion": "Sanfter Puls",
+    "previewColor": "Farbfluss",
+    "previewNote": "Nur eine Illustration, keine Verbindung zu deinen Leuchten.",
+    "casesEyebrow": "LICHT IN ECHTEN RÄUMEN",
+    "casesTitle": "Jeder Raum bekommt seine Stimmung",
+    "casesIntro": "Vom einladenden Schaufenster bis zur kreativen Installation: LED Node bringt passende Beleuchtung zusammen.",
+    "cases": [
+      [
+        "Schilder und Schaufenster",
+        "Gib Schriftzügen, Auslagen und Blickfängen einen einheitlichen Look, den du speichern und wieder aufrufen kannst."
+      ],
+      [
+        "Innenräume und Akzente",
+        "Setze Regale, architektonische Linien und ruhige Ecken mit Licht in Szene."
+      ],
+      [
+        "Events und Installationen",
+        "Kombiniere Farben, zeitgesteuerte Wechsel und Lichtabläufe für ausdrucksstarke Momente."
+      ]
+    ],
+    "casesNote": "Illustrative Einsatzideen, keine Produktfotos oder Zusagen zur Eignung für bestimmte Umgebungen.",
+    "startGuideTag": "ERSTE VERBINDUNG",
+    "startGuideTitle": "Starte mit deinem LED Node",
+    "startGuideIntro": "Richte zunächst eine Leuchte ein. Wenn sie funktioniert, kannst du weitere hinzufügen und Szenen gestalten.",
+    "startGuideReadyTitle": "Vor dem Verbinden",
+    "startGuideReady": "Du benötigst einen vorbereiteten LED Node, kompatible Leuchten, geeignete Verkabelung und ein passendes externes Netzteil. Beleuchtung und Netzteil werden für jede Installation separat gewählt.",
+    "startGuideSteps": [
+      [
+        "Bereite die Beleuchtung vor",
+        "Trenne vor der Verkabelung die Stromversorgung. Prüfe die Leuchten, Spannung, Gesamtlast und Anschlussanweisungen."
+      ],
+      [
+        "Finde das Einrichtungsnetzwerk",
+        "Verbinde dich bei einem neuen Node mit dem WLAN LumiGrid-Setup. Das einmalige Passwort erscheint bei der Erstinbetriebnahme und muss vom Installateur bereitgestellt werden."
+      ],
+      [
+        "Öffne und schütze die Steuerung",
+        "Öffne im Einrichtungsnetzwerk die unten angegebene Geräteadresse. Erstelle einen persönlichen Administrator-Schlüssel und bewahre ihn sicher auf."
+      ],
+      [
+        "Teste eine Leuchte und speichere eine Szene",
+        "Konfiguriere einen Ausgang, beginne mit geringer Helligkeit und prüfe das tatsächliche Licht. Speichere die erste Szene und ergänze danach weitere Ausgänge und Zeitpläne."
+      ]
+    ],
+    "startGuideAddressTitle": "LED Node Einrichtungsadresse",
+    "startGuideAddressNote": "Erreichbar, wenn LED Node sein Einrichtungsnetzwerk bereitstellt. Dies ist keine öffentliche Website.",
+    "startGuideHelpTitle": "Schon eingerichtet oder keine Verbindung?",
+    "startGuideHelp": "LED Node kann bereits in einem anderen lokalen Netzwerk sein und den zuvor erstellten Zugangsschlüssel benötigen. Öffne die geräteeigene Seite oder lasse den Installateur die Verbindung prüfen. Ein Zurücksetzen kann gespeicherte Einstellungen löschen.",
+    "startGuideOpen": "Steuerung öffnen",
+    "startGuideAdvanced": "Einrichtung und Wartung für Installateure",
+    "startGuideBack": "Zurück zu LED Node",
+    "startGuideFootnote": "Die Steuerung erfolgt im lokalen Netzwerk. Manche Browser blockieren den Zugriff eines extern gehosteten Dashboards; die geräteeigene Seite bleibt eine Alternative."
   }
 } as const;

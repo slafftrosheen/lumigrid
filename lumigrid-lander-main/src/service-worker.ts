@@ -1,50 +1,64 @@
 /// <reference lib="webworker" />
 import { build, files, version } from '$service-worker';
 
-const CACHE = `lg-v${version}`;
-const ASSETS = [...build, ...files];
+const CACHE_PREFIX = 'lg-v';
+const CACHE = `${CACHE_PREFIX}${version}`;
+// The marketing site must not pre-download large media or installation
+// packages when a visitor opens the product page.
+const LARGE_ASSET = /\.(?:mp4|webm|mov|pdf|zip|bin|gz|br|map)$/i;
+const STATIC_ASSETS = [...new Set([...build, ...files.filter(path => !LARGE_ASSET.test(path))])];
+
+function isLiveRoute(path: string): boolean {
+  return /\/(?:api|dashboard)(?:\/|$)/.test(path);
+}
 
 self.addEventListener('install', (event: ExtendableEvent) => {
-  event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(ASSETS)));
+  event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(STATIC_ASSETS)));
 });
 
 self.addEventListener('activate', (event: ExtendableEvent) => {
   event.waitUntil(
-    caches
-      .keys()
-      .then((keys) => Promise.all(keys.filter((key) => key !== CACHE).map((key) => caches.delete(key))))
+    caches.keys().then(keys => Promise.all(
+      // Do not remove caches belonging to another app hosted on this origin.
+      keys.filter(key => key.startsWith(CACHE_PREFIX) && key !== CACHE).map(key => caches.delete(key))
+    ))
   );
 });
 
 self.addEventListener('fetch', (event: FetchEvent) => {
-  const req = event.request;
-  const url = new URL(req.url);
-  
-  // Ignore range requests and cross-origin requests
-  if (req.headers.get('range') || url.origin !== location.origin) {
+  const request = event.request;
+  const url = new URL(request.url);
+  if (request.method !== 'GET' ||
+      url.origin !== location.origin ||
+      request.headers.has('range') ||
+      LARGE_ASSET.test(url.pathname) ||
+      isLiveRoute(url.pathname) ||
+      !(request.mode === 'navigate' || ['image', 'style', 'script', 'font'].includes(request.destination))) {
+    // Network-only: control sessions, API responses and substantial downloads.
     return;
   }
-  
-  if (req.method === 'GET') {
-    event.respondWith(
-      (async () => {
-        try {
-          const res = await fetch(req);
-          // Only cache complete responses (not 206 partial content)
-          if (res.status === 200 && !res.headers.get('content-range')) {
-            const cache = await caches.open(CACHE);
-            cache.put(req, res.clone());
-          }
-          return res;
-        } catch (e) {
-          const match = await caches.match(req);
-          if (match) return match;
-          // Fallback to offline page
-          const offline = await caches.match(`${location.origin}${(self as any).base || ''}/offline.html`);
-          if (offline) return offline;
-          throw e;
-        }
-      })()
-    );
-  }
+
+  event.respondWith((async () => {
+    try {
+      const response = await fetch(request);
+      const directive = response.headers.get('cache-control') || '';
+      const privateResponse = /(?:no-store|private)/i.test(directive) ||
+        response.headers.has('set-cookie');
+      if (response.ok && response.status === 200 && !response.headers.has('content-range') && !privateResponse) {
+        const cache = await caches.open(CACHE);
+        // Caching is best-effort. An individual storage failure must not
+        // prevent the landing page from appearing to the visitor.
+        await cache.put(request, response.clone()).catch(() => {});
+      }
+      return response;
+    } catch (error) {
+      const cached = await caches.match(request);
+      if (cached) return cached;
+      if (request.mode === 'navigate') {
+        const offline = await caches.match('/offline.html');
+        if (offline) return offline;
+      }
+      throw error;
+    }
+  })());
 });

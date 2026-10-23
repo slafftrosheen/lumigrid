@@ -9,6 +9,7 @@
   const limits = facts.limits;
   const lightPoints = [0, 1, 2, 3, 4, 5, 6, 7];
   let ready = false;
+  let previewMode: 'calm' | 'motion' | 'color' = 'color';
   $: copy = publicContent[$lang];
   onMount(() => { ready = true; });
 </script>
@@ -30,7 +31,7 @@
     <nav aria-label="LumiGrid">
       <a href="#capabilities">{copy.nav[0]}</a>
       <a href="#outputs">{copy.nav[1]}</a>
-      <a href={`${base}/docs`}>{copy.nav[2]}</a>
+      <a href={`${base}/start`}>{copy.nav[2]}</a>
     </nav>
     <div class="header-actions">
       <label class="language"><span>{copy.language}</span>
@@ -48,7 +49,7 @@
       <h1 id="hero-title" data-testid="hero-title">{copy.title}</h1>
       <p class="lead">{copy.intro}</p>
       <div class="actions">
-        <a class="btn primary" href={`${base}/docs/GETTING_STARTED`}>{copy.start} <span aria-hidden="true">↗</span></a>
+        <a class="btn primary" href={`${base}/start`}>{copy.start} <span aria-hidden="true">↗</span></a>
         <a class="btn" href={`${base}/dashboard`}>{copy.explore} <span aria-hidden="true">→</span></a>
       </div>
       <p class="helper">{copy.dashboardNote}</p>
@@ -57,17 +58,25 @@
     <aside class="light-card card" aria-label={copy.visualLabel}>
       <div class="light-card__head"><span class="eyebrow">{copy.visualEyebrow}</span><span class="light-card__brand">LED NODE</span></div>
       <h2>{copy.visualTitle}</h2>
-      <div class="light-stage" aria-hidden="true">
+      <div class="light-stage" class:calm={previewMode === 'calm'} class:motion={previewMode === 'motion'} class:color={previewMode === 'color'} data-preview={previewMode} data-testid="preview-stage" aria-hidden="true">
         <div class="light-stage__strip one"></div>
         <div class="light-stage__strip two"></div>
         <div class="light-stage__strip three"></div>
         <div class="light-stage__pool"></div>
       </div>
+      <div class="preview-demo">
+        <p class="preview-label">{copy.previewTitle}</p>
+        <div class="preview-buttons" role="group" aria-label={copy.previewTitle}>
+          <button type="button" class:active={previewMode === 'calm'} aria-pressed={previewMode === 'calm'} on:click={() => previewMode = 'calm'}>{copy.previewCalm}</button>
+          <button type="button" class:active={previewMode === 'motion'} aria-pressed={previewMode === 'motion'} on:click={() => previewMode = 'motion'}>{copy.previewMotion}</button>
+          <button type="button" class:active={previewMode === 'color'} aria-pressed={previewMode === 'color'} on:click={() => previewMode = 'color'}>{copy.previewColor}</button>
+        </div>
+      </div>
       <div class="light-card__summary">
         <div class="light-card__number"><strong>{limits.addressable + limits.pwm}</strong><span>{copy.totalOutputs}</span></div>
         <div class="light-card__types"><span>{limits.addressable} {copy.pixelTag}</span><span>{limits.pwm} {copy.dimmerTag}</span></div>
       </div>
-      <p class="visual-caption">{copy.visualCaption}</p>
+      <p class="visual-caption">{copy.previewNote} {copy.visualCaption}</p>
     </aside>
   </section>
 
@@ -83,10 +92,28 @@
         <article class="card feature">
           <span class="feature__number">{String(index + 1).padStart(2, '0')}</span>
           <h3>{feature[0]}</h3><p>{feature[1]}</p>
-          <a href={`${base}/docs/${feature[2]}`}>{copy.read} <span aria-hidden="true">→</span></a>
         </article>
       {/each}
     </div>
+  </section>
+
+  <section id="ideas" class="container section" aria-labelledby="ideas-title">
+    <div class="section-intro">
+      <p class="eyebrow">{copy.casesEyebrow}</p>
+      <h2 id="ideas-title">{copy.casesTitle}</h2>
+      <p>{copy.casesIntro}</p>
+    </div>
+    <div class="scenario-grid">
+      {#each copy.cases as item, index}
+        <article class="card scenario-card">
+          <div class={`scenario-art scene-${index}`} aria-hidden="true">
+            <span class="scene-window"></span><span class="scene-light"></span><span class="scene-surface"></span>
+          </div>
+          <div class="scenario-copy"><h3>{item[0]}</h3><p>{item[1]}</p></div>
+        </article>
+      {/each}
+    </div>
+    <p class="scenario-note">{copy.casesNote}</p>
   </section>
 
   <section id="outputs" class="container section" aria-labelledby="outputs-title">
@@ -118,7 +145,7 @@
   <section class="container section details" aria-label={copy.localTitle}>
     <article><p class="eyebrow">LUMIGRID LED NODE</p><h2>{copy.localTitle}</h2><p>{copy.localText}</p><p>{copy.localDetail}</p></article>
     <article class="details__essential"><h3>{copy.essentialsTitle}</h3><p>{copy.essentialsText}</p>
-      <a href={`${base}/docs/LED_NODE`}>{copy.read} <span aria-hidden="true">→</span></a>
+      <a href={`${base}/start`}>{copy.start} <span aria-hidden="true">→</span></a>
     </article>
   </section>
 
@@ -126,7 +153,7 @@
     <div class="card final-cta">
       <div><h2 id="cta-title">{copy.ctaTitle}</h2><p>{copy.ctaText}</p></div>
       <div class="actions">
-        <a class="btn primary" href={`${base}/docs/GETTING_STARTED`}>{copy.docs} <span aria-hidden="true">↗</span></a>
+        <a class="btn primary" href={`${base}/start`}>{copy.docs} <span aria-hidden="true">↗</span></a>
         <a class="btn" href={`${base}/dashboard`}>{copy.app} <span aria-hidden="true">→</span></a>
       </div>
     </div>
@@ -227,6 +254,48 @@
   .public-footer { display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:1rem; border-top:1px solid var(--glass-border); padding-block:1.6rem 2.7rem; font-size:.83rem; color:var(--muted); }
   .public-footer a { font-size:.83rem; }
   a:focus-visible,select:focus-visible { outline:2px solid var(--accent-primary); outline-offset:4px; }
+
+  /* Purely illustrative looks. Never send commands to a connected device from the landing page. */
+  .preview-demo { margin-top:1.1rem; }
+  .preview-label { font-size:.84rem; font-weight:650; color:#f5f5f7; margin:0 0 .55rem; }
+  .preview-buttons { display:flex; flex-wrap:wrap; gap:.5rem; }
+  .preview-buttons button { font:inherit; font-size:.77rem; padding:.55rem .8rem; border:1px solid #ffffff3d; border-radius:999px; background:#ffffff0b; color:#f5f5f7; cursor:pointer; min-height:44px; }
+  .preview-buttons button.active { border-color:#ff6685; background:#ff2d5533; box-shadow:inset 0 0 0 1px #ff2d5544; }
+  .preview-buttons button:focus-visible { outline:2px solid #fff; outline-offset:3px; }
+  .light-stage.calm .light-stage__strip { background:linear-gradient(90deg,#ffad4d,#ffd09a,#ff9500); color:#ff9500; opacity:.86; box-shadow:0 0 13px currentColor,0 0 21px #ff950066; }
+  .light-stage.calm .light-stage__pool { background:#ff95004b; }
+  .light-stage.motion .light-stage__strip { color:#ff9500; background:linear-gradient(90deg,#ff8b38,#ffd9a1,#ff3b30,#ff8b38); background-size:250% 100%; animation:preview-flow 6s ease-in-out infinite alternate; }
+  .light-stage.motion .light-stage__strip.two { animation-delay:-2s; } .light-stage.motion .light-stage__strip.three { animation-delay:-4s; }
+  .light-stage.color .light-stage__strip { background-size:180% 100%; animation:preview-flow 14s ease-in-out infinite alternate; }
+  .light-stage.color .light-stage__strip.two { animation-delay:-4s; }
+  .light-stage.color .light-stage__strip.three { animation-delay:-7s; }
+  @keyframes preview-flow { 0% { background-position:0% 50%; opacity:.48; } 100% { background-position:100% 50%; opacity:1; } }
+  .scenario-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:1rem; }
+  .scenario-card { padding:0; overflow:hidden; display:flex; flex-direction:column; min-width:0; }
+  .scenario-art { position:relative; height:clamp(160px,19vw,230px); overflow:hidden; isolation:isolate; background:radial-gradient(ellipse at 50% 70%,#34313d,#0a0a10 85%); }
+  .scenario-art span { display:block; position:absolute; }
+  .scenario-art .scene-window { border-radius:10px; }
+  .scenario-art .scene-light { border-radius:5px; }
+  .scenario-art .scene-surface { border-radius:60% 60% 0 0; filter:blur(19px); }
+  .scene-0 { background:linear-gradient(140deg,#11151d,#06070d); }
+  .scene-0 .scene-window { inset:24% 21% 17%; border:7px solid #2b2c33; box-shadow:0 0 0 10px #0b0b10; }
+  .scene-0 .scene-light { inset:36% 28% 35%; background:#ffb36b; box-shadow:0 0 20px #ff9500,0 0 57px #ff950085; }
+  .scene-0 .scene-surface { inset:auto 14% -15%; height:36%; background:#ff950077; }
+  .scene-1 { background:linear-gradient(155deg,#17131b,#0a0a10 72%); }
+  .scene-1 .scene-window { inset:12% 22% 16%; border:9px solid #28232e; border-bottom-width:17px; }
+  .scene-1 .scene-light { width:6px; top:16%; bottom:18%; left:28%; background:#ff6caa; box-shadow:0 0 24px #ff2d55,110px 0 25px #ff950099; }
+  .scene-1 .scene-surface { left:14%; bottom:-19%; width:85%; height:43%; background:#ff2d5559; }
+  .scene-2 { background:radial-gradient(ellipse at 50% 90%,#282340,#080a11 72%); }
+  .scene-2 .scene-window { inset:20% 14% 20%; border:8px solid #262536; border-radius:50% 50% 4px 4px; }
+  .scene-2 .scene-light { left:17%; right:17%; top:36%; height:6px; background:linear-gradient(90deg,#00d4ff,#ff2d55,#ff9500); box-shadow:0 0 15px #00d4ffb0,0 0 30px #ff2d55a0; transform:skewY(-8deg); }
+  .scene-2 .scene-surface { left:16%; right:16%; bottom:-20%; height:45%; background:#00d4ff60; }
+  .scenario-copy { padding:clamp(1.2rem,2.5vw,1.7rem); flex:1; }
+  .scenario-copy h3 { margin:0 0 .55rem; font-size:1.24rem; }
+  .scenario-copy p { margin:0; }
+  .scenario-note { font-size:.82rem; margin:1rem 0 0; }
+  @media(max-width:920px) { .scenario-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .scenario-card:last-child { grid-column:1 / -1; } }
+  @media(max-width:650px) { .scenario-grid { grid-template-columns:1fr; } .scenario-card:last-child { grid-column:auto; } .scenario-art { height:180px; } }
+  @media(prefers-reduced-motion:reduce) { .light-stage.motion .light-stage__strip,.light-stage.color .light-stage__strip { animation:none; background-position:center; } }
   @media (max-width:1040px) { .header-app { display:none; } .feature-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } }
   @media (max-width:820px) { .hero,.details { grid-template-columns:1fr; } .hero { padding-block:3rem; } .hero-copy { max-width:680px; } h1 { max-width:17ch; } .light-card { max-width:640px; width:100%; } .details__essential { border-left:0; border-top:2px solid var(--accent-primary); padding-inline:0; } }
   @media (max-width:600px) {
