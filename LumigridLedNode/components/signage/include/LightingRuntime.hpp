@@ -53,6 +53,7 @@ public:
     // this reports load/rejection failures and only accepts activation while the
     // runtime is atomically observed in the Running lifecycle state.
     bool activate_scene_checked(uint8_t index, uint32_t* generation = nullptr) {
+        const uint32_t epoch = control_epoch_.load(std::memory_order_acquire);
         if (!mutex_ ||
             lifecycle_state_.load(std::memory_order_acquire) != LifecycleState::Running ||
             shutting_down_.load(std::memory_order_acquire)) {
@@ -60,6 +61,7 @@ public:
         }
 
         xSemaphoreTake(mutex_, portMAX_DELAY);
+        if (!control_updates_allowed(epoch)) { xSemaphoreGive(mutex_); return false; }
         const bool accepted = scene_manager_.activate_scene(
             index,
             static_cast<uint32_t>(esp_timer_get_time() / 1000ULL)
@@ -80,6 +82,7 @@ public:
     }
 
     bool activate_scene_custom(uint8_t index, uint16_t fade_ms, TransitionCurve curve, uint32_t* generation = nullptr) {
+        const uint32_t epoch = control_epoch_.load(std::memory_order_acquire);
         if (!mutex_ ||
             lifecycle_state_.load(std::memory_order_acquire) != LifecycleState::Running ||
             shutting_down_.load(std::memory_order_acquire)) {
@@ -87,6 +90,7 @@ public:
         }
 
         xSemaphoreTake(mutex_, portMAX_DELAY);
+        if (!control_updates_allowed(epoch)) { xSemaphoreGive(mutex_); return false; }
         const bool accepted = scene_manager_.activate_scene_custom(
             index,
             fade_ms,
@@ -109,32 +113,40 @@ public:
     }
 
     bool prepare_manual_transition(uint8_t target_index) {
+        const uint32_t epoch = control_epoch_.load(std::memory_order_acquire);
         if (!mutex_ || lifecycle_state_.load(std::memory_order_acquire) != LifecycleState::Running) return false;
         xSemaphoreTake(mutex_, portMAX_DELAY);
+        if (!control_updates_allowed(epoch)) { xSemaphoreGive(mutex_); return false; }
         bool res = scene_manager_.prepare_manual_transition(target_index);
         xSemaphoreGive(mutex_);
         return res;
     }
 
     void set_manual_transition_progress(uint16_t progress_q15) {
+        const uint32_t epoch = control_epoch_.load(std::memory_order_acquire);
         if (!mutex_) return;
         xSemaphoreTake(mutex_, portMAX_DELAY);
+        if (!control_updates_allowed(epoch)) { xSemaphoreGive(mutex_); return; }
         scene_manager_.set_manual_transition_progress(progress_q15);
         xSemaphoreGive(mutex_);
     }
 
     // ── LG-034: transition freeze (Cue pause) ──
     bool freeze_transition() {
+        const uint32_t epoch = control_epoch_.load(std::memory_order_acquire);
         if (!mutex_ || lifecycle_state_.load(std::memory_order_acquire) != LifecycleState::Running) return false;
         xSemaphoreTake(mutex_, portMAX_DELAY);
+        if (!control_updates_allowed(epoch)) { xSemaphoreGive(mutex_); return false; }
         const bool res = scene_manager_.freeze_transition();
         xSemaphoreGive(mutex_);
         return res;
     }
 
     bool resume_frozen_transition(uint32_t remaining_ms, uint32_t current_ms) {
+        const uint32_t epoch = control_epoch_.load(std::memory_order_acquire);
         if (!mutex_ || lifecycle_state_.load(std::memory_order_acquire) != LifecycleState::Running) return false;
         xSemaphoreTake(mutex_, portMAX_DELAY);
+        if (!control_updates_allowed(epoch)) { xSemaphoreGive(mutex_); return false; }
         const bool res = scene_manager_.resume_frozen_transition(remaining_ms, current_ms);
         xSemaphoreGive(mutex_);
         return res;
@@ -158,8 +170,10 @@ public:
     /// Query current manual override status (active, channelMask, leaseRemainingMs)
     ManualControlStatus manual_control_status() const;
 
-    /// Safe ordered runtime task shutdown
-    void stop();
+    /// ESP_OK means the worker has exited and output ownership is released.
+    /// A timeout retains the task, callbacks and synchronization resources;
+    /// callers must keep the instance alive and retry stop before restarting.
+    esp_err_t stop();
 
     void inject_live_data(uint8_t zone_idx, uint8_t layer_idx, const BrandColor& color, uint8_t opacity);
     void inject_live_fixture(uint8_t fixture_idx, const LightValue* pixels, uint16_t count, const uint16_t* pwm_duties, uint8_t opacity);
@@ -297,6 +311,14 @@ private:
     static void task_entry(void* arg);
     void task();
     FrameResult render_frame(uint32_t current_ms);
+    bool control_updates_allowed() const {
+        return lifecycle_state_.load(std::memory_order_acquire) == LifecycleState::Running &&
+               !shutting_down_.load(std::memory_order_acquire);
+    }
+    bool control_updates_allowed(uint32_t epoch) const {
+        return control_updates_allowed() && control_epoch_.load(std::memory_order_acquire) == epoch;
+    }
+    void restart_soft_start_locked();
 
     FrameTimingMetrics frame_metrics_{};
 
@@ -307,7 +329,14 @@ private:
     SceneManager scene_manager_;
 
     std::atomic<LifecycleState> lifecycle_state_{LifecycleState::Constructed};
+    // Reject a producer admitted before stop even if it obtains the mutex only
+    // after a later start has made the runtime Running again.
+    std::atomic<uint32_t> control_epoch_{0};
     std::atomic<EstopState> estop_state_{EstopState::Inactive};
+    // Couples an explicit reset request to the exact physical E-stop it
+    // acknowledges. No hardware call or blocking wait occurs under this mux.
+    portMUX_TYPE estop_state_mux_ = portMUX_INITIALIZER_UNLOCKED;
+    uint32_t estop_reset_generation_ = 0;
     std::atomic<OutputState> output_state_{OutputState::Healthy};
     std::atomic<uint32_t> output_fault_count_{0};
     std::atomic<uint32_t> output_commit_failure_count_{0};
@@ -352,6 +381,8 @@ private:
     uint32_t last_observed_topology_generation_ = 0;
     bool in_abnormal_reset_quarantine_ = false;
 
+    // Stable for the object's lifetime, including stop/start. External control
+    // producers may already be queued here when the render task acknowledges exit.
     SemaphoreHandle_t mutex_ = nullptr;
     TaskHandle_t task_handle_ = nullptr;
 

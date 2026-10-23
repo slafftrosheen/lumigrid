@@ -70,16 +70,15 @@ FactoryRunner::~FactoryRunner() {
             xSemaphoreTake(shutdown_sem_, portMAX_DELAY);
         }
         task_handle_ = nullptr;
-        controller_.blackout();
-        if (status_mutex_) {
-            vSemaphoreDelete(status_mutex_);
-            status_mutex_ = nullptr;
-        }
-        if (queue_) {
-            vQueueDelete(queue_);
-            queue_ = nullptr;
-        }
-        lifecycle_state_.store(LifecycleState::Stopped, std::memory_order_release);
+        stop();
+    }
+    if (status_mutex_) {
+        vSemaphoreDelete(status_mutex_);
+        status_mutex_ = nullptr;
+    }
+    if (queue_) {
+        vQueueDelete(queue_);
+        queue_ = nullptr;
     }
     if (shutdown_sem_) {
         vSemaphoreDelete(shutdown_sem_);
@@ -94,13 +93,15 @@ esp_err_t FactoryRunner::start() {
         current == LifecycleState::Stopping) {
         return ESP_ERR_INVALID_STATE;
     }
-    if (current == LifecycleState::Faulted && task_handle_ != nullptr) {
-        ESP_LOGW("FactoryRunner", "start() rejected: previous factory task has not terminated");
-        return ESP_ERR_INVALID_STATE;
-    }
     if (!lifecycle_state_.compare_exchange_strong(current, LifecycleState::Starting)) {
         return ESP_ERR_INVALID_STATE;
     }
+    if (current == LifecycleState::Faulted && task_handle_ != nullptr) {
+        ESP_LOGW("FactoryRunner", "start() rejected: previous factory task has not terminated");
+        lifecycle_state_.store(current, std::memory_order_release);
+        return ESP_ERR_INVALID_STATE;
+    }
+    command_epoch_.fetch_add(1, std::memory_order_acq_rel);
     shutting_down_.store(false, std::memory_order_release);
 
     if (shutdown_sem_ == nullptr) {
@@ -112,7 +113,7 @@ esp_err_t FactoryRunner::start() {
         return ESP_ERR_NO_MEM;
     }
 
-    queue_ = xQueueCreate(kQueueDepth, sizeof(FactoryCommand));
+    if (!queue_) queue_ = xQueueCreate(kQueueDepth, sizeof(FactoryCommand));
     if (queue_ == nullptr) {
         lifecycle_state_.store(LifecycleState::Faulted, std::memory_order_release);
         source_manager_.release(ControlSource::Factory);
@@ -120,16 +121,18 @@ esp_err_t FactoryRunner::start() {
         return ESP_ERR_NO_MEM;
     }
 
-    status_mutex_ = xSemaphoreCreateMutex();
+    if (!status_mutex_) status_mutex_ = xSemaphoreCreateMutex();
     if (status_mutex_ == nullptr) {
-        vQueueDelete(queue_);
-        queue_ = nullptr;
         lifecycle_state_.store(LifecycleState::Faulted, std::memory_order_release);
         source_manager_.release(ControlSource::Factory);
         note_factory_task_start_failure();
         return ESP_ERR_NO_MEM;
     }
 
+    xSemaphoreTake(status_mutex_, portMAX_DELAY);
+    xQueueReset(queue_);
+    direct_test_active_ = false;
+    stream_active_ = false;
     status_.active_effect = FactoryEffect::SafeBlackout;
     status_.brightness = LG_FACTORY_DEFAULT_BRIGHTNESS;
     status_.auto_loop = false;
@@ -139,6 +142,7 @@ esp_err_t FactoryRunner::start() {
     status_.commit_failures = 0;
     status_.active_channel = 0xFF;
     status_.session = FactoryTestSession{};
+    xSemaphoreGive(status_mutex_);
 
     const BaseType_t created = xTaskCreatePinnedToCore(
         task_entry,
@@ -151,10 +155,6 @@ esp_err_t FactoryRunner::start() {
     );
 
     if (created != pdPASS) {
-        vSemaphoreDelete(status_mutex_);
-        status_mutex_ = nullptr;
-        vQueueDelete(queue_);
-        queue_ = nullptr;
         task_handle_ = nullptr;
         source_manager_.release(ControlSource::Factory);
         lifecycle_state_.store(LifecycleState::Faulted, std::memory_order_release);
@@ -185,10 +185,16 @@ bool FactoryRunner::ensure_worker_started() {
 }
 
 void FactoryRunner::stop() {
-    LifecycleState prev = lifecycle_state_.exchange(LifecycleState::Stopping, std::memory_order_acq_rel);
-    if (prev == LifecycleState::Stopping || prev == LifecycleState::Stopped) {
+    LifecycleState current = lifecycle_state_.load(std::memory_order_acquire);
+    for (;;) {
+        if (current == LifecycleState::Starting || current == LifecycleState::Stopping || current == LifecycleState::Stopped) return;
+        if (lifecycle_state_.compare_exchange_weak(current, LifecycleState::Stopping, std::memory_order_acq_rel)) break;
+    }
+    if (task_handle_ && xTaskGetCurrentTaskHandle() == task_handle_) {
+        lifecycle_state_.store(current, std::memory_order_release);
         return;
     }
+    command_epoch_.fetch_add(1, std::memory_order_acq_rel);
     shutting_down_.store(true, std::memory_order_release);
 
     if (task_handle_) {
@@ -205,19 +211,20 @@ void FactoryRunner::stop() {
         task_handle_ = nullptr;
     }
 
-    blackout();
+    const esp_err_t blackout_result = blackout();
+    uint32_t stopped_session_id = 0;
+    {
+        std::lock_guard<std::mutex> guard(burn_in_mutex_);
+        stopped_session_id = burn_in_session_id_;
+    }
+    finish_burn_in(stopped_session_id, true, blackout_result, "Shutdown blackout failed");
     if (pending_command_id_ != 0 && journal_) {
         journal_->failed(pending_command_id_, ESP_ERR_INVALID_STATE);
         pending_command_id_ = 0;
     }
-    if (status_mutex_) {
-        vSemaphoreDelete(status_mutex_);
-        status_mutex_ = nullptr;
-    }
-    if (queue_) {
-        vQueueDelete(queue_);
-        queue_ = nullptr;
-    }
+    if (status_mutex_) xSemaphoreTake(status_mutex_, portMAX_DELAY);
+    if (queue_) xQueueReset(queue_);
+    if (status_mutex_) xSemaphoreGive(status_mutex_);
     // LG-038.3 §19: the worker stays alive until reboot once started; stop()
     // here means runtime shutdown. Drop stack telemetry with it.
     task_stack_registry().unregister_task("lg_factory");
@@ -225,29 +232,12 @@ void FactoryRunner::stop() {
 }
 
 bool FactoryRunner::abort() {
-    if (burn_in_active_) {
-        if (burn_in_job_mgr_ && burn_in_job_id_ != 0) {
-            burn_in_job_mgr_->cancel_job(burn_in_job_id_);
-        }
-        burn_in_active_ = false;
-    }
-    if (status_mutex_ != nullptr &&
-        xSemaphoreTake(status_mutex_, pdMS_TO_TICKS(50)) == pdTRUE) {
-        if (status_.session.state == FactoryTestState::Running ||
-            status_.session.state == FactoryTestState::WaitingForOperator ||
-            status_.session.state == FactoryTestState::Preparing) {
-            status_.session.state = FactoryTestState::Aborted;
-            status_.session.finished_ms = now_ms();
-        }
-        xSemaphoreGive(status_mutex_);
-    }
-
-    FactoryCommand cmd;
-    cmd.type = FactoryCommandType::Abort;
-    return enqueue(cmd);
+    return abort_test_session();
 }
 
 bool FactoryRunner::enqueue(const FactoryCommand& command) {
+    uint32_t epoch = command_epoch_.load(std::memory_order_acquire);
+    const bool already_running = lifecycle_state_.load(std::memory_order_acquire) == LifecycleState::Running;
     // LG-038.3 §18: first Factory command starts the lazy worker.
     if (!ensure_worker_started()) {
         if (status_mutex_ != nullptr &&
@@ -257,14 +247,15 @@ bool FactoryRunner::enqueue(const FactoryCommand& command) {
         }
         return false;
     }
-    if (queue_ == nullptr) return false;
-    if (xQueueSend(queue_, &command, 0) == pdPASS) return true;
-    if (status_mutex_ != nullptr &&
-        xSemaphoreTake(status_mutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
-        ++status_.command_rejections;
-        xSemaphoreGive(status_mutex_);
-    }
-    return false;
+    if (!already_running) epoch = command_epoch_.load(std::memory_order_acquire);
+    if (!queue_ || !status_mutex_ || xSemaphoreTake(status_mutex_, pdMS_TO_TICKS(10)) != pdTRUE) return false;
+    const bool accepted = epoch == command_epoch_.load(std::memory_order_acquire) &&
+        lifecycle_state_.load(std::memory_order_acquire) == LifecycleState::Running &&
+        !shutting_down_.load(std::memory_order_acquire) &&
+        xQueueSend(queue_, &command, 0) == pdPASS;
+    if (!accepted) ++status_.command_rejections;
+    xSemaphoreGive(status_mutex_);
+    return accepted;
 }
 
 bool FactoryRunner::test_channel(uint8_t channel, const char* mode, uint32_t duration_ms) {
@@ -348,8 +339,11 @@ bool FactoryRunner::confirm_test_session(
     return enqueue(cmd);
 }
 
-bool FactoryRunner::abort_test_session(uint32_t /*session_id*/) {
-    return abort();
+bool FactoryRunner::abort_test_session(uint32_t session_id) {
+    FactoryCommand cmd;
+    cmd.type = FactoryCommandType::Abort;
+    cmd.session_id = session_id;
+    return enqueue(cmd);
 }
 
 FactoryValidationReport FactoryRunner::validation_report() const {
@@ -377,15 +371,15 @@ bool FactoryRunner::start_burn_in_job(
     uint32_t* out_job_id
 ) {
     if (job_mgr == nullptr) return false;
-    if (burn_in_active_) return false;
     // LG-038.3 §18: Burn-In is explicit physical use of the worker.
     if (!ensure_worker_started()) return false;
+    std::lock_guard<std::mutex> guard(burn_in_mutex_);
+    if (burn_in_active_ || shutting_down_.load(std::memory_order_acquire) ||
+        lifecycle_state_.load(std::memory_order_acquire) != LifecycleState::Running) return false;
 
     uint32_t job_id = 0;
     esp_err_t err = job_mgr->start_job(JobType::BurnIn, &job_id);
     if (err != ESP_OK) return false;
-
-    if (out_job_id) *out_job_id = job_id;
 
     burn_in_job_mgr_ = job_mgr;
     burn_in_job_id_ = job_id;
@@ -394,33 +388,50 @@ bool FactoryRunner::start_burn_in_job(
     burn_in_brightness_ = clamp_brightness(brightness, true);
     burn_in_active_ = true;
 
-    uint32_t session_id = 0;
-    return start_test_session(
+    const bool queued = start_test_session(
         FactoryTestKind::BurnIn,
         0xFF,
         burn_in_duration_ms_,
         burn_in_brightness_,
-        &session_id
+        &burn_in_session_id_
     );
+    if (!queued) {
+        job_mgr->fail_job(job_id, ESP_ERR_INVALID_STATE, "Burn-in command was not queued");
+        burn_in_active_ = false;
+        return false;
+    }
+    if (out_job_id) *out_job_id = job_id;
+    return true;
 }
 
 bool FactoryRunner::stop_burn_in_job() {
+    std::lock_guard<std::mutex> guard(burn_in_mutex_);
     if (!burn_in_active_) return false;
+    // Queue acceptance is distinct from completion. Retain the job reservation
+    // until this exact session has been blacked out by the worker.
+    return abort_test_session(burn_in_session_id_);
+}
+
+void FactoryRunner::finish_burn_in(uint32_t session_id, bool cancelled,
+                                   esp_err_t result, const char* detail) {
+    std::lock_guard<std::mutex> guard(burn_in_mutex_);
+    if (!burn_in_active_ || session_id == 0 || burn_in_session_id_ != session_id) return;
     if (burn_in_job_mgr_ && burn_in_job_id_ != 0) {
-        burn_in_job_mgr_->cancel_job(burn_in_job_id_);
+        if (result != ESP_OK) burn_in_job_mgr_->fail_job(burn_in_job_id_, result, detail);
+        else if (cancelled) burn_in_job_mgr_->cancel_job(burn_in_job_id_);
+        else burn_in_job_mgr_->complete_job(burn_in_job_id_);
     }
     burn_in_active_ = false;
-    abort();
-    return true;
 }
 
 void FactoryRunner::task_entry(void* argument) {
     static_cast<FactoryRunner*>(argument)->task();
 }
 
-void FactoryRunner::blackout() {
+esp_err_t FactoryRunner::blackout() {
     source_manager_.release(ControlSource::Factory);
-    controller_.blackout();
+    const esp_err_t result = controller_.blackout();
+    if (!status_mutex_) return result;
     xSemaphoreTake(status_mutex_, portMAX_DELAY);
     status_.active_effect = FactoryEffect::SafeBlackout;
     status_.outputs_enabled = false;
@@ -429,6 +440,7 @@ void FactoryRunner::blackout() {
     status_.active_channel = 0xFF;
     xSemaphoreGive(status_mutex_);
     if (status_callback_) status_callback_();
+    return result;
 }
 
 void FactoryRunner::start_effect(FactoryEffect effect,
@@ -482,18 +494,39 @@ void FactoryRunner::apply_command(const FactoryCommand& command,
     }
 
     switch (command.type) {
-        case FactoryCommandType::Abort:
+        case FactoryCommandType::Abort: {
+            const FactoryTestSession active_session = session();
+            if (command.session_id != 0 && command.session_id != active_session.session_id) {
+                if (command.command_id != 0 && pending_command_id_ == command.command_id) {
+                    if (journal_) journal_->failed(command.command_id, ESP_ERR_INVALID_STATE);
+                    pending_command_id_ = 0;
+                }
+                return;
+            }
             direct_test_active_ = false;
             xSemaphoreTake(status_mutex_, portMAX_DELAY);
             stream_active_ = false;
             status_.auto_loop = false;
             xSemaphoreGive(status_mutex_);
-            blackout();
+            const esp_err_t result = blackout();
+            xSemaphoreTake(status_mutex_, portMAX_DELAY);
+            if (status_.session.state == FactoryTestState::Running ||
+                status_.session.state == FactoryTestState::WaitingForOperator ||
+                status_.session.state == FactoryTestState::Preparing) {
+                status_.session.state = result == ESP_OK ? FactoryTestState::Aborted : FactoryTestState::Failed;
+                status_.session.error_code = result;
+                status_.session.finished_ms = current_ms;
+            }
+            xSemaphoreGive(status_mutex_);
+            finish_burn_in(active_session.session_id, true, result, "Cancellation blackout failed");
             if (pending_command_id_ != 0 && journal_) {
-                journal_->applied(pending_command_id_);
+                if (result == ESP_OK) journal_->applied(pending_command_id_);
+                else journal_->failed(pending_command_id_, result);
                 pending_command_id_ = 0;
             }
+            if (status_callback_) status_callback_();
             return;
+        }
         case FactoryCommandType::SetAutoLoop:
             direct_test_active_ = false;
             if (command.enabled) {
@@ -675,10 +708,13 @@ void FactoryRunner::task() {
         }
 
         // Periodic Burn-In Job progress update
-        if (burn_in_active_ && burn_in_job_mgr_ && (current_ms % 1000 < kFramePeriodMs)) {
-            const uint32_t elapsed = current_ms - burn_in_started_ms_;
-            const uint8_t prog = burn_in_duration_ms_ > 0 ? std::min<uint8_t>(100, (elapsed * 100ULL) / burn_in_duration_ms_) : 0;
-            burn_in_job_mgr_->update_progress(burn_in_job_id_, JobState::Running, prog);
+        {
+            std::lock_guard<std::mutex> guard(burn_in_mutex_);
+            if (burn_in_active_ && burn_in_job_mgr_ && (current_ms % 1000 < kFramePeriodMs)) {
+                const uint32_t elapsed = current_ms - burn_in_started_ms_;
+                const uint8_t prog = burn_in_duration_ms_ > 0 ? std::min<uint8_t>(100, (elapsed * 100ULL) / burn_in_duration_ms_) : 0;
+                burn_in_job_mgr_->update_progress(burn_in_job_id_, JobState::Running, prog);
+            }
         }
 
         bool is_streaming = false;
@@ -901,18 +937,14 @@ void FactoryRunner::task() {
             }
             xSemaphoreGive(status_mutex_);
 
-            if (burn_in_active_) {
-                if (burn_in_job_mgr_) {
-                    burn_in_job_mgr_->complete_job(burn_in_job_id_);
-                }
-                burn_in_active_ = false;
+            const esp_err_t blackout_result = blackout();
+            if (current.session.kind == FactoryTestKind::BurnIn && blackout_result == ESP_OK) {
                 xSemaphoreTake(status_mutex_, portMAX_DELAY);
                 validation_report_.burn_in = { .tested = true, .passed = true, .timestamp_ms = current_ms };
-                validation_report_.burn_in_duration_s = (current_ms - burn_in_started_ms_) / 1000;
+                validation_report_.burn_in_duration_s = (current_ms - current.session.started_ms) / 1000;
                 xSemaphoreGive(status_mutex_);
             }
-
-            blackout();
+            finish_burn_in(current.session.session_id, false, blackout_result, "Completion blackout failed");
             vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(kFramePeriodMs));
             continue;
         }
@@ -939,14 +971,8 @@ void FactoryRunner::task() {
                 }
                 xSemaphoreGive(status_mutex_);
 
-                if (burn_in_active_) {
-                    if (burn_in_job_mgr_) {
-                        burn_in_job_mgr_->fail_job(burn_in_job_id_, commit_err, "Commit error");
-                    }
-                    burn_in_active_ = false;
-                }
-
                 blackout();
+                finish_burn_in(current.session.session_id, false, commit_err, "Commit error");
                 vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(kFramePeriodMs));
                 continue;
             }

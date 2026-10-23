@@ -478,10 +478,17 @@ void OutputController::latch_estop() {
 }
 
 esp_err_t OutputController::clear_estop() {
+    return clear_estop(estop_generation_.load(std::memory_order_acquire));
+}
+
+esp_err_t OutputController::clear_estop(uint32_t clear_generation) {
     // Clearing the physical latch only re-arms the controller with known-zero outputs.
     // It must NOT immediately restore previous or stale output.
     lock();
-    const uint32_t clear_generation = estop_generation_.load(std::memory_order_acquire);
+    if (estop_generation_.load(std::memory_order_acquire) != clear_generation) {
+        unlock();
+        return ESP_ERR_INVALID_STATE;
+    }
 #if defined(CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS) && CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS
     const bool mock = test_mode_.load(std::memory_order_acquire);
     if (!mock) Pca9685Driver::disable_outputs();

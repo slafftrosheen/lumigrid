@@ -4,6 +4,7 @@
 #include "FactoryTypes.hpp"
 #include <atomic>
 #include <functional>
+#include <mutex>
 #include "ControlSourceManager.hpp"
 #include "OutputController.hpp"
 #include "CommandReceipt.hpp"
@@ -129,13 +130,17 @@ private:
         uint8_t brightness,
         uint32_t now_ms
     );
-    void blackout();
+    esp_err_t blackout();
+    void finish_burn_in(uint32_t session_id, bool cancelled, esp_err_t result,
+                        const char* detail = nullptr);
 
     ControlSourceManager& source_manager_;
     OutputController& controller_;
     CommandJournal* journal_ = nullptr;
     uint32_t pending_command_id_ = 0;
 
+    // Recovery API readers/writers can outlive a worker stop. These objects
+    // remain stable until destruction and are reused by a later lazy start.
     QueueHandle_t queue_ = nullptr;
     SemaphoreHandle_t status_mutex_ = nullptr;
     TaskHandle_t task_handle_ = nullptr;
@@ -152,8 +157,12 @@ private:
     FactoryValidationReport validation_report_{};
 
     // Burn-In Job tracking
+    // API admission and worker acknowledgement share this lock; publishing a
+    // terminal job is allowed only after the worker has stopped its output.
+    std::mutex burn_in_mutex_;
     class JobManager* burn_in_job_mgr_ = nullptr;
     uint32_t burn_in_job_id_ = 0;
+    uint32_t burn_in_session_id_ = 0;
     uint32_t burn_in_started_ms_ = 0;
     uint32_t burn_in_duration_ms_ = 0;
     uint8_t burn_in_brightness_ = kBurnInDefaultBrightness;
@@ -161,6 +170,7 @@ private:
 
     StatusCallback status_callback_{};
     std::atomic<LifecycleState> lifecycle_state_{LifecycleState::Constructed};
+    std::atomic<uint32_t> command_epoch_{0};
     std::atomic<bool> shutting_down_{false};
     SemaphoreHandle_t shutdown_sem_ = nullptr;
 };

@@ -113,7 +113,7 @@
     actionLoading = true;
     try {
       await postFactoryAbort(nodeIp);
-      toast('Emergency blackout applied.');
+      toast('Blackout requested. Waiting for node status.');
       refreshHealth().catch(() => {});
     } catch (e) {
       toast(`Blackout failed: ${e}`);

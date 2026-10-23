@@ -182,8 +182,8 @@ export function confirmFactoryTestSession(
   );
 }
 
-export function abortFactoryTestSession(ip: string): Promise<{ aborted: boolean }> {
-  return apiJson<{ aborted: boolean }>(ip, '/api/v1/factory/test/abort', {
+export function abortFactoryTestSession(ip: string): Promise<{ accepted: boolean; cancellationRequested: boolean }> {
+  return apiJson<{ accepted: boolean; cancellationRequested: boolean }>(ip, '/api/v1/factory/test/abort', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: '{}',
@@ -210,8 +210,8 @@ export function startBurnInJob(
   );
 }
 
-export function stopBurnInJob(ip: string): Promise<{ stopped: boolean }> {
-  return apiJson<{ stopped: boolean }>(ip, '/api/v1/factory/burn-in/stop', {
+export function stopBurnInJob(ip: string): Promise<{ accepted: boolean; cancellationRequested: boolean }> {
+  return apiJson<{ accepted: boolean; cancellationRequested: boolean }>(ip, '/api/v1/factory/burn-in/stop', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: '{}',

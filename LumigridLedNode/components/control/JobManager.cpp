@@ -13,6 +13,11 @@ static uint32_t current_time_ms() {
 #endif
 
 namespace lg {
+namespace {
+bool terminal(JobState state) {
+    return state == JobState::Completed || state == JobState::Failed || state == JobState::Cancelled;
+}
+}
 
 esp_err_t JobManager::start_job(JobType type, uint32_t* job_id) {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -51,7 +56,7 @@ esp_err_t JobManager::start_job(JobType type, uint32_t* job_id) {
 
 void JobManager::update_progress(uint32_t job_id, JobState state, uint8_t progress, int32_t error, const char* detail) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (current_job_.job_id == job_id) {
+    if (job_id != 0 && current_job_.job_id == job_id && !terminal(current_job_.state)) {
         current_job_.state = state;
         current_job_.progress = (progress > 100) ? 100 : progress;
         current_job_.updated_ms = current_time_ms();
@@ -69,7 +74,7 @@ void JobManager::complete_job(uint32_t job_id) {
 
 void JobManager::fail_job(uint32_t job_id, int32_t error, const char* detail) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (current_job_.job_id == job_id) {
+    if (job_id != 0 && current_job_.job_id == job_id && !terminal(current_job_.state)) {
         current_job_.state = JobState::Failed;
         current_job_.updated_ms = current_time_ms();
         current_job_.error_code = error;
@@ -82,13 +87,14 @@ void JobManager::fail_job(uint32_t job_id, int32_t error, const char* detail) {
 
 void JobManager::cancel_job(uint32_t job_id) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (current_job_.job_id == job_id) {
+    if (job_id != 0 && current_job_.job_id == job_id && !terminal(current_job_.state)) {
         current_job_.state = JobState::Cancelled;
         current_job_.updated_ms = current_time_ms();
     }
 }
 
 bool JobManager::get_job(uint32_t job_id, OperationJob& out) const {
+    if (job_id == 0) return false;
     std::lock_guard<std::mutex> lock(mutex_);
     if (current_job_.job_id == job_id) {
         out = current_job_;

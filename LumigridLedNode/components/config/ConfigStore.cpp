@@ -6,6 +6,7 @@
 #include <cstring>
 #include <cstdio>
 #include <cstdarg>
+#include <initializer_list>
 #include <memory>
 #include <new>
 #include "esp_rom_crc.h"
@@ -88,9 +89,147 @@ void clear_cue_list(CueList& cl) {
     }
 }
 
+template<size_t N>
+bool terminated(const char (&text)[N]) {
+    return std::memchr(text, '\0', N) != nullptr;
+}
+
+bool recoverable_blob_error(esp_err_t error) {
+    return error == ESP_ERR_NVS_NOT_FOUND || error == ESP_ERR_NVS_INVALID_LENGTH ||
+           error == ESP_ERR_NVS_INVALID_STATE || error == ESP_ERR_INVALID_VERSION;
+}
+
+esp_err_t fallback_result(esp_err_t primary, esp_err_t backup) {
+    // An absent backup must not hide a corrupt primary or a real I/O error.
+    return backup == ESP_ERR_NVS_NOT_FOUND ? primary : backup;
+}
+
+template<class T>
+esp_err_t read_exact_blob(nvs_handle_t handle, const char* key, T& output) {
+    size_t length = 0;
+    esp_err_t error = nvs_get_blob(handle, key, nullptr, &length);
+    if (error != ESP_OK) return error;
+    if (length != sizeof(T)) return ESP_ERR_NVS_INVALID_LENGTH;
+    error = nvs_get_blob(handle, key, &output, &length);
+    if (error != ESP_OK) return error;
+    return length == sizeof(T) ? ESP_OK : ESP_ERR_NVS_INVALID_LENGTH;
+}
+
+template<class T, class Validator>
+esp_err_t read_mirrored_blob(nvs_handle_t handle, const char* primary, const char* backup,
+                            T& output, Validator valid) {
+    auto read = [&](const char* key) {
+        const esp_err_t error = read_exact_blob(handle, key, output);
+        return error == ESP_OK && !valid(output) ? ESP_ERR_NVS_INVALID_STATE : error;
+    };
+    const esp_err_t error = read(primary);
+    if (!recoverable_blob_error(error)) return error;
+    return fallback_result(error, read(backup));
+}
+
+template<class T>
+esp_err_t write_mirrored_blob(nvs_handle_t handle, const char* primary, const char* backup,
+                             const T& value) {
+    if (!handle) return ESP_ERR_INVALID_STATE;
+    std::unique_ptr<T> verify(new (std::nothrow) T{});
+    if (!verify) return ESP_ERR_NO_MEM;
+    esp_err_t error = nvs_set_blob(handle, primary, &value, sizeof(T));
+    if (error == ESP_OK) error = nvs_commit(handle);
+    if (error != ESP_OK) return error;
+    error = read_exact_blob(handle, primary, *verify);
+    if (error != ESP_OK) return error;
+    if (std::memcmp(verify.get(), &value, sizeof(T)) != 0) return ESP_ERR_NVS_INVALID_STATE;
+    // Keep the previous backup until the new primary is committed and verified.
+    // A backup failure is a partial save and must be reported to the caller.
+    error = nvs_set_blob(handle, backup, &value, sizeof(T));
+    return error == ESP_OK ? nvs_commit(handle) : error;
+}
+
+esp_err_t erase_keys(nvs_handle_t handle, std::initializer_list<const char*> keys) {
+    if (!handle) return ESP_ERR_INVALID_STATE;
+    bool changed = false;
+    for (const char* key : keys) {
+        const esp_err_t error = nvs_erase_key(handle, key);
+        if (error == ESP_OK) changed = true;
+        else if (error != ESP_ERR_NVS_NOT_FOUND) return error;
+    }
+    return changed ? nvs_commit(handle) : ESP_OK;
+}
+
+bool valid_scene(const SceneConfig& scene) {
+    if (scene.schema_version != 2 || !terminated(scene.name)) return false;
+    for (const auto& channel : scene.channels) {
+        for (const auto& layer : channel.layers) {
+            if (layer.effect > static_cast<uint8_t>(SignageEffect::Confetti) ||
+                static_cast<uint8_t>(layer.blend_mode) > static_cast<uint8_t>(BlendMode::Screen)) return false;
+        }
+    }
+    return true;
+}
+
+bool valid_motion(const SceneMotionConfig& motion) {
+    if (motion.schema_version != 1 || motion.track_count > kAutomationTracksPerScene ||
+        static_cast<uint8_t>(motion.transition_curve) > static_cast<uint8_t>(TransitionCurve::Step)) return false;
+    for (uint8_t i = 0; i < motion.track_count; ++i) {
+        const auto& track = motion.tracks[i];
+        if (track.point_count > kAutomationPointsPerTrack || track.channel >= kChannelCount || track.layer >= 3 ||
+            static_cast<uint8_t>(track.target) > static_cast<uint8_t>(AutomationTarget::LayerParameter) ||
+            static_cast<uint8_t>(track.curve) > static_cast<uint8_t>(AutomationCurve::Step)) return false;
+        for (uint8_t p = 1; p < track.point_count; ++p) {
+            if (track.points[p].position < track.points[p - 1].position) return false;
+        }
+    }
+    return true;
+}
+
+bool valid_cue_list(const CueList& list) {
+    if (!terminated(list.name) || list.count > kMaxCuesPerList ||
+        static_cast<uint8_t>(list.mode) > static_cast<uint8_t>(CueRunMode::Manual) ||
+        static_cast<uint8_t>(list.end_action) > static_cast<uint8_t>(CueEndAction::RestoreFallback)) return false;
+    for (uint8_t i = 0; i < list.count; ++i) {
+        if (!terminated(list.cues[i].label) || list.cues[i].scene_index >= kMaxPresets ||
+            static_cast<uint8_t>(list.cues[i].curve) > static_cast<uint8_t>(TransitionCurve::Step)) return false;
+    }
+    return true;
+}
+
+bool valid_sequence(const Sequence& sequence) {
+    for (const auto& track : sequence.tracks) {
+        if (track.channel_id >= kChannelCount || track.num_steps > 16) return false;
+        for (uint8_t i = 0; i < track.num_steps; ++i) {
+            if (track.steps[i].preset_index >= kMaxPresets || track.steps[i].length_beats == 0) return false;
+        }
+    }
+    return true;
+}
+
+bool valid_calendar(const CalendarSchedule& schedule) {
+    for (const auto& entry : schedule.entries) {
+        if (entry.hour > 23 || entry.minute > 59 || entry.days_of_week > 0x7f ||
+            entry.preset_index >= kMaxPresets || entry.cue_list_index >= kMaxCueLists ||
+            static_cast<uint8_t>(entry.action) > static_cast<uint8_t>(CalendarAction::CueList)) return false;
+    }
+    return true;
+}
+
+bool valid_network(const NetworkSettings& settings, bool allow_missing_ap_password = false) {
+    if (settings.schema_version != 2 ||
+        static_cast<uint8_t>(settings.mode) > static_cast<uint8_t>(NetworkMode::StaWithApFallback) ||
+        settings.ap_channel < 1 || settings.ap_channel > 13 ||
+        !terminated(settings.sta_ssid) || !terminated(settings.sta_password) ||
+        !terminated(settings.ap_name) || !terminated(settings.ap_password)) return false;
+    if (settings.mode != NetworkMode::ApOnly && settings.sta_ssid[0] == '\0') return false;
+    const size_t sta_length = std::strlen(settings.sta_password);
+    const size_t ap_length = std::strlen(settings.ap_password);
+    return (sta_length == 0 || (sta_length >= 8 && sta_length <= 63)) &&
+           ((ap_length >= 8 && ap_length <= 63) ||
+            (ap_length == 0 && (allow_missing_ap_password || settings.mode == NetworkMode::StaOnly)));
+}
+
 } // namespace
 
 esp_err_t ConfigStore::init() {
+    if (handle_) return ESP_OK;
     esp_err_t err = NvsRuntime::initialise();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "ConfigStore: NVS initialization failed (%s); recovery required", esp_err_to_name(err));
@@ -98,7 +237,24 @@ esp_err_t ConfigStore::init() {
     }
     ESP_RETURN_ON_ERROR(nvs_open(storage_namespace_, NVS_READWRITE, &handle_), TAG, "open");
 
-    ESP_RETURN_ON_ERROR(ensure_defaults(), TAG, "defaults");
+    bool restore_active = true;
+    err = read_restore_marker(restore_active);
+    if (err != ESP_OK) {
+        nvs_close(handle_);
+        handle_ = 0;
+        return err;
+    }
+    if (restore_active) {
+        ESP_LOGW(TAG, "Interrupted restore; skipping defaults and scene migrations");
+        return ESP_OK;
+    }
+
+    err = ensure_defaults();
+    if (err != ESP_OK) {
+        nvs_close(handle_);
+        handle_ = 0;
+        return err;
+    }
     ESP_LOGI(TAG, "ConfigStore ready (%u scenes)", scene_count());
     return ESP_OK;
 }
@@ -107,7 +263,7 @@ esp_err_t ConfigStore::init() {
 // ── Scenes (Product Grade) ──────────────────────────────────────────
 
 esp_err_t ConfigStore::save_scene(uint8_t index, const SceneConfig& scene) {
-    if (index >= kMaxPresets) return ESP_ERR_INVALID_ARG;
+    if (index >= kMaxPresets || !valid_scene(scene)) return ESP_ERR_INVALID_ARG;
 
     std::unique_ptr<SceneConfig> scratch(new (std::nothrow) SceneConfig(scene));
     if (!scratch) return ESP_ERR_NO_MEM;
@@ -117,28 +273,12 @@ esp_err_t ConfigStore::save_scene(uint8_t index, const SceneConfig& scene) {
     char key[12];
     make_key(key, sizeof(key), "scene", index);
 
-    ESP_RETURN_ON_ERROR(
-        nvs_set_blob(handle_, key, &to_save, sizeof(SceneConfig)),
-        TAG, "save scene primary"
-    );
-    ESP_RETURN_ON_ERROR(nvs_commit(handle_), TAG, "commit scene primary");
-
     char bak_key[16];
     snprintf(bak_key, sizeof(bak_key), "scene_b_%u", index);
-    esp_err_t bak_err = nvs_set_blob(handle_, bak_key, &to_save, sizeof(SceneConfig));
-    if (bak_err != ESP_OK) {
-        ESP_LOGW(TAG, "Scene %u backup write failed: %s", index, esp_err_to_name(bak_err));
-    } else {
-        bak_err = nvs_commit(handle_);
-        if (bak_err != ESP_OK) {
-            ESP_LOGW(TAG, "Scene %u backup commit failed: %s", index, esp_err_to_name(bak_err));
-        }
-    }
-
-    return ESP_OK;
+    return write_mirrored_blob(handle_, key, bak_key, to_save);
 }
 
-esp_err_t ConfigStore::load_scene(uint8_t index, SceneConfig& scene) {
+esp_err_t ConfigStore::load_scene(uint8_t index, SceneConfig& scene, bool persist_changes) {
     if (index >= kMaxPresets) return ESP_ERR_INVALID_ARG;
 
     char key[12];
@@ -154,7 +294,7 @@ esp_err_t ConfigStore::load_scene(uint8_t index, SceneConfig& scene) {
     auto legacy_zone_for_channel = [&](uint8_t channel) -> uint8_t {
         if (!topology_checked) {
             topology_cfg.reset(new (std::nothrow) DeviceConfig{});
-            topology_error = topology_cfg ? load_config(*topology_cfg) : ESP_ERR_NO_MEM;
+            topology_error = topology_cfg ? load_config(*topology_cfg, persist_changes) : ESP_ERR_NO_MEM;
             have_topology = (topology_error == ESP_OK);
             topology_checked = true;
         }
@@ -173,12 +313,13 @@ esp_err_t ConfigStore::load_scene(uint8_t index, SceneConfig& scene) {
     auto load_from_key = [&](const char* k, SceneConfig& out) -> esp_err_t {
         size_t len = 0;
         esp_err_t err = nvs_get_blob(handle_, k, nullptr, &len);
+        if (err == ESP_OK && len == 0) return ESP_ERR_NVS_INVALID_LENGTH;
         if (err == ESP_OK && len > 0) {
             if (len == sizeof(SceneConfig)) {
                 len = sizeof(SceneConfig);
                 err = nvs_get_blob(handle_, k, &out, &len);
                 if (err == ESP_OK) {
-                    if (out.checksum != calc_scene_crc(out)) {
+                    if (len != sizeof(out) || out.checksum != calc_scene_crc(out) || !valid_scene(out)) {
                         ESP_LOGW(TAG, "Scene %s CRC mismatch", k);
                         return ESP_ERR_NVS_INVALID_STATE;
                     }
@@ -204,8 +345,9 @@ esp_err_t ConfigStore::load_scene(uint8_t index, SceneConfig& scene) {
                             out.channels[ch].layers[l] = v1->zones[legacy_zone_for_channel(ch)].layers[l];
                         }
                     }
-                    if (topology_error == ESP_ERR_NO_MEM) return topology_error;
+                    if (topology_error != ESP_OK) return topology_error;
                     out.checksum = calc_scene_crc(out);
+                    if (!valid_scene(out)) return ESP_ERR_NVS_INVALID_STATE;
                     migrated_legacy_scene = true;
                     ESP_LOGI(TAG, "Migrated SceneConfigV1 (8-zone) %s to v2 (16-channel)", k);
                     return ESP_OK;
@@ -260,8 +402,9 @@ esp_err_t ConfigStore::load_scene(uint8_t index, SceneConfig& scene) {
                         out.channels[ch].layers[0].enabled = true;
                     }
                     
-                    if (topology_error == ESP_ERR_NO_MEM) return topology_error;
+                    if (topology_error != ESP_OK) return topology_error;
                     out.checksum = calc_scene_crc(out);
+                    if (!valid_scene(out)) return ESP_ERR_NVS_INVALID_STATE;
                     migrated_legacy_scene = true;
                     ESP_LOGI(TAG, "Migrated legacy scene %s", k);
                     return ESP_OK;
@@ -274,31 +417,21 @@ esp_err_t ConfigStore::load_scene(uint8_t index, SceneConfig& scene) {
     };
 
     esp_err_t err = load_from_key(key, scene);
-    if (err == ESP_ERR_NVS_INVALID_STATE) {
+    if (recoverable_blob_error(err)) {
         // Try backup
         char bak_key[16];
         snprintf(bak_key, sizeof(bak_key), "scene_b_%u", index);
         ESP_LOGW(TAG, "Restoring scene %u from backup slot", index);
-        err = load_from_key(bak_key, scene);
-        if (err == ESP_OK) {
-            esp_err_t restore_err = nvs_set_blob(handle_, key, &scene, sizeof(SceneConfig));
-            if (restore_err != ESP_OK) {
-                ESP_LOGW(TAG, "Scene %u primary restore write failed: %s", index, esp_err_to_name(restore_err));
-            } else {
-                restore_err = nvs_commit(handle_);
-                if (restore_err != ESP_OK) {
-                    ESP_LOGW(TAG, "Scene %u primary restore commit failed: %s", index, esp_err_to_name(restore_err));
-                }
-            }
-        }
+        err = fallback_result(err, load_from_key(bak_key, scene));
     }
 
-    if (err == ESP_OK && migrated_legacy_scene) {
+    if (err == ESP_OK && migrated_legacy_scene && persist_changes) {
         // Persist the channel-based representation immediately so later scene
         // playback never has to re-run legacy topology resolution.
         const esp_err_t persist_err = save_scene(index, scene);
         if (persist_err != ESP_OK) {
             ESP_LOGW(TAG, "Failed to persist migrated scene %u: %s", index, esp_err_to_name(persist_err));
+            return persist_err;
         }
     }
     
@@ -313,13 +446,10 @@ esp_err_t ConfigStore::delete_scene(uint8_t index) {
 
     char bak_key[16];
     snprintf(bak_key, sizeof(bak_key), "scene_b_%u", index);
-    (void)nvs_erase_key(handle_, bak_key);
-    (void)delete_scene_motion(index);
-
-    esp_err_t err = nvs_erase_key(handle_, key);
-    if (err == ESP_ERR_NVS_NOT_FOUND) return ESP_OK;
-    ESP_RETURN_ON_ERROR(err, TAG, "delete scene");
-    return nvs_commit(handle_);
+    char motion_key[16], motion_backup[16];
+    make_key(motion_key, sizeof(motion_key), "smot", index);
+    snprintf(motion_backup, sizeof(motion_backup), "smot_b_%u", index);
+    return erase_keys(handle_, {bak_key, motion_backup, motion_key, key});
 }
 
 uint8_t ConfigStore::scene_count() {
@@ -416,7 +546,7 @@ uint32_t ConfigStore::compute_show_hash() const {
 // ── Scene Motion ────────────────────────────────────────────────────
 
 esp_err_t ConfigStore::save_scene_motion(uint8_t index, const SceneMotionConfig& motion) {
-    if (index >= kMaxPresets) return ESP_ERR_INVALID_ARG;
+    if (index >= kMaxPresets || !valid_motion(motion)) return ESP_ERR_INVALID_ARG;
 
     SceneMotionConfig to_save = motion;
     to_save.schema_version = 1;
@@ -425,67 +555,24 @@ esp_err_t ConfigStore::save_scene_motion(uint8_t index, const SceneMotionConfig&
     char key[16];
     make_key(key, sizeof(key), "smot", index);
 
-    ESP_RETURN_ON_ERROR(
-        nvs_set_blob(handle_, key, &to_save, sizeof(SceneMotionConfig)),
-        TAG, "save scene motion primary"
-    );
-    ESP_RETURN_ON_ERROR(nvs_commit(handle_), TAG, "commit scene motion primary");
-
     char bak_key[16];
     snprintf(bak_key, sizeof(bak_key), "smot_b_%u", index);
-    esp_err_t bak_err = nvs_set_blob(handle_, bak_key, &to_save, sizeof(SceneMotionConfig));
-    if (bak_err == ESP_OK) {
-        (void)nvs_commit(handle_);
-    }
-
-    return ESP_OK;
+    return write_mirrored_blob(handle_, key, bak_key, to_save);
 }
 
 esp_err_t ConfigStore::load_scene_motion(uint8_t index, SceneMotionConfig& motion) {
     if (index >= kMaxPresets) return ESP_ERR_INVALID_ARG;
-    clear_scene_motion(motion);
-
-    char key[16];
+    char key[16], backup[16];
     make_key(key, sizeof(key), "smot", index);
-
-    size_t len = 0;
-    esp_err_t err = nvs_get_blob(handle_, key, nullptr, &len);
-    if (err == ESP_OK && len == sizeof(SceneMotionConfig)) {
-        err = nvs_get_blob(handle_, key, &motion, &len);
-        if (err == ESP_OK) {
-            if (motion.checksum != calc_motion_crc(motion)) {
-                ESP_LOGW(TAG, "Scene motion %s CRC mismatch, trying backup", key);
-                char bak_key[16];
-                snprintf(bak_key, sizeof(bak_key), "smot_b_%u", index);
-                len = sizeof(SceneMotionConfig);
-                err = nvs_get_blob(handle_, bak_key, &motion, &len);
-                if (err == ESP_OK && len == sizeof(SceneMotionConfig) && motion.checksum == calc_motion_crc(motion)) {
-                    (void)nvs_set_blob(handle_, key, &motion, sizeof(SceneMotionConfig));
-                    (void)nvs_commit(handle_);
-                    return ESP_OK;
-                }
-                clear_scene_motion(motion);
-                return ESP_ERR_NVS_INVALID_STATE;
-            }
-            return ESP_OK;
-        }
-    }
-
-    // Check backup
-    char bak_key[16];
-    snprintf(bak_key, sizeof(bak_key), "smot_b_%u", index);
-    len = 0;
-    if (nvs_get_blob(handle_, bak_key, nullptr, &len) == ESP_OK && len == sizeof(SceneMotionConfig)) {
-        if (nvs_get_blob(handle_, bak_key, &motion, &len) == ESP_OK && motion.checksum == calc_motion_crc(motion)) {
-            (void)nvs_set_blob(handle_, key, &motion, sizeof(SceneMotionConfig));
-            (void)nvs_commit(handle_);
-            return ESP_OK;
-        }
-    }
-
-    clear_scene_motion(motion);
-    return (err == ESP_OK) ? ESP_ERR_NOT_FOUND : err;
+    snprintf(backup, sizeof(backup), "smot_b_%u", index);
+    const esp_err_t error = read_mirrored_blob(handle_, key, backup, motion,
+        [](const SceneMotionConfig& value) {
+            return value.checksum == calc_motion_crc(value) && valid_motion(value);
+        });
+    if (error != ESP_OK) clear_scene_motion(motion);
+    return error;
 }
+
 
 esp_err_t ConfigStore::delete_scene_motion(uint8_t index) {
     if (index >= kMaxPresets) return ESP_ERR_INVALID_ARG;
@@ -495,18 +582,13 @@ esp_err_t ConfigStore::delete_scene_motion(uint8_t index) {
 
     char bak_key[16];
     snprintf(bak_key, sizeof(bak_key), "smot_b_%u", index);
-    (void)nvs_erase_key(handle_, bak_key);
-
-    esp_err_t err = nvs_erase_key(handle_, key);
-    if (err == ESP_ERR_NVS_NOT_FOUND) return ESP_OK;
-    ESP_RETURN_ON_ERROR(err, TAG, "delete scene motion");
-    return nvs_commit(handle_);
+    return erase_keys(handle_, {bak_key, key});
 }
 
 // ── Cue Lists ───────────────────────────────────────────────────────
 
 esp_err_t ConfigStore::save_cue_list(uint8_t index, const CueList& list) {
-    if (index >= kMaxCueLists) return ESP_ERR_INVALID_ARG;
+    if (index >= kMaxCueLists || !valid_cue_list(list)) return ESP_ERR_INVALID_ARG;
 
     CueList to_save = list;
     to_save.checksum = calc_cue_list_crc(to_save);
@@ -514,66 +596,24 @@ esp_err_t ConfigStore::save_cue_list(uint8_t index, const CueList& list) {
     char key[16];
     make_key(key, sizeof(key), "cuel", index);
 
-    ESP_RETURN_ON_ERROR(
-        nvs_set_blob(handle_, key, &to_save, sizeof(CueList)),
-        TAG, "save cue list primary"
-    );
-    ESP_RETURN_ON_ERROR(nvs_commit(handle_), TAG, "commit cue list primary");
-
     char bak_key[16];
     snprintf(bak_key, sizeof(bak_key), "cuel_b_%u", index);
-    esp_err_t bak_err = nvs_set_blob(handle_, bak_key, &to_save, sizeof(CueList));
-    if (bak_err == ESP_OK) {
-        (void)nvs_commit(handle_);
-    }
-
-    return ESP_OK;
+    return write_mirrored_blob(handle_, key, bak_key, to_save);
 }
 
 esp_err_t ConfigStore::load_cue_list(uint8_t index, CueList& list) {
     if (index >= kMaxCueLists) return ESP_ERR_INVALID_ARG;
-    clear_cue_list(list);
-
-    char key[16];
+    char key[16], backup[16];
     make_key(key, sizeof(key), "cuel", index);
-
-    size_t len = 0;
-    esp_err_t err = nvs_get_blob(handle_, key, nullptr, &len);
-    if (err == ESP_OK && len == sizeof(CueList)) {
-        err = nvs_get_blob(handle_, key, &list, &len);
-        if (err == ESP_OK) {
-            if (list.checksum != calc_cue_list_crc(list)) {
-                ESP_LOGW(TAG, "Cue list %s CRC mismatch, trying backup", key);
-                char bak_key[16];
-                snprintf(bak_key, sizeof(bak_key), "cuel_b_%u", index);
-                len = sizeof(CueList);
-                err = nvs_get_blob(handle_, bak_key, &list, &len);
-                if (err == ESP_OK && len == sizeof(CueList) && list.checksum == calc_cue_list_crc(list)) {
-                    (void)nvs_set_blob(handle_, key, &list, sizeof(CueList));
-                    (void)nvs_commit(handle_);
-                    return ESP_OK;
-                }
-                clear_cue_list(list);
-                return ESP_ERR_NVS_INVALID_STATE;
-            }
-            return ESP_OK;
-        }
-    }
-
-    char bak_key[16];
-    snprintf(bak_key, sizeof(bak_key), "cuel_b_%u", index);
-    len = 0;
-    if (nvs_get_blob(handle_, bak_key, nullptr, &len) == ESP_OK && len == sizeof(CueList)) {
-        if (nvs_get_blob(handle_, bak_key, &list, &len) == ESP_OK && list.checksum == calc_cue_list_crc(list)) {
-            (void)nvs_set_blob(handle_, key, &list, sizeof(CueList));
-            (void)nvs_commit(handle_);
-            return ESP_OK;
-        }
-    }
-
-    clear_cue_list(list);
-    return (err == ESP_OK) ? ESP_ERR_NOT_FOUND : err;
+    snprintf(backup, sizeof(backup), "cuel_b_%u", index);
+    const esp_err_t error = read_mirrored_blob(handle_, key, backup, list,
+        [](const CueList& value) {
+            return value.checksum == calc_cue_list_crc(value) && valid_cue_list(value);
+        });
+    if (error != ESP_OK) clear_cue_list(list);
+    return error;
 }
+
 
 esp_err_t ConfigStore::delete_cue_list(uint8_t index) {
     if (index >= kMaxCueLists) return ESP_ERR_INVALID_ARG;
@@ -583,12 +623,7 @@ esp_err_t ConfigStore::delete_cue_list(uint8_t index) {
 
     char bak_key[16];
     snprintf(bak_key, sizeof(bak_key), "cuel_b_%u", index);
-    (void)nvs_erase_key(handle_, bak_key);
-
-    esp_err_t err = nvs_erase_key(handle_, key);
-    if (err == ESP_ERR_NVS_NOT_FOUND) return ESP_OK;
-    ESP_RETURN_ON_ERROR(err, TAG, "delete cue list");
-    return nvs_commit(handle_);
+    return erase_keys(handle_, {bak_key, key});
 }
 
 uint8_t ConfigStore::cue_list_count() {
@@ -726,6 +761,19 @@ esp_err_t ConfigStore::validate_config(const DeviceConfig& config, ConfigValidat
     };
 
     // 1. General device checks
+    if (config.schema_version != 4) add_error("Unsupported device schema %u", config.schema_version);
+    if (!terminated(config.device_name) || !terminated(config.mqtt_broker) || !terminated(config.timezone) ||
+        !terminated(config.admin_token) || !terminated(config.installer_token) || !terminated(config.operator_token) ||
+        !terminated(config.serial_number) || !terminated(config.hardware_revision) ||
+        !terminated(config.site_label) || !terminated(config.group_label)) {
+        add_error("Device configuration contains an unterminated string");
+    }
+    if (config.active_preset_index >= kMaxPresets || config.fallback_preset_index >= kMaxPresets) {
+        add_error("Device preset index is out of range");
+    }
+    if (config.sync_role > 2 || static_cast<uint8_t>(config.protocol.merge_mode) > static_cast<uint8_t>(MergeMode::LTP)) {
+        add_error("Device mode is out of range");
+    }
     if (config.gamma_x10 < 10 || config.gamma_x10 > 30) {
         add_error("gamma_x10 (%u) out of sane range [10, 30]", (unsigned)config.gamma_x10);
     }
@@ -748,6 +796,7 @@ esp_err_t ConfigStore::validate_config(const DeviceConfig& config, ConfigValidat
     // 3. Channels validation (LG-023 16-Channel Hardware Model & LG-HW-005 Power)
     for (uint8_t ch = 0; ch < kChannelCount; ++ch) {
         const auto& c = config.channels[ch];
+        if (!terminated(c.name)) add_error("channel[%u] name is unterminated", (unsigned)ch);
         if (!c.enabled) {
             continue;
         }
@@ -786,9 +835,15 @@ esp_err_t ConfigStore::validate_config(const DeviceConfig& config, ConfigValidat
     }
 
     // 4. Power supply domains validation (LG-HW-005.5)
+    for (const auto& group : config.groups) {
+        if (!terminated(group.name) || static_cast<uint8_t>(group.role) > static_cast<uint8_t>(ZoneRole::MainLight)) {
+            add_error("Channel group name or role is invalid");
+        }
+    }
     uint16_t combined_supply_mask = 0;
     for (uint8_t s = 0; s < kMaxPowerSupplies; ++s) {
         const auto& psu = config.power_supplies[s];
+        if (!terminated(psu.name)) add_error("power_supplies[%u] name is unterminated", (unsigned)s);
         if (!psu.enabled) continue;
 
         if (psu.voltage_mv < 3000 || psu.voltage_mv > 60000) {
@@ -1178,27 +1233,31 @@ bool ConfigStore::migrate_v3_to_v4(const DeviceConfigV3& v3, DeviceConfig& v4, u
     return true;
 }
 
-esp_err_t ConfigStore::load_config(DeviceConfig& config) {
+esp_err_t ConfigStore::load_config(DeviceConfig& config, bool persist_changes) {
     bool needs_persist = false;
 
-    auto load_from_key = [&](const char* k, DeviceConfig& out) -> esp_err_t {
+    auto load_from_key = [&](const char* k, DeviceConfig& out, bool& migrated) -> esp_err_t {
+        migrated = false;
         size_t len = 0;
         esp_err_t err = nvs_get_blob(handle_, k, nullptr, &len);
+        if (err == ESP_OK && len == 0) return ESP_ERR_NVS_INVALID_LENGTH;
         if (err == ESP_OK && len > 0) {
             if (len == sizeof(DeviceConfig)) {
                 len = sizeof(DeviceConfig);
                 err = nvs_get_blob(handle_, k, &out, &len);
                 if (err == ESP_OK) {
-                    if (out.checksum != calc_device_crc(out)) {
+                    if (len != sizeof(out) || out.checksum != calc_device_crc(out)) {
                         ESP_LOGW(TAG, "DeviceConfig %s CRC mismatch", k);
                         return ESP_ERR_NVS_INVALID_STATE;
                     }
+                    if (out.schema_version == 0 || out.schema_version > 4) return ESP_ERR_INVALID_VERSION;
                     if (out.schema_version < 4) {
                         ESP_LOGI(TAG, "Migrating DeviceConfig %s from in-memory schema v%u to v4", k, out.schema_version);
                         out.schema_version = 4;
                         out.checksum = calc_device_crc(out);
-                        needs_persist = true;
+                        migrated = true;
                     }
+                    if (validate_config(out) != ESP_OK) return ESP_ERR_NVS_INVALID_STATE;
                     return ESP_OK;
                 }
             } else if (len == sizeof(DeviceConfigV3)) {
@@ -1213,7 +1272,8 @@ esp_err_t ConfigStore::load_config(DeviceConfig& config) {
                     }
                     ESP_LOGI(TAG, "Migrating legacy v3 blob %s to v4", k);
                     migrate_v3_to_v4(*v3, out);
-                    needs_persist = true;
+                    if (validate_config(out) != ESP_OK) return ESP_ERR_NVS_INVALID_STATE;
+                    migrated = true;
                     return ESP_OK;
                 }
             } else if (len == sizeof(DeviceConfigV2)) {
@@ -1231,7 +1291,8 @@ esp_err_t ConfigStore::load_config(DeviceConfig& config) {
                     if (!v3) return ESP_ERR_NO_MEM;
                     migrate_v2_to_v3(*v2, *v3);
                     migrate_v3_to_v4(*v3, out);
-                    needs_persist = true;
+                    if (validate_config(out) != ESP_OK) return ESP_ERR_NVS_INVALID_STATE;
+                    migrated = true;
                     return ESP_OK;
                 }
             } else if (len == sizeof(DeviceConfigV1)) {
@@ -1251,7 +1312,8 @@ esp_err_t ConfigStore::load_config(DeviceConfig& config) {
                     migrate_v1_to_v2(*v1, *v2);
                     migrate_v2_to_v3(*v2, *v3);
                     migrate_v3_to_v4(*v3, out);
-                    needs_persist = true;
+                    if (validate_config(out) != ESP_OK) return ESP_ERR_NVS_INVALID_STATE;
+                    migrated = true;
                     return ESP_OK;
                 }
             } else {
@@ -1263,12 +1325,13 @@ esp_err_t ConfigStore::load_config(DeviceConfig& config) {
         return err;
     };
 
-    esp_err_t err = load_from_key("device_cfg", config);
+    esp_err_t err = load_from_key("device_cfg", config, needs_persist);
     if (err == ESP_OK) {
         primary_valid_ = true;
         std::unique_ptr<DeviceConfig> bak_cfg(new (std::nothrow) DeviceConfig{});
         if (!bak_cfg) return ESP_ERR_NO_MEM;
-        esp_err_t bak_err = load_from_key("device_cfg_bak", *bak_cfg);
+        bool backup_migrated = false;
+        esp_err_t bak_err = load_from_key("device_cfg_bak", *bak_cfg, backup_migrated);
         if (bak_err == ESP_ERR_NO_MEM) return bak_err;
         if (bak_err == ESP_OK && bak_cfg->checksum == config.checksum) {
             backup_valid_ = true;
@@ -1277,14 +1340,13 @@ esp_err_t ConfigStore::load_config(DeviceConfig& config) {
             backup_valid_ = false;
             persistence_state_ = ConfigPersistenceState::PrimaryOnly;
         }
-    } else if (err == ESP_ERR_NVS_INVALID_STATE || err == ESP_ERR_NVS_INVALID_LENGTH || err == ESP_ERR_NVS_NOT_FOUND) {
+    } else if (recoverable_blob_error(err)) {
         primary_valid_ = false;
         ESP_LOGW(TAG, "Restoring DeviceConfig from backup slot");
-        err = load_from_key("device_cfg_bak", config);
+        err = fallback_result(err, load_from_key("device_cfg_bak", config, needs_persist));
         if (err == ESP_OK) {
             backup_valid_ = true;
-            persistence_state_ = ConfigPersistenceState::PrimaryOnly;
-            needs_persist = true;
+            persistence_state_ = ConfigPersistenceState::BackupOnly;
         } else {
             backup_valid_ = false;
             persistence_state_ = ConfigPersistenceState::RecoveryRequired;
@@ -1295,7 +1357,7 @@ esp_err_t ConfigStore::load_config(DeviceConfig& config) {
         persistence_state_ = ConfigPersistenceState::RecoveryRequired;
     }
 
-    if (err == ESP_ERR_NVS_NOT_FOUND || err == ESP_ERR_NVS_INVALID_STATE || err == ESP_ERR_NVS_INVALID_LENGTH) {
+    if (err == ESP_ERR_NVS_NOT_FOUND && persist_changes) {
         config.reset();
         ESP_LOGI(TAG, "Default credentials active (Admin role configured)");
         populate_default_topology(config);
@@ -1303,7 +1365,7 @@ esp_err_t ConfigStore::load_config(DeviceConfig& config) {
         config.checksum = calc_device_crc(config);
         return save_config(config);
     } else if (err == ESP_OK) {
-        if (needs_persist) {
+        if (needs_persist && persist_changes) {
             ESP_LOGI(TAG, "Persisting migrated/updated DeviceConfig to NVS");
             esp_err_t s_err = save_config(config);
             if (s_err != ESP_OK) {
@@ -1357,42 +1419,30 @@ void ConfigStore::populate_default_topology(DeviceConfig& config) {
 // ── Sequences ───────────────────────────────────────────────────────
 
 esp_err_t ConfigStore::save_sequence(const Sequence& seq) {
-    auto to_save = std::make_unique<Sequence>(seq);
+    if (!valid_sequence(seq)) return ESP_ERR_INVALID_ARG;
+    std::unique_ptr<Sequence> to_save(new (std::nothrow) Sequence(seq));
+    if (!to_save) return ESP_ERR_NO_MEM;
     to_save->enabled = false; // LG-033: Deprecated compatibility state, new saves always false
     to_save->checksum = calc_seq_crc(*to_save);
 
-    ESP_RETURN_ON_ERROR(
-        nvs_set_blob(handle_, "seq_main", to_save.get(), sizeof(Sequence)),
-        TAG, "save seq primary"
-    );
-    ESP_RETURN_ON_ERROR(nvs_commit(handle_), TAG, "commit seq primary");
-
-    esp_err_t bak_err = nvs_set_blob(handle_, "seq_main_bak", to_save.get(), sizeof(Sequence));
-    if (bak_err != ESP_OK) {
-        ESP_LOGW(TAG, "Sequence backup write failed: %s", esp_err_to_name(bak_err));
-    } else {
-        bak_err = nvs_commit(handle_);
-        if (bak_err != ESP_OK) {
-            ESP_LOGW(TAG, "Sequence backup commit failed: %s", esp_err_to_name(bak_err));
-        }
-    }
-
-    return ESP_OK;
+    return write_mirrored_blob(handle_, "seq_main", "seq_main_bak", *to_save);
 }
 
-esp_err_t ConfigStore::load_sequence(Sequence& seq) {
+esp_err_t ConfigStore::load_sequence(Sequence& seq, bool* was_present, bool persist_changes) {
+    if (was_present) *was_present = false;
     bool migrated = false;
 
     auto load_from_key = [&](const char* k, Sequence& out) -> esp_err_t {
         size_t len = 0;
         esp_err_t err = nvs_get_blob(handle_, k, nullptr, &len);
-        if (err != ESP_OK || len == 0) return err;
+        if (err != ESP_OK) return err;
+        if (len == 0) return ESP_ERR_NVS_INVALID_LENGTH;
 
         if (len == sizeof(Sequence)) {
             len = sizeof(Sequence);
             err = nvs_get_blob(handle_, k, &out, &len);
             if (err != ESP_OK) return err;
-            if (out.checksum != calc_seq_crc(out)) {
+            if (len != sizeof(out) || out.checksum != calc_seq_crc(out)) {
                 ESP_LOGW(TAG, "Sequence %s CRC mismatch", k);
                 return ESP_ERR_NVS_INVALID_STATE;
             }
@@ -1432,6 +1482,8 @@ esp_err_t ConfigStore::load_sequence(Sequence& seq) {
                 migrated = true;
             }
             out.enabled = false; // LG-033: Deprecate Sequence.enabled as runtime authority
+            out.checksum = calc_seq_crc(out);
+            if (!valid_sequence(out)) return ESP_ERR_NVS_INVALID_STATE;
             return ESP_OK;
         }
 
@@ -1469,6 +1521,7 @@ esp_err_t ConfigStore::load_sequence(Sequence& seq) {
             out.bpm = old.bpm > 0 ? old.bpm : 120;
             out.enabled = false;
             out.checksum = calc_seq_crc(out);
+            if (!valid_sequence(out)) return ESP_ERR_NVS_INVALID_STATE;
             migrated = true;
             ESP_LOGI(TAG, "Migrated sequence %s from 8 tracks to 16 canonical physical tracks", k);
             return ESP_OK;
@@ -1478,12 +1531,12 @@ esp_err_t ConfigStore::load_sequence(Sequence& seq) {
     };
 
     esp_err_t err = load_from_key("seq_main", seq);
-    if (err == ESP_ERR_NVS_INVALID_STATE || err == ESP_ERR_NVS_INVALID_LENGTH) {
+    if (recoverable_blob_error(err)) {
         ESP_LOGW(TAG, "Restoring Sequence from backup slot");
-        err = load_from_key("seq_main_bak", seq);
+        err = fallback_result(err, load_from_key("seq_main_bak", seq));
     }
 
-    if (err == ESP_OK && migrated) {
+    if (err == ESP_OK && migrated && persist_changes) {
         const esp_err_t persist_err = save_sequence(seq);
         if (persist_err != ESP_OK) {
             ESP_LOGW(TAG, "Failed to persist migrated 16-track sequence: %s", esp_err_to_name(persist_err));
@@ -1491,7 +1544,7 @@ esp_err_t ConfigStore::load_sequence(Sequence& seq) {
         }
     }
 
-    if (err == ESP_ERR_NVS_NOT_FOUND || err == ESP_ERR_NVS_INVALID_STATE || err == ESP_ERR_NVS_INVALID_LENGTH) {
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
         seq = Sequence{};
         for (uint8_t i = 0; i < 16; ++i) {
             seq.tracks[i].channel_id = i;
@@ -1502,79 +1555,42 @@ esp_err_t ConfigStore::load_sequence(Sequence& seq) {
         seq.checksum = calc_seq_crc(seq);
         return ESP_OK;
     }
+    if (err == ESP_OK && was_present) *was_present = true;
     return err;
+}
+
+esp_err_t ConfigStore::delete_sequence() {
+    return erase_keys(handle_, {"seq_main_bak", "seq_main"});
 }
 
 // ── Calendar scheduling ────────────────────────────────────────────────
 
 esp_err_t ConfigStore::save_calendar_schedule(const CalendarSchedule& schedule) {
-    auto to_save = std::make_unique<CalendarSchedule>(schedule);
+    if (!valid_calendar(schedule)) return ESP_ERR_INVALID_ARG;
+    std::unique_ptr<CalendarSchedule> to_save(new (std::nothrow) CalendarSchedule(schedule));
+    if (!to_save) return ESP_ERR_NO_MEM;
     to_save->checksum = calc_calendar_crc(*to_save);
 
-    ESP_RETURN_ON_ERROR(
-        nvs_set_blob(handle_, "calendar", to_save.get(), sizeof(CalendarSchedule)),
-        TAG, "save calendar primary"
-    );
-    ESP_RETURN_ON_ERROR(nvs_commit(handle_), TAG, "commit calendar primary");
-
-    esp_err_t bak_err = nvs_set_blob(handle_, "calendar_bak", to_save.get(), sizeof(CalendarSchedule));
-    if (bak_err != ESP_OK) {
-        ESP_LOGW(TAG, "Calendar backup write failed: %s", esp_err_to_name(bak_err));
-    } else {
-        bak_err = nvs_commit(handle_);
-        if (bak_err != ESP_OK) {
-            ESP_LOGW(TAG, "Calendar backup commit failed: %s", esp_err_to_name(bak_err));
-        }
-    }
-
-    return ESP_OK;
+    return write_mirrored_blob(handle_, "calendar", "calendar_bak", *to_save);
 }
 
-esp_err_t ConfigStore::load_calendar_schedule(CalendarSchedule& schedule) {
-    auto load_from_key = [&](const char* k, CalendarSchedule& out) -> esp_err_t {
-        size_t len = 0;
-        esp_err_t err = nvs_get_blob(handle_, k, nullptr, &len);
-        if (err == ESP_OK && len > 0) {
-            if (len <= sizeof(CalendarSchedule)) {
-                len = sizeof(CalendarSchedule);
-                err = nvs_get_blob(handle_, k, &out, &len);
-                if (err == ESP_OK) {
-                    if (out.checksum != calc_calendar_crc(out)) {
-                        ESP_LOGW(TAG, "Calendar %s CRC mismatch", k);
-                        return ESP_ERR_NVS_INVALID_STATE;
-                    }
-                    return ESP_OK;
-                }
-            } else {
-                err = ESP_ERR_NVS_INVALID_LENGTH;
-            }
-        }
-        return err;
-    };
-
-    esp_err_t err = load_from_key("calendar", schedule);
-    if (err == ESP_ERR_NVS_INVALID_STATE) {
-        ESP_LOGW(TAG, "Restoring Calendar from backup slot");
-        err = load_from_key("calendar_bak", schedule);
-        if (err == ESP_OK) {
-            esp_err_t restore_err = nvs_set_blob(handle_, "calendar", &schedule, sizeof(CalendarSchedule));
-            if (restore_err != ESP_OK) {
-                ESP_LOGW(TAG, "Calendar primary restore write failed: %s", esp_err_to_name(restore_err));
-            } else {
-                restore_err = nvs_commit(handle_);
-                if (restore_err != ESP_OK) {
-                    ESP_LOGW(TAG, "Calendar primary restore commit failed: %s", esp_err_to_name(restore_err));
-                }
-            }
-        }
-    }
-
-    if (err == ESP_ERR_NVS_NOT_FOUND || err == ESP_ERR_NVS_INVALID_STATE) {
+esp_err_t ConfigStore::load_calendar_schedule(CalendarSchedule& schedule, bool* was_present) {
+    if (was_present) *was_present = false;
+    const esp_err_t error = read_mirrored_blob(handle_, "calendar", "calendar_bak", schedule,
+        [](const CalendarSchedule& value) {
+            return value.checksum == calc_calendar_crc(value) && valid_calendar(value);
+        });
+    if (error == ESP_ERR_NVS_NOT_FOUND) {
         schedule = CalendarSchedule{};
         schedule.checksum = calc_calendar_crc(schedule);
         return ESP_OK;
     }
-    return err;
+    if (error == ESP_OK && was_present) *was_present = true;
+    return error;
+}
+
+esp_err_t ConfigStore::delete_calendar_schedule() {
+    return erase_keys(handle_, {"calendar_bak", "calendar"});
 }
 
 // ── Active state ────────────────────────────────────────────────────
@@ -1600,122 +1616,76 @@ esp_err_t ConfigStore::load_active_state(uint8_t& preset_index) {
 
 esp_err_t ConfigStore::save_network_settings(const NetworkSettings& settings) {
     if (!handle_) return ESP_ERR_INVALID_STATE;
-
     NetworkSettings to_save = settings;
-    to_save.schema_version = 1;
+    to_save.schema_version = 2;
+    if (!valid_network(to_save)) return ESP_ERR_INVALID_ARG;
     to_save.checksum = calc_network_settings_crc(to_save);
-
-    // 1. Write and commit primary slot ("network")
-    esp_err_t err = nvs_set_blob(handle_, "network", &to_save, sizeof(NetworkSettings));
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to write primary network settings: %s", esp_err_to_name(err));
-        return err;
-    }
-    err = nvs_commit(handle_);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to commit primary network settings: %s", esp_err_to_name(err));
-        return err;
-    }
-
-    // 2. Read-back verification of primary
-    NetworkSettings verify_buf{};
-    size_t verify_len = sizeof(NetworkSettings);
-    err = nvs_get_blob(handle_, "network", &verify_buf, &verify_len);
-    if (err != ESP_OK || verify_len != sizeof(NetworkSettings) ||
-        verify_buf.checksum != to_save.checksum ||
-        calc_network_settings_crc(verify_buf) != to_save.checksum) {
-        ESP_LOGE(TAG, "Primary network settings read-back verification failed! Preserving backup intact.");
-        return ESP_ERR_NVS_INVALID_STATE;
-    }
-
-    // 3. Primary confirmed valid -> update backup slot ("network_b")
-    err = nvs_set_blob(handle_, "network_b", &to_save, sizeof(NetworkSettings));
-    if (err == ESP_OK) {
-        (void)nvs_commit(handle_);
-    } else {
-        ESP_LOGW(TAG, "Primary network settings committed, but writing backup slot failed: %s", esp_err_to_name(err));
-    }
-
-    return ESP_OK;
+    return write_mirrored_blob(handle_, "network", "network_b", to_save);
 }
 
 esp_err_t ConfigStore::load_network_settings(NetworkSettings& settings) {
     if (!handle_) return ESP_ERR_INVALID_STATE;
-
-    auto load_from_key = [&](const char* k, NetworkSettings& out) -> esp_err_t {
-        size_t len = 0;
-        esp_err_t err = nvs_get_blob(handle_, k, nullptr, &len);
-        if (err == ESP_OK && len == sizeof(NetworkSettings)) {
-            err = nvs_get_blob(handle_, k, &out, &len);
-            if (err == ESP_OK) {
-                if (out.schema_version == 2) {
-                    if (out.checksum != calc_network_settings_crc(out)) {
-                        ESP_LOGW(TAG, "NetworkSettings %s CRC mismatch", k);
-                        return ESP_ERR_NVS_INVALID_STATE;
-                    }
-                    if (out.ap_password[0] == '\0') {
-                        generate_random_ap_password(out.ap_password, sizeof(out.ap_password));
-                        out.checksum = calc_network_settings_crc(out);
-                        save_network_settings(out);
-                    }
-                    return ESP_OK;
-                }
+    NetworkSettings candidate{};
+    bool migrated = false;
+    auto load_from_key = [&](const char* key) -> esp_err_t {
+        migrated = false;
+        size_t length = 0;
+        esp_err_t error = nvs_get_blob(handle_, key, nullptr, &length);
+        if (error != ESP_OK) return error;
+        if (length == sizeof(NetworkSettings)) {
+            error = read_exact_blob(handle_, key, candidate);
+            if (error != ESP_OK) return error;
+            if (candidate.checksum != calc_network_settings_crc(candidate)) {
+                return ESP_ERR_NVS_INVALID_STATE;
             }
-        }
-
-        // Migration check: schema v1
-        if (err == ESP_OK && (len == sizeof(NetworkSettingsV1) || len == sizeof(NetworkSettings))) {
-            NetworkSettingsV1 v1{};
-            size_t v1_len = sizeof(NetworkSettingsV1);
-            if (nvs_get_blob(handle_, k, &v1, &v1_len) == ESP_OK && v1_len == sizeof(NetworkSettingsV1)) {
-                if (v1.schema_version == 1 && v1.checksum == calc_network_settings_v1_crc(v1)) {
-                    out = NetworkSettings{};
-                    out.schema_version = 2;
-                    out.mode = v1.mode;
-                    std::strncpy(out.sta_ssid, v1.sta_ssid, sizeof(out.sta_ssid));
-                    std::strncpy(out.sta_password, v1.sta_password, sizeof(out.sta_password));
-                    std::strncpy(out.ap_name, v1.ap_name, sizeof(out.ap_name));
-                    out.ap_channel = v1.ap_channel;
-                    generate_random_ap_password(out.ap_password, sizeof(out.ap_password));
-                    out.checksum = calc_network_settings_crc(out);
-                    ESP_LOGI(TAG, "Migrated NetworkSettings %s from v1 to v2 with random per-device AP key", k);
-                    save_network_settings(out);
-                    return ESP_OK;
-                }
+            if (candidate.schema_version != 1 && candidate.schema_version != 2) return ESP_ERR_INVALID_VERSION;
+            // Earlier firmware wrote the v2 layout with a v1 tag. Its v2 CRC
+            // and exact size distinguish it from a true legacy v1 record.
+            migrated = candidate.schema_version == 1;
+            candidate.schema_version = 2;
+        } else if (length == sizeof(NetworkSettingsV1)) {
+            NetworkSettingsV1 old{};
+            error = read_exact_blob(handle_, key, old);
+            if (error != ESP_OK) return error;
+            if (old.checksum != calc_network_settings_v1_crc(old) ||
+                !terminated(old.sta_ssid) || !terminated(old.sta_password) || !terminated(old.ap_name)) {
+                return ESP_ERR_NVS_INVALID_STATE;
             }
+            if (old.schema_version != 1) return ESP_ERR_INVALID_VERSION;
+            candidate = NetworkSettings{};
+            candidate.mode = old.mode;
+            safe_strncpy(candidate.sta_ssid, old.sta_ssid, sizeof(candidate.sta_ssid));
+            safe_strncpy(candidate.sta_password, old.sta_password, sizeof(candidate.sta_password));
+            safe_strncpy(candidate.ap_name, old.ap_name, sizeof(candidate.ap_name));
+            candidate.ap_channel = old.ap_channel;
+            migrated = true;
+        } else {
+            return ESP_ERR_NVS_INVALID_LENGTH;
         }
-
-        return (err == ESP_OK) ? ESP_ERR_NVS_INVALID_LENGTH : err;
+        if (!valid_network(candidate, true)) return ESP_ERR_NVS_INVALID_STATE;
+        if (candidate.ap_password[0] == '\0') {
+            generate_random_ap_password(candidate.ap_password, sizeof(candidate.ap_password));
+            migrated = true;
+        }
+        candidate.checksum = calc_network_settings_crc(candidate);
+        return ESP_OK;
     };
 
-    // Try primary "network"
-    esp_err_t err = load_from_key("network", settings);
-    if (err == ESP_OK) {
-        return ESP_OK;
+    esp_err_t error = load_from_key("network");
+    if (recoverable_blob_error(error)) error = fallback_result(error, load_from_key("network_b"));
+    if (error == ESP_ERR_NVS_NOT_FOUND) {
+        settings = NetworkSettings{};
+        generate_random_ap_password(settings.ap_password, sizeof(settings.ap_password));
+        settings.checksum = calc_network_settings_crc(settings);
+        return ESP_ERR_NOT_FOUND;
     }
-
-    // Primary missing or corrupted -> attempt recovery from backup "network_b"
-    ESP_LOGW(TAG, "Restoring NetworkSettings from backup slot 'network_b'...");
-    err = load_from_key("network_b", settings);
-    if (err == ESP_OK) {
-        // Restore primary from valid backup
-        (void)nvs_set_blob(handle_, "network", &settings, sizeof(NetworkSettings));
-        (void)nvs_commit(handle_);
-        return ESP_OK;
+    if (error != ESP_OK) return error;
+    if (migrated) {
+        error = save_network_settings(candidate);
+        if (error != ESP_OK) return error;
     }
-
-    // Neither slot valid -> populate default NetworkSettings v2
-    settings = NetworkSettings{};
-    settings.schema_version = 2;
-    settings.mode = NetworkMode::ApOnly;
-    settings.sta_ssid[0] = '\0';
-    settings.sta_password[0] = '\0';
-    settings.ap_name[0] = '\0';
-    generate_random_ap_password(settings.ap_password, sizeof(settings.ap_password));
-    settings.ap_channel = 1;
-    settings.checksum = calc_network_settings_crc(settings);
-
-    return ESP_ERR_NOT_FOUND;
+    settings = candidate;
+    return ESP_OK;
 }
 
 // ── Defaults ────────────────────────────────────────────────────────
@@ -1723,10 +1693,16 @@ esp_err_t ConfigStore::load_network_settings(NetworkSettings& settings) {
 esp_err_t ConfigStore::ensure_defaults() {
     std::unique_ptr<SceneConfig> scratch(new (std::nothrow) SceneConfig{});
     if (!scratch) return ESP_ERR_NO_MEM;
-    const esp_err_t load_err = load_scene(0, *scratch);
-    if (load_err == ESP_OK) return ESP_OK; // Already has scenes
-    if (load_err != ESP_ERR_NVS_NOT_FOUND && load_err != ESP_ERR_NVS_INVALID_STATE &&
-        load_err != ESP_ERR_NVS_INVALID_LENGTH) return load_err;
+    esp_err_t invalid = ESP_OK;
+    for (uint8_t index = 0; index < kMaxPresets; ++index) {
+        const esp_err_t load_error = load_scene(index, *scratch);
+        if (load_error == ESP_OK) return ESP_OK;
+        if (!recoverable_blob_error(load_error)) return load_error;
+        if (load_error != ESP_ERR_NVS_NOT_FOUND) invalid = load_error;
+    }
+    // Defaults are only for empty storage. Preserve existing corrupt records
+    // for recovery, and never overwrite scene 1 just because scene 0 is absent.
+    if (invalid != ESP_OK) return invalid;
 
     ESP_LOGI(TAG, "No scenes found, creating defaults...");
 
@@ -1771,32 +1747,66 @@ uint32_t ConfigStore::compute_device_crc(const DeviceConfig& dc) {
     return calc_device_crc(dc);
 }
 
-bool ConfigStore::is_restore_in_progress(uint32_t* out_checksum) {
-    if (!handle_) return false;
+esp_err_t ConfigStore::read_restore_marker(bool& in_progress, uint32_t* out_checksum) {
+    in_progress = true; // Failure is unsafe to interpret as an idle restore.
+    if (out_checksum) *out_checksum = 0;
+    if (!handle_) return ESP_ERR_INVALID_STATE;
     uint8_t flag = 0;
-    esp_err_t err = nvs_get_u8(handle_, "rst_prog", &flag);
-    if (err == ESP_OK && flag != 0) {
-        if (out_checksum) {
-            nvs_get_u32(handle_, "rst_crc", out_checksum);
-        }
-        return true;
+    esp_err_t error = nvs_get_u8(handle_, "rst_prog", &flag);
+    if (error == ESP_ERR_NVS_NOT_FOUND) {
+        in_progress = false;
+        return ESP_OK;
     }
-    return false;
+    if (error != ESP_OK) return error;
+    if (flag > 1) return ESP_ERR_NVS_INVALID_STATE;
+    if (flag == 0) {
+        in_progress = false;
+        return ESP_OK;
+    }
+    uint32_t checksum = 0;
+    error = nvs_get_u32(handle_, "rst_crc", &checksum);
+    if (error != ESP_OK) return error;
+    if (out_checksum) *out_checksum = checksum;
+    return ESP_OK;
+}
+
+bool ConfigStore::is_restore_in_progress(uint32_t* out_checksum) {
+    bool in_progress = true;
+    return read_restore_marker(in_progress, out_checksum) != ESP_OK || in_progress;
 }
 
 esp_err_t ConfigStore::set_restore_in_progress(bool in_progress, uint32_t package_checksum) {
     if (!handle_) return ESP_ERR_INVALID_STATE;
-    uint8_t flag = in_progress ? 1 : 0;
-    esp_err_t err = nvs_set_u8(handle_, "rst_prog", flag);
-    if (err == ESP_OK) {
-        if (in_progress) {
-            nvs_set_u32(handle_, "rst_crc", package_checksum);
-        } else {
-            nvs_erase_key(handle_, "rst_crc");
-        }
-        nvs_commit(handle_);
+    if (in_progress) {
+        // Commit the identifying checksum before publishing an active marker.
+        esp_err_t error = nvs_set_u32(handle_, "rst_crc", package_checksum);
+        if (error == ESP_OK) error = nvs_commit(handle_);
+        if (error == ESP_OK) error = nvs_set_u8(handle_, "rst_prog", 1);
+        return error == ESP_OK ? nvs_commit(handle_) : error;
     }
-    return err;
+
+    bool was_active = true;
+    uint32_t old_checksum = 0;
+    esp_err_t error = read_restore_marker(was_active, &old_checksum);
+    if (error != ESP_OK) return error;
+    error = nvs_set_u8(handle_, "rst_prog", 0);
+    if (error == ESP_OK) error = nvs_commit(handle_);
+    if (error == ESP_OK) {
+        error = nvs_erase_key(handle_, "rst_crc");
+        if (error == ESP_OK) error = nvs_commit(handle_);
+        else if (error == ESP_ERR_NVS_NOT_FOUND) error = ESP_OK;
+    }
+    if (error != ESP_OK && was_active) {
+        // NVS writes can be visible before commit returns. Keep recovery active
+        // after an unsuccessful clear, including a failed checksum cleanup.
+        const esp_err_t checksum_error = nvs_set_u32(handle_, "rst_crc", old_checksum);
+        const esp_err_t marker_error = nvs_set_u8(handle_, "rst_prog", 1);
+        const esp_err_t commit_error = nvs_commit(handle_);
+        if (checksum_error != ESP_OK || marker_error != ESP_OK || commit_error != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to re-arm restore marker after clear failure");
+        }
+    }
+    return error;
 }
 
 } // namespace lg

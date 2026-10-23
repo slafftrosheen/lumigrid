@@ -42,6 +42,10 @@ public:
 
     // Save persisted OTA state to NVS
     esp_err_t save_state(const PersistedOtaState& st);
+    esp_err_t persistence_error() const { return persistence_error_.load(); }
+    // Record an observed boot-selection failure, including when the journal
+    // cannot be updated. The persistence error remains separately visible.
+    esp_err_t record_update_failure(const char* reason, int32_t error_code);
 
     // Call after core startup self-test passes to confirm candidate
     esp_err_t confirm_candidate();
@@ -50,6 +54,10 @@ public:
 
     // Call if core startup self-test fails fatally to rollback to previous firmware
     esp_err_t rollback_candidate(const char* reason, int32_t error_code = -1);
+    // Fault-only entry point for failures before init(), including unavailable
+    // NVS or a failed mutex allocation. Successful rollback never returns;
+    // non-candidates return ESP_ERR_INVALID_STATE without a rollback request.
+    esp_err_t rollback_failed_startup(const char* reason, int32_t error_code);
 
     // Query OTA status information for API
     OtaBootState boot_state() const { return state().state; }
@@ -63,6 +71,9 @@ private:
     OtaBootVerifier() = default;
 
     std::atomic<bool> pending_verify_{false};
+    std::atomic<esp_err_t> persistence_error_{ESP_OK};
+    bool initialized_ = false;
+    bool rollback_requested_ = false;
     bool dwell_started_ = false;
     bool dwell_satisfied_ = false;
     uint32_t candidate_boot_ms_ = 0;

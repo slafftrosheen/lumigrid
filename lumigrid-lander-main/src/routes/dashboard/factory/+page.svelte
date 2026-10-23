@@ -198,7 +198,7 @@
     try {
       error = '';
       await stopBurnInJob(nodeIp);
-      flash = 'Burn-in endurance job stopped.';
+      flash = 'Burn-in cancellation requested. Waiting for worker status.';
       setTimeout(() => (flash = ''), 3000);
       await refresh();
     } catch (e) {
@@ -211,7 +211,7 @@
     aborting = true;
     try {
       await abortFactoryTestSession(nodeIp);
-      flash = 'All factory output and test sessions ABORTED';
+      flash = 'Factory cancellation requested. Waiting for worker status.';
       operatorPromptOpen = false;
       pendingSession = null;
       setTimeout(() => (flash = ''), 3000);

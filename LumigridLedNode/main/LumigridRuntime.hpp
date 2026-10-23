@@ -177,9 +177,9 @@ private:
     static void recovery_task(void* arg);
     static void net_apply_worker(void* arg);
     void execute_network_apply(const NetworkApplyRequest& req);
-    void stop_network_services();
+    esp_err_t stop_network_services();
     esp_err_t start_network_services();
-    void rollback_services(StartupStage failed_stage, esp_err_t error);
+    esp_err_t rollback_services(StartupStage failed_stage, esp_err_t error);
 
     // LG-038.3 §7/§8/§10: on-demand network apply worker. One owned pending
     // request (apply_in_progress_ already serializes applies); the 8 KB task

@@ -3733,6 +3733,7 @@ static bool test_lg027_network_settings_and_commissioning() {
         strncpy(net.sta_ssid, "Test-SSID", sizeof(net.sta_ssid) - 1);
         strncpy(net.sta_password, "SecretPassword123", sizeof(net.sta_password) - 1);
         strncpy(net.ap_name, "LumiGrid-Custom", sizeof(net.ap_name) - 1);
+        strncpy(net.ap_password, "TestApPassword123", sizeof(net.ap_password) - 1);
         net.ap_channel = 6;
 
         assert(cfg.save_network_settings(net) == ESP_OK);
@@ -3846,6 +3847,7 @@ bool test_lg028_network_commissioning_and_lifecycle() {
         net.mode = NetworkMode::StaWithApFallback;
         std::strncpy(net.sta_ssid, "BackupRecoverSSID", sizeof(net.sta_ssid) - 1);
         std::strncpy(net.sta_password, "ValidPassword123", sizeof(net.sta_password) - 1);
+        std::strncpy(net.ap_password, "TestApPassword123", sizeof(net.ap_password) - 1);
         net.ap_channel = 5;
 
         assert(cfg.save_network_settings(net) == ESP_OK);
@@ -3995,6 +3997,7 @@ bool test_lg028_network_commissioning_and_lifecycle() {
         NetworkSettings original{};
         original.mode = NetworkMode::ApOnly;
         std::strncpy(original.ap_name, "OriginalKnownGood", sizeof(original.ap_name) - 1);
+        std::strncpy(original.ap_password, "TestApPassword123", sizeof(original.ap_password) - 1);
         cfg.save_network_settings(original);
 
         // Simulate apply failure: do not call save_network_settings
@@ -5730,20 +5733,10 @@ bool test_lg029_node_backed_authentication() {
             strcpy(descriptor.project_name, "another_project");
             memcpy(prefix + sizeof(header) + sizeof(segment), &descriptor, sizeof(descriptor));
             assert(!ota_image_prefix_valid(prefix, sizeof(prefix), 301, &parsed));
-            OtaBootVerifier& verifier = OtaBootVerifier::instance();
-            verifier.init();
-            assert(verifier.running_version() != nullptr && strlen(verifier.running_version()) > 0);
-
-            verifier.confirm_candidate();
-            assert(verifier.boot_state() == OtaBootState::Confirmed);
-            assert(!verifier.rolled_back());
-
-            verifier.rollback_candidate("test_fault", -42);
-            assert(verifier.boot_state() == OtaBootState::RolledBack);
-            assert(verifier.rolled_back());
-            assert(strcmp(verifier.last_reason(), "test_fault") == 0);
-
-            verifier.confirm_candidate();
+            // Keep the diagnostic image observational: do not initialize the
+            // live OTA journal, confirm a running image, or request a reboot.
+            // test_ota_boot_verifier.py exercises the production verifier with
+            // injected NVS/bootloader failures and simulated reboot boundaries.
         }
 
         ESP_LOGI(TAG, "[PASS] LG-036 Configuration, Recovery, Backup/Restore & OTA Hardening tests passed.");

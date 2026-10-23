@@ -29,12 +29,14 @@ namespace api { enum class ApiRole { Admin }; bool authorize(httpd_req_t*,ApiRol
 struct FakeService {
     CertificationSession value{};
     int result_calls=0, abort_calls=0, result_error=ESP_OK, abort_error=ESP_OK;
+    bool pending_cancellation=false;
     int ticks=0; uint64_t tick_time=0;
     void tick(uint64_t time) { ++ticks; tick_time=time; }
     int record_result(const char*,CertificationTestState,EvidenceSource,float,const char*,const char*) {
         ++result_calls; return result_error;
     }
     int abort() { ++abort_calls; return abort_error; }
+    bool cancellation_pending() const { return pending_cancellation; }
     const CertificationSession& session() { return value; }
 };
 class FactoryApi { public:
@@ -118,14 +120,36 @@ int main(int argc,char** argv) {
     else if(name=="valid_zero_measurement") reject=false;
     else if(name=="result_storage_failure") { api.service.result_error=ESP_ERR_NO_MEM; reject=false; }
     else if(name=="abort_storage_failure") { api.service.abort_error=ESP_FAIL; }
+    else if(name=="abort_pending") { api.service.pending_cancellation=true; }
+    else if(name=="abort_completed") {}
+    else if(name=="abort_queue_rejected") { api.service.abort_error=ESP_ERR_INVALID_STATE; api.service.pending_cancellation=true; }
     else if(name!="float_overflow" && name!="double_overflow") assert(false);
     char* serialized=cJSON_PrintUnformatted(json); request.input=serialized; cJSON_free(serialized); cJSON_Delete(json);
     if(name=="float_overflow" || name=="double_overflow")
         request.input=std::string(R"({"testId":"POWER-LIMIT-001","state":"passed","evidenceSource":"instrument_measurement","measuredValue":)")+
             (name=="float_overflow" ? "1e50" : "1e400")+R"(,"unit":"mW","note":"bench"})";
-    if(name=="abort_storage_failure") {
+    if(name.rfind("abort_",0)==0) {
         assert(post_certification_abort(&request)==ESP_OK);
-        assert(request.status!="200 OK" && api.service.abort_calls==1 && api.notifications==0);
+        assert(api.service.abort_calls==1);
+        if(name=="abort_storage_failure") {
+            assert(request.status=="500 Internal Server Error" && api.notifications==0);
+        } else if(name=="abort_queue_rejected") {
+            assert(request.status=="409 Conflict" && api.notifications==0);
+        } else {
+            assert(api.notifications==1);
+            cJSON* reply=cJSON_Parse(request.output.c_str()); assert(reply);
+            const cJSON* status=cJSON_GetObjectItemCaseSensitive(reply,"status");
+            assert(cJSON_IsString(status));
+            if(name=="abort_pending") {
+                assert(request.status=="202 Accepted");
+                assert(strcmp(status->valuestring,"cancellation_requested")==0);
+                assert(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(reply,"accepted")));
+                assert(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(reply,"cancellationRequested")));
+            } else {
+                assert(request.status=="200 OK" && strcmp(status->valuestring,"aborted")==0);
+            }
+            cJSON_Delete(reply);
+        }
     } else {
         assert(post_certification_test_result(&request)==ESP_OK);
         if(name=="result_storage_failure") {
@@ -162,19 +186,23 @@ def main():
     cjson=ROOT/"managed_components/espressif__cjson/cJSON"
     with tempfile.TemporaryDirectory(prefix="lumigrid-certification-api-") as directory:
         build=Path(directory); (build/"harness.cpp").write_text(harness)
-        subprocess.run([cc,"-c",str(cjson/"cJSON.c"),"-I",str(cjson),"-o",str(build/"cjson.o")],check=True)
+        sanitizer_flags=["-fsanitize=address,undefined","-fno-omit-frame-pointer","-fno-pie"]
+        subprocess.run([cc,*sanitizer_flags,"-c",str(cjson/"cJSON.c"),"-I",str(cjson),"-o",str(build/"cjson.o")],check=True)
         executable=build/"certification_api"
-        subprocess.run([cxx,"-std=c++17","-O1","-Wall","-Wextra","-I",str(cjson),
+        subprocess.run([cxx,"-std=c++17","-O1","-Wall","-Wextra",*sanitizer_flags,"-no-pie","-I",str(cjson),
                         "-I",str(ROOT/"components/certification/include"),
                         str(ROOT/"components/certification/CertificationPlan.cpp"),
                         str(build/"harness.cpp"),str(build/"cjson.o"),"-o",str(executable)],check=True)
         cases=("missing_measurement","non_numeric_measurement","wrong_state","nonterminal_state",
                "wrong_source","external_automatic","wrong_unit","float_overflow","double_overflow",
                "valid_zero_measurement","result_storage_failure","abort_storage_failure",
+               "abort_pending","abort_completed","abort_queue_rejected",
                "dispatch_no_clients","dispatch_non_ws","dispatch_ws","dispatch_no_service","dispatch_queue_failure")
         failures=[]
+        env={**os.environ,"ASAN_OPTIONS":"detect_leaks=0:halt_on_error=1",
+             "UBSAN_OPTIONS":"halt_on_error=1:print_stacktrace=1"}
         for case in cases:
-            result=subprocess.run([str(executable),case],capture_output=True,text=True,cwd=build)
+            result=subprocess.run([str(executable),case],capture_output=True,text=True,cwd=build,env=env)
             print(result.stdout or result.stderr,end="")
             if result.returncode: failures.append(case)
         if failures: raise SystemExit(f"{len(failures)}/{len(cases)} API cases failed: {', '.join(failures)}")

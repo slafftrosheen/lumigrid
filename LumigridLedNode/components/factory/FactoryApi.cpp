@@ -5,6 +5,7 @@
 #include "RuntimeServices.hpp"
 #include "esp_ota_ops.h"
 #include "esp_app_format.h"
+#include "esp_image_format.h"
 #include "OtaBootVerifier.hpp"
 #include "StorageContract.hpp"
 #include "OtaImagePreflight.hpp"
@@ -176,6 +177,7 @@ static bool is_sync_follower_read_only(FactoryApi* api_ptr, char* out_leader, si
 // array elements each own one node; punctuation inside strings is ignored.
 // Strings cannot expand beyond their encoded input plus allocator overhead.
 static cJSON* parse_admitted_json(const char* body, size_t length) {
+    if (!body || std::memchr(body, '\0', length)) return nullptr;
     const auto budget = json_scratch_budget(body, length, sizeof(cJSON));
     if (!budget.bounded) return nullptr;
     if (!check_memory_admission_snapshot(capture_runtime_memory(), budget.scratch_bytes,
@@ -183,7 +185,18 @@ static cJSON* parse_admitted_json(const char* body, size_t length) {
         note_api_allocation_failure();
         return nullptr;
     }
-    return cJSON_ParseWithLength(body, length);
+    const char* end = nullptr;
+    cJSON* root = cJSON_ParseWithLengthOpts(body, length, &end, false);
+    if (!root) return nullptr;
+    // cJSON otherwise accepts a valid prefix followed by unrelated bytes.
+    // Every API body and backup record is one complete JSON object.
+    while (end && end < body + length &&
+           (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n')) ++end;
+    if (!cJSON_IsObject(root) || end != body + length) {
+        cJSON_Delete(root);
+        return nullptr;
+    }
+    return root;
 }
 
 esp_err_t read_json(httpd_req_t* request, cJSON** out, size_t max_body_bytes = kMaxBodyBytes) {
@@ -563,11 +576,16 @@ esp_err_t post_abort(httpd_req_t* request) {
 
     FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
     uint32_t cmd_id = api_ptr->command_journal().accept(CommandDomain::Factory);
-    api_ptr->runner().abort();
-    api_ptr->command_journal().applied(cmd_id);
+    FactoryCommand command{};
+    command.command_id = cmd_id;
+    command.type = FactoryCommandType::Abort;
+    if (!api_ptr->runner().enqueue(command)) {
+        api_ptr->command_journal().failed(cmd_id, ESP_ERR_INVALID_STATE);
+        return send_error(request, "409 Conflict", "command_queue_full");
+    }
 
-    char resp[96];
-    snprintf(resp, sizeof(resp), "{\"accepted\":true,\"commandId\":%" PRIu32 ",\"action\":\"blackout\"}", cmd_id);
+    char resp[128];
+    snprintf(resp, sizeof(resp), "{\"accepted\":true,\"commandId\":%" PRIu32 ",\"action\":\"blackout\",\"cancellationRequested\":true}", cmd_id);
     return send_json(request, resp, "202 Accepted");
 }
 
@@ -608,6 +626,12 @@ esp_err_t post_auto_loop(httpd_req_t* request) {
 esp_err_t post_factory_test_start(httpd_req_t* request) {
     if (!api::authorize(request, api::ApiRole::Installer)) return ESP_OK;
 
+    FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+    auto* certification = api_ptr->certification_service();
+    if (certification && (certification->is_in_progress() || certification->cancellation_pending())) {
+        return send_error(request, "409 Conflict", "certification_session_active");
+    }
+
     cJSON* root = nullptr;
     if (read_json(request, &root) != ESP_OK) {
         return send_error(request, "400 Bad Request", "invalid_json");
@@ -645,7 +669,6 @@ esp_err_t post_factory_test_start(httpd_req_t* request) {
 
     cJSON_Delete(root);
 
-    FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
     uint32_t session_id = 0;
     if (!api_ptr->runner().start_test_session(kind, channel, duration_ms, brightness, &session_id)) {
         return send_error(request, "409 Conflict", "failed_to_start_session");
@@ -700,11 +723,10 @@ esp_err_t post_factory_test_abort(httpd_req_t* request) {
     if (!api::authorize(request, api::ApiRole::Installer)) return ESP_OK;
 
     FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
-    api_ptr->runner().abort_test_session();
-
-    char resp[48];
-    snprintf(resp, sizeof(resp), "{\"aborted\":true}");
-    return send_json(request, resp);
+    if (!api_ptr->runner().abort_test_session()) {
+        return send_error(request, "409 Conflict", "command_queue_full");
+    }
+    return send_json(request, "{\"accepted\":true,\"cancellationRequested\":true}", "202 Accepted");
 }
 
 esp_err_t get_factory_test_report(httpd_req_t* request) {
@@ -771,6 +793,12 @@ esp_err_t get_factory_test_report(httpd_req_t* request) {
 esp_err_t post_factory_burn_in_start(httpd_req_t* request) {
     if (!api::authorize(request, api::ApiRole::Installer)) return ESP_OK;
 
+    FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+    auto* certification = api_ptr->certification_service();
+    if (certification && (certification->is_in_progress() || certification->cancellation_pending())) {
+        return send_error(request, "409 Conflict", "certification_session_active");
+    }
+
     cJSON* root = nullptr;
     if (read_json(request, &root) != ESP_OK) {
         return send_error(request, "400 Bad Request", "invalid_json");
@@ -788,7 +816,6 @@ esp_err_t post_factory_burn_in_start(httpd_req_t* request) {
 
     cJSON_Delete(root);
 
-    FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
     uint32_t job_id = 0;
     if (!api_ptr->runner().start_burn_in_job(&api_ptr->job_manager(), duration_minutes, brightness, &job_id)) {
         return send_error(request, "409 Conflict", "failed_to_start_burn_in");
@@ -809,9 +836,7 @@ esp_err_t post_factory_burn_in_stop(httpd_req_t* request) {
         return send_error(request, "409 Conflict", "no_active_burn_in_job");
     }
 
-    char resp[48];
-    snprintf(resp, sizeof(resp), "{\"stopped\":true}");
-    return send_json(request, resp);
+    return send_json(request, "{\"accepted\":true,\"cancellationRequested\":true}", "202 Accepted");
 }
 
 esp_err_t ws_handler(httpd_req_t* request) {
@@ -2494,9 +2519,22 @@ static bool parse_and_validate_layer_obj(const cJSON* l_item, LayerConfig& layer
         layer.secondary_color.b = static_cast<uint8_t>(b->valueint);
     }
 
+    const cJSON* en = cJSON_GetObjectItemCaseSensitive(l_item, "enabled");
+    if (en) {
+        if (!cJSON_IsBool(en)) {
+            err_code = "invalid_layer_enabled";
+            return false;
+        }
+        layer.enabled = cJSON_IsTrue(en);
+    }
+
     const cJSON* spd = cJSON_GetObjectItemCaseSensitive(l_item, "speedMs");
     if (spd) {
-        if (!cJSON_IsNumber(spd) || spd->valuedouble < 10 || spd->valuedouble > 60000) {
+        // SceneConfig::reset() stores zero speed in unused disabled layers.
+        // Preserve that representation across backup/restore; an enabled
+        // effect must still meet the ordinary timing bounds.
+        const bool unused_zero = !layer.enabled && spd->valuedouble == 0;
+        if (!lg::json::is_integer(spd) || (!unused_zero && spd->valuedouble < 10) || spd->valuedouble > 60000) {
             err_code = "invalid_layer_speed";
             return false;
         }
@@ -2531,14 +2569,6 @@ static bool parse_and_validate_layer_obj(const cJSON* l_item, LayerConfig& layer
         layer.opacity = static_cast<uint8_t>(op->valueint);
     }
 
-    const cJSON* en = cJSON_GetObjectItemCaseSensitive(l_item, "enabled");
-    if (en) {
-        if (!cJSON_IsBool(en)) {
-            err_code = "invalid_layer_enabled";
-            return false;
-        }
-        layer.enabled = cJSON_IsTrue(en);
-    }
 
     return true;
 }
@@ -4163,7 +4193,7 @@ bool parse_and_validate_device_config(const cJSON* root, const DeviceConfig& cur
     do { \
         const cJSON* item = cJSON_GetObjectItemCaseSensitive(root, json_name); \
         if (item) { \
-            if (!cJSON_IsNumber(item) || item->valuedouble < (min_v) || item->valuedouble > (max_v)) { \
+            if (!lg::json::is_integer(item) || item->valuedouble < (min_v) || item->valuedouble > (max_v)) { \
                 snprintf(err_code, err_len, "%s", code_on_err); \
                 return false; \
             } \
@@ -4193,7 +4223,7 @@ bool parse_and_validate_device_config(const cJSON* root, const DeviceConfig& cur
     const cJSON* ap = cJSON_GetObjectItemCaseSensitive(root, "activePreset");
     if (!ap) ap = cJSON_GetObjectItemCaseSensitive(root, "activePresetIndex");
     if (ap) {
-        if (!cJSON_IsNumber(ap) || ap->valuedouble < 0 || ap->valuedouble > (kMaxPresets - 1)) {
+        if (!lg::json::is_integer(ap) || ap->valuedouble < 0 || ap->valuedouble > (kMaxPresets - 1)) {
             snprintf(err_code, err_len, "invalid_field_activePreset");
             return false;
         }
@@ -4203,7 +4233,7 @@ bool parse_and_validate_device_config(const cJSON* root, const DeviceConfig& cur
     const cJSON* fp = cJSON_GetObjectItemCaseSensitive(root, "fallbackPreset");
     if (!fp) fp = cJSON_GetObjectItemCaseSensitive(root, "fallbackPresetIndex");
     if (fp) {
-        if (!cJSON_IsNumber(fp) || fp->valuedouble < 0 || fp->valuedouble > (kMaxPresets - 1)) {
+        if (!lg::json::is_integer(fp) || fp->valuedouble < 0 || fp->valuedouble > (kMaxPresets - 1)) {
             snprintf(err_code, err_len, "invalid_field_fallbackPreset");
             return false;
         }
@@ -4217,11 +4247,11 @@ bool parse_and_validate_device_config(const cJSON* root, const DeviceConfig& cur
     const cJSON* gm = cJSON_GetObjectItemCaseSensitive(root, "gamma");
     if (!gm) gm = cJSON_GetObjectItemCaseSensitive(root, "gammaX10");
     if (gm) {
-        if (!cJSON_IsNumber(gm)) {
+        if (!cJSON_IsNumber(gm) || !std::isfinite(gm->valuedouble)) {
             snprintf(err_code, err_len, "invalid_field_gamma");
             return false;
         }
-        if (gm->valuedouble >= 10.0 && gm->valuedouble <= 30.0) {
+        if (lg::json::is_integer(gm) && gm->valuedouble >= 10.0 && gm->valuedouble <= 30.0) {
             out_cfg.gamma_x10 = static_cast<uint8_t>(gm->valueint);
         } else if (gm->valuedouble >= 1.0 && gm->valuedouble <= 3.0) {
             out_cfg.gamma_x10 = static_cast<uint8_t>(std::round(gm->valuedouble * 10.0));
@@ -4261,7 +4291,7 @@ bool parse_and_validate_device_config(const cJSON* root, const DeviceConfig& cur
     } else {
         const cJSON* st = cJSON_GetObjectItemCaseSensitive(root, "syncToken");
         if (st && !cJSON_IsNull(st)) {
-            if (!cJSON_IsNumber(st) || st->valuedouble < 0 || st->valuedouble > 4294967295.0) {
+            if (!lg::json::is_integer(st) || st->valuedouble < 0 || st->valuedouble > 4294967295.0) {
                 snprintf(err_code, err_len, "invalid_field_syncToken");
                 return false;
             }
@@ -4319,7 +4349,7 @@ bool parse_and_validate_device_config(const cJSON* root, const DeviceConfig& cur
             }
             const cJSON* mb_j = cJSON_GetObjectItemCaseSensitive(ch_item, "maxBrightness");
             if (mb_j) {
-                if (!cJSON_IsNumber(mb_j) || mb_j->valuedouble < 0 || mb_j->valuedouble > 255) {
+                if (!lg::json::is_integer(mb_j) || mb_j->valuedouble < 0 || mb_j->valuedouble > 255) {
                     snprintf(err_code, err_len, "invalid_field_maxBrightness");
                     return false;
                 }
@@ -4335,7 +4365,7 @@ bool parse_and_validate_device_config(const cJSON* root, const DeviceConfig& cur
             }
             const cJSON* mw_j = cJSON_GetObjectItemCaseSensitive(ch_item, "maxMilliwatts");
             if (mw_j) {
-                if (!cJSON_IsNumber(mw_j) || mw_j->valuedouble < 0 || mw_j->valuedouble > kMaxChannelPowerMw) {
+                if (!lg::json::is_integer(mw_j) || mw_j->valuedouble < 0 || mw_j->valuedouble > kMaxChannelPowerMw) {
                     snprintf(err_code, err_len, "invalid_field_maxMilliwatts");
                     return false;
                 }
@@ -4347,7 +4377,7 @@ bool parse_and_validate_device_config(const cJSON* root, const DeviceConfig& cur
             }
             const cJSON* clim_j = cJSON_GetObjectItemCaseSensitive(ch_item, "channelPowerLimitMw");
             if (clim_j) {
-                if (!cJSON_IsNumber(clim_j) || clim_j->valuedouble < 0 || clim_j->valuedouble > kMaxChannelPowerMw) {
+                if (!lg::json::is_integer(clim_j) || clim_j->valuedouble < 0 || clim_j->valuedouble > kMaxChannelPowerMw) {
                     snprintf(err_code, err_len, "invalid_field_channelPowerLimitMw");
                     return false;
                 }
@@ -4355,7 +4385,7 @@ bool parse_and_validate_device_config(const cJSON* root, const DeviceConfig& cur
             }
             const cJSON* rfp_j = cJSON_GetObjectItemCaseSensitive(ch_item, "ratedFullPowerMw");
             if (rfp_j) {
-                if (!cJSON_IsNumber(rfp_j) || rfp_j->valuedouble < 0 || rfp_j->valuedouble > kMaxChannelPowerMw) {
+                if (!lg::json::is_integer(rfp_j) || rfp_j->valuedouble < 0 || rfp_j->valuedouble > kMaxChannelPowerMw) {
                     snprintf(err_code, err_len, "invalid_field_ratedFullPowerMw");
                     return false;
                 }
@@ -4363,7 +4393,7 @@ bool parse_and_validate_device_config(const cJSON* root, const DeviceConfig& cur
             }
             const cJSON* du_j = cJSON_GetObjectItemCaseSensitive(ch_item, "dmxUniverse");
             if (du_j) {
-                if (!cJSON_IsNumber(du_j) || du_j->valuedouble < 0 || du_j->valuedouble > 63999) {
+                if (!lg::json::is_integer(du_j) || du_j->valuedouble < 0 || du_j->valuedouble > 63999) {
                     snprintf(err_code, err_len, "invalid_field_dmxUniverse");
                     return false;
                 }
@@ -4371,7 +4401,7 @@ bool parse_and_validate_device_config(const cJSON* root, const DeviceConfig& cur
             }
             const cJSON* ds_j = cJSON_GetObjectItemCaseSensitive(ch_item, "dmxStartChannel");
             if (ds_j) {
-                if (!cJSON_IsNumber(ds_j) || ds_j->valuedouble < 0 || ds_j->valuedouble > 512) {
+                if (!lg::json::is_integer(ds_j) || ds_j->valuedouble < 0 || ds_j->valuedouble > 512) {
                     snprintf(err_code, err_len, "invalid_field_dmxStartChannel");
                     return false;
                 }
@@ -4379,7 +4409,7 @@ bool parse_and_validate_device_config(const cJSON* root, const DeviceConfig& cur
             }
             const cJSON* dm_j = cJSON_GetObjectItemCaseSensitive(ch_item, "dmxMode");
             if (dm_j) {
-                if (!cJSON_IsNumber(dm_j) || dm_j->valuedouble < 0 || dm_j->valuedouble > 2) {
+                if (!lg::json::is_integer(dm_j) || dm_j->valuedouble < 0 || dm_j->valuedouble > 2) {
                     snprintf(err_code, err_len, "invalid_field_dmxMode");
                     return false;
                 }
@@ -4400,7 +4430,7 @@ bool parse_and_validate_device_config(const cJSON* root, const DeviceConfig& cur
                             snprintf(err_code, err_len, "invalid_field_addressableType");
                             return false;
                         }
-                    } else if (cJSON_IsNumber(atype_j) && (atype_j->valueint == 0 || atype_j->valueint == 1)) {
+                    } else if (lg::json::is_integer(atype_j) && (atype_j->valueint == 0 || atype_j->valueint == 1)) {
                         out_cfg.channels[ch_idx].addressable_type = static_cast<AddressableType>(atype_j->valueint);
                     } else {
                         snprintf(err_code, err_len, "invalid_field_addressableType");
@@ -4412,7 +4442,7 @@ bool parse_and_validate_device_config(const cJSON* root, const DeviceConfig& cur
             if (!px_j) px_j = cJSON_GetObjectItemCaseSensitive(src_addr, "pixelCount");
             if (px_j) {
                 if (ch_idx < 8) {
-                    if (!cJSON_IsNumber(px_j) || px_j->valuedouble < 0 || px_j->valuedouble > MAX_PIXELS) {
+                    if (!lg::json::is_integer(px_j) || px_j->valuedouble < 0 || px_j->valuedouble > MAX_PIXELS) {
                         snprintf(err_code, err_len, "invalid_field_pixelCount");
                         return false;
                     }
@@ -4422,7 +4452,7 @@ bool parse_and_validate_device_config(const cJSON* root, const DeviceConfig& cur
             const cJSON* po_j = cJSON_GetObjectItemCaseSensitive(src_addr, "pixelOrder");
             if (po_j) {
                 if (ch_idx < 8) {
-                    if (cJSON_IsNumber(po_j)) {
+                    if (lg::json::is_integer(po_j)) {
                         if (po_j->valueint < 0 || po_j->valueint > 3) {
                             snprintf(err_code, err_len, "invalid_field_pixelOrder");
                             return false;
@@ -4474,7 +4504,7 @@ bool parse_and_validate_device_config(const cJSON* root, const DeviceConfig& cur
             }
             const cJSON* mask_j = cJSON_GetObjectItemCaseSensitive(g_item, "channelMask");
             if (mask_j) {
-                if (!cJSON_IsNumber(mask_j) || mask_j->valuedouble < 0 || mask_j->valuedouble > 0xFFFF) {
+                if (!lg::json::is_integer(mask_j) || mask_j->valuedouble < 0 || mask_j->valuedouble > 0xFFFF) {
                     snprintf(err_code, err_len, "invalid_field_channelMask");
                     return false;
                 }
@@ -4495,7 +4525,7 @@ bool parse_and_validate_device_config(const cJSON* root, const DeviceConfig& cur
                         snprintf(err_code, err_len, "invalid_field_group_role");
                         return false;
                     }
-                } else if (cJSON_IsNumber(role_j)) {
+                } else if (lg::json::is_integer(role_j)) {
                     if (role_j->valueint < 0 || role_j->valueint > 4) {
                         snprintf(err_code, err_len, "invalid_field_group_role");
                         return false;
@@ -4529,19 +4559,35 @@ bool parse_and_validate_device_config(const cJSON* root, const DeviceConfig& cur
                 return false;
             }
             const cJSON* id_j = cJSON_GetObjectItemCaseSensitive(p_item, "id");
-            if (!id_j || !cJSON_IsNumber(id_j) || id_j->valueint < 0 || id_j->valueint >= kMaxPowerSupplies) {
+            if (!id_j || !lg::json::is_integer(id_j) || id_j->valueint < 0 || id_j->valueint >= kMaxPowerSupplies) {
                 snprintf(err_code, err_len, "invalid_field_powerSupplies");
                 return false;
             }
             uint8_t p_id = static_cast<uint8_t>(id_j->valueint);
             auto& psu = out_cfg.power_supplies[p_id];
 
+            const cJSON* name_j = cJSON_GetObjectItemCaseSensitive(p_item, "name");
+            if (name_j) {
+                if (!cJSON_IsString(name_j) || !name_j->valuestring ||
+                    std::strlen(name_j->valuestring) >= sizeof(psu.name)) {
+                    snprintf(err_code, err_len, "invalid_supply_name");
+                    return false;
+                }
+                lg::json::safe_strncpy(psu.name, name_j->valuestring, sizeof(psu.name));
+            }
+
             const cJSON* en_j = cJSON_GetObjectItemCaseSensitive(p_item, "enabled");
-            if (en_j) psu.enabled = cJSON_IsTrue(en_j);
+            if (en_j) {
+                if (!cJSON_IsBool(en_j)) {
+                    snprintf(err_code, err_len, "invalid_supply_enabled");
+                    return false;
+                }
+                psu.enabled = cJSON_IsTrue(en_j);
+            }
 
             const cJSON* v_j = cJSON_GetObjectItemCaseSensitive(p_item, "voltageMv");
             if (v_j) {
-                if (!cJSON_IsNumber(v_j) || (psu.enabled && (v_j->valuedouble < 3000 || v_j->valuedouble > 60000))) {
+                if (!lg::json::is_integer(v_j) || (v_j->valuedouble < (psu.enabled ? 3000 : 0) || v_j->valuedouble > 60000)) {
                     snprintf(err_code, err_len, "invalid_supply_voltage");
                     return false;
                 }
@@ -4550,7 +4596,7 @@ bool parse_and_validate_device_config(const cJSON* root, const DeviceConfig& cur
 
             const cJSON* cur_j = cJSON_GetObjectItemCaseSensitive(p_item, "ratedCurrentMa");
             if (cur_j) {
-                if (!cJSON_IsNumber(cur_j) || (psu.enabled && (cur_j->valuedouble < 1 || cur_j->valuedouble > 200000))) {
+                if (!lg::json::is_integer(cur_j) || (cur_j->valuedouble < (psu.enabled ? 1 : 0) || cur_j->valuedouble > 200000)) {
                     snprintf(err_code, err_len, "invalid_current_rating");
                     return false;
                 }
@@ -4559,7 +4605,7 @@ bool parse_and_validate_device_config(const cJSON* root, const DeviceConfig& cur
 
             const cJSON* cap_j = cJSON_GetObjectItemCaseSensitive(p_item, "usableCapacityPermille");
             if (cap_j) {
-                if (!cJSON_IsNumber(cap_j) || (psu.enabled && (cap_j->valuedouble < 1 || cap_j->valuedouble > 1000))) {
+                if (!lg::json::is_integer(cap_j) || (cap_j->valuedouble < (psu.enabled ? 1 : 0) || cap_j->valuedouble > 1000)) {
                     snprintf(err_code, err_len, "invalid_field_usableCapacityPermille");
                     return false;
                 }
@@ -4568,7 +4614,7 @@ bool parse_and_validate_device_config(const cJSON* root, const DeviceConfig& cur
 
             const cJSON* mask_j = cJSON_GetObjectItemCaseSensitive(p_item, "channelMask");
             if (mask_j) {
-                if (!cJSON_IsNumber(mask_j) || mask_j->valuedouble < 0 || mask_j->valuedouble > 0xFFFF) {
+                if (!lg::json::is_integer(mask_j) || mask_j->valuedouble < 0 || mask_j->valuedouble > 0xFFFF) {
                     snprintf(err_code, err_len, "invalid_field_channelMask");
                     return false;
                 }
@@ -4608,7 +4654,7 @@ bool parse_and_validate_device_config(const cJSON* root, const DeviceConfig& cur
         }
         item = cJSON_GetObjectItemCaseSensitive(prot, "universeStart");
         if (item) {
-            if (!cJSON_IsNumber(item) || item->valuedouble < 0 || item->valuedouble > 63999) {
+            if (!lg::json::is_integer(item) || item->valuedouble < 0 || item->valuedouble > 63999) {
                 snprintf(err_code, err_len, "invalid_field_universeStart");
                 return false;
             }
@@ -4616,14 +4662,16 @@ bool parse_and_validate_device_config(const cJSON* root, const DeviceConfig& cur
         }
         item = cJSON_GetObjectItemCaseSensitive(prot, "mergeMode");
         if (item) {
-            if (!cJSON_IsString(item)) { snprintf(err_code, err_len, "invalid_field_mergeMode"); return false; }
-            if (strcmp(item->valuestring, "LTP") == 0) out_cfg.protocol.merge_mode = MergeMode::LTP;
-            else if (strcmp(item->valuestring, "HTP") == 0) out_cfg.protocol.merge_mode = MergeMode::HTP;
+            if (cJSON_IsString(item) && strcmp(item->valuestring, "LTP") == 0) out_cfg.protocol.merge_mode = MergeMode::LTP;
+            else if (cJSON_IsString(item) && strcmp(item->valuestring, "HTP") == 0) out_cfg.protocol.merge_mode = MergeMode::HTP;
+            // Previously exported v4 packages encoded this enum numerically.
+            else if (lg::json::is_integer(item) && (item->valuedouble == 0 || item->valuedouble == 1))
+                out_cfg.protocol.merge_mode = static_cast<MergeMode>(item->valueint);
             else { snprintf(err_code, err_len, "invalid_field_mergeMode"); return false; }
         }
         item = cJSON_GetObjectItemCaseSensitive(prot, "streamTimeoutMs");
         if (item) {
-            if (!cJSON_IsNumber(item) || item->valuedouble < 100 || item->valuedouble > 60000) {
+            if (!lg::json::is_integer(item) || item->valuedouble < 100 || item->valuedouble > 60000) {
                 snprintf(err_code, err_len, "invalid_field_streamTimeoutMs");
                 return false;
             }
@@ -4631,7 +4679,7 @@ bool parse_and_validate_device_config(const cJSON* root, const DeviceConfig& cur
         }
         item = cJSON_GetObjectItemCaseSensitive(prot, "liveStreamLayer");
         if (item) {
-            if (!cJSON_IsNumber(item) || item->valuedouble < 0 || item->valuedouble > 2) {
+            if (!lg::json::is_integer(item) || item->valuedouble < 0 || item->valuedouble > 2) {
                 snprintf(err_code, err_len, "invalid_field_liveStreamLayer");
                 return false;
             }
@@ -4639,7 +4687,7 @@ bool parse_and_validate_device_config(const cJSON* root, const DeviceConfig& cur
         }
         item = cJSON_GetObjectItemCaseSensitive(prot, "zoneStartChannel");
         if (item) {
-            if (!cJSON_IsNumber(item) || item->valuedouble < 0 || item->valuedouble > 512) {
+            if (!lg::json::is_integer(item) || item->valuedouble < 0 || item->valuedouble > 512) {
                 snprintf(err_code, err_len, "invalid_field_zoneStartChannel");
                 return false;
             }
@@ -6244,6 +6292,11 @@ esp_err_t post_ota(httpd_req_t* request) {
     if (!api::authorize(request, api::ApiRole::Admin)) return ESP_OK;
 
     FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+    auto& verifier = OtaBootVerifier::instance();
+
+    if (verifier.is_pending_verify()) {
+        return send_error(request, "409 Conflict", "ota_verification_pending");
+    }
 
     if (api_ptr->current_maintenance_mode() != MaintenanceMode::None) {
         return send_error(request, "409 Conflict", "maintenance_job_active");
@@ -6300,6 +6353,7 @@ esp_err_t post_ota(httpd_req_t* request) {
         const int received = httpd_req_recv(request, reinterpret_cast<char*>(prefix) + prefix_received, sizeof(prefix) - prefix_received);
         if (received == HTTPD_SOCK_ERR_TIMEOUT && ++prefix_timeouts < 3) continue;
         if (received <= 0) return send_error(request, "400 Bad Request", "ota_receive_failed");
+        prefix_timeouts = 0;
         prefix_received += received;
     }
     esp_app_desc_t candidate{};
@@ -6335,12 +6389,13 @@ esp_err_t post_ota(httpd_req_t* request) {
     }
     char buf[512];
     int received = 0;
-    int remaining = request->content_len - sizeof(prefix);
-    int total = request->content_len;
+    size_t bytes_written = sizeof(prefix);
+    size_t remaining = request->content_len - bytes_written;
+    const size_t total = request->content_len;
     unsigned timeouts = 0;
 
     while (remaining > 0) {
-        if ((received = httpd_req_recv(request, buf, std::min(remaining, (int)sizeof(buf)))) <= 0) {
+        if ((received = httpd_req_recv(request, buf, std::min(remaining, sizeof(buf)))) <= 0) {
             if (received == HTTPD_SOCK_ERR_TIMEOUT && ++timeouts < 3) continue;
             esp_ota_abort(update_handle);
             api_ptr->job_manager().fail_job(job_id, ESP_FAIL, "OTA receive failed");
@@ -6355,8 +6410,9 @@ esp_err_t post_ota(httpd_req_t* request) {
             return send_error(request, "500 Internal Server Error", "OTA write failed");
         }
         timeouts = 0;
+        bytes_written += static_cast<size_t>(received);
         remaining -= received;
-        uint8_t pct = static_cast<uint8_t>(std::min(90, 5 + (int)(((float)(total - remaining) / total) * 85)));
+        uint8_t pct = static_cast<uint8_t>(5 + (bytes_written * 85 / total));
         api_ptr->job_manager().update_progress(job_id, JobState::Running, pct);
     }
 
@@ -6369,26 +6425,35 @@ esp_err_t post_ota(httpd_req_t* request) {
         return send_error(request, "500 Internal Server Error", "OTA end failed");
     }
 
+    // esp_ota_end validates the entire partition. Sequential writes may leave
+    // an old valid image tail in untouched sectors, so validate again with the
+    // actual uploaded byte extent. IDF includes checksum padding, optional
+    // appended digest and configured signature data in this bound.
+    const esp_partition_pos_t uploaded_extent{update_partition->address, static_cast<uint32_t>(bytes_written)};
+    esp_image_metadata_t image_metadata{};
+    err = esp_image_verify(ESP_IMAGE_VERIFY, &uploaded_extent, &image_metadata);
+    if (err != ESP_OK || image_metadata.image_len > bytes_written) {
+        if (err == ESP_OK) err = ESP_ERR_INVALID_SIZE;
+        api_ptr->job_manager().fail_job(job_id, err, "Incomplete OTA image");
+        api_ptr->command_journal().failed(cmd_id, err);
+        return send_error(request, "400 Bad Request", "incomplete_ota_image");
+    }
+
     // Validate OTA image descriptor (§52)
     err = esp_ota_get_partition_description(update_partition, &candidate);
-    if (err != ESP_OK || strcmp(candidate.project_name, "lumigrid_led_node") != 0 || strlen(candidate.version) == 0) {
-        api_ptr->job_manager().fail_job(job_id, ESP_ERR_INVALID_ARG, "Invalid project descriptor");
-        api_ptr->command_journal().failed(cmd_id, ESP_ERR_INVALID_ARG);
+    if (err != ESP_OK || !ota_app_descriptor_valid(candidate)) {
+        if (err == ESP_OK) err = ESP_ERR_INVALID_ARG;
+        api_ptr->job_manager().fail_job(job_id, err, "Invalid project descriptor");
+        api_ptr->command_journal().failed(cmd_id, err);
         api::AuditLog::instance().log(api::ApiRole::Admin, "ota_failed", "Invalid project descriptor or unknown project");
         return send_error(request, "400 Bad Request", "invalid_project_descriptor");
     }
 
-    err = esp_ota_set_boot_partition(update_partition);
-    if (err != ESP_OK) {
-        api_ptr->job_manager().fail_job(job_id, err, "OTA set boot failed");
-        api_ptr->command_journal().failed(cmd_id, err);
-        return send_error(request, "500 Internal Server Error", "OTA set boot failed");
-    }
-
-    // Persist OTA state for cross-reboot tracking (§61)
-    PersistedOtaState ota_st = OtaBootVerifier::instance().state();
+    // Commit intent before selecting the next boot partition. A journal error
+    // must never leave an untracked candidate selected for the next restart.
+    PersistedOtaState ota_st{};
     ota_st.state = OtaBootState::PendingReboot;
-    strncpy(ota_st.previous_version, OtaBootVerifier::instance().running_version(), sizeof(ota_st.previous_version) - 1);
+    strncpy(ota_st.previous_version, verifier.running_version(), sizeof(ota_st.previous_version) - 1);
     strncpy(ota_st.target_version, candidate.version, sizeof(ota_st.target_version) - 1);
     strncpy(ota_st.target_partition, update_partition->label, sizeof(ota_st.target_partition) - 1);
     ota_st.last_reason[0] = 0;
@@ -6396,12 +6461,21 @@ esp_err_t post_ota(httpd_req_t* request) {
     ota_st.candidate_boot_ms = 0;
     ota_st.verification_started_ms = 0;
     ota_st.verification_deadline_ms = 0;
-    if (OtaBootVerifier::instance().save_state(ota_st) != ESP_OK) {
-        // Do not reboot into a candidate whose verification journal was not saved.
-        esp_ota_set_boot_partition(esp_ota_get_running_partition());
-        api_ptr->job_manager().fail_job(job_id, ESP_FAIL, "OTA journal persistence failed");
-        api_ptr->command_journal().failed(cmd_id, ESP_FAIL);
+    err = verifier.save_state(ota_st);
+    if (err != ESP_OK) {
+        api_ptr->job_manager().fail_job(job_id, err, "OTA journal persistence failed");
+        api_ptr->command_journal().failed(cmd_id, err);
         return send_error(request, "500 Internal Server Error", "ota_state_persistence_failed");
+    }
+
+    err = esp_ota_set_boot_partition(update_partition);
+    if (err != ESP_OK) {
+        // A selector error is not proof of a rollback or a reboot-ready image.
+        // Preserve the actual error even if recording that result also fails.
+        verifier.record_update_failure("boot_selection_failed", err);
+        api_ptr->job_manager().fail_job(job_id, err, "OTA set boot failed");
+        api_ptr->command_journal().failed(cmd_id, err);
+        return send_error(request, "500 Internal Server Error", "OTA set boot failed");
     }
 
     api_ptr->command_journal().applied(cmd_id);
@@ -6409,11 +6483,21 @@ esp_err_t post_ota(httpd_req_t* request) {
 
     api::AuditLog::instance().log(api::ApiRole::Admin, "ota_start", "OTA image accepted, reboot pending");
 
-    char resp[256];
-    snprintf(resp, sizeof(resp),
-        "{\"accepted\":true,\"commandId\":%" PRIu32 ",\"jobId\":%" PRIu32 ",\"targetVersion\":\"%s\",\"projectName\":\"%s\",\"state\":\"pending_reboot\"}",
-        cmd_id, job_id, candidate.version, candidate.project_name);
-    send_json(request, resp);
+    cJSON* response = cJSON_CreateObject();
+    if (response && cJSON_AddBoolToObject(response, "accepted", true) &&
+        cJSON_AddNumberToObject(response, "commandId", cmd_id) &&
+        cJSON_AddNumberToObject(response, "jobId", job_id) &&
+        cJSON_AddStringToObject(response, "targetVersion", candidate.version) &&
+        cJSON_AddStringToObject(response, "projectName", candidate.project_name) &&
+        cJSON_AddStringToObject(response, "state", "pending_reboot")) {
+        send_json(request, response);
+    } else {
+        cJSON_Delete(response);
+        note_api_allocation_failure();
+        // The durable operation has succeeded even if the detailed response
+        // cannot be allocated. Keep its outcome truthful and still restart.
+        send_json(request, "{\"accepted\":true,\"state\":\"pending_reboot\"}");
+    }
     vTaskDelay(pdMS_TO_TICKS(1000));
     esp_restart();
     return ESP_OK;
@@ -6424,6 +6508,10 @@ esp_err_t get_ota_status(httpd_req_t* request) {
 
     const auto& verifier = OtaBootVerifier::instance();
     cJSON* root = cJSON_CreateObject();
+    if (!root) {
+        note_api_allocation_failure();
+        return send_error(request, "503 Service Unavailable", "out_of_memory");
+    }
     const auto persisted = verifier.state();
     const auto storage = capture_storage();
     cJSON_AddNumberToObject(root, "maxFirmwareBytes", storage.next ? storage.next->size : 0);
@@ -6438,16 +6526,16 @@ esp_err_t get_ota_status(httpd_req_t* request) {
     cJSON_AddStringToObject(root, "runningVersion", verifier.running_version());
     cJSON_AddStringToObject(root, "previousVersion", persisted.previous_version);
     cJSON_AddStringToObject(root, "targetVersion", persisted.target_version);
-    cJSON_AddBoolToObject(root, "rolledBack", verifier.rolled_back());
+    cJSON_AddStringToObject(root, "targetPartition", persisted.target_partition);
+    cJSON_AddBoolToObject(root, "pendingVerification", verifier.is_pending_verify());
+    cJSON_AddNumberToObject(root, "lastError", persisted.last_error);
+    cJSON_AddNumberToObject(root, "persistenceError", verifier.persistence_error());
+    cJSON_AddBoolToObject(root, "rolledBack", persisted.state == OtaBootState::RolledBack);
     if (strlen(persisted.last_reason) > 0) {
         cJSON_AddStringToObject(root, "reason", persisted.last_reason);
     }
 
-    char* json_str = cJSON_PrintUnformatted(root);
-    cJSON_Delete(root);
-    esp_err_t res = send_json(request, json_str);
-    cJSON_free(json_str);
-    return res;
+    return send_json(request, root);
 }
 
 esp_err_t get_recovery_status(httpd_req_t* request) {
@@ -6484,618 +6572,562 @@ esp_err_t get_recovery_status(httpd_req_t* request) {
 
 // ── Backup v4 & Restore Domain Serializers & Parsers ──
 
+class BackupJsonBuilder {
+public:
+    cJSON* object() { cJSON* value = cJSON_CreateObject(); if (!value) ok_ = false; return value; }
+    cJSON* array() { cJSON* value = cJSON_CreateArray(); if (!value) ok_ = false; return value; }
+    void string(cJSON* parent, const char* name, const char* value) {
+        if (!cJSON_AddStringToObject(parent, name, value)) ok_ = false;
+    }
+    void number(cJSON* parent, const char* name, double value) {
+        if (!cJSON_AddNumberToObject(parent, name, value)) ok_ = false;
+    }
+    void boolean(cJSON* parent, const char* name, bool value) {
+        if (!cJSON_AddBoolToObject(parent, name, value)) ok_ = false;
+    }
+    void item(cJSON* parent, const char* name, cJSON* value) {
+        if (!value || !cJSON_AddItemToObject(parent, name, value)) {
+            ok_ = false;
+            cJSON_Delete(value);
+        }
+    }
+    void item(cJSON* parent, cJSON* value) {
+        if (!value || !cJSON_AddItemToArray(parent, value)) {
+            ok_ = false;
+            cJSON_Delete(value);
+        }
+    }
+    cJSON* finish(cJSON* root) {
+        if (!ok_) { cJSON_Delete(root); return nullptr; }
+        return root;
+    }
+private:
+    bool ok_ = true;
+};
+
 static cJSON* serialize_device_config(const DeviceConfig& cfg) {
-    cJSON* cfg_json = cJSON_CreateObject();
-    cJSON_AddStringToObject(cfg_json, "deviceName", cfg.device_name);
-    cJSON_AddNumberToObject(cfg_json, "activePresetIndex", cfg.active_preset_index);
-    cJSON_AddNumberToObject(cfg_json, "fallbackPresetIndex", cfg.fallback_preset_index);
-    cJSON_AddNumberToObject(cfg_json, "watchdogTimeoutS", cfg.watchdog_timeout_s);
-    cJSON_AddNumberToObject(cfg_json, "maxPowerMw", cfg.max_power_mw);
-    cJSON_AddNumberToObject(cfg_json, "gammaX10", cfg.gamma_x10);
-    cJSON_AddBoolToObject(cfg_json, "softStartEnabled", cfg.soft_start_enabled);
-    cJSON_AddNumberToObject(cfg_json, "softStartMs", cfg.soft_start_ms);
-    cJSON_AddBoolToObject(cfg_json, "mqttEnabled", cfg.mqtt_enabled);
-    cJSON_AddStringToObject(cfg_json, "mqttBroker", cfg.mqtt_broker);
-    cJSON_AddNumberToObject(cfg_json, "mqttPort", cfg.mqtt_port);
-    cJSON_AddBoolToObject(cfg_json, "syncEnabled", cfg.sync_enabled);
-    cJSON_AddNumberToObject(cfg_json, "syncRole", cfg.sync_role);
+    BackupJsonBuilder json;
+    cJSON* cfg_json = json.object();
+    json.string(cfg_json, "deviceName", cfg.device_name);
+    json.string(cfg_json, "timezone", cfg.timezone);
+    json.string(cfg_json, "siteLabel", cfg.site_label);
+    json.string(cfg_json, "groupLabel", cfg.group_label);
+    json.number(cfg_json, "activePresetIndex", cfg.active_preset_index);
+    json.number(cfg_json, "fallbackPresetIndex", cfg.fallback_preset_index);
+    json.number(cfg_json, "watchdogTimeoutS", cfg.watchdog_timeout_s);
+    json.number(cfg_json, "maxPowerMw", cfg.max_power_mw);
+    json.number(cfg_json, "gammaX10", cfg.gamma_x10);
+    json.boolean(cfg_json, "softStartEnabled", cfg.soft_start_enabled);
+    json.number(cfg_json, "softStartMs", cfg.soft_start_ms);
+    json.boolean(cfg_json, "mqttEnabled", cfg.mqtt_enabled);
+    json.string(cfg_json, "mqttBroker", cfg.mqtt_broker);
+    json.number(cfg_json, "mqttPort", cfg.mqtt_port);
+    json.boolean(cfg_json, "syncEnabled", cfg.sync_enabled);
+    json.number(cfg_json, "syncRole", cfg.sync_role);
     // Write-only sync token indicator (§14, §27) - token itself NEVER exported!
-    cJSON_AddBoolToObject(cfg_json, "syncTokenSet", cfg.sync_token != 0);
+    json.boolean(cfg_json, "syncTokenSet", cfg.sync_token != 0);
 
     // Protocol config
-    cJSON* prot_json = cJSON_CreateObject();
-    cJSON_AddBoolToObject(prot_json, "artnetEnabled", cfg.protocol.artnet_enabled);
-    cJSON_AddBoolToObject(prot_json, "sacnEnabled", cfg.protocol.sacn_enabled);
-    cJSON_AddNumberToObject(prot_json, "universeStart", cfg.protocol.universe_start);
-    cJSON_AddNumberToObject(prot_json, "liveStreamLayer", cfg.protocol.live_stream_layer);
-    cJSON_AddNumberToObject(prot_json, "mergeMode", static_cast<uint8_t>(cfg.protocol.merge_mode));
-    cJSON_AddNumberToObject(prot_json, "streamTimeoutMs", cfg.protocol.stream_timeout_ms);
-    cJSON_AddNumberToObject(prot_json, "zoneStartChannel", cfg.protocol.zone_start_channel);
-    cJSON_AddItemToObject(cfg_json, "protocol", prot_json);
+    cJSON* prot_json = json.object();
+    json.boolean(prot_json, "artnetEnabled", cfg.protocol.artnet_enabled);
+    json.boolean(prot_json, "sacnEnabled", cfg.protocol.sacn_enabled);
+    json.number(prot_json, "universeStart", cfg.protocol.universe_start);
+    json.number(prot_json, "liveStreamLayer", cfg.protocol.live_stream_layer);
+    json.string(prot_json, "mergeMode", cfg.protocol.merge_mode == MergeMode::LTP ? "LTP" : "HTP");
+    json.number(prot_json, "streamTimeoutMs", cfg.protocol.stream_timeout_ms);
+    json.number(prot_json, "zoneStartChannel", cfg.protocol.zone_start_channel);
+    json.item(cfg_json, "protocol", prot_json);
 
     // Channels
-    cJSON* channels_arr = cJSON_CreateArray();
+    cJSON* channels_arr = json.array();
     for (uint8_t c = 0; c < 16; ++c) {
         const auto& ch = cfg.channels[c];
-        cJSON* cj = cJSON_CreateObject();
-        cJSON_AddNumberToObject(cj, "index", c);
-        cJSON_AddStringToObject(cj, "name", ch.name);
-        cJSON_AddBoolToObject(cj, "enabled", ch.enabled);
-        cJSON_AddNumberToObject(cj, "addressableType", static_cast<int>(ch.addressable_type));
-        cJSON_AddNumberToObject(cj, "pixelOrder", static_cast<int>(ch.pixel_order));
-        cJSON_AddNumberToObject(cj, "pixelCount", ch.pixel_count);
-        cJSON_AddNumberToObject(cj, "maxBrightness", ch.max_brightness);
-        cJSON_AddBoolToObject(cj, "gammaCorrection", ch.gamma_correction);
-        cJSON_AddNumberToObject(cj, "maxMilliwatts", ch.max_milliwatts);
-        cJSON_AddNumberToObject(cj, "channelPowerLimitMw", ch.channel_limit_mw);
-        cJSON_AddNumberToObject(cj, "ratedFullPowerMw", ch.rated_full_power_mw);
-        cJSON_AddNumberToObject(cj, "dmxUniverse", ch.dmx_universe);
-        cJSON_AddNumberToObject(cj, "dmxStartChannel", ch.dmx_start_channel);
-        cJSON_AddNumberToObject(cj, "dmxMode", ch.dmx_mode);
-        cJSON_AddItemToArray(channels_arr, cj);
+        cJSON* cj = json.object();
+        json.number(cj, "index", c);
+        json.string(cj, "name", ch.name);
+        json.boolean(cj, "enabled", ch.enabled);
+        json.number(cj, "addressableType", static_cast<int>(ch.addressable_type));
+        json.number(cj, "pixelOrder", static_cast<int>(ch.pixel_order));
+        json.number(cj, "pixelCount", ch.pixel_count);
+        json.number(cj, "maxBrightness", ch.max_brightness);
+        json.boolean(cj, "gammaCorrection", ch.gamma_correction);
+        json.number(cj, "maxMilliwatts", ch.max_milliwatts);
+        json.number(cj, "channelPowerLimitMw", ch.channel_limit_mw);
+        json.number(cj, "ratedFullPowerMw", ch.rated_full_power_mw);
+        json.number(cj, "dmxUniverse", ch.dmx_universe);
+        json.number(cj, "dmxStartChannel", ch.dmx_start_channel);
+        json.number(cj, "dmxMode", ch.dmx_mode);
+        json.item(channels_arr, cj);
     }
-    cJSON_AddItemToObject(cfg_json, "channels", channels_arr);
+    json.item(cfg_json, "channels", channels_arr);
 
     // Power supplies (HW-005.5)
-    cJSON* psu_arr = cJSON_CreateArray();
+    cJSON* psu_arr = json.array();
     for (uint8_t s = 0; s < kMaxPowerSupplies; ++s) {
         const auto& psu = cfg.power_supplies[s];
-        cJSON* pj = cJSON_CreateObject();
-        cJSON_AddNumberToObject(pj, "id", s);
-        cJSON_AddBoolToObject(pj, "enabled", psu.enabled);
-        cJSON_AddNumberToObject(pj, "voltageMv", psu.voltage_mv);
-        cJSON_AddNumberToObject(pj, "ratedCurrentMa", psu.rated_current_ma);
-        cJSON_AddNumberToObject(pj, "usableCapacityPermille", psu.usable_capacity_permille);
-        cJSON_AddNumberToObject(pj, "channelMask", psu.channel_mask);
-        cJSON_AddItemToArray(psu_arr, pj);
+        cJSON* pj = json.object();
+        json.number(pj, "id", s);
+        json.string(pj, "name", psu.name);
+        json.boolean(pj, "enabled", psu.enabled);
+        json.number(pj, "voltageMv", psu.voltage_mv);
+        json.number(pj, "ratedCurrentMa", psu.rated_current_ma);
+        json.number(pj, "usableCapacityPermille", psu.usable_capacity_permille);
+        json.number(pj, "channelMask", psu.channel_mask);
+        json.item(psu_arr, pj);
     }
-    cJSON_AddItemToObject(cfg_json, "powerSupplies", psu_arr);
+    json.item(cfg_json, "powerSupplies", psu_arr);
 
     // Groups
-    cJSON* groups_arr = cJSON_CreateArray();
+    cJSON* groups_arr = json.array();
     for (uint8_t g = 0; g < 8; ++g) {
         const auto& grp = cfg.groups[g];
-        cJSON* gj = cJSON_CreateObject();
-        cJSON_AddNumberToObject(gj, "index", g);
-        cJSON_AddStringToObject(gj, "name", grp.name);
-        cJSON_AddNumberToObject(gj, "channelMask", grp.channel_mask);
-        cJSON_AddStringToObject(gj, "role", zone_role_name(grp.role));
-        cJSON_AddBoolToObject(gj, "enabled", grp.enabled);
-        cJSON_AddItemToArray(groups_arr, gj);
+        cJSON* gj = json.object();
+        json.number(gj, "index", g);
+        json.string(gj, "name", grp.name);
+        json.number(gj, "channelMask", grp.channel_mask);
+        json.string(gj, "role", zone_role_name(grp.role));
+        json.boolean(gj, "enabled", grp.enabled);
+        json.item(groups_arr, gj);
     }
-    cJSON_AddItemToObject(cfg_json, "groups", groups_arr);
+    json.item(cfg_json, "groups", groups_arr);
 
-    return cfg_json;
+    return json.finish(cfg_json);
 }
 
 static cJSON* serialize_scene(const SceneConfig& sc, uint8_t index) {
-    cJSON* s = cJSON_CreateObject();
-    cJSON_AddNumberToObject(s, "index", index);
-    cJSON_AddStringToObject(s, "name", sc.name);
-    cJSON_AddNumberToObject(s, "globalBrightness", sc.global_brightness);
-    cJSON_AddNumberToObject(s, "transitionMs", sc.transition_ms);
+    BackupJsonBuilder json;
+    cJSON* s = json.object();
+    json.number(s, "index", index);
+    json.string(s, "name", sc.name);
+    json.number(s, "globalBrightness", sc.global_brightness);
+    json.number(s, "transitionMs", sc.transition_ms);
 
-    cJSON* ch_arr = cJSON_CreateArray();
+    cJSON* ch_arr = json.array();
     for (uint8_t c = 0; c < 16; ++c) {
-        cJSON* c_obj = cJSON_CreateObject();
-        cJSON* l_arr = cJSON_CreateArray();
+        cJSON* c_obj = json.object();
+        cJSON* l_arr = json.array();
         for (uint8_t l = 0; l < 3; ++l) {
             const auto& layer = sc.channels[c].layers[l];
-            cJSON* l_obj = cJSON_CreateObject();
-            cJSON_AddBoolToObject(l_obj, "enabled", layer.enabled);
-            cJSON_AddNumberToObject(l_obj, "effect", static_cast<int>(layer.effect));
-            cJSON_AddNumberToObject(l_obj, "speedMs", layer.speed_ms);
+            cJSON* l_obj = json.object();
+            json.boolean(l_obj, "enabled", layer.enabled);
+            json.number(l_obj, "effect", static_cast<int>(layer.effect));
+            json.number(l_obj, "speedMs", layer.speed_ms);
 
-            cJSON* pcol = cJSON_CreateObject();
-            cJSON_AddNumberToObject(pcol, "r", layer.primary_color.r);
-            cJSON_AddNumberToObject(pcol, "g", layer.primary_color.g);
-            cJSON_AddNumberToObject(pcol, "b", layer.primary_color.b);
-            cJSON_AddItemToObject(l_obj, "primaryColor", pcol);
+            cJSON* pcol = json.object();
+            json.number(pcol, "r", layer.primary_color.r);
+            json.number(pcol, "g", layer.primary_color.g);
+            json.number(pcol, "b", layer.primary_color.b);
+            json.item(l_obj, "primaryColor", pcol);
 
-            cJSON* scol = cJSON_CreateObject();
-            cJSON_AddNumberToObject(scol, "r", layer.secondary_color.r);
-            cJSON_AddNumberToObject(scol, "g", layer.secondary_color.g);
-            cJSON_AddNumberToObject(scol, "b", layer.secondary_color.b);
-            cJSON_AddItemToObject(l_obj, "secondaryColor", scol);
+            cJSON* scol = json.object();
+            json.number(scol, "r", layer.secondary_color.r);
+            json.number(scol, "g", layer.secondary_color.g);
+            json.number(scol, "b", layer.secondary_color.b);
+            json.item(l_obj, "secondaryColor", scol);
 
-            cJSON_AddNumberToObject(l_obj, "opacity", layer.opacity);
-            cJSON_AddNumberToObject(l_obj, "blendMode", static_cast<int>(layer.blend_mode));
-            cJSON_AddNumberToObject(l_obj, "parameter", layer.fx_param);
-            cJSON_AddItemToArray(l_arr, l_obj);
+            json.number(l_obj, "opacity", layer.opacity);
+            json.number(l_obj, "blendMode", static_cast<int>(layer.blend_mode));
+            json.number(l_obj, "parameter", layer.fx_param);
+            json.number(l_obj, "paletteId", layer.palette_id);
+            json.item(l_arr, l_obj);
         }
-        cJSON_AddItemToObject(c_obj, "layers", l_arr);
-        cJSON_AddItemToArray(ch_arr, c_obj);
+        json.item(c_obj, "layers", l_arr);
+        json.item(ch_arr, c_obj);
     }
-    cJSON_AddItemToObject(s, "channels", ch_arr);
-    return s;
+    json.item(s, "channels", ch_arr);
+    return json.finish(s);
 }
 
 static cJSON* serialize_scene_motion(const SceneMotionConfig& sm, uint8_t index) {
-    cJSON* m_obj = cJSON_CreateObject();
-    cJSON_AddNumberToObject(m_obj, "index", index);
-    cJSON_AddStringToObject(m_obj, "transitionCurve", transition_curve_name(sm.transition_curve));
-    cJSON_AddNumberToObject(m_obj, "trackCount", sm.track_count);
-    cJSON* tracks = cJSON_CreateArray();
+    BackupJsonBuilder json;
+    cJSON* m_obj = json.object();
+    json.number(m_obj, "index", index);
+    json.string(m_obj, "transitionCurve", transition_curve_name(sm.transition_curve));
+    json.number(m_obj, "trackCount", sm.track_count);
+    cJSON* tracks = json.array();
     for (uint8_t t = 0; t < sm.track_count && t < kAutomationTracksPerScene; ++t) {
         const auto& tr = sm.tracks[t];
-        cJSON* tobj = cJSON_CreateObject();
-        cJSON_AddStringToObject(tobj, "target", automation_target_name(tr.target));
-        cJSON_AddNumberToObject(tobj, "channel", tr.channel);
-        cJSON_AddNumberToObject(tobj, "layer", tr.layer);
-        cJSON_AddStringToObject(tobj, "curve", automation_curve_name(tr.curve));
-        cJSON_AddBoolToObject(tobj, "loop", tr.loop);
-        cJSON_AddNumberToObject(tobj, "periodMs", tr.period_ms);
-        cJSON* pts = cJSON_CreateArray();
+        cJSON* tobj = json.object();
+        json.string(tobj, "target", automation_target_name(tr.target));
+        json.number(tobj, "channel", tr.channel);
+        json.number(tobj, "layer", tr.layer);
+        json.string(tobj, "curve", automation_curve_name(tr.curve));
+        json.boolean(tobj, "loop", tr.loop);
+        json.number(tobj, "periodMs", tr.period_ms);
+        cJSON* pts = json.array();
         for (uint8_t p = 0; p < tr.point_count && p < kAutomationPointsPerTrack; ++p) {
-            cJSON* pobj = cJSON_CreateObject();
-            cJSON_AddNumberToObject(pobj, "position", tr.points[p].position);
-            cJSON_AddNumberToObject(pobj, "value", tr.points[p].value);
-            cJSON_AddItemToArray(pts, pobj);
+            cJSON* pobj = json.object();
+            json.number(pobj, "position", tr.points[p].position);
+            json.number(pobj, "value", tr.points[p].value);
+            json.item(pts, pobj);
         }
-        cJSON_AddItemToObject(tobj, "points", pts);
-        cJSON_AddItemToArray(tracks, tobj);
+        json.item(tobj, "points", pts);
+        json.item(tracks, tobj);
     }
-    cJSON_AddItemToObject(m_obj, "tracks", tracks);
-    return m_obj;
+    json.item(m_obj, "tracks", tracks);
+    return json.finish(m_obj);
 }
 
 static cJSON* serialize_timeline(const Sequence& seq) {
-    cJSON* seq_obj = cJSON_CreateObject();
-    cJSON_AddNumberToObject(seq_obj, "bpm", seq.bpm);
-    cJSON_AddBoolToObject(seq_obj, "enabled", seq.enabled);
-    cJSON* trs = cJSON_CreateArray();
+    BackupJsonBuilder json;
+    cJSON* seq_obj = json.object();
+    json.number(seq_obj, "bpm", seq.bpm);
+    json.boolean(seq_obj, "enabled", seq.enabled);
+    cJSON* trs = json.array();
     for (uint8_t t = 0; t < 16; ++t) {
         const auto& track = seq.tracks[t];
-        cJSON* trobj = cJSON_CreateObject();
-        cJSON_AddNumberToObject(trobj, "channel_id", track.channel_id);
-        cJSON_AddBoolToObject(trobj, "enabled", track.enabled);
-        cJSON* steps = cJSON_CreateArray();
+        cJSON* trobj = json.object();
+        json.number(trobj, "channel_id", track.channel_id);
+        json.boolean(trobj, "enabled", track.enabled);
+        cJSON* steps = json.array();
         for (uint8_t s = 0; s < track.num_steps && s < 16; ++s) {
-            cJSON* sobj = cJSON_CreateObject();
-            cJSON_AddNumberToObject(sobj, "preset_index", track.steps[s].preset_index);
-            cJSON_AddNumberToObject(sobj, "length_beats", track.steps[s].length_beats);
-            cJSON_AddItemToArray(steps, sobj);
+            cJSON* sobj = json.object();
+            json.number(sobj, "preset_index", track.steps[s].preset_index);
+            json.number(sobj, "length_beats", track.steps[s].length_beats);
+            json.item(steps, sobj);
         }
-        cJSON_AddItemToObject(trobj, "steps", steps);
-        cJSON_AddItemToArray(trs, trobj);
+        json.item(trobj, "steps", steps);
+        json.item(trs, trobj);
     }
-    cJSON_AddItemToObject(seq_obj, "tracks", trs);
-    return seq_obj;
+    json.item(seq_obj, "tracks", trs);
+    return json.finish(seq_obj);
 }
 
 static cJSON* serialize_calendar(const CalendarSchedule& cal) {
-    cJSON* cal_obj = cJSON_CreateObject();
-    cJSON* entries = cJSON_CreateArray();
+    BackupJsonBuilder json;
+    cJSON* cal_obj = json.object();
+    cJSON* entries = json.array();
     for (uint8_t e = 0; e < 8; ++e) {
         const auto& entry = cal.entries[e];
-        cJSON* eobj = cJSON_CreateObject();
-        cJSON_AddNumberToObject(eobj, "hour", entry.hour);
-        cJSON_AddNumberToObject(eobj, "minute", entry.minute);
-        cJSON_AddNumberToObject(eobj, "days_of_week", entry.days_of_week);
-        cJSON_AddNumberToObject(eobj, "preset_index", entry.preset_index);
-        cJSON_AddNumberToObject(eobj, "action", static_cast<int>(entry.action));
-        cJSON_AddBoolToObject(eobj, "enabled", entry.enabled);
-        cJSON_AddNumberToObject(eobj, "cue_list_index", entry.cue_list_index);
-        cJSON_AddItemToArray(entries, eobj);
+        cJSON* eobj = json.object();
+        json.number(eobj, "hour", entry.hour);
+        json.number(eobj, "minute", entry.minute);
+        json.number(eobj, "days_of_week", entry.days_of_week);
+        json.number(eobj, "preset_index", entry.preset_index);
+        json.number(eobj, "action", static_cast<int>(entry.action));
+        json.boolean(eobj, "enabled", entry.enabled);
+        json.number(eobj, "cue_list_index", entry.cue_list_index);
+        json.item(entries, eobj);
     }
-    cJSON_AddItemToObject(cal_obj, "entries", entries);
-    return cal_obj;
+    json.item(cal_obj, "entries", entries);
+    return json.finish(cal_obj);
 }
 
 static cJSON* serialize_cue_list(const CueList& cl, uint8_t index) {
-    cJSON* cl_obj = cJSON_CreateObject();
-    cJSON_AddNumberToObject(cl_obj, "index", index);
-    cJSON_AddStringToObject(cl_obj, "name", cl.name);
-    cJSON_AddStringToObject(cl_obj, "mode", cue_run_mode_name(cl.mode));
-    cJSON_AddStringToObject(cl_obj, "endAction", cue_end_action_name(cl.end_action));
-    cJSON_AddNumberToObject(cl_obj, "checksum", cl.checksum);
-    cJSON* cues = cJSON_CreateArray();
+    BackupJsonBuilder json;
+    cJSON* cl_obj = json.object();
+    json.number(cl_obj, "index", index);
+    json.string(cl_obj, "name", cl.name);
+    json.string(cl_obj, "mode", cue_run_mode_name(cl.mode));
+    json.string(cl_obj, "endAction", cue_end_action_name(cl.end_action));
+    json.number(cl_obj, "checksum", cl.checksum);
+    cJSON* cues = json.array();
     for (uint8_t c = 0; c < cl.count && c < kMaxCuesPerList; ++c) {
-        cJSON* cobj = cJSON_CreateObject();
-        cJSON_AddNumberToObject(cobj, "sceneIndex", cl.cues[c].scene_index);
-        cJSON_AddNumberToObject(cobj, "holdMs", cl.cues[c].hold_ms);
-        cJSON_AddNumberToObject(cobj, "fadeMs", cl.cues[c].fade_ms);
-        cJSON_AddStringToObject(cobj, "curve", transition_curve_name(cl.cues[c].curve));
-        cJSON_AddStringToObject(cobj, "label", cl.cues[c].label);
-        cJSON_AddItemToArray(cues, cobj);
+        cJSON* cobj = json.object();
+        json.number(cobj, "sceneIndex", cl.cues[c].scene_index);
+        json.number(cobj, "holdMs", cl.cues[c].hold_ms);
+        json.number(cobj, "fadeMs", cl.cues[c].fade_ms);
+        json.string(cobj, "curve", transition_curve_name(cl.cues[c].curve));
+        json.string(cobj, "label", cl.cues[c].label);
+        json.item(cues, cobj);
     }
-    cJSON_AddItemToObject(cl_obj, "cues", cues);
-    return cl_obj;
+    json.item(cl_obj, "cues", cues);
+    return json.finish(cl_obj);
+}
+
+// Restore must reject invalid fields, not narrow/wrap them into a new show.
+static bool backup_integer_tree(const cJSON* value, unsigned depth = 0) {
+    if (!value || depth > 32) return false;
+    if (cJSON_IsNumber(value) &&
+        (!std::isfinite(value->valuedouble) || std::trunc(value->valuedouble) != value->valuedouble)) return false;
+    for (const cJSON* child = value->child; child; child = child->next)
+        if (!backup_integer_tree(child, depth + 1)) return false;
+    return true;
+}
+
+template <typename T>
+static bool backup_number(const cJSON* obj, const char* key, T& value,
+                          double minimum, double maximum) {
+    if (!cJSON_GetObjectItemCaseSensitive(obj, key)) return true;
+    return lg::json::get_number(obj, key, value) && value >= minimum && value <= maximum;
+}
+
+static bool backup_string(const cJSON* obj, const char* key, char* value, size_t capacity) {
+    const cJSON* item = cJSON_GetObjectItemCaseSensitive(obj, key);
+    if (!item) return true;
+    return cJSON_IsString(item) && item->valuestring && std::strlen(item->valuestring) < capacity &&
+           lg::json::get_string(obj, key, value, capacity);
+}
+
+static bool backup_bool(const cJSON* obj, const char* key, bool& value) {
+    return !cJSON_GetObjectItemCaseSensitive(obj, key) || lg::json::get_bool(obj, key, value);
+}
+
+static bool backup_error(char* error, size_t capacity, const char* code) {
+    snprintf(error, capacity, "%s", code);
+    return false;
 }
 
 static bool parse_scene_record(cJSON* obj, SceneConfig& sc, char* err_buf, size_t err_size) {
-    lg::json::get_string(obj, "name", sc.name, sizeof(sc.name));
-    int b = 255;
-    if (lg::json::get_number(obj, "globalBrightness", b)) {
-        if (b < 0 || b > 255) {
-            snprintf(err_buf, err_size, "invalid_global_brightness");
-            return false;
-        }
-        sc.global_brightness = static_cast<uint8_t>(b);
-    }
-    lg::json::get_number(obj, "transitionMs", sc.transition_ms);
+    if (!cJSON_IsObject(obj) || !backup_integer_tree(obj) ||
+        !backup_string(obj, "name", sc.name, sizeof(sc.name)) ||
+        !backup_number(obj, "globalBrightness", sc.global_brightness, 0, 255) ||
+        !backup_number(obj, "transitionMs", sc.transition_ms, 0, 60000))
+        return backup_error(err_buf, err_size, "invalid_scene_fields");
 
-    cJSON* c_arr = cJSON_GetObjectItem(obj, "channels");
-    if (c_arr && cJSON_IsArray(c_arr)) {
-        if (cJSON_GetArraySize(c_arr) > 16) {
-            snprintf(err_buf, err_size, "too_many_scene_channels");
-            return false;
-        }
-        int c_idx = 0;
-        cJSON* cj;
-        cJSON_ArrayForEach(cj, c_arr) {
-            cJSON* l_arr = cJSON_GetObjectItem(cj, "layers");
-            if (l_arr && cJSON_IsArray(l_arr)) {
-                if (cJSON_GetArraySize(l_arr) > 3) {
-                    snprintf(err_buf, err_size, "too_many_scene_layers");
-                    return false;
-                }
-                int l_idx = 0;
-                cJSON* lj;
-                cJSON_ArrayForEach(lj, l_arr) {
-                    auto& layer = sc.channels[c_idx].layers[l_idx];
-                    lg::json::get_bool(lj, "enabled", layer.enabled);
-                    int fx = 0;
-                    if (lg::json::get_number(lj, "effect", fx)) layer.effect = fx;
-                    lg::json::get_number(lj, "speedMs", layer.speed_ms);
-                    int op = 255;
-                    if (lg::json::get_number(lj, "opacity", op)) {
-                        if (op < 0 || op > 255) { snprintf(err_buf, err_size, "invalid_opacity"); return false; }
-                        layer.opacity = static_cast<uint8_t>(op);
-                    }
-                    int blend = 0;
-                    if (lg::json::get_number(lj, "blendMode", blend)) {
-                        if (blend < 0 || blend > 5) { snprintf(err_buf, err_size, "invalid_blend_mode"); return false; }
-                        layer.blend_mode = static_cast<BlendMode>(blend);
-                    }
-                    int param = 0;
-                    if (lg::json::get_number(lj, "parameter", param)) {
-                        if (param < 0 || param > 255) { snprintf(err_buf, err_size, "invalid_parameter"); return false; }
-                        layer.fx_param = static_cast<uint8_t>(param);
-                    }
-                    cJSON* pcol = cJSON_GetObjectItem(lj, "primaryColor");
-                    if (pcol) {
-                        int r=0, g=0, b=0;
-                        lg::json::get_number(pcol, "r", r);
-                        lg::json::get_number(pcol, "g", g);
-                        lg::json::get_number(pcol, "b", b);
-                        layer.primary_color = { static_cast<uint8_t>(std::clamp(r,0,255)),
-                                                static_cast<uint8_t>(std::clamp(g,0,255)),
-                                                static_cast<uint8_t>(std::clamp(b,0,255)) };
-                    }
-                    cJSON* scol = cJSON_GetObjectItem(lj, "secondaryColor");
-                    if (scol) {
-                        int r=0, g=0, b=0;
-                        lg::json::get_number(scol, "r", r);
-                        lg::json::get_number(scol, "g", g);
-                        lg::json::get_number(scol, "b", b);
-                        layer.secondary_color = { static_cast<uint8_t>(std::clamp(r,0,255)),
-                                                  static_cast<uint8_t>(std::clamp(g,0,255)),
-                                                  static_cast<uint8_t>(std::clamp(b,0,255)) };
-                    }
-                    l_idx++;
-                }
-            }
-            c_idx++;
+    const cJSON* channels = cJSON_GetObjectItemCaseSensitive(obj, "channels");
+    if (!channels) return true;
+    if (!cJSON_IsArray(channels) || cJSON_GetArraySize(channels) > 16)
+        return backup_error(err_buf, err_size, "invalid_scene_channels");
+    unsigned channel_index = 0;
+    for (const cJSON* channel = channels->child; channel; channel = channel->next, ++channel_index) {
+        if (!cJSON_IsObject(channel)) return backup_error(err_buf, err_size, "invalid_scene_channel");
+        const cJSON* layers = cJSON_GetObjectItemCaseSensitive(channel, "layers");
+        if (!layers) continue;
+        if (!cJSON_IsArray(layers) || cJSON_GetArraySize(layers) > 3)
+            return backup_error(err_buf, err_size, "invalid_scene_layers");
+        unsigned layer_index = 0;
+        for (const cJSON* item = layers->child; item; item = item->next, ++layer_index) {
+            auto& layer = sc.channels[channel_index].layers[layer_index];
+            const char* error = nullptr;
+            if (!parse_and_validate_layer_obj(item, layer, error))
+                return backup_error(err_buf, err_size, error ? error : "invalid_scene_layer");
+            // Earlier v4 exports used parameter; current API payloads use fxParam.
+            if (!backup_number(item, "parameter", layer.fx_param, 0, 255))
+                return backup_error(err_buf, err_size, "invalid_parameter");
+            const cJSON* fx = cJSON_GetObjectItemCaseSensitive(item, "fxParam");
+            if (fx && fx->valuedouble != layer.fx_param)
+                return backup_error(err_buf, err_size, "conflicting_parameter");
         }
     }
     return true;
 }
 
 static bool parse_scene_motion_record(cJSON* obj, SceneMotionConfig& sm, char* err_buf, size_t err_size) {
-    sm.schema_version = 1;
-    cJSON* cur_j = cJSON_GetObjectItem(obj, "transitionCurve");
-    if (cur_j && cJSON_IsString(cur_j)) {
-        if (!parse_transition_curve(cur_j->valuestring, sm.transition_curve)) {
-            snprintf(err_buf, err_size, "invalid_transition_curve");
-            return false;
-        }
-    }
-    cJSON* trs = cJSON_GetObjectItem(obj, "tracks");
-    if (trs && cJSON_IsArray(trs)) {
-        if (cJSON_GetArraySize(trs) > kAutomationTracksPerScene) {
-            snprintf(err_buf, err_size, "too_many_motion_tracks");
-            return false;
-        }
-        uint8_t t_idx = 0;
-        cJSON* t_item;
-        cJSON_ArrayForEach(t_item, trs) {
-            auto& tr = sm.tracks[t_idx];
-            cJSON* target_j = cJSON_GetObjectItem(t_item, "target");
-            if (target_j && cJSON_IsString(target_j)) {
-                if (!parse_automation_target(target_j->valuestring, tr.target)) {
-                    snprintf(err_buf, err_size, "invalid_automation_target");
-                    return false;
-                }
-            }
-            int ch = 0;
-            if (lg::json::get_number(t_item, "channel", ch)) {
-                if (ch < 0 || ch >= 16) { snprintf(err_buf, err_size, "invalid_motion_channel"); return false; }
-                tr.channel = static_cast<uint8_t>(ch);
-            }
-            int layer = 0;
-            if (lg::json::get_number(t_item, "layer", layer)) {
-                if (layer < 0 || layer >= 3) { snprintf(err_buf, err_size, "invalid_motion_layer"); return false; }
-                tr.layer = static_cast<uint8_t>(layer);
-            }
-            cJSON* c_j = cJSON_GetObjectItem(t_item, "curve");
-            if (c_j && cJSON_IsString(c_j)) {
-                if (!parse_automation_curve(c_j->valuestring, tr.curve)) {
-                    snprintf(err_buf, err_size, "invalid_automation_curve");
-                    return false;
-                }
-            }
-            lg::json::get_bool(t_item, "loop", tr.loop);
-            lg::json::get_number(t_item, "periodMs", tr.period_ms);
-            cJSON* pts = cJSON_GetObjectItem(t_item, "points");
-            if (pts && cJSON_IsArray(pts)) {
-                if (cJSON_GetArraySize(pts) > kAutomationPointsPerTrack) {
-                    snprintf(err_buf, err_size, "too_many_motion_points");
-                    return false;
-                }
-                uint8_t p_idx = 0;
-                cJSON* p_item;
-                cJSON_ArrayForEach(p_item, pts) {
-                    int pos = 0, val = 0;
-                    if (lg::json::get_number(p_item, "position", pos) && lg::json::get_number(p_item, "value", val)) {
-                        tr.points[p_idx].position = static_cast<uint16_t>(std::clamp(pos, 0, 65535));
-                        tr.points[p_idx].value = static_cast<uint8_t>(std::clamp(val, 0, 255));
-                        p_idx++;
-                    }
-                }
-                tr.point_count = p_idx;
-            }
-            t_idx++;
-        }
-        sm.track_count = t_idx;
-    }
+    if (!cJSON_IsObject(obj) || !backup_integer_tree(obj))
+        return backup_error(err_buf, err_size, "invalid_scene_motion");
+    const char* error = nullptr;
+    if (!parse_and_validate_motion_json(obj, 0, sm, error))
+        return backup_error(err_buf, err_size, error ? error : "invalid_scene_motion");
     return true;
 }
 
 static bool parse_cue_list_record(cJSON* obj, CueList& cl, char* err_buf, size_t err_size) {
-    lg::json::get_string(obj, "name", cl.name, sizeof(cl.name));
-    cJSON* mode_j = cJSON_GetObjectItem(obj, "mode");
-    if (mode_j && cJSON_IsString(mode_j)) {
-        if (!parse_cue_run_mode(mode_j->valuestring, cl.mode)) {
-            snprintf(err_buf, err_size, "invalid_cue_run_mode");
-            return false;
+    if (!cJSON_IsObject(obj) || !backup_integer_tree(obj) ||
+        !backup_string(obj, "name", cl.name, sizeof(cl.name)))
+        return backup_error(err_buf, err_size, "invalid_cue_list");
+    const cJSON* mode = cJSON_GetObjectItemCaseSensitive(obj, "mode");
+    if (mode && (!cJSON_IsString(mode) || !parse_cue_run_mode(mode->valuestring, cl.mode)))
+        return backup_error(err_buf, err_size, "invalid_cue_run_mode");
+    const cJSON* end = cJSON_GetObjectItemCaseSensitive(obj, "endAction");
+    if (end) {
+        if (cJSON_IsString(end)) {
+            if (!parse_cue_end_action(end->valuestring, cl.end_action))
+                return backup_error(err_buf, err_size, "invalid_cue_end_action");
+        } else {
+            uint8_t action = 0;
+            if (!lg::json::get_number(obj, "endAction", action) || action > 2)
+                return backup_error(err_buf, err_size, "invalid_cue_end_action");
+            cl.end_action = static_cast<CueEndAction>(action);
         }
     }
-    cJSON* ea_j = cJSON_GetObjectItem(obj, "endAction");
-    if (ea_j && cJSON_IsString(ea_j)) {
-        if (!parse_cue_end_action(ea_j->valuestring, cl.end_action)) {
-            snprintf(err_buf, err_size, "invalid_cue_end_action");
-            return false;
-        }
-    } else if (ea_j && cJSON_IsNumber(ea_j)) {
-        if (ea_j->valueint < 0 || ea_j->valueint > 2) {
-            snprintf(err_buf, err_size, "invalid_cue_end_action");
-            return false;
-        }
-        cl.end_action = static_cast<CueEndAction>(ea_j->valueint);
-    }
-    cJSON* cues = cJSON_GetObjectItem(obj, "cues");
-    if (cues && cJSON_IsArray(cues)) {
-        if (cJSON_GetArraySize(cues) > kMaxCuesPerList) {
-            snprintf(err_buf, err_size, "too_many_cues");
-            return false;
-        }
-        uint8_t c_idx = 0;
-        cJSON* c_item;
-        cJSON_ArrayForEach(c_item, cues) {
-            int sc_idx = 0;
-            if (!lg::json::get_number(c_item, "sceneIndex", sc_idx) || sc_idx < 0 || sc_idx >= lg::kMaxPresets) {
-                snprintf(err_buf, err_size, "invalid_cue_scene_index");
-                return false;
-            }
-            cl.cues[c_idx].scene_index = static_cast<uint8_t>(sc_idx);
-            lg::json::get_number(c_item, "holdMs", cl.cues[c_idx].hold_ms);
-            lg::json::get_number(c_item, "fadeMs", cl.cues[c_idx].fade_ms);
-            cJSON* cur_j = cJSON_GetObjectItem(c_item, "curve");
-            if (cur_j && cJSON_IsString(cur_j)) {
-                if (!parse_transition_curve(cur_j->valuestring, cl.cues[c_idx].curve)) {
-                    snprintf(err_buf, err_size, "invalid_cue_curve");
-                    return false;
-                }
-            }
-            lg::json::get_string(c_item, "label", cl.cues[c_idx].label, sizeof(cl.cues[c_idx].label));
-            c_idx++;
-        }
-        cl.count = c_idx;
+    const cJSON* cues = cJSON_GetObjectItemCaseSensitive(obj, "cues");
+    if (!cues) return true;
+    if (!cJSON_IsArray(cues) || cJSON_GetArraySize(cues) > kMaxCuesPerList)
+        return backup_error(err_buf, err_size, "invalid_cues");
+    cl.count = 0;
+    for (const cJSON* item = cues->child; item; item = item->next) {
+        auto& cue = cl.cues[cl.count];
+        if (!cJSON_IsObject(item) || !lg::json::get_number(item, "sceneIndex", cue.scene_index) ||
+            cue.scene_index >= kMaxPresets || !backup_number(item, "holdMs", cue.hold_ms, 0, 3600000) ||
+            !backup_number(item, "fadeMs", cue.fade_ms, 0, 60000) ||
+            !backup_string(item, "label", cue.label, sizeof(cue.label)))
+            return backup_error(err_buf, err_size, "invalid_cue_fields");
+        const cJSON* curve = cJSON_GetObjectItemCaseSensitive(item, "curve");
+        if (curve && (!cJSON_IsString(curve) || !parse_transition_curve(curve->valuestring, cue.curve)))
+            return backup_error(err_buf, err_size, "invalid_cue_curve");
+        ++cl.count;
     }
     return true;
 }
 
 static bool parse_timeline_record(cJSON* obj, Sequence& seq, char* err_buf, size_t err_size) {
-    int bpm = 120;
-    if (lg::json::get_number(obj, "bpm", bpm)) {
-        if (bpm < 20 || bpm > 300) { snprintf(err_buf, err_size, "invalid_bpm"); return false; }
-        seq.bpm = static_cast<uint16_t>(bpm);
+    if (!cJSON_IsObject(obj) || !backup_integer_tree(obj) ||
+        !backup_number(obj, "bpm", seq.bpm, 10, 500) || !backup_bool(obj, "enabled", seq.enabled))
+        return backup_error(err_buf, err_size, "invalid_timeline");
+    // Match the canonical physical track layout used by ConfigStore and the
+    // timeline API. Missing tracks are empty, not duplicate channel-zero rows.
+    for (uint8_t i = 0; i < 16; ++i) {
+        seq.tracks[i].channel_id = i;
+        seq.tracks[i].num_steps = 0;
+        seq.tracks[i].enabled = false;
     }
-    lg::json::get_bool(obj, "enabled", seq.enabled);
-    cJSON* trs = cJSON_GetObjectItem(obj, "tracks");
-    if (trs && cJSON_IsArray(trs)) {
-        if (cJSON_GetArraySize(trs) > 16) { snprintf(err_buf, err_size, "too_many_timeline_tracks"); return false; }
-        int t_idx = 0;
-        cJSON* tr;
-        cJSON_ArrayForEach(tr, trs) {
-            auto& track = seq.tracks[t_idx];
-            int ch = 0;
-            if (lg::json::get_number(tr, "channel_id", ch)) track.channel_id = static_cast<uint8_t>(ch & 0x0F);
-            lg::json::get_bool(tr, "enabled", track.enabled);
-            cJSON* steps = cJSON_GetObjectItem(tr, "steps");
-            if (steps && cJSON_IsArray(steps)) {
-                if (cJSON_GetArraySize(steps) > 16) { snprintf(err_buf, err_size, "too_many_timeline_steps"); return false; }
-                int s_idx = 0;
-                cJSON* st;
-                cJSON_ArrayForEach(st, steps) {
-                    int p_idx = 0, len = 1;
-                    lg::json::get_number(st, "preset_index", p_idx);
-                    lg::json::get_number(st, "length_beats", len);
-                    track.steps[s_idx].preset_index = static_cast<uint8_t>(p_idx & 0x1F);
-                    track.steps[s_idx].length_beats = static_cast<uint8_t>(std::clamp(len, 1, 64));
-                    s_idx++;
-                }
-                track.num_steps = static_cast<uint8_t>(s_idx);
-            }
-            t_idx++;
+    const cJSON* tracks = cJSON_GetObjectItemCaseSensitive(obj, "tracks");
+    if (!tracks) return true;
+    if (!cJSON_IsArray(tracks) || cJSON_GetArraySize(tracks) > 16)
+        return backup_error(err_buf, err_size, "invalid_timeline_tracks");
+    unsigned index = 0;
+    for (const cJSON* item = tracks->child; item; item = item->next, ++index) {
+        auto& track = seq.tracks[index];
+        if (!cJSON_IsObject(item) || !backup_number(item, "channel_id", track.channel_id, 0, 15) ||
+            track.channel_id != index || !backup_bool(item, "enabled", track.enabled))
+            return backup_error(err_buf, err_size, "invalid_timeline_track");
+        const cJSON* steps = cJSON_GetObjectItemCaseSensitive(item, "steps");
+        if (!steps) continue;
+        if (!cJSON_IsArray(steps) || cJSON_GetArraySize(steps) > 16)
+            return backup_error(err_buf, err_size, "invalid_timeline_steps");
+        track.num_steps = 0;
+        for (const cJSON* step = steps->child; step; step = step->next) {
+            auto& out = track.steps[track.num_steps];
+            if (!cJSON_IsObject(step) || !backup_number(step, "preset_index", out.preset_index, 0, kMaxPresets - 1) ||
+                !backup_number(step, "length_beats", out.length_beats, 1, 64))
+                return backup_error(err_buf, err_size, "invalid_timeline_step");
+            ++track.num_steps;
         }
     }
     return true;
 }
 
 static bool parse_calendar_record(cJSON* obj, CalendarSchedule& cal, char* err_buf, size_t err_size) {
-    cJSON* entries = cJSON_GetObjectItem(obj, "entries");
-    if (entries && cJSON_IsArray(entries)) {
-        if (cJSON_GetArraySize(entries) > 8) { snprintf(err_buf, err_size, "too_many_calendar_entries"); return false; }
-        int e_idx = 0;
-        cJSON* ent;
-        cJSON_ArrayForEach(ent, entries) {
-            auto& e = cal.entries[e_idx];
-            int h = 0, m = 0, dow = 0x7F, pi = 0, act = 0, ci = 0;
-            lg::json::get_number(ent, "hour", h);
-            lg::json::get_number(ent, "minute", m);
-            lg::json::get_number(ent, "days_of_week", dow);
-            lg::json::get_number(ent, "preset_index", pi);
-            lg::json::get_number(ent, "action", act);
-            lg::json::get_number(ent, "cue_list_index", ci);
-            lg::json::get_bool(ent, "enabled", e.enabled);
-            e.hour = static_cast<uint8_t>(std::clamp(h, 0, 23));
-            e.minute = static_cast<uint8_t>(std::clamp(m, 0, 59));
-            e.days_of_week = static_cast<uint8_t>(dow & 0x7F);
-            e.preset_index = static_cast<uint8_t>(pi & 0x1F);
-            e.action = static_cast<CalendarAction>(std::clamp(act, 0, 2));
-            e.cue_list_index = static_cast<uint8_t>(ci & 0x07);
-            e_idx++;
-        }
+    if (!cJSON_IsObject(obj) || !backup_integer_tree(obj))
+        return backup_error(err_buf, err_size, "invalid_calendar");
+    const cJSON* entries = cJSON_GetObjectItemCaseSensitive(obj, "entries");
+    if (!entries) return true;
+    if (!cJSON_IsArray(entries) || cJSON_GetArraySize(entries) > 8)
+        return backup_error(err_buf, err_size, "invalid_calendar_entries");
+    unsigned index = 0;
+    for (const cJSON* item = entries->child; item; item = item->next, ++index) {
+        auto& entry = cal.entries[index];
+        uint8_t action = static_cast<uint8_t>(entry.action);
+        if (!cJSON_IsObject(item) || !backup_number(item, "hour", entry.hour, 0, 23) ||
+            !backup_number(item, "minute", entry.minute, 0, 59) ||
+            !backup_number(item, "days_of_week", entry.days_of_week, 0, 127) ||
+            !backup_number(item, "preset_index", entry.preset_index, 0, kMaxPresets - 1) ||
+            !backup_number(item, "action", action, 0, 2) ||
+            !backup_number(item, "cue_list_index", entry.cue_list_index, 0, kMaxCueLists - 1) ||
+            !backup_bool(item, "enabled", entry.enabled))
+            return backup_error(err_buf, err_size, "invalid_calendar_entry");
+        entry.action = static_cast<CalendarAction>(action);
     }
     return true;
 }
 
 // ── Streaming Backup Export (§25, §30, §31) ──
 
+static bool backup_record_missing(esp_err_t error) {
+    return error == ESP_ERR_NOT_FOUND || error == ESP_ERR_NVS_NOT_FOUND;
+}
+
+struct BackupExportScratch {
+    DeviceConfig config{};
+    SceneConfig scene{};
+    SceneMotionConfig motion{};
+    Sequence timeline{};
+    CalendarSchedule calendar{};
+    CueList cue_list{};
+};
+
 esp_err_t get_backup(httpd_req_t* request) {
     if (!api::authorize(request, api::ApiRole::Admin)) return ESP_OK;
-
-    FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
-    if (!api_ptr->config()) {
-        return send_error(request, "500 Internal Server Error", "ConfigStore not available");
+    auto* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+    auto* store = api_ptr->config();
+    if (!store) return send_error(request, "500 Internal Server Error", "config_not_ready");
+    auto scratch = std::unique_ptr<BackupExportScratch>(new (std::nothrow) BackupExportScratch{});
+    if (!scratch) {
+        note_api_allocation_failure();
+        return send_error(request, "500 Internal Server Error", "out_of_memory");
     }
+    if (store->load_config(scratch->config, false) != ESP_OK)
+        return send_error(request, "500 Internal Server Error", "backup_config_load_failed");
 
     const auto& identity = api_ptr->identity();
     char filename[128];
     snprintf(filename, sizeof(filename), "attachment; filename=\"lumigrid-%s-backup.lgbak\"", identity.id);
-
     httpd_resp_set_type(request, "application/x-lumigrid-backup");
     httpd_resp_set_hdr(request, "Content-Disposition", filename);
-
-    uint32_t total_crc = 0;
-    uint32_t record_count = 0;
-
-    auto send_record = [&](cJSON* obj) -> esp_err_t {
-        char* str = cJSON_PrintUnformatted(obj);
-        cJSON_Delete(obj);
-        if (!str) return ESP_FAIL;
-        size_t len = strlen(str);
-        total_crc = esp_rom_crc32_le(total_crc, reinterpret_cast<const uint8_t*>(str), len);
-        esp_err_t err = httpd_resp_send_chunk(request, str, len);
-        cJSON_free(str);
-        if (err != ESP_OK) return err;
-        total_crc = esp_rom_crc32_le(total_crc, reinterpret_cast<const uint8_t*>("\n"), 1);
-        err = httpd_resp_send_chunk(request, "\n", 1);
-        if (err == ESP_OK) record_count++;
-        return err;
+    uint32_t total_crc = 0, record_count = 0;
+    auto send_record = [&](cJSON* object) -> esp_err_t {
+        if (!object) { note_api_allocation_failure(); return ESP_ERR_NO_MEM; }
+        char* text = cJSON_PrintUnformatted(object);
+        cJSON_Delete(object);
+        if (!text) { note_api_allocation_failure(); return ESP_ERR_NO_MEM; }
+        const size_t length = std::strlen(text);
+        esp_err_t error = httpd_resp_send_chunk(request, text, length);
+        if (error == ESP_OK) total_crc = esp_rom_crc32_le(total_crc, reinterpret_cast<const uint8_t*>(text), length);
+        cJSON_free(text);
+        if (error != ESP_OK) return error;
+        error = httpd_resp_send_chunk(request, "\n", 1);
+        if (error == ESP_OK) {
+            total_crc = esp_rom_crc32_le(total_crc, reinterpret_cast<const uint8_t*>("\n"), 1);
+            ++record_count;
+        }
+        return error;
     };
-
-    // 1. Header record (§26)
-    cJSON* hdr = cJSON_CreateObject();
-    cJSON_AddStringToObject(hdr, "type", "header");
-    cJSON_AddNumberToObject(hdr, "schema", 4);
-    cJSON* src = cJSON_CreateObject();
-    cJSON_AddStringToObject(src, "nodeId", identity.id);
-    cJSON_AddStringToObject(src, "family", "led-node");
-    cJSON_AddStringToObject(src, "model", identity.model);
-    cJSON_AddStringToObject(src, "firmwareVersion", identity.fw_version);
-    cJSON_AddStringToObject(src, "hardwareRevision", identity.hw_revision);
-    cJSON_AddNumberToObject(src, "partitionLayoutVersion", kPartitionLayoutVersion);
-    cJSON_AddNumberToObject(src, "configuredFlashBytes", capture_storage().configured_bytes);
-    cJSON_AddItemToObject(hdr, "source", src);
-    cJSON* pol = cJSON_CreateObject();
-    cJSON_AddBoolToObject(pol, "authIncluded", false);
-    cJSON_AddBoolToObject(pol, "networkSecretsIncluded", false);
-    cJSON_AddBoolToObject(pol, "syncSecretIncluded", false);
-    cJSON_AddItemToObject(hdr, "policy", pol);
-    if (send_record(hdr) != ESP_OK) return ESP_FAIL;
-
-    // 2. DeviceConfig record
-    DeviceConfig cfg;
-    api_ptr->config()->load_config(cfg);
-    cJSON* cfg_rec = cJSON_CreateObject();
-    cJSON_AddStringToObject(cfg_rec, "type", "deviceConfig");
-    cJSON_AddItemToObject(cfg_rec, "data", serialize_device_config(cfg));
-    if (send_record(cfg_rec) != ESP_OK) return ESP_FAIL;
-
-    // 3. Scenes
-    for (uint8_t i = 0; i < lg::kMaxPresets; ++i) {
-        SceneConfig sc;
-        if (api_ptr->config()->load_scene(i, sc) == ESP_OK) {
-            cJSON* sc_rec = cJSON_CreateObject();
-            cJSON_AddStringToObject(sc_rec, "type", "scene");
-            cJSON_AddNumberToObject(sc_rec, "index", i);
-            cJSON_AddItemToObject(sc_rec, "data", serialize_scene(sc, i));
-            if (send_record(sc_rec) != ESP_OK) return ESP_FAIL;
-        }
+    auto send_data = [&](const char* type, cJSON* data, int index = -1) -> esp_err_t {
+        BackupJsonBuilder json;
+        cJSON* record = json.object();
+        json.string(record, "type", type);
+        if (index >= 0) json.number(record, "index", index);
+        json.item(record, "data", data);
+        return send_record(json.finish(record));
+    };
+    {
+        BackupJsonBuilder json;
+        cJSON* header = json.object();
+        json.string(header, "type", "header");
+        json.number(header, "schema", 4);
+        cJSON* source = json.object();
+        json.string(source, "nodeId", identity.id);
+        json.string(source, "family", "led-node");
+        json.string(source, "model", identity.model);
+        json.string(source, "firmwareVersion", identity.fw_version);
+        json.string(source, "hardwareRevision", identity.hw_revision);
+        json.number(source, "partitionLayoutVersion", kPartitionLayoutVersion);
+        json.number(source, "configuredFlashBytes", capture_storage().configured_bytes);
+        json.item(header, "source", source);
+        cJSON* policy = json.object();
+        json.boolean(policy, "authIncluded", false);
+        json.boolean(policy, "networkSecretsIncluded", false);
+        json.boolean(policy, "syncSecretIncluded", false);
+        json.item(header, "policy", policy);
+        if (send_record(json.finish(header)) != ESP_OK) return ESP_FAIL;
     }
-
-    // 4. Scene Motion
-    for (uint8_t i = 0; i < lg::kMaxPresets; ++i) {
-        SceneMotionConfig sm;
-        if (api_ptr->config()->load_scene_motion(i, sm) == ESP_OK && (sm.track_count > 0 || sm.transition_curve != TransitionCurve::EaseInOut)) {
-            cJSON* sm_rec = cJSON_CreateObject();
-            cJSON_AddStringToObject(sm_rec, "type", "sceneMotion");
-            cJSON_AddNumberToObject(sm_rec, "index", i);
-            cJSON_AddItemToObject(sm_rec, "data", serialize_scene_motion(sm, i));
-            if (send_record(sm_rec) != ESP_OK) return ESP_FAIL;
-        }
+    if (send_data("deviceConfig", serialize_device_config(scratch->config)) != ESP_OK) return ESP_FAIL;
+    for (uint8_t i = 0; i < kMaxPresets; ++i) {
+        const esp_err_t error = store->load_scene(i, scratch->scene, false);
+        if (error == ESP_OK) {
+            if (send_data("scene", serialize_scene(scratch->scene, i), i) != ESP_OK) return ESP_FAIL;
+        } else if (!backup_record_missing(error)) return error;
     }
-
-    // 5. Timeline / Sequence
-    Sequence seq;
-    if (api_ptr->config()->load_sequence(seq) == ESP_OK) {
-        cJSON* seq_rec = cJSON_CreateObject();
-        cJSON_AddStringToObject(seq_rec, "type", "timeline");
-        cJSON_AddItemToObject(seq_rec, "data", serialize_timeline(seq));
-        if (send_record(seq_rec) != ESP_OK) return ESP_FAIL;
+    for (uint8_t i = 0; i < kMaxPresets; ++i) {
+        const esp_err_t error = store->load_scene_motion(i, scratch->motion);
+        if (error == ESP_OK) {
+            // Include empty records too: restoring them must clear old motion.
+            if (send_data("sceneMotion", serialize_scene_motion(scratch->motion, i), i) != ESP_OK) return ESP_FAIL;
+        } else if (!backup_record_missing(error)) return error;
     }
-
-    // 6. Calendar
-    CalendarSchedule cal;
-    if (api_ptr->config()->load_calendar_schedule(cal) == ESP_OK) {
-        cJSON* cal_rec = cJSON_CreateObject();
-        cJSON_AddStringToObject(cal_rec, "type", "calendar");
-        cJSON_AddItemToObject(cal_rec, "data", serialize_calendar(cal));
-        if (send_record(cal_rec) != ESP_OK) return ESP_FAIL;
+    esp_err_t error = store->load_sequence(scratch->timeline, nullptr, false);
+    if (error == ESP_OK) {
+        if (send_data("timeline", serialize_timeline(scratch->timeline)) != ESP_OK) return ESP_FAIL;
+    } else if (!backup_record_missing(error)) return error;
+    error = store->load_calendar_schedule(scratch->calendar);
+    if (error == ESP_OK) {
+        if (send_data("calendar", serialize_calendar(scratch->calendar)) != ESP_OK) return ESP_FAIL;
+    } else if (!backup_record_missing(error)) return error;
+    for (uint8_t i = 0; i < kMaxCueLists; ++i) {
+        error = store->load_cue_list(i, scratch->cue_list);
+        if (error == ESP_OK) {
+            if (send_data("cueList", serialize_cue_list(scratch->cue_list, i), i) != ESP_OK) return ESP_FAIL;
+        } else if (!backup_record_missing(error)) return error;
     }
-
-    // 7. Cue Lists
-    for (uint8_t i = 0; i < lg::kMaxCueLists; ++i) {
-        CueList cl;
-        if (api_ptr->config()->load_cue_list(i, cl) == ESP_OK && cl.count > 0) {
-            cJSON* cl_rec = cJSON_CreateObject();
-            cJSON_AddStringToObject(cl_rec, "type", "cueList");
-            cJSON_AddNumberToObject(cl_rec, "index", i);
-            cJSON_AddItemToObject(cl_rec, "data", serialize_cue_list(cl, i));
-            if (send_record(cl_rec) != ESP_OK) return ESP_FAIL;
-        }
+    {
+        BackupJsonBuilder json;
+        cJSON* end = json.object();
+        json.string(end, "type", "end");
+        json.number(end, "records", record_count + 1);
+        json.number(end, "checksum", total_crc);
+        if (send_record(json.finish(end)) != ESP_OK) return ESP_FAIL;
     }
-
-    // 8. End record
-    cJSON* end_rec = cJSON_CreateObject();
-    cJSON_AddStringToObject(end_rec, "type", "end");
-    cJSON_AddNumberToObject(end_rec, "records", record_count + 1);
-    cJSON_AddNumberToObject(end_rec, "checksum", total_crc);
-    if (send_record(end_rec) != ESP_OK) return ESP_FAIL;
-
     api::AuditLog::instance().log(api::ApiRole::Admin, "backup_export", "Recovery package v4 exported");
     return httpd_resp_send_chunk(request, nullptr, 0);
 }
@@ -7139,230 +7171,174 @@ struct ParsedBackupPackage {
 static constexpr size_t kMaxRestoreRecordSize = 16384;
 
 static esp_err_t ingest_backup_package(httpd_req_t* request, ParsedBackupPackage& pkg, ConfigStore* store) {
-    if (request->content_len <= 0 || request->content_len > 1024 * 1024) {
-        snprintf(pkg.error, sizeof(pkg.error), "empty_payload");
-        return ESP_ERR_INVALID_ARG;
-    }
+    auto fail = [&](const char* code, esp_err_t error = ESP_ERR_INVALID_ARG) -> esp_err_t {
+        snprintf(pkg.error, sizeof(pkg.error), "%s", code);
+        return error;
+    };
+    if (request->content_len <= 0 || request->content_len > 1024 * 1024)
+        return fail("invalid_payload_size", ESP_ERR_INVALID_SIZE);
+    std::unique_ptr<char[]> line(new (std::nothrow) char[kMaxRestoreRecordSize + 1]);
+    if (!line) { note_api_allocation_failure(); return fail("out_of_memory", ESP_ERR_NO_MEM); }
+    using JsonOwner = std::unique_ptr<cJSON, decltype(&cJSON_Delete)>;
+    size_t line_size = 0;
+    unsigned timeouts = 0;
+    bool first_line = true, legacy = false, header_seen = false, end_seen = false;
+    uint32_t crc = 0, record_count = 0;
+    std::string legacy_payload;
 
-    // Allocate 16 KB line buffer for streaming NDJSON (§33)
-    const size_t kMaxRecordSize = kMaxRestoreRecordSize;
-    std::unique_ptr<char[]> line_buf(new (std::nothrow) char[kMaxRecordSize + 1]);
-    if (!line_buf) {
-        snprintf(pkg.error, sizeof(pkg.error), "out_of_memory");
-        note_api_allocation_failure();
-        return ESP_ERR_NO_MEM;
-    }
+    auto parse_data_record = [&](const char* type, cJSON* record) -> esp_err_t {
+        cJSON* data = cJSON_GetObjectItemCaseSensitive(record, "data");
+        if (!cJSON_IsObject(data)) return fail("missing_record_data");
+        if (std::strcmp(type, "deviceConfig") == 0) {
+            if (pkg.has_device_config) return fail("duplicate_device_config");
+            // Preserve omitted values and board identity from the target node.
+            // This object is heap-owned as part of pkg, not another large local.
+            if (store) {
+                const esp_err_t error = store->load_config(pkg.device_config, false);
+                if (error != ESP_OK) return fail("current_config_load_failed", error);
+            }
+            if (!parse_and_validate_device_config(data, pkg.device_config, pkg.device_config,
+                                                   pkg.error, sizeof(pkg.error))) return ESP_ERR_INVALID_ARG;
+            ConfigStore::ConfigValidationResult validation{};
+            const esp_err_t validated = ConfigStore::validate_config(pkg.device_config, &validation);
+            if (validated != ESP_OK) return fail(validation.first_error[0] ? validation.first_error : "invalid_device_config", validated);
+            pkg.has_device_config = true;
+        } else if (std::strcmp(type, "scene") == 0 || std::strcmp(type, "sceneMotion") == 0) {
+            uint8_t index = 0;
+            if (!lg::json::get_number(record, "index", index) || index >= kMaxPresets)
+                return fail("invalid_scene_index");
+            if (std::strcmp(type, "scene") == 0) {
+                if (pkg.has_scenes[index]) return fail("duplicate_scene");
+                if (!parse_scene_record(data, pkg.scenes[index], pkg.error, sizeof(pkg.error))) return ESP_ERR_INVALID_ARG;
+                pkg.has_scenes[index] = true; ++pkg.scene_count;
+            } else {
+                if (pkg.has_motions[index]) return fail("duplicate_scene_motion");
+                if (!parse_scene_motion_record(data, pkg.motions[index], pkg.error, sizeof(pkg.error))) return ESP_ERR_INVALID_ARG;
+                pkg.has_motions[index] = true; ++pkg.motion_count;
+            }
+        } else if (std::strcmp(type, "cueList") == 0) {
+            uint8_t index = 0;
+            if (!lg::json::get_number(record, "index", index) || index >= kMaxCueLists)
+                return fail("invalid_cue_list_index");
+            if (pkg.has_cue_lists[index]) return fail("duplicate_cue_list");
+            if (!parse_cue_list_record(data, pkg.cue_lists[index], pkg.error, sizeof(pkg.error))) return ESP_ERR_INVALID_ARG;
+            pkg.has_cue_lists[index] = true; ++pkg.cue_list_count;
+        } else if (std::strcmp(type, "timeline") == 0) {
+            if (pkg.has_timeline) return fail("duplicate_timeline");
+            if (!parse_timeline_record(data, pkg.timeline, pkg.error, sizeof(pkg.error))) return ESP_ERR_INVALID_ARG;
+            pkg.has_timeline = true;
+        } else if (std::strcmp(type, "calendar") == 0) {
+            if (pkg.has_calendar) return fail("duplicate_calendar");
+            if (!parse_calendar_record(data, pkg.calendar, pkg.error, sizeof(pkg.error))) return ESP_ERR_INVALID_ARG;
+            pkg.has_calendar = true;
+        } else return fail("unknown_record_type");
+        return ESP_OK;
+    };
 
     int remaining = request->content_len;
-    size_t line_pos = 0;
-    bool is_first_line = true;
-    unsigned timeouts = 0;
-    bool is_legacy_v3 = false;
-    std::string v3_payload;
-
     while (remaining > 0) {
         char ch = 0;
-        int ret = httpd_req_recv(request, &ch, 1);
-        if (ret == HTTPD_SOCK_ERR_TIMEOUT) {
-            if (++timeouts >= 3) { snprintf(pkg.error, sizeof(pkg.error), "receive_timeout"); return ESP_ERR_TIMEOUT; }
+        const int received = httpd_req_recv(request, &ch, 1);
+        if (received == HTTPD_SOCK_ERR_TIMEOUT) {
+            if (++timeouts >= 3) return fail("receive_timeout", ESP_ERR_TIMEOUT);
             continue;
         }
-        if (ret <= 0) {
-            snprintf(pkg.error, sizeof(pkg.error), "receive_error");
-            return ESP_FAIL;
+        if (received != 1) return fail("receive_error", ESP_FAIL);
+        --remaining;
+        if (ch != '\n') {
+            if (line_size == kMaxRestoreRecordSize) return fail("record_too_large", ESP_ERR_INVALID_SIZE);
+            line[line_size++] = ch;
         }
-        remaining--;
-
-        if (is_first_line && line_pos == 0 && ch == '{') {
-            // Check if legacy v3 (does not start with NDJSON header or is a single large JSON)
+        if (ch != '\n' && remaining != 0) continue;
+        line[line_size] = '\0';
+        JsonOwner record(nullptr, &cJSON_Delete);
+        if (first_line) {
+            first_line = false;
+            record.reset(parse_admitted_json(line.get(), line_size));
+            // A v4 header is a complete first line. Legacy v3 can be pretty
+            // printed, so retain a bounded payload and validate its version.
+            legacy = !record || !cJSON_GetObjectItemCaseSensitive(record.get(), "type");
         }
-
-        if (ch == '\n' || remaining == 0) {
-            if (ch != '\n' && remaining == 0) {
-                if (line_pos >= kMaxRecordSize) {
-                    snprintf(pkg.error, sizeof(pkg.error), "record_too_large");
-                    return ESP_ERR_INVALID_SIZE;
-                }
-                line_buf[line_pos++] = ch;
-            }
-            line_buf[line_pos] = '\0';
-
-            if (line_pos > 0) {
-                // If legacy v3 detected on first line
-                if (is_first_line) {
-                    is_first_line = false;
-                    if (strstr(line_buf.get(), "\"version\":3") != nullptr || strstr(line_buf.get(), "\"presets\":") != nullptr) {
-                        is_legacy_v3 = true;
-                        v3_payload.reserve(std::min<int>(request->content_len, 32768));
-                    }
-                }
-
-                if (is_legacy_v3) {
-                    if (v3_payload.size() + line_pos > 32768) {
-                        snprintf(pkg.error, sizeof(pkg.error), "legacy_v3_payload_too_large");
-                        return ESP_ERR_INVALID_SIZE;
-                    }
-                    v3_payload.append(line_buf.get(), line_pos);
-                    if (ch == '\n') v3_payload.push_back('\n');
-                    line_pos = 0;
-                    continue;
-                }
-
-                // Parse v4 NDJSON record
-                cJSON* rec = parse_admitted_json(line_buf.get(), line_pos);
-                if (!rec) {
-                    snprintf(pkg.error, sizeof(pkg.error), "malformed_record");
-                    return ESP_ERR_INVALID_ARG;
-                }
-
-                cJSON* type_j = cJSON_GetObjectItem(rec, "type");
-                if (!type_j || !cJSON_IsString(type_j)) {
-                    cJSON_Delete(rec);
-                    snprintf(pkg.error, sizeof(pkg.error), "missing_record_type");
-                    return ESP_ERR_INVALID_ARG;
-                }
-
-                const char* rtype = type_j->valuestring;
-                if (strcmp(rtype, "header") == 0) {
-                    cJSON* sch_j = cJSON_GetObjectItem(rec, "schema");
-                    if (sch_j && cJSON_IsNumber(sch_j)) pkg.schema = static_cast<uint8_t>(sch_j->valueint);
-                    cJSON* src_j = cJSON_GetObjectItem(rec, "source");
-                    if (src_j) {
-                        lg::json::get_string(src_j, "nodeId", pkg.node_id, sizeof(pkg.node_id));
-                        lg::json::get_string(src_j, "family", pkg.family, sizeof(pkg.family));
-                        lg::json::get_string(src_j, "model", pkg.model, sizeof(pkg.model));
-                        lg::json::get_string(src_j, "firmwareVersion", pkg.firmware_version, sizeof(pkg.firmware_version));
-                    }
-                } else if (strcmp(rtype, "deviceConfig") == 0) {
-                    cJSON* data = cJSON_GetObjectItem(rec, "data");
-                    if (data) {
-                        DeviceConfig dummy_cur{};
-                        if (!parse_and_validate_device_config(data, dummy_cur, pkg.device_config, pkg.error, sizeof(pkg.error))) {
-                            cJSON_Delete(rec);
-                            return ESP_ERR_INVALID_ARG;
-                        }
-                        pkg.has_device_config = true;
-                    }
-                } else if (strcmp(rtype, "scene") == 0) {
-                    int idx = -1;
-                    if (lg::json::get_number(rec, "index", idx) && idx >= 0 && idx < lg::kMaxPresets) {
-                        cJSON* data = cJSON_GetObjectItem(rec, "data");
-                        if (data && parse_scene_record(data, pkg.scenes[idx], pkg.error, sizeof(pkg.error))) {
-                            pkg.has_scenes[idx] = true;
-                            pkg.scene_count++;
-                        } else {
-                            cJSON_Delete(rec);
-                            return ESP_ERR_INVALID_ARG;
-                        }
-                    }
-                } else if (strcmp(rtype, "sceneMotion") == 0) {
-                    int idx = -1;
-                    if (lg::json::get_number(rec, "index", idx) && idx >= 0 && idx < lg::kMaxPresets) {
-                        cJSON* data = cJSON_GetObjectItem(rec, "data");
-                        if (data && parse_scene_motion_record(data, pkg.motions[idx], pkg.error, sizeof(pkg.error))) {
-                            pkg.has_motions[idx] = true;
-                            pkg.motion_count++;
-                        } else {
-                            cJSON_Delete(rec);
-                            return ESP_ERR_INVALID_ARG;
-                        }
-                    }
-                } else if (strcmp(rtype, "timeline") == 0) {
-                    cJSON* data = cJSON_GetObjectItem(rec, "data");
-                    if (data && parse_timeline_record(data, pkg.timeline, pkg.error, sizeof(pkg.error))) {
-                        pkg.has_timeline = true;
-                    } else {
-                        cJSON_Delete(rec);
-                        return ESP_ERR_INVALID_ARG;
-                    }
-                } else if (strcmp(rtype, "calendar") == 0) {
-                    cJSON* data = cJSON_GetObjectItem(rec, "data");
-                    if (data && parse_calendar_record(data, pkg.calendar, pkg.error, sizeof(pkg.error))) {
-                        pkg.has_calendar = true;
-                    } else {
-                        cJSON_Delete(rec);
-                        return ESP_ERR_INVALID_ARG;
-                    }
-                } else if (strcmp(rtype, "cueList") == 0) {
-                    int idx = -1;
-                    if (lg::json::get_number(rec, "index", idx) && idx >= 0 && idx < lg::kMaxCueLists) {
-                        cJSON* data = cJSON_GetObjectItem(rec, "data");
-                        if (data && parse_cue_list_record(data, pkg.cue_lists[idx], pkg.error, sizeof(pkg.error))) {
-                            pkg.has_cue_lists[idx] = true;
-                            pkg.cue_list_count++;
-                        } else {
-                            cJSON_Delete(rec);
-                            return ESP_ERR_INVALID_ARG;
-                        }
-                    }
-                } else if (strcmp(rtype, "end") == 0) {
-                    lg::json::get_number(rec, "checksum", pkg.checksum);
-                }
-
-                cJSON_Delete(rec);
-            }
-            line_pos = 0;
+        if (legacy) {
+            const size_t appended = line_size + (ch == '\n' ? 1u : 0u);
+            if (appended > 32768u - legacy_payload.size()) return fail("legacy_v3_payload_too_large", ESP_ERR_INVALID_SIZE);
+            legacy_payload.append(line.get(), line_size);
+            if (ch == '\n') legacy_payload.push_back('\n');
+            line_size = 0;
+            continue;
+        }
+        if (end_seen) return fail("record_after_end");
+        if (!record) record.reset(parse_admitted_json(line.get(), line_size));
+        if (!record) return fail("malformed_record");
+        const cJSON* type = cJSON_GetObjectItemCaseSensitive(record.get(), "type");
+        if (!cJSON_IsString(type) || !type->valuestring) return fail("missing_record_type");
+        if (std::strcmp(type->valuestring, "header") == 0) {
+            uint8_t schema = 0;
+            if (header_seen || record_count != 0) return fail("duplicate_header");
+            if (!lg::json::get_number(record.get(), "schema", schema) || schema != 4) return fail("unsupported_backup_schema");
+            const cJSON* source = cJSON_GetObjectItemCaseSensitive(record.get(), "source");
+            if (!cJSON_IsObject(source) || !lg::json::get_string(source, "family", pkg.family, sizeof(pkg.family)) ||
+                std::strcmp(pkg.family, "led-node") != 0) return fail("backup_family_mismatch");
+            if (!backup_string(source, "nodeId", pkg.node_id, sizeof(pkg.node_id)) ||
+                !backup_string(source, "model", pkg.model, sizeof(pkg.model)) ||
+                !backup_string(source, "firmwareVersion", pkg.firmware_version, sizeof(pkg.firmware_version)))
+                return fail("invalid_backup_identity");
+            pkg.schema = schema; header_seen = true;
+        } else if (!header_seen) return fail("missing_header");
+        else if (std::strcmp(type->valuestring, "end") == 0) {
+            uint32_t expected_count = 0, expected_crc = 0;
+            if (!lg::json::get_number(record.get(), "records", expected_count) || expected_count != record_count + 1)
+                return fail("backup_record_count_mismatch");
+            if (!lg::json::get_number(record.get(), "checksum", expected_crc) || expected_crc != crc)
+                return fail("backup_checksum_mismatch");
+            pkg.checksum = crc; end_seen = true;
         } else {
-            if (line_pos >= kMaxRecordSize) {
-                snprintf(pkg.error, sizeof(pkg.error), "record_too_large");
-                return ESP_ERR_INVALID_SIZE;
-            }
-            line_buf[line_pos++] = ch;
+            const esp_err_t error = parse_data_record(type->valuestring, record.get());
+            if (error != ESP_OK) return error;
         }
+        if (!end_seen) {
+            crc = esp_rom_crc32_le(crc, reinterpret_cast<const uint8_t*>(line.get()), line_size);
+            if (ch == '\n') crc = esp_rom_crc32_le(crc, reinterpret_cast<const uint8_t*>("\n"), 1);
+            ++record_count;
+        }
+        line_size = 0;
     }
-
-    // Handle legacy v3 if detected (§86)
-    if (is_legacy_v3) {
+    if (legacy) {
+        JsonOwner root(parse_admitted_json(legacy_payload.data(), legacy_payload.size()), &cJSON_Delete);
+        uint8_t version = 0;
+        if (!root || !lg::json::get_number(root.get(), "version", version) || version != 3)
+            return fail("unsupported_legacy_backup");
         pkg.schema = 3;
-        cJSON* v3_root = parse_admitted_json(v3_payload.c_str(), v3_payload.size());
-        if (!v3_root) {
-            snprintf(pkg.error, sizeof(pkg.error), "malformed_v3_json");
-            return ESP_ERR_INVALID_ARG;
+        pkg.checksum = esp_rom_crc32_le(0, reinterpret_cast<const uint8_t*>(legacy_payload.data()), legacy_payload.size());
+        // Wrap borrowed legacy data only for the common validation path. The
+        // wrapper owns reference nodes, never the root's source objects.
+        auto legacy_record = [&](const char* type, cJSON* data, int index) -> esp_err_t {
+            JsonOwner wrapper(cJSON_CreateObject(), &cJSON_Delete);
+            if (!wrapper) return fail("out_of_memory", ESP_ERR_NO_MEM);
+            if (index >= 0 && !cJSON_AddNumberToObject(wrapper.get(), "index", index)) return fail("out_of_memory", ESP_ERR_NO_MEM);
+            if (!cJSON_AddItemReferenceToObject(wrapper.get(), "data", data)) return fail("out_of_memory", ESP_ERR_NO_MEM);
+            return parse_data_record(type, wrapper.get());
+        };
+        cJSON* config = cJSON_GetObjectItemCaseSensitive(root.get(), "config");
+        if (config) {
+            const esp_err_t error = legacy_record("deviceConfig", config, -1);
+            if (error != ESP_OK) return error;
         }
-        cJSON* cfg_j = cJSON_GetObjectItem(v3_root, "config");
-        if (cfg_j) {
-            DeviceConfig dummy_cur{};
-            parse_and_validate_device_config(cfg_j, dummy_cur, pkg.device_config, pkg.error, sizeof(pkg.error));
-            pkg.has_device_config = true;
-        }
-        cJSON* presets_arr = cJSON_GetObjectItem(v3_root, "presets");
-        if (presets_arr && cJSON_IsArray(presets_arr)) {
-            cJSON* p;
-            cJSON_ArrayForEach(p, presets_arr) {
-                int idx = -1;
-                if (lg::json::get_number(p, "index", idx) && idx >= 0 && idx < lg::kMaxPresets) {
-                    parse_scene_record(p, pkg.scenes[idx], pkg.error, sizeof(pkg.error));
-                    pkg.has_scenes[idx] = true;
-                    pkg.scene_count++;
-                }
+        struct LegacyArray { const char* key; const char* type; };
+        for (const LegacyArray& source : {LegacyArray{"presets", "scene"}, {"scene_motion", "sceneMotion"}, {"cue_lists", "cueList"}}) {
+            cJSON* array = cJSON_GetObjectItemCaseSensitive(root.get(), source.key);
+            if (!array) continue;
+            if (!cJSON_IsArray(array)) return fail("invalid_legacy_record_array");
+            for (cJSON* item = array->child; item; item = item->next) {
+                uint8_t index = 0;
+                if (!cJSON_IsObject(item) || !lg::json::get_number(item, "index", index)) return fail("invalid_legacy_index");
+                const esp_err_t error = legacy_record(source.type, item, index);
+                if (error != ESP_OK) return error;
             }
         }
-        cJSON* motion_arr = cJSON_GetObjectItem(v3_root, "scene_motion");
-        if (motion_arr && cJSON_IsArray(motion_arr)) {
-            cJSON* m;
-            cJSON_ArrayForEach(m, motion_arr) {
-                int idx = -1;
-                if (lg::json::get_number(m, "index", idx) && idx >= 0 && idx < lg::kMaxPresets) {
-                    parse_scene_motion_record(m, pkg.motions[idx], pkg.error, sizeof(pkg.error));
-                    pkg.has_motions[idx] = true;
-                    pkg.motion_count++;
-                }
-            }
-        }
-        cJSON* cl_arr = cJSON_GetObjectItem(v3_root, "cue_lists");
-        if (cl_arr && cJSON_IsArray(cl_arr)) {
-            cJSON* cl_item;
-            cJSON_ArrayForEach(cl_item, cl_arr) {
-                int idx = -1;
-                if (lg::json::get_number(cl_item, "index", idx) && idx >= 0 && idx < lg::kMaxCueLists) {
-                    parse_cue_list_record(cl_item, pkg.cue_lists[idx], pkg.error, sizeof(pkg.error));
-                    pkg.has_cue_lists[idx] = true;
-                    pkg.cue_list_count++;
-                }
-            }
-        }
-        cJSON_Delete(v3_root);
-    }
+    } else if (!header_seen || !end_seen) return fail("incomplete_backup");
+    if (!pkg.has_device_config && !pkg.scene_count && !pkg.motion_count &&
+        !pkg.cue_list_count && !pkg.has_timeline && !pkg.has_calendar) return fail("empty_backup");
 
     // Product family check (§37)
     if (strlen(pkg.family) > 0 && strcmp(pkg.family, "led-node") != 0) {
@@ -7386,7 +7362,7 @@ static esp_err_t ingest_backup_package(httpd_req_t* request, ParsedBackupPackage
     };
 
     // Timeline cross-ref
-    if (pkg.has_timeline && pkg.timeline.enabled) {
+    if (pkg.has_timeline) {
         for (uint8_t t = 0; t < 16; ++t) {
             const auto& tr = pkg.timeline.tracks[t];
             if (tr.enabled) {
@@ -7446,7 +7422,9 @@ esp_err_t post_restore_validate(httpd_req_t* request) {
     }
 
     constexpr uint32_t scratch = sizeof(ParsedBackupPackage) + kMaxRestoreRecordSize + 32768u;
-    if (!check_memory_admission(scratch).accepted) return send_memory_admission_error(request, scratch);
+    if (!check_memory_admission_snapshot(capture_runtime_memory(), scratch,
+            kPostTopologyHeapReserveBytes, sizeof(ParsedBackupPackage)).accepted)
+        return send_memory_admission_error(request, scratch);
     std::unique_ptr<ParsedBackupPackage> storage(new (std::nothrow) ParsedBackupPackage{});
     if (!storage) { note_api_allocation_failure(); return send_memory_admission_error(request, scratch); }
     auto& pkg = *storage;
@@ -7505,207 +7483,321 @@ struct RestoreRollbackSnapshot {
     SceneMotionConfig old_motions[lg::kMaxPresets] = {};
     bool has_cue_lists[lg::kMaxCueLists] = {};
     CueList old_cue_lists[lg::kMaxCueLists] = {};
+    bool has_timeline = false;
     Sequence old_timeline{};
+    bool has_calendar = false;
     CalendarSchedule old_calendar{};
+    bool attempted_scenes[lg::kMaxPresets] = {};
+    bool attempted_motions[lg::kMaxPresets] = {};
+    bool attempted_cue_lists[lg::kMaxCueLists] = {};
+    bool attempted_timeline = false;
+    bool attempted_calendar = false;
+    bool attempted_config = false;
 };
+
+struct RestoreVerifyScratch {
+    DeviceConfig config{};
+    SceneConfig scene{};
+    SceneMotionConfig motion{};
+    CueList cue_list{};
+    Sequence timeline{};
+    CalendarSchedule calendar{};
+};
+
+template<typename T>
+static bool restore_payload_matches(const T& expected, const T& actual) {
+    // ConfigStore regenerates the final checksum on save. Compare the complete
+    // preceding persisted payload so a valid but stale record is not accepted.
+    return std::memcmp(&expected, &actual, offsetof(T, checksum)) == 0;
+}
 
 esp_err_t post_restore(httpd_req_t* request) {
     if (!api::authorize(request, api::ApiRole::Admin)) return ESP_OK;
 
     FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
-    if (!api_ptr->config()) {
-        return send_error(request, "500 Internal Server Error", "ConfigStore not available");
-    }
-
-    if (api_ptr->current_maintenance_mode() != MaintenanceMode::None) {
+    ConfigStore* store = api_ptr->config();
+    if (!store) return send_error(request, "500 Internal Server Error", "ConfigStore not available");
+    if (api_ptr->current_maintenance_mode() != MaintenanceMode::None)
         return send_error(request, "409 Conflict", "maintenance_job_active");
+
+    constexpr size_t scratch_bytes = sizeof(ParsedBackupPackage) + sizeof(RestoreRollbackSnapshot) +
+                                     sizeof(RestoreVerifyScratch) + kMaxRestoreRecordSize + 32768u;
+    const MemoryAdmissionResult admission = check_memory_admission_snapshot(
+        capture_runtime_memory(), scratch_bytes, kPostTopologyHeapReserveBytes,
+        std::max(sizeof(ParsedBackupPackage), sizeof(RestoreRollbackSnapshot)));
+    if (!admission.accepted) {
+        char err_body[192];
+        snprintf(err_body, sizeof(err_body),
+                 "{\"error\":\"insufficient_runtime_memory\",\"requiredBytes\":%u,\"freeBytes\":%u,\"reserveBytes\":%u}",
+                 (unsigned)admission.required_bytes, (unsigned)capture_runtime_memory().free_8bit,
+                 (unsigned)admission.reserve_bytes);
+        httpd_resp_set_status(request, "507 Insufficient Storage");
+        httpd_resp_set_type(request, "application/json");
+        return httpd_resp_sendstr(request, err_body);
     }
 
-    // LG-038.3 §43/§49: restore stays record-bounded; its known scratch cost
-    // (kMaxRecordSize parse buffer + one record's cJSON tree) must be
-    // allocatable while preserving the post-operation reserve.
-    {
-        const MemoryAdmissionResult admission =
-            check_memory_admission(sizeof(ParsedBackupPackage) + sizeof(RestoreRollbackSnapshot) + kMaxRestoreRecordSize + 32768u);
-        if (!admission.accepted) {
-            char err_body[192];
-            snprintf(err_body, sizeof(err_body),
-                     "{\"error\":\"insufficient_runtime_memory\",\"requiredBytes\":%u,\"freeBytes\":%u,\"reserveBytes\":%u}",
-                     (unsigned)admission.required_bytes,
-                     (unsigned)capture_runtime_memory().free_8bit,
-                     (unsigned)admission.reserve_bytes);
-            httpd_resp_set_status(request, "507 Insufficient Storage");
-            httpd_resp_set_type(request, "application/json");
-            return httpd_resp_sendstr(request, err_body);
-        }
-    }
-
-    // Start Restore Job BEFORE mutation (§38)
-    uint32_t cmd_id = api_ptr->command_journal().accept(CommandDomain::Restore);
+    const uint32_t cmd_id = api_ptr->command_journal().accept(CommandDomain::Restore);
     uint32_t job_id = 0;
-    esp_err_t job_err = api_ptr->job_manager().start_job(JobType::Restore, &job_id);
-    if (job_err != ESP_OK) {
-        api_ptr->command_journal().failed(cmd_id, job_err);
+    const esp_err_t job_error = api_ptr->job_manager().start_job(JobType::Restore, &job_id);
+    if (job_error != ESP_OK) {
+        api_ptr->command_journal().failed(cmd_id, job_error);
         return send_error(request, "409 Conflict", "job_already_running");
     }
+    auto fail = [&](esp_err_t error, const char* detail, const char* status = "500 Internal Server Error") {
+        api_ptr->job_manager().fail_job(job_id, error, detail);
+        api_ptr->command_journal().failed(cmd_id, error);
+        api::AuditLog::instance().log(api::ApiRole::Admin, "restore_failed", detail);
+        return send_error(request, status, detail);
+    };
     api_ptr->job_manager().update_progress(job_id, JobState::Preparing, 5);
 
-    // Ingest and validate package
     std::unique_ptr<ParsedBackupPackage> package_storage(new (std::nothrow) ParsedBackupPackage{});
     if (!package_storage) {
         note_api_allocation_failure();
-        api_ptr->job_manager().fail_job(job_id, ESP_ERR_NO_MEM, "out_of_memory");
-        api_ptr->command_journal().failed(cmd_id, ESP_ERR_NO_MEM);
-        return send_memory_admission_error(request, sizeof(ParsedBackupPackage));
+        return fail(ESP_ERR_NO_MEM, "out_of_memory");
     }
     auto& pkg = *package_storage;
-    esp_err_t parse_err = ingest_backup_package(request, pkg, api_ptr->config());
-    if (parse_err != ESP_OK) {
-        api_ptr->job_manager().fail_job(job_id, parse_err, pkg.error);
-        api_ptr->command_journal().failed(cmd_id, parse_err);
-        return send_error(request, "400 Bad Request", pkg.error);
+    esp_err_t error = ingest_backup_package(request, pkg, store);
+    if (error != ESP_OK) return fail(error, pkg.error, "400 Bad Request");
+
+    // A partial package cannot establish that an earlier interrupted restore
+    // has been repaired. Keep that marker for explicit recovery/recommissioning.
+    bool marker_active = true;
+    error = store->read_restore_marker(marker_active);
+    if (error != ESP_OK) return fail(error, "restore_marker_read_failed");
+    if (marker_active) return fail(ESP_ERR_INVALID_STATE, "restore_recovery_required", "409 Conflict");
+
+    std::unique_ptr<RestoreRollbackSnapshot> snapshot(new (std::nothrow) RestoreRollbackSnapshot{});
+    std::unique_ptr<RestoreVerifyScratch> verify(new (std::nothrow) RestoreVerifyScratch{});
+    if (!snapshot || !verify) {
+        note_api_allocation_failure();
+        return fail(ESP_ERR_NO_MEM, "out_of_memory_for_snapshot");
+    }
+
+    // Read only affected records, and distinguish absence from read/corruption
+    // errors. Snapshot reads must not persist migrations or create defaults.
+    if (pkg.has_device_config) {
+        error = store->load_config(snapshot->old_cfg, false);
+        if (error != ESP_OK) return fail(error, "snapshot_config_failed");
+        pkg.device_config.sync_token = snapshot->old_cfg.sync_token;
+        std::memcpy(pkg.device_config.serial_number, snapshot->old_cfg.serial_number, sizeof(pkg.device_config.serial_number));
+        std::memcpy(pkg.device_config.hardware_revision, snapshot->old_cfg.hardware_revision, sizeof(pkg.device_config.hardware_revision));
+        std::memcpy(pkg.device_config.admin_token, snapshot->old_cfg.admin_token, sizeof(pkg.device_config.admin_token));
+        std::memcpy(pkg.device_config.installer_token, snapshot->old_cfg.installer_token, sizeof(pkg.device_config.installer_token));
+        std::memcpy(pkg.device_config.operator_token, snapshot->old_cfg.operator_token, sizeof(pkg.device_config.operator_token));
+        error = ConfigStore::validate_config(pkg.device_config);
+        if (error != ESP_OK) return fail(error, "invalid_restored_config", "400 Bad Request");
+    }
+    for (uint8_t i = 0; i < lg::kMaxPresets; ++i) {
+        if (pkg.has_scenes[i]) {
+            error = store->load_scene(i, snapshot->old_scenes[i], false);
+            if (error != ESP_OK && !backup_record_missing(error)) return fail(error, "snapshot_scene_failed");
+            snapshot->has_scenes[i] = error == ESP_OK;
+        }
+        // Deleting a newly created scene during rollback also deletes its
+        // motion. Preserve a pre-existing orphan motion even if absent in pkg.
+        if (pkg.has_motions[i] || (pkg.has_scenes[i] && !snapshot->has_scenes[i])) {
+            error = store->load_scene_motion(i, snapshot->old_motions[i]);
+            if (error != ESP_OK && !backup_record_missing(error)) return fail(error, "snapshot_motion_failed");
+            snapshot->has_motions[i] = error == ESP_OK;
+        }
+    }
+    for (uint8_t i = 0; i < lg::kMaxCueLists; ++i) {
+        if (!pkg.has_cue_lists[i]) continue;
+        error = store->load_cue_list(i, snapshot->old_cue_lists[i]);
+        if (error != ESP_OK && !backup_record_missing(error)) return fail(error, "snapshot_cue_list_failed");
+        snapshot->has_cue_lists[i] = error == ESP_OK;
+    }
+    if (pkg.has_timeline) {
+        error = store->load_sequence(snapshot->old_timeline, &snapshot->has_timeline, false);
+        if (error != ESP_OK) return fail(error, "snapshot_timeline_failed");
+        pkg.timeline.enabled = false; // ConfigStore's persisted compatibility value.
+    }
+    if (pkg.has_calendar) {
+        error = store->load_calendar_schedule(snapshot->old_calendar, &snapshot->has_calendar);
+        if (error != ESP_OK) return fail(error, "snapshot_calendar_failed");
     }
     api_ptr->job_manager().update_progress(job_id, JobState::Preparing, 15);
 
-    // Capture rollback snapshot before writing (§39)
-    std::unique_ptr<RestoreRollbackSnapshot> snapshot(new (std::nothrow) RestoreRollbackSnapshot());
-    if (!snapshot) {
-        api_ptr->job_manager().fail_job(job_id, ESP_ERR_NO_MEM, "out_of_memory_for_snapshot");
-        api_ptr->command_journal().failed(cmd_id, ESP_ERR_NO_MEM);
-        return send_error(request, "500 Internal Server Error", "out_of_memory");
-    }
+    error = store->set_restore_in_progress(true, pkg.checksum);
+    if (error != ESP_OK) return fail(error, "restore_marker_set_failed");
+    uint32_t marked_checksum = 0;
+    error = store->read_restore_marker(marker_active, &marked_checksum);
+    if (error != ESP_OK || !marker_active || marked_checksum != pkg.checksum)
+        return fail(error != ESP_OK ? error : ESP_ERR_INVALID_STATE, "restore_marker_verify_failed");
 
-    api_ptr->config()->load_config(snapshot->old_cfg);
-    for (uint8_t i = 0; i < lg::kMaxPresets; ++i) {
-        if (api_ptr->config()->load_scene(i, snapshot->old_scenes[i]) == ESP_OK) snapshot->has_scenes[i] = true;
-        if (api_ptr->config()->load_scene_motion(i, snapshot->old_motions[i]) == ESP_OK) snapshot->has_motions[i] = true;
-    }
-    for (uint8_t i = 0; i < lg::kMaxCueLists; ++i) {
-        if (api_ptr->config()->load_cue_list(i, snapshot->old_cue_lists[i]) == ESP_OK) snapshot->has_cue_lists[i] = true;
-    }
-    api_ptr->config()->load_sequence(snapshot->old_timeline);
-    api_ptr->config()->load_calendar_schedule(snapshot->old_calendar);
-
-    // Set power-loss-safe restore marker in NVS (§41)
-    api_ptr->config()->set_restore_in_progress(true, pkg.checksum);
-
-    api_ptr->job_manager().update_progress(job_id, JobState::Running, 20);
-
-    auto rollback_all = [&]() {
-        ESP_LOGE("restore", "Rolling back previous state after restore failure!");
+    auto save_scene_checked = [&](uint8_t index, const SceneConfig& value) -> esp_err_t {
+        esp_err_t e = store->save_scene(index, value);
+        if (e == ESP_OK) e = store->load_scene(index, verify->scene, false);
+        return e == ESP_OK && !restore_payload_matches(value, verify->scene) ? ESP_ERR_INVALID_STATE : e;
+    };
+    auto save_motion_checked = [&](uint8_t index, const SceneMotionConfig& value) -> esp_err_t {
+        esp_err_t e = store->save_scene_motion(index, value);
+        if (e == ESP_OK) e = store->load_scene_motion(index, verify->motion);
+        return e == ESP_OK && !restore_payload_matches(value, verify->motion) ? ESP_ERR_INVALID_STATE : e;
+    };
+    auto save_cue_checked = [&](uint8_t index, const CueList& value) -> esp_err_t {
+        esp_err_t e = store->save_cue_list(index, value);
+        if (e == ESP_OK) e = store->load_cue_list(index, verify->cue_list);
+        return e == ESP_OK && !restore_payload_matches(value, verify->cue_list) ? ESP_ERR_INVALID_STATE : e;
+    };
+    auto save_timeline_checked = [&](const Sequence& value) -> esp_err_t {
+        esp_err_t e = store->save_sequence(value);
+        bool present = false;
+        if (e == ESP_OK) e = store->load_sequence(verify->timeline, &present, false);
+        return e == ESP_OK && (!present || !restore_payload_matches(value, verify->timeline)) ? ESP_ERR_INVALID_STATE : e;
+    };
+    auto save_calendar_checked = [&](const CalendarSchedule& value) -> esp_err_t {
+        esp_err_t e = store->save_calendar_schedule(value);
+        bool present = false;
+        if (e == ESP_OK) e = store->load_calendar_schedule(verify->calendar, &present);
+        return e == ESP_OK && (!present || !restore_payload_matches(value, verify->calendar)) ? ESP_ERR_INVALID_STATE : e;
+    };
+    auto save_config_checked = [&](const DeviceConfig& value) -> esp_err_t {
+        esp_err_t e = store->save_config(value);
+        if (e == ESP_OK) e = store->load_config(verify->config, false);
+        return e == ESP_OK && !restore_payload_matches(value, verify->config) ? ESP_ERR_INVALID_STATE : e;
+    };
+    auto retain_marker = [&]() -> esp_err_t {
+        bool active = true;
+        uint32_t checksum = 0;
+        esp_err_t e = store->read_restore_marker(active, &checksum);
+        if (e == ESP_OK && active && checksum == pkg.checksum) return ESP_OK;
+        e = store->set_restore_in_progress(true, pkg.checksum);
+        if (e != ESP_OK) return e;
+        e = store->read_restore_marker(active, &checksum);
+        return e == ESP_OK && (!active || checksum != pkg.checksum) ? ESP_ERR_INVALID_STATE : e;
+    };
+    auto clear_marker_checked = [&]() -> esp_err_t {
+        esp_err_t e = store->set_restore_in_progress(false);
+        if (e == ESP_OK) {
+            bool active = true;
+            e = store->read_restore_marker(active);
+            if (e == ESP_OK && active) e = ESP_ERR_INVALID_STATE;
+        }
+        if (e != ESP_OK && retain_marker() != ESP_OK)
+            ESP_LOGE("restore", "Failed to re-arm restore marker after clear failure");
+        return e;
+    };
+    auto rollback = [&]() -> esp_err_t {
+        esp_err_t first_error = ESP_OK;
+        auto remember = [&](esp_err_t e) { if (first_error == ESP_OK && e != ESP_OK) first_error = e; };
+        auto expect_missing = [](esp_err_t e) -> esp_err_t {
+            return backup_record_missing(e) ? ESP_OK : (e == ESP_OK ? ESP_ERR_INVALID_STATE : e);
+        };
         for (uint8_t i = 0; i < lg::kMaxPresets; ++i) {
-            if (snapshot->has_scenes[i]) api_ptr->config()->save_scene(i, snapshot->old_scenes[i]);
-            else api_ptr->config()->delete_scene(i);
-            if (snapshot->has_motions[i]) api_ptr->config()->save_scene_motion(i, snapshot->old_motions[i]);
-            else api_ptr->config()->delete_scene_motion(i);
+            if (snapshot->attempted_scenes[i]) {
+                if (snapshot->has_scenes[i]) remember(save_scene_checked(i, snapshot->old_scenes[i]));
+                else {
+                    // Even a failing delete can have removed motion already.
+                    snapshot->attempted_motions[i] = true;
+                    remember(store->delete_scene(i));
+                    remember(expect_missing(store->load_scene(i, verify->scene, false)));
+                }
+            }
+            if (snapshot->attempted_motions[i]) {
+                if (snapshot->has_motions[i]) remember(save_motion_checked(i, snapshot->old_motions[i]));
+                else {
+                    remember(store->delete_scene_motion(i));
+                    remember(expect_missing(store->load_scene_motion(i, verify->motion)));
+                }
+            }
         }
         for (uint8_t i = 0; i < lg::kMaxCueLists; ++i) {
-            if (snapshot->has_cue_lists[i]) api_ptr->config()->save_cue_list(i, snapshot->old_cue_lists[i]);
-            else api_ptr->config()->delete_cue_list(i);
+            if (!snapshot->attempted_cue_lists[i]) continue;
+            if (snapshot->has_cue_lists[i]) remember(save_cue_checked(i, snapshot->old_cue_lists[i]));
+            else {
+                remember(store->delete_cue_list(i));
+                remember(expect_missing(store->load_cue_list(i, verify->cue_list)));
+            }
         }
-        api_ptr->config()->save_sequence(snapshot->old_timeline);
-        api_ptr->config()->save_calendar_schedule(snapshot->old_calendar);
-        api_ptr->config()->save_config(snapshot->old_cfg);
-        api_ptr->config()->set_restore_in_progress(false, 0);
+        if (snapshot->attempted_timeline) {
+            if (snapshot->has_timeline) remember(save_timeline_checked(snapshot->old_timeline));
+            else {
+                remember(store->delete_sequence());
+                bool present = true;
+                const esp_err_t e = store->load_sequence(verify->timeline, &present, false);
+                remember(e == ESP_OK && present ? ESP_ERR_INVALID_STATE : e);
+            }
+        }
+        if (snapshot->attempted_calendar) {
+            if (snapshot->has_calendar) remember(save_calendar_checked(snapshot->old_calendar));
+            else {
+                remember(store->delete_calendar_schedule());
+                bool present = true;
+                const esp_err_t e = store->load_calendar_schedule(verify->calendar, &present);
+                remember(e == ESP_OK && present ? ESP_ERR_INVALID_STATE : e);
+            }
+        }
+        if (snapshot->attempted_config) remember(save_config_checked(snapshot->old_cfg));
+        return first_error;
+    };
+    auto fail_after_write = [&](esp_err_t operation_error, const char* detail) {
+        ESP_LOGE("restore", "Restore failed (%s, %d); rolling back attempted records", detail, (int)operation_error);
+        const esp_err_t rollback_error = rollback();
+        if (rollback_error != ESP_OK) {
+            if (retain_marker() != ESP_OK) ESP_LOGE("restore", "Restore marker could not be confirmed active");
+            return fail(rollback_error, "restore_rollback_incomplete");
+        }
+        const esp_err_t marker_error = clear_marker_checked();
+        if (marker_error != ESP_OK) return fail(marker_error, "restore_marker_clear_failed");
+        return fail(operation_error, detail);
     };
 
-    // 1. Write and verify Scenes (20-55%)
+    // Mark an attempt before the call: a failing save may have committed its
+    // primary slot already. Rollback never rewrites unrelated records.
+    api_ptr->job_manager().update_progress(job_id, JobState::Running, 20);
     for (uint8_t i = 0; i < lg::kMaxPresets; ++i) {
-        if (pkg.has_scenes[i]) {
-            if (api_ptr->config()->save_scene(i, pkg.scenes[i]) != ESP_OK) {
-                rollback_all();
-                api_ptr->job_manager().fail_job(job_id, ESP_FAIL, "save_scene_failed");
-                api_ptr->command_journal().failed(cmd_id, ESP_FAIL);
-                api::AuditLog::instance().log(api::ApiRole::Admin, "restore_failed", "Save scene failed, rolled back");
-                return send_error(request, "500 Internal Server Error", "save_scene_failed");
-            }
-            SceneConfig verify{};
-            if (api_ptr->config()->load_scene(i, verify) != ESP_OK) {
-                rollback_all();
-                api_ptr->job_manager().fail_job(job_id, ESP_FAIL, "verify_scene_failed");
-                api_ptr->command_journal().failed(cmd_id, ESP_FAIL);
-                return send_error(request, "500 Internal Server Error", "verify_scene_failed");
-            }
-        }
+        if (!pkg.has_scenes[i]) continue;
+        snapshot->attempted_scenes[i] = true;
+        error = save_scene_checked(i, pkg.scenes[i]);
+        if (error != ESP_OK) return fail_after_write(error, "save_or_verify_scene_failed");
     }
     api_ptr->job_manager().update_progress(job_id, JobState::Running, 55);
-
-    // 2. Write and verify Scene Motion (55-65%)
     for (uint8_t i = 0; i < lg::kMaxPresets; ++i) {
-        if (pkg.has_motions[i]) {
-            if (api_ptr->config()->save_scene_motion(i, pkg.motions[i]) != ESP_OK) {
-                rollback_all();
-                api_ptr->job_manager().fail_job(job_id, ESP_FAIL, "save_motion_failed");
-                api_ptr->command_journal().failed(cmd_id, ESP_FAIL);
-                return send_error(request, "500 Internal Server Error", "save_motion_failed");
-            }
-        }
+        if (!pkg.has_motions[i]) continue;
+        snapshot->attempted_motions[i] = true;
+        error = save_motion_checked(i, pkg.motions[i]);
+        if (error != ESP_OK) return fail_after_write(error, "save_or_verify_motion_failed");
     }
     api_ptr->job_manager().update_progress(job_id, JobState::Running, 65);
-
-    // 3. Write and verify Cue Lists (65-75%)
     for (uint8_t i = 0; i < lg::kMaxCueLists; ++i) {
-        if (pkg.has_cue_lists[i]) {
-            if (api_ptr->config()->save_cue_list(i, pkg.cue_lists[i]) != ESP_OK) {
-                rollback_all();
-                api_ptr->job_manager().fail_job(job_id, ESP_FAIL, "save_cue_list_failed");
-                api_ptr->command_journal().failed(cmd_id, ESP_FAIL);
-                return send_error(request, "500 Internal Server Error", "save_cue_list_failed");
-            }
-        }
+        if (!pkg.has_cue_lists[i]) continue;
+        snapshot->attempted_cue_lists[i] = true;
+        error = save_cue_checked(i, pkg.cue_lists[i]);
+        if (error != ESP_OK) return fail_after_write(error, "save_or_verify_cue_list_failed");
     }
     api_ptr->job_manager().update_progress(job_id, JobState::Running, 75);
-
-    // 4. Write and verify Timeline (80%)
     if (pkg.has_timeline) {
-        if (api_ptr->config()->save_sequence(pkg.timeline) != ESP_OK) {
-            rollback_all();
-            api_ptr->job_manager().fail_job(job_id, ESP_FAIL, "save_timeline_failed");
-            api_ptr->command_journal().failed(cmd_id, ESP_FAIL);
-            return send_error(request, "500 Internal Server Error", "save_timeline_failed");
-        }
+        snapshot->attempted_timeline = true;
+        error = save_timeline_checked(pkg.timeline);
+        if (error != ESP_OK) return fail_after_write(error, "save_or_verify_timeline_failed");
     }
     api_ptr->job_manager().update_progress(job_id, JobState::Running, 80);
-
-    // 5. Write and verify Calendar (85%)
     if (pkg.has_calendar) {
-        if (api_ptr->config()->save_calendar_schedule(pkg.calendar) != ESP_OK) {
-            rollback_all();
-            api_ptr->job_manager().fail_job(job_id, ESP_FAIL, "save_calendar_failed");
-            api_ptr->command_journal().failed(cmd_id, ESP_FAIL);
-            return send_error(request, "500 Internal Server Error", "save_calendar_failed");
-        }
+        snapshot->attempted_calendar = true;
+        error = save_calendar_checked(pkg.calendar);
+        if (error != ESP_OK) return fail_after_write(error, "save_or_verify_calendar_failed");
     }
     api_ptr->job_manager().update_progress(job_id, JobState::Running, 85);
-
-    // 6. Write and verify DeviceConfig (LAST) (90%)
     if (pkg.has_device_config) {
-        // Preserve immutable/unrestored secrets from current node (§26, §27)
-        pkg.device_config.sync_token = snapshot->old_cfg.sync_token;
-        if (api_ptr->config()->save_config(pkg.device_config) != ESP_OK) {
-            rollback_all();
-            api_ptr->job_manager().fail_job(job_id, ESP_FAIL, "save_config_failed");
-            api_ptr->command_journal().failed(cmd_id, ESP_FAIL);
-            return send_error(request, "500 Internal Server Error", "save_config_failed");
-        }
+        snapshot->attempted_config = true;
+        error = save_config_checked(pkg.device_config);
+        if (error != ESP_OK) return fail_after_write(error, "save_or_verify_config_failed");
     }
-    api_ptr->job_manager().update_progress(job_id, JobState::Running, 95);
+    api_ptr->job_manager().update_progress(job_id, JobState::Verifying, 95);
+    error = clear_marker_checked();
+    if (error != ESP_OK) return fail(error, "restore_marker_clear_failed");
 
-    // Full write/readback verified! Clear power-loss restore marker (§41)
-    api_ptr->config()->set_restore_in_progress(false, 0);
-
-    api_ptr->job_manager().update_progress(job_id, JobState::Running, 99);
     api_ptr->job_manager().complete_job(job_id);
     api_ptr->command_journal().applied(cmd_id);
     api_ptr->notify_status_async();
-
-    api::AuditLog::instance().log(api::ApiRole::Admin, "restore_complete", "Configuration and show content restored successfully");
-
-    char resp[160];
-    snprintf(resp, sizeof(resp),
+    api::AuditLog::instance().log(api::ApiRole::Admin, "restore_complete", "Configuration and show content restored and verified");
+    char response[192];
+    snprintf(response, sizeof(response),
         "{\"status\":\"success\",\"accepted\":true,\"commandId\":%" PRIu32 ",\"jobId\":%" PRIu32 ",\"message\":\"Restore successful, rebooting...\"}",
         cmd_id, job_id);
-    send_json(request, resp);
+    send_json(request, response);
     vTaskDelay(pdMS_TO_TICKS(1000));
     esp_restart();
     return ESP_OK;
@@ -8001,12 +8093,20 @@ static esp_err_t post_certification_abort(httpd_req_t* request) {
 
     const esp_err_t err = api_ptr->certification_service()->abort();
     if (err != ESP_OK) {
+        if (err == ESP_ERR_INVALID_STATE) {
+            return send_error(request, "409 Conflict", "Certification cancellation was not queued");
+        }
         return send_error(request, "500 Internal Server Error", "Certification abort was not persisted");
     }
+    const bool pending = api_ptr->certification_service()->cancellation_pending();
     cJSON* resp = cJSON_CreateObject();
-    cJSON_AddStringToObject(resp, "status", "aborted");
+    cJSON_AddStringToObject(resp, "status", pending ? "cancellation_requested" : "aborted");
+    if (pending) {
+        cJSON_AddBoolToObject(resp, "accepted", true);
+        cJSON_AddBoolToObject(resp, "cancellationRequested", true);
+    }
     api_ptr->notify_status_async();
-    return send_json(request, resp, "200 OK");
+    return send_json(request, resp, pending ? "202 Accepted" : "200 OK");
 }
 
 static esp_err_t get_certification_report(httpd_req_t* request) {

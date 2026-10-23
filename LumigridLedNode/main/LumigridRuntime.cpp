@@ -123,6 +123,19 @@ void LumigridRuntime::recovery_task(void *arg) {
   // false-positives
   vTaskDelay(pdMS_TO_TICKS(3000));
 
+  bool failed_startup_rollback_attempted = false;
+  auto attempt_failed_startup_rollback = [&]() {
+    if (!self || failed_startup_rollback_attempted ||
+        self->startup_state_ != StartupState::Faulted) return;
+    failed_startup_rollback_attempted = true;
+    const esp_err_t result = OtaBootVerifier::instance().rollback_failed_startup(
+        "startup_failure", self->failing_error_);
+    if (result != ESP_ERR_INVALID_STATE) {
+      ESP_LOGE("lumigrid", "Failed-startup OTA rollback returned: %s", esp_err_to_name(result));
+    }
+  };
+  attempt_failed_startup_rollback();
+
   // If GPIO0 is already LOW at the end of grace period, warn and wait for
   // release to prevent stuck reboot loop
   if (gpio_get_level(GPIO_NUM_0) == 0) {
@@ -130,6 +143,7 @@ void LumigridRuntime::recovery_task(void *arg) {
                          "before arming factory reset");
     while (gpio_get_level(GPIO_NUM_0) == 0) {
       vTaskDelay(pdMS_TO_TICKS(100));
+      attempt_failed_startup_rollback();
     }
   }
 
@@ -144,11 +158,12 @@ void LumigridRuntime::recovery_task(void *arg) {
 
   while (!reset_triggered) {
     vTaskDelay(pdMS_TO_TICKS(20)); // 20ms debounce sampling interval
+    attempt_failed_startup_rollback();
     const uint32_t now_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000);
     if (self && now_ms - last_verify_ms >= 1000 && OtaBootVerifier::instance().is_pending_verify()) {
       last_verify_ms = now_ms;
       auto cfg = std::unique_ptr<DeviceConfig>(new (std::nothrow) DeviceConfig());
-      const bool config_valid = cfg && self->config_.load_config(*cfg) == ESP_OK && self->config_.cached_validation_result().valid;
+      const bool config_valid = cfg && self->config_.load_config(*cfg, false) == ESP_OK && self->config_.cached_validation_result().valid;
       const RuntimeServicePlan wanted = compute_service_plan({self->is_safe_mode(), self->commissioning_plan_state(), self->network_plan_state_.load(), cfg.get()});
       const auto& active = self->started_subsystems_;
       const bool required = (!wanted.mdns || active.mdns) && (!wanted.lighting || active.lighting) && (!wanted.scheduler || active.scheduler) &&
@@ -338,6 +353,21 @@ esp_err_t LumigridRuntime::init() {
     return err;
   }
 
+  // Establish the authoritative pending-image state before reading product
+  // configuration. The recovery task remains alive on failure and can roll
+  // back an unverified candidate even when its journal cannot be persisted.
+  err = OtaBootVerifier::instance().init();
+  if (err != ESP_OK) {
+    startup_state_ = StartupState::Faulted;
+    failing_stage_ = StartupStage::ConfigStoreInitialized;
+    failing_error_ = err;
+    safe_mode_ = true;
+    output_.blackout();
+    output_.set_output_enabled(false);
+    ESP_LOGE("lumigrid", "OTA verification initialization failed: %s", esp_err_to_name(err));
+    return err;
+  }
+
   ESP_LOGI("lumigrid", "Step 2: config.init()...");
   err = config_.init();
   if (err != ESP_OK) {
@@ -354,28 +384,28 @@ esp_err_t LumigridRuntime::init() {
   log_heap_stage("config_store");
   vTaskDelay(pdMS_TO_TICKS(500));
 
-  // Power-loss-safe restore marker check (LG-036 В§41)
+  // A failed marker read is ambiguous persistent state, never proof that a
+  // previous restore completed. Keep this fault latched through config load.
   uint32_t restore_chk = 0;
-  if (config_.is_restore_in_progress(&restore_chk)) {
+  bool restore_in_progress = false;
+  const esp_err_t restore_error = config_.read_restore_marker(restore_in_progress, &restore_chk);
+  const bool restore_blocked = restore_error != ESP_OK || restore_in_progress;
+  if (restore_blocked) {
     safe_mode_ = true;
     startup_state_ = StartupState::SafeMode;
     failing_stage_ = StartupStage::ConfigLoaded;
-    failing_error_ = ESP_ERR_INVALID_STATE;
+    failing_error_ = restore_error != ESP_OK ? restore_error : ESP_ERR_INVALID_STATE;
     restore_state_ = RestoreState::Interrupted;
     configuration_valid_ = false;
-    std::strncpy(configuration_first_error_,
-                 "Previous restore was interrupted before completion",
-                 sizeof(configuration_first_error_) - 1);
+    configuration_error_count_ = 1;
+    std::snprintf(configuration_first_error_, sizeof(configuration_first_error_), "%s",
+        restore_error != ESP_OK ? "Restore recovery marker could not be read" :
+                                 "Previous restore was interrupted before completion");
     output_.blackout();
     output_.set_output_enabled(false);
-    ESP_LOGE("lumigrid",
-             "RESTORE INTERRUPTED DETECTED ON BOOT (checksum %08" PRIx32
-             ")! Entering SAFE MODE!",
-             restore_chk);
+    ESP_LOGE("lumigrid", "Restore recovery required (checksum %08" PRIx32 ", error %s)",
+             restore_chk, esp_err_to_name(failing_error_));
   }
-
-  // OTA boot verification initialization (LG-036 В§56)
-  OtaBootVerifier::instance().init();
 
   // Wire recovery and transactional config apply hooks
   api_.set_recovery_status_provider([this]() { return get_recovery_status(); });
@@ -431,7 +461,7 @@ esp_err_t LumigridRuntime::init() {
     return ESP_ERR_NO_MEM;
   }
   DeviceConfig &dev_cfg = *dev_cfg_storage;
-  if (config_.load_config(dev_cfg) == ESP_OK) {
+  if (config_.load_config(dev_cfg, !restore_blocked) == ESP_OK) {
     startup_stage_ = StartupStage::ConfigLoaded;
     // Migrate legacy credentials into AuthStore if needed (Case A: universal
     // defaults -> unprovisioned; Case B: custom -> migrated)
@@ -443,6 +473,16 @@ esp_err_t LumigridRuntime::init() {
     } else {
       NetworkSettings net_settings{};
       esp_err_t net_err = config_.load_network_settings(net_settings);
+      if (net_err != ESP_OK && net_err != ESP_ERR_NOT_FOUND && net_err != ESP_ERR_NVS_NOT_FOUND) {
+        safe_mode_ = true;
+        startup_state_ = StartupState::Faulted;
+        failing_stage_ = StartupStage::NetworkConfigured;
+        failing_error_ = net_err;
+        output_.blackout();
+        output_.set_output_enabled(false);
+        ESP_LOGE("lumigrid", "Saved network settings unavailable: %s", esp_err_to_name(net_err));
+        return net_err;
+      }
       bool has_configured_sta =
           (net_err == ESP_OK && net_settings.mode != NetworkMode::ApOnly &&
            net_settings.sta_ssid[0] != '\0');
@@ -477,7 +517,7 @@ esp_err_t LumigridRuntime::init() {
                "STARTUP CONFIG VALIDATION FAILED (%u errors): %s. Entering "
                "SAFE/RECOVERY MODE!",
                (unsigned)val_res.error_count, val_res.first_error);
-    } else {
+    } else if (!restore_blocked) {
       startup_stage_ = StartupStage::ConfigValidated;
       configuration_valid_ = true;
       configuration_error_count_ = 0;
@@ -594,69 +634,70 @@ esp_err_t LumigridRuntime::init() {
   return (startup_state_ == StartupState::Faulted) ? failing_error_ : ESP_OK;
 }
 
-void LumigridRuntime::rollback_services(StartupStage failed_stage,
-                                        esp_err_t error) {
+esp_err_t LumigridRuntime::rollback_services(StartupStage failed_stage,
+                                                esp_err_t error) {
   ServiceGuard guard(services_mutex_);
-  ESP_LOGW("lumigrid",
-           "Rolling back runtime services due to failure at stage %s: %s",
+  ESP_LOGW("lumigrid", "Stopping runtime services after stage %s: %s",
            startup_stage_to_name(failed_stage), esp_err_to_name(error));
+  esp_err_t stop_error = ESP_OK;
+  StartupStage stop_stage = StartupStage::ProtocolsStarted;
+  auto stop_owned = [&](auto& owner, auto& started) {
+    if (!started) return;
+    const esp_err_t result = owner.stop();
+    if (result == ESP_OK) started = false;
+    else if (stop_error == ESP_OK) stop_error = result;
+  };
 
-  // Reverse-order teardown: only stop services that actually started
+  // Inhibit output before waiting for workers. An unacknowledged owner keeps
+  // its task/buffers and its started flag until a later stop succeeds.
+  output_.set_output_enabled(false);
+  output_.blackout();
   if (started_subsystems_.mqtt) {
     DiagnosticLog::instance().set_stream_callback(nullptr);
     mqtt_.stop();
     started_subsystems_.mqtt = false;
   }
-  if (started_subsystems_.node_sync) {
-    node_sync_.stop();
-    started_subsystems_.node_sync = false;
-  }
-  if (started_subsystems_.scheduler) {
-    scheduler_.stop();
-    started_subsystems_.scheduler = false;
-  }
-  if (started_subsystems_.sacn) {
-    sacn_.stop();
-    started_subsystems_.sacn = false;
-  }
-  if (started_subsystems_.artnet) {
-    artnet_.stop();
-    started_subsystems_.artnet = false;
-  }
-  if (started_subsystems_.mdns) {
-    mdns_.stop();
-    started_subsystems_.mdns = false;
-  }
-  if (started_subsystems_.fleet_discovery) {
-    fleet_discovery_.stop();
-    started_subsystems_.fleet_discovery = false;
-  }
-  // NOTE: Wi-Fi and Web API are intentionally NOT stopped during rollback
-  // to preserve recovery access and telemetry at 192.168.4.1 even during
-  // failures.
-  if (factory_runner_.lifecycle_state() == FactoryRunner::LifecycleState::Running) {
+  stop_owned(node_sync_, started_subsystems_.node_sync);
+  stop_owned(scheduler_, started_subsystems_.scheduler);
+  stop_owned(sacn_, started_subsystems_.sacn);
+  stop_owned(artnet_, started_subsystems_.artnet);
+  stop_owned(mdns_, started_subsystems_.mdns);
+  stop_owned(fleet_discovery_, started_subsystems_.fleet_discovery);
+
+  // Retain Wi-Fi and the API for recovery when a service fails to stop.
+  if (started_subsystems_.factory ||
+      factory_runner_.lifecycle_state() != FactoryRunner::LifecycleState::Stopped) {
     factory_runner_.stop();
-    started_subsystems_.factory = false;
+    started_subsystems_.factory =
+        factory_runner_.lifecycle_state() != FactoryRunner::LifecycleState::Stopped;
+    if (started_subsystems_.factory && stop_error == ESP_OK) {
+      stop_error = ESP_ERR_TIMEOUT;
+      stop_stage = StartupStage::FactoryStarted;
+    }
   }
   if (started_subsystems_.lighting) {
-    lighting_.stop();
-    task_stack_registry().unregister_task("lighting_rt");
-    started_subsystems_.lighting = false;
+    const esp_err_t result = lighting_.stop();
+    if (result == ESP_OK) {
+      task_stack_registry().unregister_task("lighting_rt");
+      started_subsystems_.lighting = false;
+    } else if (stop_error == ESP_OK) {
+      stop_error = result;
+      stop_stage = StartupStage::LightingStarted;
+    }
   }
-
   source_manager_.release(ControlSource::LiveDmx);
   source_manager_.release(ControlSource::Factory);
-  output_.blackout();
-  output_.set_output_enabled(false);
   services_started_ = false;
 
-  if (error != ESP_OK) {
+  const esp_err_t failure = error != ESP_OK ? error : stop_error;
+  if (failure != ESP_OK) {
     safe_mode_ = true;
     startup_state_ = StartupState::Faulted;
     lifecycle_state_ = RuntimeLifecycle::Faulted;
-    failing_stage_ = failed_stage;
-    failing_error_ = error;
+    failing_stage_ = error != ESP_OK ? failed_stage : stop_stage;
+    failing_error_ = failure;
   }
+  return failure;
 }
 
 esp_err_t LumigridRuntime::stop() {
@@ -671,7 +712,8 @@ esp_err_t LumigridRuntime::stop() {
   while (apply_in_progress_.load()) vTaskDelay(pdMS_TO_TICKS(10));
   ESP_LOGI("lumigrid", "Stopping LumigridRuntime...");
 
-  rollback_services(StartupStage::None, ESP_OK);
+  const esp_err_t services_error = rollback_services(StartupStage::None, ESP_OK);
+  if (services_error != ESP_OK) return services_error;
   if (started_subsystems_.api) {
     api_.stop();
     started_subsystems_.api = false;
@@ -706,6 +748,7 @@ esp_err_t LumigridRuntime::start() {
       lifecycle_state_ == RuntimeLifecycle::NetworkReady ||
       lifecycle_state_ == RuntimeLifecycle::ServicesStarting ||
       lifecycle_state_ == RuntimeLifecycle::Stopping ||
+      lifecycle_state_ == RuntimeLifecycle::Faulted ||
       started_subsystems_.wifi) {
     ESP_LOGW("lumigrid", "start() rejected: runtime is already %s",
              lifecycle_state_str());
@@ -721,7 +764,7 @@ esp_err_t LumigridRuntime::start() {
     return ESP_ERR_NO_MEM;
   }
   DeviceConfig &dev_cfg = *dev_cfg_storage;
-  esp_err_t config_err = config_.load_config(dev_cfg);
+  esp_err_t config_err = config_.load_config(dev_cfg, false);
   if (config_err != ESP_OK) {
     rollback_services(StartupStage::ConfigLoaded, config_err);
     return config_err;
@@ -731,11 +774,22 @@ esp_err_t LumigridRuntime::start() {
   esp_read_mac(mac, ESP_MAC_WIFI_STA);
 
   NetworkSettings net_settings;
-  config_.load_network_settings(net_settings);
+  const esp_err_t network_error = config_.load_network_settings(net_settings);
+  if (network_error != ESP_OK && network_error != ESP_ERR_NOT_FOUND &&
+      network_error != ESP_ERR_NVS_NOT_FOUND) {
+    // A storage failure is not first boot. Never overwrite unreadable saved
+    // credentials with synthesized defaults.
+    rollback_services(StartupStage::NetworkConfigured, network_error);
+    return network_error;
+  }
   if (net_settings.ap_password[0] == '\0') {
     generate_random_ap_password(net_settings.ap_password, sizeof(net_settings.ap_password));
     net_settings.checksum = calc_network_settings_crc(net_settings);
-    config_.save_network_settings(net_settings);
+    const esp_err_t saved = config_.save_network_settings(net_settings);
+    if (saved != ESP_OK) {
+      rollback_services(StartupStage::NetworkConfigured, saved);
+      return saved;
+    }
   }
 
   const bool factory_setup = !auth_manager_.is_provisioned() &&
@@ -812,7 +866,7 @@ esp_err_t LumigridRuntime::start() {
     return ESP_ERR_NO_MEM;
   }
 
-  startup_state_ = StartupState::StartingNetwork;
+  if (!safe_mode_) startup_state_ = StartupState::StartingNetwork;
   ESP_LOGI("lumigrid",
            "Step 5: wifi.start() - Mode: %s, AP SSID: '%s', STA SSID: '%s'...",
            wifi_mode == WifiMode::StaOnly  ? "STA"
@@ -874,7 +928,7 @@ esp_err_t LumigridRuntime::start() {
   lifecycle_state_ = RuntimeLifecycle::ServicesStarting;
 
   DeviceConfig &current_cfg = *dev_cfg_storage;
-  config_err = config_.load_config(current_cfg);
+  config_err = config_.load_config(current_cfg, false);
   if (config_err != ESP_OK) {
     rollback_services(StartupStage::ConfigLoaded, config_err);
     return config_err;
@@ -1092,7 +1146,11 @@ esp_err_t LumigridRuntime::start() {
 
   if (compute_service_plan({is_safe_mode(), commissioning_plan_state(), network_plan_state_.load(), &current_cfg}).scheduler && !started_subsystems_.scheduler) {
     ESP_LOGI("lumigrid", "Starting scheduler...");
-    scheduler_.start(current_cfg.timezone);
+    const esp_err_t scheduler_error = scheduler_.start(current_cfg.timezone);
+    if (scheduler_error != ESP_OK) {
+      rollback_services(StartupStage::ProtocolsStarted, scheduler_error);
+      return scheduler_error;
+    }
     started_subsystems_.scheduler = true;
     task_stack_registry().register_task("scheduler", 4096);
   }
@@ -1113,38 +1171,33 @@ esp_err_t LumigridRuntime::start() {
   return ESP_OK;
 }
 
-void LumigridRuntime::stop_network_services() {
+esp_err_t LumigridRuntime::stop_network_services() {
   ServiceGuard guard(services_mutex_);
   ESP_LOGI("lumigrid", "Stopping network-dependent services for rebind...");
+  esp_err_t error = ESP_OK;
+  auto stop_owned = [&](auto& owner, auto& started) {
+    if (!started) return;
+    const esp_err_t result = owner.stop();
+    if (result == ESP_OK) started = false;
+    else if (error == ESP_OK) error = result;
+  };
   if (started_subsystems_.mqtt) {
     DiagnosticLog::instance().set_stream_callback(nullptr);
     mqtt_.stop();
     started_subsystems_.mqtt = false;
   }
-  if (started_subsystems_.node_sync) {
-    node_sync_.stop(1000);
-    started_subsystems_.node_sync = false;
-  }
-  if (started_subsystems_.sacn) {
-    sacn_.stop();
-    started_subsystems_.sacn = false;
-  }
-  if (started_subsystems_.artnet) {
-    artnet_.stop();
-    started_subsystems_.artnet = false;
-  }
-  if (started_subsystems_.mdns) {
-    mdns_.stop();
-    started_subsystems_.mdns = false;
-  }
-  if (started_subsystems_.fleet_discovery) {
-    fleet_discovery_.stop();
-    started_subsystems_.fleet_discovery = false;
-  }
+  stop_owned(node_sync_, started_subsystems_.node_sync);
+  stop_owned(sacn_, started_subsystems_.sacn);
+  stop_owned(artnet_, started_subsystems_.artnet);
+  stop_owned(mdns_, started_subsystems_.mdns);
+  stop_owned(fleet_discovery_, started_subsystems_.fleet_discovery);
+  // Do not rebind Wi-Fi or remove recovery access under a live owner.
+  if (error != ESP_OK) return error;
   if (started_subsystems_.api) {
     api_.stop();
     started_subsystems_.api = false;
   }
+  return ESP_OK;
 }
 
 esp_err_t LumigridRuntime::start_network_services() {
@@ -1155,7 +1208,7 @@ esp_err_t LumigridRuntime::start_network_services() {
     return ESP_ERR_NO_MEM;
   }
   DeviceConfig &current_cfg = *current_cfg_storage;
-  esp_err_t config_err = config_.load_config(current_cfg);
+  esp_err_t config_err = config_.load_config(current_cfg, false);
   if (config_err != ESP_OK) return config_err;
 
   set_network_plan_state(wifi_.state() == WifiState::Connected ? NetworkPlanState::StaConnected :
@@ -1278,7 +1331,7 @@ void LumigridRuntime::execute_network_apply(const NetworkApplyRequest &req) {
   // "old plan" baseline when reconciling services afterwards (В§65).
   std::unique_ptr<DeviceConfig> config_storage(new (std::nothrow) DeviceConfig{});
   const esp_err_t config_err = config_storage
-      ? config_.load_config(*config_storage) : ESP_ERR_NO_MEM;
+      ? config_.load_config(*config_storage, false) : ESP_ERR_NO_MEM;
   if (config_err != ESP_OK) {
     note_network_task_start_failure();
     api_.command_journal().failed(req.command_id, config_err);
@@ -1289,8 +1342,15 @@ void LumigridRuntime::execute_network_apply(const NetworkApplyRequest &req) {
   }
   const DeviceConfig& dev_cfg = *config_storage;
 
-  // 2. Stop network-dependent services
-  stop_network_services();
+  // 2. Drain network owners before replacing their Wi-Fi/netif resources.
+  const esp_err_t stop_services_error = stop_network_services();
+  if (stop_services_error != ESP_OK) {
+    api_.command_journal().failed(req.command_id, stop_services_error);
+    last_apply_error_ = "network_service_stop_failed";
+    apply_state_.store(NetworkApplyState::Failed);
+    pending_apply_command_id_.store(0);
+    return;
+  }
 
   // 3. Stop Wi-Fi intentionally
   if (started_subsystems_.wifi) {
@@ -1687,7 +1747,9 @@ esp_err_t LumigridRuntime::reconcile_services(const DeviceConfig &old_cfg,
         }
     }
     if (!desired.lighting && started_subsystems_.lighting) {
-        lighting_.stop();
+        const esp_err_t error = lighting_.stop();
+        if (error != ESP_OK) return error;
+        task_stack_registry().unregister_task("lighting_rt");
         started_subsystems_.lighting = false;
     }
     if (desired.lighting && !started_subsystems_.lighting) {
@@ -1697,7 +1759,8 @@ esp_err_t LumigridRuntime::reconcile_services(const DeviceConfig &old_cfg,
         task_stack_registry().register_task("lighting_rt", 10240);
     }
     if (!desired.scheduler && started_subsystems_.scheduler) {
-        scheduler_.stop();
+        const esp_err_t error = scheduler_.stop();
+        if (error != ESP_OK) return error;
         started_subsystems_.scheduler = false;
     }
     if (desired.scheduler && !started_subsystems_.scheduler) {
@@ -1959,7 +2022,7 @@ void LumigridRuntime::request_service_reconcile() {
           !self->apply_in_progress_.load(std::memory_order_acquire) &&
           !self->network_apply_stopping_.load(std::memory_order_acquire)) {
         std::unique_ptr<DeviceConfig> cfg(new (std::nothrow) DeviceConfig{});
-        if (cfg && self->config_.load_config(*cfg) == ESP_OK) {
+        if (cfg && self->config_.load_config(*cfg, false) == ESP_OK) {
           const esp_err_t result = self->reconcile_services(*cfg, *cfg, true);
           if (result != ESP_OK) {
             ESP_LOGE("lumigrid", "Service reconciliation failed: %s", esp_err_to_name(result));

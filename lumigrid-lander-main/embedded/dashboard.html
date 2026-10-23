@@ -1905,7 +1905,7 @@ window.lg = (() => {
     async function blackout() {
         try {
             await api('/api/v1/factory/abort', 'POST');
-            toast('Emergency blackout applied.');
+            toast('Blackout requested. Waiting for node status.');
         } catch (e) { toast(e.message, true); }
     }
 
@@ -2829,11 +2829,11 @@ window.lg = (() => {
     async function stopBurnIn() {
         try {
             await api('/api/v1/factory/burn-in/stop', 'POST', {});
-            toast('Burn-in job stopped.');
+            toast('Burn-in cancellation requested. Waiting for worker status.');
         } catch (e) {
             try {
                 await api('/api/v1/factory/abort', 'POST', {});
-                toast('Factory output aborted.');
+                toast('Factory cancellation requested. Waiting for worker status.');
             } catch (err) { toast(err.message, true); }
         }
     }

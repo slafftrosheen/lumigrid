@@ -46,7 +46,8 @@ HOST_HEADERS = {
     "esp_rom_sys.h": "inline void esp_rom_delay_us(unsigned) {}\n",
     "esp_timer.h": """
         #include <cstdint>
-        inline int64_t esp_timer_get_time() { static int64_t now = 0; return ++now; }
+        #include <atomic>
+        inline int64_t esp_timer_get_time() { static std::atomic<int64_t> now{0}; return ++now; }
     """,
     "esp_heap_caps.h": """
         #include <cstdlib>

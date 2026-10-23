@@ -170,7 +170,16 @@ public:
     }
 
     void set_commit_observer(CommitObserver observer) {
+        // Commits invoke the observer while holding this lock. Replacing it
+        // must wait for an entered callback before releasing its captures.
+        // Before successful controller initialization there is no active commit.
+        if (!mutex_) {
+            commit_observer_ = std::move(observer);
+            return;
+        }
+        lock();
         commit_observer_ = std::move(observer);
+        unlock();
     }
 
     void set_output_enabled(bool enabled);
@@ -195,6 +204,9 @@ public:
 
     void latch_estop();
     esp_err_t clear_estop();
+    // A deferred reset may acknowledge only the stop observed by its caller.
+    esp_err_t clear_estop(uint32_t expected_generation);
+    uint32_t estop_generation() const { return estop_generation_.load(std::memory_order_acquire); }
     bool is_estop_latched() const { return estop_latched_.load(std::memory_order_acquire); }
     uint32_t failed_commit_count() const { return failed_commit_count_.load(std::memory_order_relaxed); }
     esp_err_t last_commit_error() const { return last_commit_error_.load(std::memory_order_acquire); }

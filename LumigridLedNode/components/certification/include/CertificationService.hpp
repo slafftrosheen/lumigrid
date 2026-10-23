@@ -72,6 +72,7 @@ public:
 
     bool is_in_progress() const { return store_.current_record().session.state == CertificationState::InProgress; }
     const char* current_running_test() const { return current_test_; }
+    bool cancellation_pending() const { return cancellation_pending_; }
 
     // Stale & Invalidation detection
     void check_invalidation(const DeviceConfig& current_cfg, const char* current_hw_rev, const char* current_fw_ver);
@@ -95,6 +96,7 @@ public:
 
 private:
     esp_err_t persist_record();
+    esp_err_t request_output_cancellation();
     void evaluate_overall_state();
     int find_result_index(const char* test_id) const;
 
@@ -125,6 +127,8 @@ private:
     JobManager* job_mgr_ = nullptr;
     CertificationProbeProvider probe_provider_{};
     uint32_t current_factory_session_id_ = 0;
+    bool cancellation_pending_ = false;
+    bool cancellation_queued_ = false;
 };
 
 } // namespace lg

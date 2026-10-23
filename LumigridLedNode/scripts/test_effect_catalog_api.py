@@ -60,6 +60,7 @@ def main():
 #include <new>
 #include <string>
 #include "cJSON.h"
+#include "cjson_helpers.hpp"
 #include "SignageTypes.hpp"
 
 using esp_err_t = int;
@@ -262,7 +263,8 @@ int main() {
         (temp / "test.cpp").write_text(harness)
         subprocess.run([cc, "-std=c99", "-c", str(CJSON / "cJSON.c"),
                         "-o", str(temp / "cjson.o")], check=True)
-        includes = [temp, CJSON, ROOT / "components/config/include", ROOT / "components/board/include"]
+        includes = [temp, CJSON, ROOT / "components/config/include", ROOT / "components/board/include",
+                    ROOT / "components/factory/include"]
         subprocess.run([cxx, "-std=c++17", "-Wall", "-Wextra", "-Werror",
                         "-Wno-unused-parameter", "-Wno-sign-compare", "-O1", "-g",
                         *[f"-I{p}" for p in includes], str(temp / "test.cpp"),

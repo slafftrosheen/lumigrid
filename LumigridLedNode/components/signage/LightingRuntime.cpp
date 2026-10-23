@@ -41,19 +41,18 @@ LightingRuntime::LightingRuntime(ControlSourceManager& source_manager, OutputCon
 }
 
 LightingRuntime::~LightingRuntime() {
-    controller_.set_commit_observer(nullptr);
     stop();
     // Destruction is terminal. If bounded stop timed out, wait for the cooperative
     // task to acknowledge exit before deleting the semaphore/mutex it can touch.
     if (task_handle_) {
         if (shutdown_sem_) xSemaphoreTake(shutdown_sem_, portMAX_DELAY);
         task_handle_ = nullptr;
-        controller_.blackout();
-        if (mutex_) {
-            vSemaphoreDelete(mutex_);
-            mutex_ = nullptr;
-        }
-        lifecycle_state_.store(LifecycleState::Stopped, std::memory_order_release);
+        stop();
+    }
+    controller_.set_commit_observer(nullptr);
+    if (mutex_) {
+        vSemaphoreDelete(mutex_);
+        mutex_ = nullptr;
     }
     if (shutdown_sem_) {
         vSemaphoreDelete(shutdown_sem_);
@@ -61,9 +60,18 @@ LightingRuntime::~LightingRuntime() {
     }
 }
 
-void LightingRuntime::stop() {
-    LifecycleState prev = lifecycle_state_.exchange(LifecycleState::Stopping, std::memory_order_acq_rel);
-    if (prev == LifecycleState::Stopping || prev == LifecycleState::Stopped) return;
+esp_err_t LightingRuntime::stop() {
+    LifecycleState current = lifecycle_state_.load(std::memory_order_acquire);
+    for (;;) {
+        if (current == LifecycleState::Stopped) return ESP_OK;
+        if (current == LifecycleState::Starting || current == LifecycleState::Stopping) return ESP_ERR_INVALID_STATE;
+        if (lifecycle_state_.compare_exchange_weak(current, LifecycleState::Stopping, std::memory_order_acq_rel)) break;
+    }
+    if (task_handle_ && xTaskGetCurrentTaskHandle() == task_handle_) {
+        lifecycle_state_.store(current, std::memory_order_release);
+        return ESP_ERR_INVALID_STATE;
+    }
+    control_epoch_.fetch_add(1, std::memory_order_acq_rel);
     shutting_down_.store(true, std::memory_order_release);
     if (task_handle_) {
         xTaskAbortDelay(task_handle_);
@@ -72,15 +80,16 @@ void LightingRuntime::stop() {
         if (!ack) {
             ESP_LOGE(TAG, "LightingRuntime task did not exit within 1000ms timeout! Halting cleanup to prevent UAF");
             lifecycle_state_.store(LifecycleState::Faulted, std::memory_order_release);
-            controller_.set_commit_observer(nullptr);
-            return;
+            return ESP_ERR_TIMEOUT;
         }
         task_handle_ = nullptr;
     }
-    controller_.set_commit_observer(nullptr);
     controller_.blackout();
     if (mutex_) {
-        xSemaphoreTake(mutex_, portMAX_DELAY);
+        if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(1000)) != pdTRUE) {
+            lifecycle_state_.store(LifecycleState::Faulted, std::memory_order_release);
+            return ESP_ERR_TIMEOUT;
+        }
         if (live_pending_) (*live_pending_) = {};
         if (live_active_) (*live_active_) = {};
         live_pending_dirty_ = true;
@@ -90,14 +99,14 @@ void LightingRuntime::stop() {
         source_manager_.release(ControlSource::Factory);
         source_manager_.release(ControlSource::ManualOverride);
         manual_active_ = {};
-        // Do NOT give the mutex before deleting it. The task is confirmed dead
-        // (shutdown_sem_ was acked). Giving first would allow any concurrent waiter
-        // that slipped in to grab the semaphore and then touch the deleted object
-        // (UAF). Delete directly while holding it — FreeRTOS allows this.
-        vSemaphoreDelete(mutex_);
-        mutex_ = nullptr;
+        // The render task has exited, but API/DMX callers can still be waiting
+        // here. Keep the semaphore alive and let each waiter reject shutdown
+        // after acquiring it. A subsequent start reuses the same semaphore.
+        xSemaphoreGive(mutex_);
     }
+    controller_.set_commit_observer(nullptr);
     lifecycle_state_.store(LifecycleState::Stopped, std::memory_order_release);
+    return ESP_OK;
 }
 
 esp_err_t LightingRuntime::start() {
@@ -106,17 +115,21 @@ esp_err_t LightingRuntime::start() {
         ESP_LOGW(TAG, "LightingRuntime start() rejected: lifecycle transition already in progress");
         return ESP_ERR_INVALID_STATE;
     }
-    if (current == LifecycleState::Faulted && task_handle_ != nullptr) {
-        ESP_LOGW(TAG, "LightingRuntime start() rejected: previous task has not terminated");
+    if (!lifecycle_state_.compare_exchange_strong(current, LifecycleState::Starting, std::memory_order_acq_rel)) {
         return ESP_ERR_INVALID_STATE;
     }
+    if (current == LifecycleState::Faulted && (task_handle_ != nullptr || shutting_down_.load(std::memory_order_acquire))) {
+        ESP_LOGW(TAG, "LightingRuntime start() rejected: previous task has not terminated");
+        lifecycle_state_.store(current, std::memory_order_release);
+        return ESP_ERR_INVALID_STATE;
+    }
+    control_epoch_.fetch_add(1, std::memory_order_acq_rel);
     if (!live_pending_ || !live_active_) {
         ESP_LOGE(TAG, "Live DMX frame allocation failed; refusing lighting startup");
         controller_.blackout();
         lifecycle_state_.store(LifecycleState::Faulted, std::memory_order_release);
         return ESP_ERR_NO_MEM;
     }
-    lifecycle_state_.store(LifecycleState::Starting, std::memory_order_release);
     shutting_down_.store(false, std::memory_order_release);
     controller_.set_commit_observer([this](esp_err_t commit_result) {
         if (commit_result != ESP_OK) report_output_fault(commit_result);
@@ -125,16 +138,6 @@ esp_err_t LightingRuntime::start() {
             ESP_LOGI(TAG, "Armed commit succeeded: output state restored to HEALTHY");
         }
     });
-    esp_err_t config_err = config_.load_config(device_cfg_);
-    if (config_err != ESP_OK) {
-        controller_.set_commit_observer(nullptr);
-        controller_.blackout();
-        lifecycle_state_.store(LifecycleState::Faulted, std::memory_order_release);
-        return config_err;
-    }
-    power_budget_.set_limit_mw(device_cfg_.max_power_mw);
-    power_budget_.set_soft_start(device_cfg_.soft_start_enabled, device_cfg_.soft_start_ms);
-    ColorPipeline::set_gamma(device_cfg_.gamma_x10);
     if (!mutex_) {
         mutex_ = xSemaphoreCreateMutex();
         if (!mutex_) {
@@ -150,12 +153,26 @@ esp_err_t LightingRuntime::start() {
         lifecycle_state_.store(LifecycleState::Faulted, std::memory_order_release);
         return ESP_ERR_NO_MEM;
     }
-    esp_err_t scene_err = scene_manager_.init();
-    if (scene_err != ESP_OK) {
+    // The recovery API remains available across stop/start. Publish the new
+    // configuration and scene state under the same stable mutex as its readers.
+    xSemaphoreTake(mutex_, portMAX_DELAY);
+    esp_err_t init_err = config_.load_config(device_cfg_);
+    if (init_err == ESP_OK) {
+        power_budget_.set_limit_mw(device_cfg_.max_power_mw);
+        power_budget_.set_soft_start(device_cfg_.soft_start_enabled, device_cfg_.soft_start_ms);
+        ColorPipeline::set_gamma(device_cfg_.gamma_x10);
+        init_err = scene_manager_.init();
+    }
+    if (init_err == ESP_OK) {
+        last_observed_topology_generation_ = controller_.topology_generation();
+        restart_soft_start_locked();
+    }
+    xSemaphoreGive(mutex_);
+    if (init_err != ESP_OK) {
         controller_.set_commit_observer(nullptr);
         controller_.blackout();
         lifecycle_state_.store(LifecycleState::Faulted, std::memory_order_release);
-        return scene_err;
+        return init_err;
     }
     // LG-HW-001: Pinned to CPU1 (core 1).
     // Architecture:
@@ -169,17 +186,16 @@ esp_err_t LightingRuntime::start() {
         lifecycle_state_.store(LifecycleState::Faulted, std::memory_order_release);
         return ESP_FAIL;
     }
-    activation_timing_.arm_ms = now_ms();
-    last_observed_topology_generation_ = controller_.topology_generation();
-    restart_soft_start();
     lifecycle_state_.store(LifecycleState::Running, std::memory_order_release);
     ESP_LOGI(TAG, "LightingRuntime started (gamma=%.1f, max_mw=%" PRIu32 ")", device_cfg_.gamma_x10 / 10.0f, static_cast<uint32_t>(device_cfg_.max_power_mw));
     return ESP_OK;
 }
 
 void LightingRuntime::trigger_estop() {
-    estop_state_.store(EstopState::Tripped, std::memory_order_release);
     controller_.latch_estop();
+    portENTER_CRITICAL(&estop_state_mux_);
+    estop_state_.store(EstopState::Tripped, std::memory_order_release);
+    portEXIT_CRITICAL(&estop_state_mux_);
     source_manager_.release(ControlSource::Factory);
     clear_live_frame();
     clear_manual_override();
@@ -206,8 +222,10 @@ void LightingRuntime::clear_manual_override() {
 }
 
 bool LightingRuntime::submit_manual_override(const ManualOverrideFrame& frame, uint32_t lease_ms) {
+    const uint32_t epoch = control_epoch_.load(std::memory_order_acquire);
     if (shutting_down_.load(std::memory_order_acquire) || !mutex_) return false;
     if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(50)) != pdTRUE) return false;
+    if (!control_updates_allowed(epoch)) { xSemaphoreGive(mutex_); return false; }
 
     // Allowed lease range: 1,000–60,000 ms (default 15,000 ms)
     if (lease_ms < 1000) lease_ms = 1000;
@@ -256,18 +274,18 @@ ManualControlStatus LightingRuntime::manual_control_status() const {
 }
 
 void LightingRuntime::clear_estop() {
+    portENTER_CRITICAL(&estop_state_mux_);
     if (estop_state_.load(std::memory_order_relaxed) == EstopState::Tripped) {
+        estop_reset_generation_ = controller_.estop_generation();
         estop_state_.store(EstopState::PendingReset, std::memory_order_release);
-        ESP_LOGI(TAG, "EMERGENCY STOP CLEAR REQUESTED: Forcing 1-frame blackout before scene resume");
     }
+    portEXIT_CRITICAL(&estop_state_mux_);
 }
 
 void LightingRuntime::task_entry(void* arg) { static_cast<LightingRuntime*>(arg)->task(); }
 
 void LightingRuntime::task() {
     TickType_t next_deadline = xTaskGetTickCount() + pdMS_TO_TICKS(kFramePeriodMs);
-    enable_ms_ = now_ms();
-    power_budget_.on_enable();
 
     uint32_t loop_count = 0;
     uint32_t commit_count = 0;
@@ -346,7 +364,10 @@ FrameResult LightingRuntime::render_frame(uint32_t current_ms) {
         restart_soft_start();
     }
 
+    portENTER_CRITICAL(&estop_state_mux_);
     const EstopState es = estop_state_.load(std::memory_order_acquire);
+    const uint32_t reset_generation = estop_reset_generation_;
+    portEXIT_CRITICAL(&estop_state_mux_);
     if (es == EstopState::Tripped) {
         controller_.blackout();
         if (preview_cb_) {
@@ -366,10 +387,15 @@ FrameResult LightingRuntime::render_frame(uint32_t current_ms) {
             }
             preview_cb_(current_render_frame_, current_local_cfg_);
         }
-        estop_state_.store(EstopState::ReArmedBlackout, std::memory_order_release);
+        portENTER_CRITICAL(&estop_state_mux_);
+        if (estop_state_.load(std::memory_order_relaxed) == EstopState::PendingReset &&
+            estop_reset_generation_ == reset_generation) {
+            estop_state_.store(EstopState::ReArmedBlackout, std::memory_order_release);
+        }
+        portEXIT_CRITICAL(&estop_state_mux_);
         return FrameResult::EstopBlackout;
     } else if (es == EstopState::ReArmedBlackout) {
-        const esp_err_t err = controller_.clear_estop();
+        const esp_err_t err = controller_.clear_estop(reset_generation);
         if (preview_cb_) {
             for (auto& ch : current_render_frame_.channels) {
                 ch.pixels.fill(LightValue{0, 0, 0, 0});
@@ -377,12 +403,19 @@ FrameResult LightingRuntime::render_frame(uint32_t current_ms) {
             }
             preview_cb_(current_render_frame_, current_local_cfg_);
         }
-        if (err == ESP_OK) {
-            estop_state_.store(EstopState::Inactive, std::memory_order_release);
+        bool reset_finished = false, reset_failed = false;
+        portENTER_CRITICAL(&estop_state_mux_);
+        if (estop_state_.load(std::memory_order_relaxed) == EstopState::ReArmedBlackout &&
+            estop_reset_generation_ == reset_generation) {
+            estop_state_.store(err == ESP_OK ? EstopState::Inactive : EstopState::Tripped, std::memory_order_release);
+            reset_finished = err == ESP_OK;
+            reset_failed = err != ESP_OK;
+        }
+        portEXIT_CRITICAL(&estop_state_mux_);
+        if (reset_finished) {
             restart_soft_start();
             ESP_LOGI(TAG, "EMERGENCY STOP RESET: Controller re-armed, resuming output on subsequent frame");
-        } else {
-            estop_state_.store(EstopState::Tripped, std::memory_order_release);
+        } else if (reset_failed) {
             report_output_fault(err);
             ESP_LOGE(TAG, "EMERGENCY STOP RESET FAILED: Hardware clear error %s; re-tripping E-stop", esp_err_to_name(err));
         }
@@ -391,11 +424,13 @@ FrameResult LightingRuntime::render_frame(uint32_t current_ms) {
 
     uint32_t render_scene_generation = 0;
     if (!mutex_ || xSemaphoreTake(mutex_, pdMS_TO_TICKS(5)) != pdTRUE) return FrameResult::NoOutput;
+    if (shutting_down_.load(std::memory_order_acquire)) { xSemaphoreGive(mutex_); return FrameResult::NoOutput; }
     if (live_pending_dirty_) { (*live_active_) = (*live_pending_); live_pending_dirty_ = false; }
     current_render_scene_ = scene_manager_.process_frame(current_ms);
     current_local_cfg_ = device_cfg_;
     render_scene_generation = requested_scene_generation_.load(std::memory_order_acquire);
-    xSemaphoreGive(mutex_);
+    // Keep scene transitions, manual data, gamma and power state consistent for
+    // CPU composition. Release before output I/O or application callbacks.
 
     const SceneConfig& render_scene = current_render_scene_;
     const DeviceConfig& local_cfg = current_local_cfg_;
@@ -427,6 +462,7 @@ FrameResult LightingRuntime::render_frame(uint32_t current_ms) {
         ControlSource ch_owner = ctrl_snapshot.resolve_channel(ch, current_ms);
         if (ch_owner == ControlSource::LiveDmx && live_channel_is_valid(live_active_->channels[ch])) {
             ChannelFrame& live_src = current_live_src_;
+            live_src.pixels.fill(LightValue{0, 0, 0, 0});
             const uint16_t pcount = std::min<uint16_t>(live_active_->channels[ch].pixel_count, num_pixels);
             for (uint16_t p = 0; p < pcount; ++p) live_src.pixels[p] = live_active_->channels[ch].pixels[p];
             live_src.pwm = live_active_->channels[ch].pwm;
@@ -519,6 +555,7 @@ FrameResult LightingRuntime::render_frame(uint32_t current_ms) {
         }
     }
     power_budget_.enforce(render_frame, local_cfg, current_ms);
+    xSemaphoreGive(mutex_);
     OutputState state = output_state_.load(std::memory_order_acquire);
     FrameResult frame_result = FrameResult::NoOutput;
     if (state == OutputState::Faulted) {
@@ -559,8 +596,8 @@ FrameResult LightingRuntime::render_frame(uint32_t current_ms) {
         } else {
             frame_result = FrameResult::NoOutput;
         }
-        if (state == OutputState::Armed) {
-            output_state_.store(OutputState::Healthy, std::memory_order_release);
+        if (frame_committed && state == OutputState::Armed &&
+            output_state_.compare_exchange_strong(state, OutputState::Healthy, std::memory_order_acq_rel)) {
             ESP_LOGI(TAG, "Armed commit succeeded: output state restored to HEALTHY");
         }
 
@@ -629,25 +666,32 @@ FrameBudgetEstimate LightingRuntime::preflight_frame_budget(const DeviceConfig& 
 }
 
 void LightingRuntime::activate_scene(uint8_t index) {
+    const uint32_t epoch = control_epoch_.load(std::memory_order_acquire);
+    if (!mutex_ || !control_updates_allowed()) return;
     xSemaphoreTake(mutex_, portMAX_DELAY);
+    if (!control_updates_allowed(epoch)) { xSemaphoreGive(mutex_); return; }
     if (scene_manager_.activate_scene(index, now_ms())) {
         source_manager_.acquire(ControlSource::ScenePlayback, 0, 0, 0, 0xFFFF);
     }
     xSemaphoreGive(mutex_);
 }
 void LightingRuntime::activate_scene_direct(const SceneConfig& scene, bool immediate) {
+    const uint32_t epoch = control_epoch_.load(std::memory_order_acquire);
+    if (!mutex_ || !control_updates_allowed()) return;
     xSemaphoreTake(mutex_, portMAX_DELAY);
+    if (!control_updates_allowed(epoch)) { xSemaphoreGive(mutex_); return; }
     source_manager_.acquire(ControlSource::ScenePlayback, 0, 0, 0, 0xFFFF);
     scene_manager_.activate_scene_direct(scene, now_ms(), immediate);
     xSemaphoreGive(mutex_);
 }
 
 bool LightingRuntime::submit_live_frame(const LiveDmxFrame& frame) {
+    const uint32_t epoch = control_epoch_.load(std::memory_order_acquire);
     if (shutting_down_.load(std::memory_order_acquire) || !mutex_ || !live_pending_ || !live_active_) return false;
     if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(10)) != pdTRUE) return false;
+    if (!control_updates_allowed(epoch)) { xSemaphoreGive(mutex_); return false; }
     const uint32_t now = now_ms();
     (*live_pending_) = frame; live_pending_->timestamp_ms = now; live_pending_dirty_ = true; last_live_stream_ms_ = now;
-    if (!task_handle_) { (*live_active_) = (*live_pending_); live_pending_dirty_ = false; }
     uint8_t live_zone_mask = 0, live_layer_mask = 0; uint16_t live_channel_mask = 0;
     for (uint8_t z = 0; z < 8; ++z) for (uint8_t l = 0; l < 3; ++l) if (live_pending_->layers[z][l].active) { live_zone_mask |= (1 << z); live_layer_mask |= (1 << l); }
     for (uint8_t ch = 0; ch < 16; ++ch) if (live_pending_->channels[ch].active) live_channel_mask |= (1 << ch);
@@ -677,6 +721,13 @@ esp_err_t LightingRuntime::clear_output_fault() {
 }
 
 void LightingRuntime::restart_soft_start() {
+    if (!mutex_) return;
+    xSemaphoreTake(mutex_, portMAX_DELAY);
+    restart_soft_start_locked();
+    xSemaphoreGive(mutex_);
+}
+
+void LightingRuntime::restart_soft_start_locked() {
     enable_ms_ = now_ms();
     activation_timing_.arm_ms = enable_ms_;
     activation_timing_.ramp_complete_ms = 0;
@@ -695,8 +746,11 @@ DeviceConfig LightingRuntime::get_config_snapshot() const {
 }
 
 void LightingRuntime::inject_live_data(uint8_t zone_idx, uint8_t layer_idx, const BrandColor& color, uint8_t opacity) {
+    const uint32_t epoch = control_epoch_.load(std::memory_order_acquire);
     if (zone_idx >= 8 || layer_idx >= 3 || !mutex_ || !live_pending_) return;
-    xSemaphoreTake(mutex_, portMAX_DELAY); const uint32_t now = now_ms();
+    xSemaphoreTake(mutex_, portMAX_DELAY);
+    if (!control_updates_allowed(epoch)) { xSemaphoreGive(mutex_); return; }
+    const uint32_t now = now_ms();
     live_pending_->layers[zone_idx][layer_idx].color = color; live_pending_->layers[zone_idx][layer_idx].opacity = opacity;
     live_pending_->layers[zone_idx][layer_idx].timestamp_ms = now; live_pending_->layers[zone_idx][layer_idx].active = true;
     live_pending_dirty_ = true; last_live_stream_ms_ = now;
@@ -705,8 +759,11 @@ void LightingRuntime::inject_live_data(uint8_t zone_idx, uint8_t layer_idx, cons
 }
 
 void LightingRuntime::inject_live_fixture(uint8_t fixture_idx, const LightValue* pixels, uint16_t count, const uint16_t* pwm_duties, uint8_t opacity) {
+    const uint32_t epoch = control_epoch_.load(std::memory_order_acquire);
     if (fixture_idx >= 16 || !mutex_ || !live_pending_) return;
-    xSemaphoreTake(mutex_, portMAX_DELAY); const uint32_t now = now_ms(); auto& lf = live_pending_->channels[fixture_idx];
+    xSemaphoreTake(mutex_, portMAX_DELAY);
+    if (!control_updates_allowed(epoch)) { xSemaphoreGive(mutex_); return; }
+    const uint32_t now = now_ms(); auto& lf = live_pending_->channels[fixture_idx];
     uint16_t pcount = std::min<uint16_t>(count, MAX_PIXELS); lf.pixel_count = pcount;
     if (pixels && pcount > 0) std::memcpy(lf.pixels.data(), pixels, pcount * sizeof(LightValue));
     if (pwm_duties) {
@@ -737,10 +794,12 @@ uint8_t LightingRuntime::active_live_objects() const {
 }
 
 void LightingRuntime::feed_watchdog() {
+    const uint32_t epoch = control_epoch_.load(std::memory_order_acquire);
     if (!mutex_) {
         return;
     }
     xSemaphoreTake(mutex_, portMAX_DELAY);
+    if (!control_updates_allowed(epoch)) { xSemaphoreGive(mutex_); return; }
     scene_manager_.feed_watchdog(now_ms());
     xSemaphoreGive(mutex_);
 }
@@ -748,15 +807,18 @@ uint8_t LightingRuntime::active_scene_index() const { return scene_manager_.acti
 bool LightingRuntime::is_fallback_active() const { return scene_manager_.is_fallback_active(); }
 bool LightingRuntime::is_transitioning() const { return scene_manager_.is_transitioning(); }
 void LightingRuntime::set_beat_period(uint16_t period_ms) {
+    const uint32_t epoch = control_epoch_.load(std::memory_order_acquire);
     if (!mutex_) {
         return;
     }
     xSemaphoreTake(mutex_, portMAX_DELAY);
+    if (!control_updates_allowed(epoch)) { xSemaphoreGive(mutex_); return; }
     beat_period_ms_ = std::max<uint16_t>(10, std::min<uint16_t>(period_ms, 60000));
     xSemaphoreGive(mutex_);
 }
 
 void LightingRuntime::reload_device_config() {
+    const uint32_t epoch = control_epoch_.load(std::memory_order_acquire);
     DeviceConfig candidate{};
     esp_err_t err = config_.load_config(candidate);
     if (err != ESP_OK) {
@@ -773,20 +835,24 @@ void LightingRuntime::reload_device_config() {
         return;
     }
     xSemaphoreTake(mutex_, portMAX_DELAY);
+    if (!control_updates_allowed(epoch)) { xSemaphoreGive(mutex_); return; }
     device_cfg_ = candidate;
     power_budget_.set_limit_mw(device_cfg_.max_power_mw);
     power_budget_.set_soft_start(device_cfg_.soft_start_enabled, device_cfg_.soft_start_ms);
     ColorPipeline::set_gamma(device_cfg_.gamma_x10);
     scene_manager_.update_device_config(device_cfg_);
-    restart_soft_start();
-    if (config_reload_cb_) {
-        config_reload_cb_(device_cfg_);
-    }
+    restart_soft_start_locked();
     xSemaphoreGive(mutex_);
+    // The runtime callback updates DmxRouter, which clears the live frame when
+    // its patch changes. It must be able to reacquire this nonrecursive mutex.
+    if (config_reload_cb_) {
+        config_reload_cb_(candidate);
+    }
     ESP_LOGI(TAG, "Device config transactional reload applied successfully");
 }
 
 bool LightingRuntime::acquire_control(ControlSource source, uint32_t lease_ms, uint8_t zone_mask, uint8_t layer_mask, uint16_t channel_mask, bool takeover) {
+    const uint32_t epoch = control_epoch_.load(std::memory_order_acquire);
     if (source == ControlSource::EStop) {
         trigger_estop();
     }
@@ -794,6 +860,7 @@ bool LightingRuntime::acquire_control(ControlSource source, uint32_t lease_ms, u
         return false;
     }
     xSemaphoreTake(mutex_, portMAX_DELAY);
+    if (!control_updates_allowed(epoch)) { xSemaphoreGive(mutex_); return false; }
     bool won = source_manager_.acquire(source, lease_ms, zone_mask, layer_mask, channel_mask, takeover);
     xSemaphoreGive(mutex_);
     return won;
@@ -809,7 +876,7 @@ void LightingRuntime::release_control(ControlSource source) {
     xSemaphoreTake(mutex_, portMAX_DELAY);
     source_manager_.release(source);
     if (source == ControlSource::Factory) {
-        restart_soft_start();
+        restart_soft_start_locked();
     }
     xSemaphoreGive(mutex_);
 }
@@ -832,7 +899,12 @@ TransitionCurve LightingRuntime::transition_curve() const {
 }
 
 void LightingRuntime::set_transition_curve(TransitionCurve curve) {
+    const uint32_t epoch = control_epoch_.load(std::memory_order_acquire);
+    if (!mutex_) return;
+    xSemaphoreTake(mutex_, portMAX_DELAY);
+    if (!control_updates_allowed(epoch)) { xSemaphoreGive(mutex_); return; }
     scene_manager_.set_transition_curve(curve);
+    xSemaphoreGive(mutex_);
 }
 
 } // namespace lg

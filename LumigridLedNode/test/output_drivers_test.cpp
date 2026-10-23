@@ -13,6 +13,9 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <condition_variable>
+#include <future>
+#include <thread>
 
 #if defined(CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS) && CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS
 #error These tests must execute the production controller path
@@ -797,8 +800,43 @@ void controller_new_estop_during_clear() {
     require_disabled("clear restored previous PWM content");
 }
 
+void controller_observer_replacement_waits() {
+    ControllerFixture f;
+    f.start(config(0, 1));
+    std::mutex mutex;
+    std::condition_variable condition;
+    bool entered = false, released = false;
+    auto lifetime = std::make_shared<int>(1);
+    std::weak_ptr<int> weak_lifetime = lifetime;
+    f.controller.set_commit_observer([&, lifetime](esp_err_t) {
+        std::unique_lock<std::mutex> lock(mutex);
+        entered = true;
+        condition.notify_all();
+        condition.wait(lock, [&] { return released; });
+    });
+    lifetime.reset();
+    auto committed = std::async(std::launch::async, [&] { return f.controller.try_commit(); });
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        require(condition.wait_for(lock, std::chrono::seconds(2), [&] { return entered; }), "commit observer never entered");
+    }
+    auto cleared = std::async(std::launch::async, [&] { f.controller.set_commit_observer({}); });
+    const bool returned_early = cleared.wait_for(std::chrono::milliseconds(30)) == std::future_status::ready;
+    const bool retained = !weak_lifetime.expired();
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        released = true;
+        condition.notify_all();
+    }
+    require(committed.get() == ESP_OK, "observer test commit failed");
+    cleared.get();
+    require(!returned_early && retained, "observer replacement destroyed an executing callback");
+    require(weak_lifetime.expired(), "observer was not released after its invocation finished");
+}
+
 using Test = std::pair<const char*, void (*)()>;
 const Test tests[] = {
+    {"controller_observer_replacement_waits", controller_observer_replacement_waits},
     {"controller_estop_during_commit", controller_estop_during_commit},
     {"controller_new_estop_during_clear", controller_new_estop_during_clear},
     {"pca_nonzero_enable", pca_nonzero_enable},

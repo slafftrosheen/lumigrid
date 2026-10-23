@@ -8,6 +8,7 @@ from pathlib import Path
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -89,26 +90,32 @@ namespace lg {
 class JobManager;
 class FactoryRunner { public:
     static constexpr uint8_t kBurnInDefaultBrightness=32;
-    FactoryStatus value{}; int aborts=0;
+    FactoryStatus value{}; int aborts=0, generic_aborts=0, burn_stops=0;
+    bool accept_abort=true, accept_start=false;
+    uint32_t aborted_session=0, proposed_session=99;
     FactoryStatus status() const { return value; }
     FactoryValidationReport validation_report() const { return {}; }
     bool start_test_session(FactoryTestKind, uint8_t, uint32_t, uint8_t,
-        uint32_t*, FactorySessionOwner, const char*) { return false; }
+        uint32_t* id, FactorySessionOwner, const char*) { if(id) *id=proposed_session; return accept_start; }
     bool start_burn_in_job(JobManager*, uint32_t, uint8_t, uint32_t*) { return false; }
     bool confirm_test_session(uint32_t, bool, const char*) { return true; }
-    bool abort() { ++aborts; return true; }
+    bool abort() { ++aborts; ++generic_aborts; return accept_abort; }
+    bool abort_test_session(uint32_t id=0) { ++aborts; aborted_session=id; return accept_abort; }
+    bool stop_burn_in_job() { ++aborts; ++burn_stops; return accept_abort; }
 };
 }
 ''',
     "JobManager.hpp": r'''
 #pragma once
 #include <cstdint>
+#include <cassert>
 namespace lg {
 enum class JobState { Running, Completed, Failed, Cancelled };
 struct OperationJob { JobState state=JobState::Running; int32_t error_code=0; };
 class JobManager { public:
     int cancellations=0; uint32_t cancelled_job=0;
-    bool get_job(uint32_t, OperationJob&) const { return false; }
+    bool available=false; OperationJob value{};
+    bool get_job(uint32_t id, OperationJob& out) const { assert(id==42); out=value; return available; }
     void cancel_job(uint32_t id) { ++cancellations; cancelled_job=id; }
 };
 }
@@ -251,18 +258,116 @@ int main(int argc, char** argv) {
         assert(service.get_test_result("BOOT-OUTPUT-SAFE")->state==CertificationTestState::WaitingForOperator);
         service.tick(long_uptime_ms+300001);
         assert(service.get_test_result("BOOT-OUTPUT-SAFE")->state==CertificationTestState::Blocked);
-    } else if(name=="abort_burn_in") {
+    } else if(name=="abort_burn_in" || name=="abort_burn_in_rejected" ||
+              name=="persistence_burn_in_pending" || name=="persistence_burn_in_rejected" ||
+              name=="cancellation_terminal_failure") {
         seed(service,"BURN-001");
         FactoryRunner runner; JobManager jobs;
+        jobs.available=true;
         service.runner_=&runner; service.job_mgr_=&jobs;
         service.burn_in_active_=true; service.burn_in_job_id_=42;
         std::strcpy(service.current_test_,"BURN-001");
-        assert(service.abort()==ESP_OK);
-        assert(jobs.cancellations==1 && jobs.cancelled_job==42);
-        assert(runner.aborts==1 && !service.burn_in_active_);
+        const bool rejected=name.find("rejected")!=std::string::npos;
+        runner.accept_abort=!rejected;
+        const bool persistence=name.find("persistence_")==0;
+        if(persistence) {
+            save_error=ESP_ERR_NO_MEM;
+            assert(service.persist_record()==ESP_ERR_NO_MEM);
+            assert(service.is_stale() && std::strcmp(service.stale_reason(),"persistence_failed")==0);
+        } else assert(service.abort()==(rejected ? ESP_ERR_INVALID_STATE : ESP_OK));
+        assert(jobs.cancellations==0 && jobs.value.state==JobState::Running);
+        assert(runner.aborts==1 && runner.generic_aborts==0 && runner.burn_stops==1);
+        assert(service.burn_in_active_ && service.burn_in_job_id_==42 && service.cancellation_pending());
+        assert(std::strcmp(service.current_running_test(),"BURN-001")==0);
+        assert(service.start_session(CertificationProfile::Development,"next")==ESP_ERR_INVALID_STATE);
+        assert(service.start_test("BOOT-001")==ESP_ERR_INVALID_STATE);
+        service.tick(2000);
+        assert(runner.aborts==(rejected ? 2 : 1));
+        assert(service.cancellation_pending() && jobs.cancellations==0);
+        if(rejected) {
+            runner.accept_abort=true; service.tick(3000); assert(runner.aborts==3);
+            service.tick(4000); assert(runner.aborts==3); // accepted cancellation is not re-enqueued
+        }
+        jobs.value.state=name=="cancellation_terminal_failure" ? JobState::Failed : JobState::Cancelled;
+        jobs.value.error_code=name=="cancellation_terminal_failure" ? ESP_FAIL : ESP_OK;
+        service.tick(5000);
+        assert(!service.cancellation_pending() && !service.burn_in_active_ && service.burn_in_job_id_==0);
+        assert(jobs.cancellations==0);
         assert(service.current_running_test()[0]=='\0');
-        assert(service.get_test_result("BURN-001")->state==CertificationTestState::Blocked);
+        assert(service.session().state==CertificationState::Incomplete);
+        assert(service.get_test_result("BURN-001")->state!=CertificationTestState::Passed);
+        if(persistence) assert(service.is_stale());
+        save_error=ESP_OK;
         assert(service.start_session(CertificationProfile::Development,"next")==ESP_OK);
+    } else if(name=="abort_physical_pending" || name=="abort_physical_rejected" ||
+              name=="timeout_physical_rejected" || name=="physical_terminal_before_blackout") {
+        seed(service,"ADDR-A1"); FactoryRunner runner; service.runner_=&runner;
+        service.current_factory_session_id_=17; std::strcpy(service.current_test_,"ADDR-A1");
+        runner.value.session.session_id=17; runner.value.session.owner=FactorySessionOwner::Certification;
+        std::strcpy(runner.value.session.certification_test_id,"ADDR-A1");
+        const bool rejected=name=="abort_physical_rejected" || name=="timeout_physical_rejected";
+        runner.accept_abort=!rejected;
+        runner.value.session.state=FactoryTestState::Running;
+        if(name=="timeout_physical_rejected") {
+            service.store_.current_record().results[0].state=CertificationTestState::WaitingForOperator;
+            runner.value.session.state=FactoryTestState::WaitingForOperator;
+            service.current_test_started_ms_=0; service.tick(300001);
+            assert(service.get_test_result("ADDR-A1")->state==CertificationTestState::Blocked);
+        } else assert(service.abort()==(rejected ? ESP_ERR_INVALID_STATE : ESP_OK));
+        assert(service.cancellation_pending() && service.current_factory_session_id_==17);
+        assert(runner.aborts==1 && runner.aborted_session==17 && runner.generic_aborts==0);
+        runner.accept_abort=true; service.tick(300002);
+        assert(runner.aborts==(rejected ? 2 : 1));
+        runner.value.session.session_id=18; runner.value.session.state=FactoryTestState::Aborted;
+        service.tick(300003); assert(service.cancellation_pending()); // unrelated terminal session is no ack
+        runner.value.session.session_id=17;
+        if(name=="physical_terminal_before_blackout") {
+            // ConfirmSession publishes Passed before its blackout completes.
+            runner.value.session.state=FactoryTestState::Passed;
+            runner.value.outputs_enabled=true; runner.value.test_active=true;
+            service.tick(300004); assert(service.cancellation_pending());
+            runner.value.outputs_enabled=false;
+            service.tick(300005); assert(service.cancellation_pending());
+            runner.value.test_active=false; runner.value.outputs_enabled=true;
+            service.tick(300006); assert(service.cancellation_pending());
+            runner.value.outputs_enabled=false;
+        }
+        service.tick(300004);
+        assert(!service.cancellation_pending() && service.current_factory_session_id_==0);
+        assert(service.current_running_test()[0]=='\0');
+    } else if(name=="physical_start_rejected" || name=="rejected_start_preserves_owned_session") {
+        for(const char* id : {"ADDR-A1","ADDR-XTALK","PWM-P1","PWM-XTALK",
+                             "SAFE-ESTOP-ADDRESSABLE","SAFE-ESTOP-PWM","SAFE-DISABLE-001"}) {
+            CertificationService candidate; seed(candidate,id);
+            FactoryRunner runner; candidate.runner_=&runner;
+            const bool prior_session=name=="rejected_start_preserves_owned_session";
+            if(prior_session) {
+                runner.value.session.session_id=17;
+                runner.value.session.owner=FactorySessionOwner::Certification;
+                runner.value.session.state=FactoryTestState::Running;
+            }
+            // FactoryRunner reserves a new ID before its queue can reject the start.
+            assert(candidate.start_test(id)==ESP_OK);
+            assert(candidate.get_test_result(id)->state==CertificationTestState::Blocked);
+            assert(candidate.current_factory_session_id_==0);
+            assert(candidate.current_running_test()[0]=='\0');
+            assert(candidate.abort()==ESP_OK);
+            assert(candidate.cancellation_pending()==prior_session);
+            assert(runner.aborts==(prior_session ? 1 : 0));
+            if(prior_session) {
+                assert(candidate.current_factory_session_id_==17 && runner.aborted_session==17);
+                runner.value.session.state=FactoryTestState::Aborted;
+                candidate.tick(5000);
+                assert(!candidate.cancellation_pending());
+            }
+        }
+    } else if(name=="abort_does_not_stop_unowned_output") {
+        seed(service); FactoryRunner runner; service.runner_=&runner;
+        runner.value.session.owner=FactorySessionOwner::ManualFactory;
+        runner.value.session.state=FactoryTestState::Running;
+        std::strcpy(service.current_test_,"POWER-LIMIT-001");
+        assert(service.abort()==ESP_OK && !service.cancellation_pending());
+        assert(runner.aborts==0 && service.current_running_test()[0]=='\0');
     } else if(name=="report_image_identity") {
         seed(service,"BOOT-001");
         cJSON* report=service.generate_report_json(); assert(report);
@@ -289,9 +394,10 @@ def main():
         for name, content in STUBS.items():
             (build / name).write_text(content)
         (build / "harness.cpp").write_text(HARNESS)
-        subprocess.run([cc,"-c",str(cjson/"cJSON.c"),"-I",str(cjson),"-o",str(build/"cjson.o")],check=True)
+        flags=["-O1","-g","-fsanitize=address,undefined","-fno-omit-frame-pointer","-fno-pie"]
+        subprocess.run([cc,*flags,"-c",str(cjson/"cJSON.c"),"-I",str(cjson),"-o",str(build/"cjson.o")],check=True)
         executable=build/"certification_service"
-        subprocess.run([compiler,"-std=c++17","-O1","-g","-Wall","-Wextra",
+        subprocess.run([compiler,"-std=c++17",*flags,"-Wall","-Wextra","-no-pie",
                         "-I",str(build),"-I",str(ROOT/"components/certification/include"),
                         "-I",str(ROOT/"components/factory/include"),"-I",str(cjson),
                         str(ROOT/"components/certification/CertificationPlan.cpp"),
@@ -301,10 +407,17 @@ def main():
                "missing_required","instrument_evidence","nan_measurement","infinite_measurement",
                "wrong_units","missing_units","explicit_failure","session_exclusivity",
                "configuration_read_failure","save_failure_not_passed","unimplemented_probes_blocked",
-               "start_full_session","external_measurement_waits","long_uptime_timeout","abort_burn_in","report_image_identity")
+               "start_full_session","external_measurement_waits","long_uptime_timeout","abort_burn_in","report_image_identity",
+               "abort_burn_in_rejected","persistence_burn_in_pending","persistence_burn_in_rejected",
+               "cancellation_terminal_failure","abort_physical_pending","abort_physical_rejected",
+               "timeout_physical_rejected","abort_does_not_stop_unowned_output",
+               "physical_terminal_before_blackout","physical_start_rejected","rejected_start_preserves_owned_session")
+        cases=sys.argv[1:] or cases
+        env={**os.environ,"ASAN_OPTIONS":"detect_leaks=0:halt_on_error=1",
+             "UBSAN_OPTIONS":"halt_on_error=1:print_stacktrace=1"}
         failures=[]
         for case in cases:
-            result=subprocess.run([str(executable),case],capture_output=True,text=True)
+            result=subprocess.run([str(executable),case],capture_output=True,text=True,env=env,timeout=10)
             print(result.stdout or result.stderr,end="")
             if result.returncode: failures.append(case)
         if failures:

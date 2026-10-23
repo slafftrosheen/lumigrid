@@ -1,10 +1,29 @@
-# Firmware release candidate 1.0.0-rc1
+# Firmware release candidate 1.0.0-rc2
 
-Date: 2026-10-23. Source baseline: `83d98dd166853871e2ff4c303b57feb9323444bd`.
+Date: 2026-10-23. Source baseline: `e75c52c10c4b4dea87c2cdb72fe1915b7d638b26` (rc1 plus the CI environment correction).
 
-This candidate repairs identified output, boot, network and evidence-storage faults before board qualification. It is a software candidate for bench testing. Physical stability, RF/EMC, electrical safety and thermal acceptance have not been measured in this change. Record the final Git commit and the exact artifact hashes from the build manifest when testing; the version string alone is insufficient to identify a binary.
+This candidate continues the rc1 reliability work with fixes to backup/restore, persistent configuration, OTA verification, worker shutdown, frame consistency and factory-job cancellation. It is a software candidate for bench testing. Physical stability, RF/EMC, electrical safety and thermal acceptance have not been measured in this change. Record the final Git commit and the exact artifact hashes from the build manifest when testing; the version string alone is insufficient to identify a binary.
 
-## Changes relevant to board qualification
+## Additional changes in rc2
+
+| Area | Reproduced fault | Resulting behavior |
+| --- | --- | --- |
+| Backup integrity | A valid export could fail its own parser; missing terminal records, altered checksums and duplicate records could be accepted | A v4 package requires its header, complete record sequence, exact count and raw-stream CRC; invalid or incomplete content is rejected before mutation |
+| Backup fidelity and JSON safety | Short JSON strings were over-read; unsigned checksums were narrowed; palettes, motion speed, labels and protocol values could change | Bounded string copies and typed numeric checks preserve supported values; scene/configuration round trips and allocation failures have production-source regressions |
+| Restore transaction | Snapshot errors, partial writes, stale readback and marker failures could still produce success; rollback touched unrelated records | Read-only affected-record snapshots precede a verified marker; every written payload is checked; rollback is limited to attempted records and incomplete recovery retains the marker |
+| Board identity | A restore could replace the target serial/revision and legacy tokens | Restore retains the target identity, authentication fields and sync secret; Wi-Fi credentials remain outside the package |
+| Persistent records | Network save mislabeled the schema; missing/corrupt primaries could hide valid backups; mirror failures were ignored | Compatible old network records migrate with checked results; valid backups load without silent repair writes; corrupt, absent and I/O-error states remain distinct |
+| Interrupted restore at boot | Default seeding or successful config validation could overwrite the recovery condition | Active restore markers suppress default seeding; failed marker reads fail closed; outputs stay inhibited until explicit recovery |
+| OTA image acceptance | A truncated upload could rely on an old image tail still in flash; boot selection could precede durable journal intent | IDF verifies the image against the bytes actually received; intent commits before boot selection; status exposes actual and persistence errors |
+| OTA boot verification | Matching version strings could imply a false confirmation/rollback; unavailable NVS could bypass failure handling | Running partition and bootloader state decide the outcome; healthy dwell and rollback are latched; early startup faults can request rollback even before normal verifier initialization |
+| Runtime ownership | A timed-out stop could clear the ownership flag and allow re-entry | Stop errors propagate; live tasks, callbacks and synchronization objects remain owned until acknowledgement; failed shutdown does not rebind Wi-Fi underneath a live service |
+| Lighting state | Concurrent manual/scene changes could produce mixed frames; short live frames retained pixel tails; an older reset could clear a newer logical stop | Composition uses a consistent state under the existing mutex; unused live pixels are cleared; deferred stop reset is tied to the controller generation; restart clears old manual/frozen transitions |
+| Factory jobs | Cancelled could be published before the worker stopped output; a full queue could leave orphan job state | Cancellation remains pending until the worker processes it; queue failures retain ownership or fail the rejected start; terminal jobs cannot be revived by late progress; HTTP and dashboard messages report acceptance until completion |
+| Certification cancellation | Evidence-save failures and aborts could release a live burn-in job; rejected physical starts retained nonexistent session IDs | The service retains and retries owned cancellation until worker acknowledgement, blocks competing manual starts during certification, and records rejected physical tests as Blocked |
+
+Restore is a checked multi-record operation, not an atomic NVS transaction. A power loss can leave a partial set of records. The durable marker causes recovery on the next boot; it does not reconstruct the lost in-memory rollback snapshot. A second partial restore is rejected while that marker is active. Retain/export known-good backups and use explicit recovery/recommissioning for an interrupted restore. Admission preserves the existing 16 KB reserve and checks both total scratch memory and the largest individual allocation; low-memory restores can return 507 without mutation.
+
+## Changes inherited from rc1 relevant to board qualification
 
 | Area | Defect addressed | Intended behavior |
 | --- | --- | --- |
@@ -50,7 +69,42 @@ The committed workflow runs boot configuration/stack checks, partition and packa
 
 Both ESP32 images must compile and satisfy the production partition/image budget. The factory ELF is checked for boot-stack limits. Building the diagnostic image does not mean its on-device suite has run. The final change report records the actual checks completed for this candidate.
 
-### Checks completed on 2026-10-23
+### rc2 software verification
+
+The rc2 workflow adds production-source host suites for persistent records, backup/export/ingest, restore transactions, runtime recovery, terminal jobs, factory cancellation and admission, lighting state, OTA boot verification and upload. It also runs the existing effects and catalogue API gates. Fault injection includes NVS writes/commits/readback, socket interruption, failed allocation, queued producers and delayed worker acknowledgement. AddressSanitizer/UndefinedBehaviorSanitizer are enabled by the new host harnesses. LeakSanitizer is disabled in the restricted host runtime; the backup harness also tracks live cJSON allocations explicitly.
+
+| rc2 host check | Observed result |
+| --- | --- |
+| Persistent configuration | 44 scenarios passed, including 42 injected write/commit failure combinations within the matrix cases |
+| Backup export, parsing and fidelity | 33 scenarios passed, including malformed/truncated packages, allocation failures, integer boundaries and full supported timeline tempo range |
+| Restore transaction and rollback | 35 scenarios passed, including snapshots, partial writes, readback mismatch, marker failures and preservation of absent/unrelated records |
+| Runtime recovery and shutdown ownership | 16 scenarios passed |
+| OTA boot verification / upload and status | 24 / 25 scenarios passed |
+| Output drivers / lighting state / terminal jobs | 30 / 13 / 5 scenarios passed; output total includes the PM teardown variant |
+| Factory worker cancellation and lifetime | 8 scenarios passed |
+| Factory cancellation and admission API | 17 scenarios passed, including active/pending certification exclusion and idle/no-service controls |
+| Certification service / result and abort API | 31 / 20 scenarios passed |
+| Wi-Fi recovery / bounded configuration strings | 25 / 6 scenarios passed |
+| Boot configuration / stack parser / partition / release manifest | 8 / 7 / 3 / 10 checks passed |
+| Board GPIO failure injection | Safe latch/readback and 27 injected failures passed |
+| Certification storage | 22 scenarios passed, plus the codec-pattern matrix |
+| Effects / catalogue API / embedded dashboard | 12 effect groups, real catalogue/scene-handler regression harness and embedded dashboard smoke passed |
+
+| rc2 build and packaging check | Observed result |
+| --- | --- |
+| Final ESP32 factory build | PASS; application binary 1,380,336 bytes, 56.9% of the 2,424,832-byte slot |
+| Final ESP32 diagnostic build | PASS; application binary 1,580,704 bytes, 65.2% of the slot |
+| Factory linked boot-stack gate | PASS; estimated acyclic direct-call path 5,616 bytes; indirect/ROM/interrupt use still requires target measurement |
+| Source consistency across the final build | PASS; all 601 inventoried source inputs matched before and after compilation |
+| Web application and generated documentation | PASS |
+| Architectural invariants and runtime mathematics | PASS |
+| Real merged-image candidate packaging | PASS; image contents, 8 MB configuration, partitions and artifact hashes validated |
+
+The factory application SHA-256 is `227f2aaffb08d7464cfcba02f9b2bc9b071554db3abf9cc5f059b746e19a4140`; the diagnostic application SHA-256 is `b8fec989415d20edf964fe134c8fa1c1546f50a0e5155719fff2e24cd3a071cc`. The candidate manifest contains the complete inventories and the final source commit. Hosted CI status is reported separately from these local checks.
+
+The values in the next table are retained as **rc1 evidence**, not measurements of the rc2 binary.
+
+### Prior rc1 measurements from 2026-10-23
 
 | Check | Observed result |
 | --- | --- |
@@ -68,7 +122,7 @@ Both ESP32 images must compile and satisfy the production partition/image budget
 | Web application build and generated documentation checks | PASS |
 | Real merged-image candidate packaging | PASS; binary contents, effective 8 MB configuration, partitions and artifact hashes validated |
 
-The actual runtime/build inputs were fingerprinted during the frozen final build and matched after it. The raw certification record is 8,000 bytes; the host fixtures store an initial session in 833 bytes and a representative completed session in 2,609 bytes. These sizes describe those fixtures, not guaranteed capacity for every note/configuration combination. No physical measurements or on-device diagnostic execution are included in these results.
+Those rc1 runtime/build inputs were fingerprinted during the frozen final build and matched after it. The raw certification record is 8,000 bytes; the host fixtures store an initial session in 833 bytes and a representative completed session in 2,609 bytes. These sizes describe those fixtures, not guaranteed capacity for every note/configuration combination. No physical measurements or on-device diagnostic execution are included in these results.
 
 ## Bench acceptance before the lab handoff
 
@@ -81,8 +135,8 @@ Use the intended PCB revision, enclosure, antenna, supplies, wiring and supporte
 | PWM channels | Exercise P1–P8 individually through zero, intermediate and intended full duty; inhibit with `/OE` | Scope duty/frequency, mapping and current observations; no unintended active channels |
 | Addressable channels | Exercise A1–A8, correct color order, maximum intended pixel count and combined updates | Visible mapping plus logic-analyzer timing/error evidence under concurrent Wi-Fi traffic |
 | Failure recovery | Introduce controlled I2C faults, network loss/reconnect and logical stop during output changes | Fault diagnostics, inhibited PWM, truthful blackout status, AP availability and successful bounded recovery |
-| State persistence | Save intended configuration, network settings and acceptance results; reboot and read back; test a controlled power interruption during a write | Previous or new complete valid record, explicit capacity/write errors, preserved credentials/configuration and exported reports |
-| OTA and rollback | Perform compatible application updates and controlled rejected/interrupted updates | Correct running hash, healthy dwell/verification, recovery path and preserved configuration |
+| State persistence | Save intended configuration, network settings and acceptance results; round-trip a v4 backup; reboot and read back; test controlled power interruptions during save and restore | Previous or new complete valid record, explicit capacity/write errors, preserved credentials/configuration and exported reports |
+| OTA and rollback | Perform compatible application updates, same-version updates, truncated uploads and controlled rejected/interrupted updates; induce startup failure before configuration init | Correct running hash, healthy dwell/verification, recovery path and preserved configuration |
 | Combined endurance | Run the intended output topology with network/API/protocol traffic and representative scene transitions for the agreed duration | Continuous serial logs, free/largest heap and task stack minima, reset/watchdog/transport counters, actual supply current and temperatures |
 | Radio/EMC preparation | Confirm Wi-Fi modes/channels, antenna and transmission settings with the lab; supply requested RF test firmware separately | Frozen product configuration and the lab's agreed operating-mode/test matrix |
 

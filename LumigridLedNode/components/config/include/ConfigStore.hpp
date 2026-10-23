@@ -79,7 +79,8 @@ enum class ConfigPersistenceState : uint8_t {
     Synchronized,       // Primary valid + backup synchronized
     PrimaryOnly,        // Primary valid, backup stale/failed
     SaveFailed,         // Primary save/validation failed
-    RecoveryRequired    // Both slots invalid
+    RecoveryRequired,   // Both slots invalid
+    BackupOnly          // Valid backup recovered without a read-time flash write
 };
 
 inline const char* persistence_state_to_name(ConfigPersistenceState st) {
@@ -88,6 +89,7 @@ inline const char* persistence_state_to_name(ConfigPersistenceState st) {
         case ConfigPersistenceState::PrimaryOnly:      return "PrimaryOnly";
         case ConfigPersistenceState::SaveFailed:       return "SaveFailed";
         case ConfigPersistenceState::RecoveryRequired: return "RecoveryRequired";
+        case ConfigPersistenceState::BackupOnly:       return "BackupOnly";
         default:                                       return "Unknown";
     }
 }
@@ -102,7 +104,7 @@ public:
 
     // ── Scenes (Product Grade) ──
     esp_err_t save_scene(uint8_t index, const SceneConfig& scene);
-    esp_err_t load_scene(uint8_t index, SceneConfig& scene);
+    esp_err_t load_scene(uint8_t index, SceneConfig& scene, bool persist_changes = true);
     esp_err_t delete_scene(uint8_t index);
     bool      scene_exists(uint8_t index) const;
     uint8_t   scene_count();
@@ -113,7 +115,9 @@ public:
 
     // ── Device config ──
     esp_err_t save_config(const DeviceConfig& config);
-    esp_err_t load_config(DeviceConfig& config);
+    // Read-only callers can inspect migrations without rewriting flash. A
+    // missing config remains NOT_FOUND when persist_changes is false.
+    esp_err_t load_config(DeviceConfig& config, bool persist_changes = true);
 
     struct ConfigValidationResult {
         bool valid = true;
@@ -164,11 +168,13 @@ public:
 
     // ── Sequences ──
     esp_err_t save_sequence(const Sequence& seq);
-    esp_err_t load_sequence(Sequence& seq);
+    esp_err_t load_sequence(Sequence& seq, bool* was_present = nullptr, bool persist_changes = true);
+    esp_err_t delete_sequence();
 
     // ── Calendar scheduling ──
     esp_err_t save_calendar_schedule(const CalendarSchedule& schedule);
-    esp_err_t load_calendar_schedule(CalendarSchedule& schedule);
+    esp_err_t load_calendar_schedule(CalendarSchedule& schedule, bool* was_present = nullptr);
+    esp_err_t delete_calendar_schedule();
 
     // ── Active state (power-loss recovery) ──
     esp_err_t save_active_state(uint8_t preset_index);
@@ -179,6 +185,7 @@ public:
     esp_err_t load_network_settings(NetworkSettings& settings);
 
     // ── Restore marker (power-loss-safe restore) ──
+    esp_err_t read_restore_marker(bool& in_progress, uint32_t* out_checksum = nullptr);
     bool is_restore_in_progress(uint32_t* out_checksum = nullptr);
     esp_err_t set_restore_in_progress(bool in_progress, uint32_t package_checksum = 0);
 

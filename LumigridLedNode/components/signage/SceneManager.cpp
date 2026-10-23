@@ -37,8 +37,19 @@ esp_err_t SceneManager::init() {
     }
 
     render_scene_ = scene;
+    target_scene_ = scene;
     active_index_ = active_idx;
     saved_active_index_ = active_idx;
+    // A stopped runtime may be started again. Its previous transition belongs
+    // to the old session, including any manual progress or frozen target.
+    transitioning_ = false;
+    manual_transition_ = false;
+    transition_frozen_ = false;
+    transition_start_ms_ = 0;
+    transition_duration_ms_ = 0;
+    transition_progress_q15_ = 32768;
+    manual_target_index_ = active_idx;
+    fallback_active_ = false;
     if (config_.load_scene_motion(active_idx, current_motion_) != ESP_OK) {
         current_motion_.reset();
     }

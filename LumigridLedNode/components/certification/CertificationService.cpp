@@ -85,7 +85,7 @@ uint32_t CertificationService::compute_hardware_fingerprint(const DeviceConfig& 
 }
 
 esp_err_t CertificationService::start_session(CertificationProfile profile, const char* serial_number) {
-    if (!store_.is_initialized() || is_in_progress() || current_test_[0] != '\0' || burn_in_active_) {
+    if (!store_.is_initialized() || is_in_progress() || current_test_[0] != '\0' || burn_in_active_ || cancellation_pending_) {
         return ESP_ERR_INVALID_STATE;
     }
     if (profile > CertificationProfile::ReleaseCandidate ||
@@ -197,7 +197,7 @@ const CertificationTestResult* CertificationService::get_test_result(const char*
 }
 
 esp_err_t CertificationService::start_test(const char* test_id) {
-    if (!is_in_progress() || current_test_[0] != '\0' || burn_in_active_) {
+    if (!is_in_progress() || current_test_[0] != '\0' || burn_in_active_ || cancellation_pending_) {
         ESP_LOGE(TAG, "Cannot start test %s: no certification session in progress", test_id ? test_id : "");
         return ESP_ERR_INVALID_STATE;
     }
@@ -216,6 +216,7 @@ esp_err_t CertificationService::start_test(const char* test_id) {
     CertificationRecord& rec = store_.current_record();
     CertificationTestResult& res = rec.results[idx];
 
+    current_factory_session_id_ = 0;
     strncpy(current_test_, test_id, sizeof(current_test_) - 1);
     current_test_[sizeof(current_test_) - 1] = '\0';
     current_test_started_ms_ = now_ms();
@@ -230,80 +231,33 @@ esp_err_t CertificationService::start_test(const char* test_id) {
     // probes below never touch it — the worker only starts when a physical
     // test actually begins (via start_test_session's lazy start). Probe
     // collection allocates no Factory stack.
+    const auto start_physical_test = [this, &res, test_id](FactoryTestKind kind, uint8_t channel) {
+        const bool accepted = runner_ && runner_->start_test_session(
+            kind, channel, 10000, 32, &current_factory_session_id_,
+            FactorySessionOwner::Certification, test_id);
+        if (!accepted) {
+            // The runner assigns its proposed ID before queue admission.
+            // A rejected command never owns that session or its outputs.
+            current_factory_session_id_ = 0;
+            res.state = CertificationTestState::Blocked;
+            res.error_code = -1;
+            snprintf(res.note, sizeof(res.note), "FactoryRunner unavailable");
+        }
+    };
     if (strncmp(test_id, "ADDR-A", 6) == 0 && strlen(test_id) == 7) {
         uint8_t ch = static_cast<uint8_t>(test_id[6] - '1');
-        if (ch < 8 && runner_) {
-            bool ok = runner_->start_test_session(
-                FactoryTestKind::AddressableChannel,
-                ch,
-                10000,
-                32,
-                &current_factory_session_id_,
-                FactorySessionOwner::Certification,
-                test_id
-            );
-            if (!ok) {
-                res.state = CertificationTestState::Blocked;
-                res.error_code = -1;
-                snprintf(res.note, sizeof(res.note), "FactoryRunner unavailable");
-            }
-        }
+        if (ch < 8) start_physical_test(FactoryTestKind::AddressableChannel, ch);
     } else if (strcmp(test_id, "ADDR-XTALK") == 0) {
-        if (runner_) {
-            runner_->start_test_session(
-                FactoryTestKind::AddressableChannel,
-                0,
-                10000,
-                32,
-                &current_factory_session_id_,
-                FactorySessionOwner::Certification,
-                test_id
-            );
-        }
+        start_physical_test(FactoryTestKind::AddressableChannel, 0);
     } else if (strncmp(test_id, "PWM-P", 5) == 0 && strlen(test_id) == 6) {
         uint8_t p = static_cast<uint8_t>(test_id[5] - '1');
-        if (p < 8 && runner_) {
-            bool ok = runner_->start_test_session(
-                FactoryTestKind::PwmChannel,
-                p + 8,
-                10000,
-                32,
-                &current_factory_session_id_,
-                FactorySessionOwner::Certification,
-                test_id
-            );
-            if (!ok) {
-                res.state = CertificationTestState::Blocked;
-                res.error_code = -1;
-                snprintf(res.note, sizeof(res.note), "FactoryRunner unavailable");
-            }
-        }
+        if (p < 8) start_physical_test(FactoryTestKind::PwmChannel, p + 8);
     } else if (strcmp(test_id, "PWM-XTALK") == 0) {
-        if (runner_) {
-            runner_->start_test_session(
-                FactoryTestKind::PwmChannel,
-                8,
-                10000,
-                32,
-                &current_factory_session_id_,
-                FactorySessionOwner::Certification,
-                test_id
-            );
-        }
+        start_physical_test(FactoryTestKind::PwmChannel, 8);
     } else if (strcmp(test_id, "SAFE-ESTOP-ADDRESSABLE") == 0 ||
                strcmp(test_id, "SAFE-ESTOP-PWM") == 0 ||
                strcmp(test_id, "SAFE-DISABLE-001") == 0) {
-        if (runner_) {
-            runner_->start_test_session(
-                FactoryTestKind::SafetyGate,
-                0xFF,
-                10000,
-                32,
-                &current_factory_session_id_,
-                FactorySessionOwner::Certification,
-                test_id
-            );
-        }
+        start_physical_test(FactoryTestKind::SafetyGate, 0xFF);
     } else if (strcmp(test_id, "BOOT-OUTPUT-SAFE") == 0) {
         // Operator observes boot safe state
         res.state = CertificationTestState::WaitingForOperator;
@@ -455,7 +409,7 @@ esp_err_t CertificationService::record_result(const char* test_id,
                                               float measured_value,
                                               const char* unit,
                                               const char* note) {
-    if (!is_in_progress()) {
+    if (!is_in_progress() || cancellation_pending_) {
         return ESP_ERR_INVALID_STATE;
     }
     if (source > EvidenceSource::InstrumentMeasurement ||
@@ -583,11 +537,11 @@ esp_err_t CertificationService::persist_record() {
     rec.session.completed_ms = esp_timer_get_time() / 1000ULL;
     is_stale_ = true;
     snprintf(stale_reason_, sizeof(stale_reason_), "persistence_failed");
-    current_test_[0] = '\0';
-    if (burn_in_active_ && job_mgr_) job_mgr_->cancel_job(burn_in_job_id_);
-    if (runner_ && (burn_in_active_ || runner_->status().session.owner == FactorySessionOwner::Certification))
-        runner_->abort();
-    burn_in_active_ = false;
+    if (!cancellation_pending_) {
+        const esp_err_t cancel_error = request_output_cancellation();
+        if (cancel_error != ESP_OK) ESP_LOGE(TAG, "Certification cancellation was not queued; tick will retry");
+    }
+    if (!cancellation_pending_) current_test_[0] = '\0';
     ESP_LOGE(TAG, "Certification evidence not persisted: %s", esp_err_to_name(err));
     return err;
 }
@@ -655,30 +609,76 @@ void CertificationService::evaluate_overall_state() {
     }
 }
 
-esp_err_t CertificationService::abort() {
-    // Burn-in uses the FactoryRunner's generic job path, so its session owner
-    // need not be Certification. Cancel the owned job and stop its output even
-    // when the normal certification-owner check does not match.
-    if (burn_in_active_ && job_mgr_) job_mgr_->cancel_job(burn_in_job_id_);
-    if (runner_) {
-        FactoryStatus fstat = runner_->status();
-        if (burn_in_active_ || fstat.session.owner == FactorySessionOwner::Certification) {
-            runner_->abort();
+esp_err_t CertificationService::request_output_cancellation() {
+    FactoryStatus status{};
+    if (runner_) status = runner_->status();
+    if (!cancellation_pending_) {
+        const bool owns_active_session = status.session.owner == FactorySessionOwner::Certification &&
+            (status.session.state == FactoryTestState::Preparing ||
+             status.session.state == FactoryTestState::Running ||
+             status.session.state == FactoryTestState::WaitingForOperator);
+        if (!burn_in_active_) {
+            // A completed/unqueued test can leave its old ID behind. Keep an
+            // accepted start that the worker has not reached yet, but do not
+            // manufacture pending work for an already finished test.
+            if (!owns_active_session && current_test_[0] == '\0') current_factory_session_id_ = 0;
+            if (owns_active_session && current_factory_session_id_ == 0)
+                current_factory_session_id_ = status.session.session_id;
         }
+        cancellation_pending_ = burn_in_active_ || current_factory_session_id_ != 0;
+        cancellation_queued_ = false;
+        if (!cancellation_pending_) return ESP_OK;
     }
-    burn_in_active_ = false;
-    burn_in_job_id_ = 0;
+
+    bool acknowledged = false;
+    if (burn_in_active_) {
+        OperationJob job{};
+        acknowledged = job_mgr_ && burn_in_job_id_ != 0 && job_mgr_->get_job(burn_in_job_id_, job) &&
+            (job.state == JobState::Completed || job.state == JobState::Failed || job.state == JobState::Cancelled);
+    } else {
+        acknowledged = runner_ && status.session.owner == FactorySessionOwner::Certification &&
+            status.session.session_id == current_factory_session_id_ &&
+            !status.outputs_enabled && !status.test_active &&
+            (status.session.state == FactoryTestState::Passed || status.session.state == FactoryTestState::Failed ||
+             status.session.state == FactoryTestState::Aborted);
+    }
+    if (acknowledged) {
+        // Job completion follows its output operation. Physical sessions also
+        // need inactive output flags because confirmation publishes its state
+        // before blackout completes. Failed blackout stays a failed job.
+        cancellation_pending_ = false;
+        cancellation_queued_ = false;
+        burn_in_active_ = false;
+        burn_in_job_id_ = 0;
+        current_factory_session_id_ = 0;
+        current_test_[0] = '\0';
+        return ESP_OK;
+    }
+    if (!runner_) return ESP_ERR_INVALID_STATE;
+    if (!cancellation_queued_) {
+        // Scope cancellation to the owned session; a delayed abort must not
+        // stop a subsequent manual factory job. Retry only a rejected enqueue.
+        cancellation_queued_ = burn_in_active_ ? runner_->stop_burn_in_job() :
+            runner_->abort_test_session(current_factory_session_id_);
+        if (!cancellation_queued_) return ESP_ERR_INVALID_STATE;
+    }
+    return ESP_OK;
+}
+
+esp_err_t CertificationService::abort() {
 
     if (current_test_[0] != '\0') {
         int idx = find_result_index(current_test_);
         if (idx >= 0) {
             CertificationRecord& rec = store_.current_record();
             rec.results[idx].state = CertificationTestState::Blocked;
-            strncpy(rec.results[idx].note, "aborted", sizeof(rec.results[idx].note) - 1);
+            strncpy(rec.results[idx].note, "abort requested", sizeof(rec.results[idx].note) - 1);
             rec.results[idx].completed_ms = esp_timer_get_time() / 1000ULL;
         }
-        current_test_[0] = '\0';
     }
+
+    const esp_err_t cancel_error = request_output_cancellation();
+    if (!cancellation_pending_) current_test_[0] = '\0';
 
     CertificationRecord& rec = store_.current_record();
     if (rec.session.state == CertificationState::InProgress) {
@@ -686,7 +686,8 @@ esp_err_t CertificationService::abort() {
         rec.session.completed_ms = esp_timer_get_time() / 1000ULL;
     }
 
-    return persist_record();
+    const esp_err_t persist_error = persist_record();
+    return persist_error != ESP_OK ? persist_error : cancel_error;
 }
 
 void CertificationService::check_invalidation(const DeviceConfig& current_cfg, const char* current_hw_rev, const char* current_fw_ver) {
@@ -760,7 +761,7 @@ void CertificationService::update_burn_in_tick(uint32_t elapsed_s, uint32_t comm
 }
 
 void CertificationService::finish_burn_in(bool passed, const char* reason) {
-    if (!burn_in_active_) return;
+    if (!burn_in_active_ || cancellation_pending_) return;
     update_burn_in_tick(store_.current_record().burn_in.duration_s, store_.current_record().burn_in.commit_failures, store_.current_record().burn_in.output_faults);
     const auto mem = capture_runtime_memory();
     burn_in_end_free8_ = mem.free_8bit;
@@ -778,6 +779,13 @@ void CertificationService::finish_burn_in(bool passed, const char* reason) {
 }
 
 void CertificationService::tick(uint64_t now_ms) {
+    // Persistence failure and explicit abort make evidence Incomplete before
+    // the worker stops. Continue cancellation retry/acknowledgement regardless
+    // of that evidence state, retaining ownership until the worker responds.
+    if (cancellation_pending_) {
+        request_output_cancellation();
+        return;
+    }
     if (!is_in_progress()) return;
 
     CertificationRecord& rec = store_.current_record();
@@ -794,10 +802,8 @@ void CertificationService::tick(uint64_t now_ms) {
                     res.completed_ms = now_ms;
                     res.error_code = -2;
                     snprintf(res.note, sizeof(res.note), "Operator observation timed out after 5m");
-                    if (runner_) {
-                        runner_->abort();
-                    }
-                    current_test_[0] = '\0';
+                    request_output_cancellation();
+                    if (!cancellation_pending_) current_test_[0] = '\0';
                     evaluate_overall_state();
                     persist_record();
                     return;

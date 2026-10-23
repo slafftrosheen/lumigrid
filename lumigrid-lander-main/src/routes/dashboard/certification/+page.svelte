@@ -262,7 +262,7 @@
       await abortCertification(nodeIp);
       await postFactoryAbort(nodeIp);
       await loadData();
-      successMsg = 'Output test aborted. Controller blacked out safely.';
+      successMsg = 'Cancellation and blackout requested. Waiting for controller status.';
     } catch (e: any) {
       error = e.message || 'Failed to abort';
     }
