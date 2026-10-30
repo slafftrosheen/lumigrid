@@ -12,6 +12,7 @@
 #include "ConfigStore.hpp"
 #include "lwip/sockets.h"
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -90,12 +91,14 @@ public:
     esp_err_t start(NodeRole role);
     esp_err_t stop(uint32_t timeout_ms = 1500);
 
-    NodeRole role() const { return configured_role_; }
+    NodeRole role() const;
     NodeRole active_role() const;
     NodeSyncStatus status() const;
 
     void reset_config_cache();
 
+    // Install callbacks before start(), with callers quiesced. Do not replace
+    // callbacks while a worker or status reader can invoke them.
     void set_transport_callback(TransportCallback callback) {
         transport_callback_ = std::move(callback);
     }
@@ -115,7 +118,7 @@ public:
         Acknowledgement = 2,
     };
 
-    // Phase 6: Canonical 68-byte packed SyncPacket v5
+    // Canonical 76-byte packed SyncPacket v6 (wire format unchanged).
     struct __attribute__((packed)) SyncPacket {
         uint32_t magic;
         uint8_t  version;
@@ -165,6 +168,8 @@ private:
     static void worker_task_entry(void* arg);
     static void auto_task_entry(void* arg);
 
+    void finish_task();
+    bool should_run() const;
     void master_task();
     void worker_task();
     void auto_task();
@@ -182,10 +187,15 @@ private:
 
     NodeRole configured_role_ = NodeRole::Auto;
     NodeRole active_role_ = NodeRole::Auto;
-    int sock_ = -1;
+    // Only lifecycle operations change task_handle_. Worker exit signals the
+    // completion semaphore; a successful stop consumes it before releasing ownership.
+    std::atomic_flag lifecycle_busy_ = ATOMIC_FLAG_INIT;
+    bool stopping_ = false;
     TaskHandle_t task_handle_ = nullptr;
     bool running_ = false;
     SemaphoreHandle_t shutdown_sem_ = nullptr;
+
+    ShowTransportSnapshot local_transport_snapshot_{};
 
     // Cached config fields
     uint32_t cached_sync_token_ = 0;

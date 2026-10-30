@@ -14,6 +14,12 @@ import {
 } from './sync';
 import * as transport from './transport';
 
+const liveSyncDefaults = {
+  syncEnabled: true, running: true, protocolVersion: 6, syncProtocol: 6,
+  clockLocked: true, lastPacketAgeMs: 100, packetsReceived: 1,
+  groupLabel: 'Test group', transportApplyOk: true,
+};
+
 describe('sync API module', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -87,9 +93,9 @@ describe('sync API module', () => {
   describe('getShowManifest', () => {
     it('fetches /api/v1/show-manifest', async () => {
       const mockManifest: ShowManifest = {
-        schema: 1,
+        schema: 2,
         firmware: '0.9.0',
-        protocol: 1,
+        protocol: 1, syncProtocol: 6,
         showHash: 12345678,
         scenes: [{ index: 0, name: 'Brand Night', checksum: 111, motionChecksum: 222 }],
         timeline: { enabled: true, bpm: 120, checksum: 333 },
@@ -116,8 +122,8 @@ describe('sync API module', () => {
 
   describe('compareShowManifest', () => {
     const baseManifest: ShowManifest = {
-      schema: 1,
-      protocol: 1,
+      schema: 2,
+      protocol: 1, syncProtocol: 6,
       showHash: 1000,
       scenes: [
         { index: 0, checksum: 10, motionChecksum: 100 },
@@ -134,7 +140,7 @@ describe('sync API module', () => {
     });
 
     it('returns INCOMPATIBLE if schemas differ', () => {
-      const target = { ...baseManifest, schema: 2 };
+      const target = { ...baseManifest, schema: 3 };
       const res = compareShowManifest(baseManifest, target);
       expect(res.status).toBe('INCOMPATIBLE');
       expect(res.reason).toContain('Schema version mismatch');
@@ -156,8 +162,8 @@ describe('sync API module', () => {
 
     it('returns DRIFT with detailed diffs when content differs', () => {
       const target: ShowManifest = {
-        schema: 1,
-        protocol: 1,
+        schema: 2,
+        protocol: 1, syncProtocol: 6,
         showHash: 2000, // Differs
         scenes: [
           { index: 0, checksum: 10, motionChecksum: 999 }, // Motion changed
@@ -229,19 +235,19 @@ describe('sync API module', () => {
   describe('evaluateClusterTopology', () => {
     it('returns NO_LEADER when 0 nodes have activeRole master', () => {
       const topo = evaluateClusterTopology([
-        { ip: '192.168.1.10', status: { activeRole: 'worker', masterAddress: '192.168.1.5' } as any },
-        { ip: '192.168.1.11', status: { activeRole: 'worker', masterAddress: '192.168.1.5' } as any },
+        { ip: '192.168.1.10', status: { ...liveSyncDefaults, activeRole: 'worker', masterAddress: '192.168.1.5' } as any },
+        { ip: '192.168.1.11', status: { ...liveSyncDefaults, activeRole: 'worker', masterAddress: '192.168.1.5' } as any },
       ]);
       expect(topo.state).toBe('NO_LEADER');
       expect(topo.leaderIp).toBeNull();
       expect(topo.isReady).toBe(false);
-      expect(topo.error).toContain('NO LEADER');
+      expect(topo.error).toContain('No running leader');
     });
 
     it('returns VALID_LEADER when exactly 1 master and workers track that master', () => {
       const topo = evaluateClusterTopology([
-        { ip: '192.168.1.10', status: { activeRole: 'master', masterAddress: null, transportApplyOk: true } as any },
-        { ip: '192.168.1.11', status: { activeRole: 'worker', masterAddress: '192.168.1.10', transportApplyOk: true } as any },
+        { ip: '192.168.1.10', status: { ...liveSyncDefaults, activeRole: 'master', masterAddress: null, transportApplyOk: true } as any },
+        { ip: '192.168.1.11', status: { ...liveSyncDefaults, activeRole: 'worker', masterAddress: '192.168.1.10', transportApplyOk: true } as any },
       ]);
       expect(topo.state).toBe('VALID_LEADER');
       expect(topo.leaderIp).toBe('192.168.1.10');
@@ -251,41 +257,41 @@ describe('sync API module', () => {
 
     it('returns SPLIT_BRAIN when multiple nodes report activeRole master', () => {
       const topo = evaluateClusterTopology([
-        { ip: '192.168.1.10', status: { activeRole: 'master' } as any },
-        { ip: '192.168.1.11', status: { activeRole: 'master' } as any },
+        { ip: '192.168.1.10', status: { ...liveSyncDefaults, activeRole: 'master' } as any },
+        { ip: '192.168.1.11', status: { ...liveSyncDefaults, activeRole: 'master' } as any },
       ]);
       expect(topo.state).toBe('SPLIT_BRAIN');
       expect(topo.leaderIp).toBeNull();
       expect(topo.isReady).toBe(false);
-      expect(topo.error).toContain('SPLIT BRAIN (2 masters detected)');
+      expect(topo.error).toContain('Multiple leaders');
     });
 
     it('returns LEADER_DISAGREEMENT when a worker tracks a different master', () => {
       const topo = evaluateClusterTopology([
-        { ip: '192.168.1.10', status: { activeRole: 'master' } as any },
-        { ip: '192.168.1.11', status: { activeRole: 'worker', masterAddress: '192.168.1.99' } as any },
+        { ip: '192.168.1.10', status: { ...liveSyncDefaults, activeRole: 'master' } as any },
+        { ip: '192.168.1.11', status: { ...liveSyncDefaults, activeRole: 'worker', masterAddress: '192.168.1.99' } as any },
       ]);
       expect(topo.state).toBe('LEADER_DISAGREEMENT');
       expect(topo.leaderIp).toBe('192.168.1.10');
       expect(topo.isReady).toBe(false);
-      expect(topo.error).toContain('LEADER DISAGREEMENT');
+      expect(topo.error).toContain('not following');
     });
 
     it('marks isReady false when any follower reports transportApplyOk false', () => {
       const topo = evaluateClusterTopology([
-        { ip: '192.168.1.10', status: { activeRole: 'master', transportApplyOk: true } as any },
-        { ip: '192.168.1.11', status: { activeRole: 'worker', masterAddress: '192.168.1.10', transportApplyOk: false } as any },
+        { ip: '192.168.1.10', status: { ...liveSyncDefaults, activeRole: 'master', transportApplyOk: true } as any },
+        { ip: '192.168.1.11', status: { ...liveSyncDefaults, activeRole: 'worker', masterAddress: '192.168.1.10', transportApplyOk: false } as any },
       ]);
       expect(topo.state).toBe('VALID_LEADER');
       expect(topo.isReady).toBe(false);
-      expect(topo.error).toContain('transport apply error');
+      expect(topo.error).toContain('playback has not been confirmed');
     });
   });
 
   describe('Playback vs Schedule Parity', () => {
     const baseManifest: ShowManifest = {
       schema: 2,
-      protocol: 4,
+      protocol: 1, syncProtocol: 6,
       playbackHash: 11111,
       scheduleHash: 22222,
       showHash: 33333,

@@ -1,0 +1,86 @@
+{
+  "schema": "lumigrid-qualification-v1",
+  "identity": {
+    "source_commit": "",
+    "firmware_sha256": "",
+    "pcb_revision": "",
+    "serial_number": "",
+    "wiring_revision": "",
+    "power_supply": "",
+    "load_profile": "",
+    "enclosure": "",
+    "antenna": ""
+  },
+  "checks": [
+    {
+      "id": "firmware_builds",
+      "result": "NOT_RUN",
+      "firmware_sha256": "",
+      "pcb_revision": "",
+      "evidence": []
+    },
+    {
+      "id": "safe_boot_and_reset",
+      "result": "NOT_RUN",
+      "firmware_sha256": "",
+      "pcb_revision": "",
+      "evidence": []
+    },
+    {
+      "id": "all_16_outputs",
+      "result": "NOT_RUN",
+      "firmware_sha256": "",
+      "pcb_revision": "",
+      "evidence": []
+    },
+    {
+      "id": "combined_outputs_and_network",
+      "result": "NOT_RUN",
+      "firmware_sha256": "",
+      "pcb_revision": "",
+      "evidence": []
+    },
+    {
+      "id": "network_loss_and_reconnect",
+      "result": "NOT_RUN",
+      "firmware_sha256": "",
+      "pcb_revision": "",
+      "evidence": []
+    },
+    {
+      "id": "sync_shutdown_and_recovery",
+      "result": "NOT_RUN",
+      "firmware_sha256": "",
+      "pcb_revision": "",
+      "evidence": []
+    },
+    {
+      "id": "ota_and_rollback",
+      "result": "NOT_RUN",
+      "firmware_sha256": "",
+      "pcb_revision": "",
+      "evidence": []
+    },
+    {
+      "id": "configuration_power_loss",
+      "result": "NOT_RUN",
+      "firmware_sha256": "",
+      "pcb_revision": "",
+      "evidence": []
+    },
+    {
+      "id": "thermal_endurance",
+      "result": "NOT_RUN",
+      "firmware_sha256": "",
+      "pcb_revision": "",
+      "evidence": []
+    },
+    {
+      "id": "installation_limits_review",
+      "result": "NOT_RUN",
+      "firmware_sha256": "",
+      "pcb_revision": "",
+      "evidence": []
+    }
+  ]
+}

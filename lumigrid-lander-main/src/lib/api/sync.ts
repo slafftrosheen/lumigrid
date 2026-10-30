@@ -1,4 +1,6 @@
 import { apiJson } from './transport';
+import { checkManifestCompatibility, evaluateSyncTopology } from './syncPolicy';
+export { syncProtocolCompatibility, evaluateClusterReadiness, rememberSyncGroup, inSelectedSyncGroup } from './syncPolicy';
 
 export type SyncRole = 'auto' | 'master' | 'worker';
 
@@ -70,6 +72,7 @@ export interface ShowManifest {
   schemaVersion?: number;
   firmware?: string;
   protocol?: number;
+  syncProtocol?: number;
   playbackHash?: number;
   scheduleHash?: number;
   showHash: number;
@@ -142,6 +145,8 @@ export function compareShowManifest(
   source: ShowManifest | null | undefined,
   target: ShowManifest | null | undefined
 ): ShowParityResult {
+  const compatibilityFailure = checkManifestCompatibility(source, target);
+  if (compatibilityFailure) return compatibilityFailure;
   if (!source || !target) {
     return {
       playbackStatus: 'UNAVAILABLE',
@@ -257,8 +262,10 @@ export function compareShowManifest(
 
   const playbackDiffs = diffs.filter((d) => d.category !== 'schedules');
   const scheduleDiffs = diffs.filter((d) => d.category === 'schedules');
-  const pStatus: ParityStatus = playbackDiffs.some((d) => d.state !== 'match') ? 'DRIFT' : 'MATCHED';
-  const sStatus: ParityStatus = scheduleDiffs.some((d) => d.state !== 'match') ? 'DRIFT' : 'MATCHED';
+  const pStatus: ParityStatus = (playbackDiffs.some((d) => d.state !== 'match') ||
+    (source.playbackHash !== undefined && target.playbackHash !== undefined && source.playbackHash !== target.playbackHash)) ? 'DRIFT' : 'MATCHED';
+  const sStatus: ParityStatus = (scheduleDiffs.some((d) => d.state !== 'match') ||
+    (source.scheduleHash !== undefined && target.scheduleHash !== undefined && source.scheduleHash !== target.scheduleHash)) ? 'DRIFT' : 'MATCHED';
   const overallStatus: ParityStatus = (pStatus === 'MATCHED' && sStatus === 'MATCHED') ? 'MATCHED' : 'DRIFT';
 
   return {
@@ -337,6 +344,8 @@ export function comparePlaybackManifest(
   source: ShowManifest | null | undefined,
   target: ShowManifest | null | undefined
 ): ShowParityResult {
+  const compatibilityFailure = checkManifestCompatibility(source, target);
+  if (compatibilityFailure) return compatibilityFailure;
   if (!source || !target) {
     return {
       playbackStatus: 'UNAVAILABLE',
@@ -418,14 +427,16 @@ export function comparePlaybackManifest(
   }
 
   if (source.playbackHash !== undefined && target.playbackHash !== undefined) {
-    if (source.playbackHash === target.playbackHash) {
+    if (source.playbackHash === target.playbackHash && !diffs.some(d => d.state !== 'match')) {
       return { playbackStatus: 'MATCHED', scheduleStatus: 'MATCHED', status: 'MATCHED', diffs };
     }
     return {
       playbackStatus: 'DRIFT',
       scheduleStatus: 'MATCHED',
       status: 'DRIFT',
-      reason: `Playback content differs (hash ${source.playbackHash} vs ${target.playbackHash})`,
+      reason: source.playbackHash === target.playbackHash
+        ? 'Playback records differ despite matching aggregate hashes'
+        : `Playback content differs (hash ${source.playbackHash} vs ${target.playbackHash})`,
       diffs,
     };
   }
@@ -448,6 +459,8 @@ export function compareScheduleManifest(
   source: ShowManifest | null | undefined,
   target: ShowManifest | null | undefined
 ): ShowParityResult {
+  const compatibilityFailure = checkManifestCompatibility(source, target);
+  if (compatibilityFailure) return compatibilityFailure;
   if (!source || !target) {
     return {
       playbackStatus: 'UNAVAILABLE',
@@ -513,53 +526,5 @@ export interface ClusterTopology {
 export function evaluateClusterTopology(
   nodes: { ip: string; status?: SyncStatus | null }[]
 ): ClusterTopology {
-  const activeMasters = nodes.filter((n) => n.status?.activeRole === 'master');
-  const masterCount = activeMasters.length;
-
-  if (masterCount === 0) {
-    return {
-      masterCount: 0,
-      leaderIp: null,
-      state: 'NO_LEADER',
-      error: 'ELECTING / NO LEADER',
-      isReady: false,
-    };
-  }
-
-  if (masterCount > 1) {
-    return {
-      masterCount,
-      leaderIp: null,
-      state: 'SPLIT_BRAIN',
-      error: `SPLIT BRAIN (${masterCount} masters detected)`,
-      isReady: false,
-    };
-  }
-
-  const leaderIp = activeMasters[0].ip;
-
-  // Check workers for leader disagreement
-  const activeWorkers = nodes.filter((n) => n.status?.activeRole === 'worker');
-  for (const worker of activeWorkers) {
-    if (worker.status?.masterAddress && worker.status.masterAddress !== leaderIp) {
-      return {
-        masterCount: 1,
-        leaderIp,
-        state: 'LEADER_DISAGREEMENT',
-        error: `LEADER DISAGREEMENT (worker ${worker.ip} tracking ${worker.status.masterAddress} instead of leader ${leaderIp})`,
-        isReady: false,
-      };
-    }
-  }
-
-  // All active followers must also have transportApplyOk !== false
-  const hasTransportError = activeWorkers.some((w) => w.status?.transportApplyOk === false);
-
-  return {
-    masterCount: 1,
-    leaderIp,
-    state: 'VALID_LEADER',
-    isReady: !hasTransportError,
-    error: hasTransportError ? 'One or more followers report transport apply error' : undefined,
-  };
+  return evaluateSyncTopology(nodes);
 }

@@ -14,6 +14,10 @@
     compareScheduleManifest,
     compareFullShowManifest,
     evaluateClusterTopology,
+    syncProtocolCompatibility,
+    evaluateClusterReadiness,
+    rememberSyncGroup,
+    inSelectedSyncGroup,
     generateSyncToken,
     buildClusterPlan,
     type SyncStatus,
@@ -55,6 +59,7 @@
     node: SavedNodeInfo;
     online: boolean;
     reachabilityState: ReachabilityState;
+    lastKnownGroup?: string;
     syncStatus?: SyncStatus;
     manifest?: ShowManifest;
     playbackParity?: ShowParityResult;
@@ -71,6 +76,8 @@
   let leaderShowTransport = $state<ShowTransportStatus | null>(null);
 
   let refreshGeneration = 0;
+  let leaderAssetsGeneration = 0;
+  let destroyed = false;
   let loading = $state(false);
   let pollInterval: ReturnType<typeof setInterval> | null = null;
   let isAdmin = $state(false);
@@ -120,8 +127,8 @@
   let availableGroups = $derived.by(() => {
     const labels = new Set<string>();
     for (const d of Object.values(fleetData)) {
-      if (d.syncStatus?.groupLabel) {
-        labels.add(d.syncStatus.groupLabel);
+      if (d.lastKnownGroup) {
+        labels.add(d.lastKnownGroup);
       }
     }
     return Array.from(labels).sort();
@@ -131,12 +138,12 @@
   let activeGroupNodes = $derived.by(() => {
     const all = Object.values(fleetData);
     if (selectedGroupLabel === 'All') return all;
-    return all.filter((d) => d.syncStatus?.groupLabel === selectedGroupLabel);
+    return all.filter((d) => inSelectedSyncGroup(d.lastKnownGroup, selectedGroupLabel));
   });
 
   let otherFleetNodes = $derived.by(() => {
     if (selectedGroupLabel === 'All') return [];
-    return Object.values(fleetData).filter((d) => d.syncStatus?.groupLabel !== selectedGroupLabel);
+    return Object.values(fleetData).filter((d) => !inSelectedSyncGroup(d.lastKnownGroup, selectedGroupLabel));
   });
 
   let onlineNodes = $derived(activeGroupNodes.filter((d) => d.online));
@@ -163,7 +170,7 @@
   );
 
   let clusterTransport = $derived.by(() => {
-    if (leaderShowTransport?.mode) {
+    if (loadedLeaderIp === leaderIp && leaderShowTransport?.mode) {
       return leaderShowTransport.mode.toUpperCase();
     }
     if (leaderNodeData?.syncStatus?.transport) {
@@ -213,20 +220,30 @@
   // 2. Topology is VALID_LEADER and ready (no split-brain, no leader disagreement)
   // 3. All followers are sync running and clock locked
   // 4. Playback parity is MATCHED (schedule differences do not gate group playback)
-  let isClusterReady = $derived.by(() => {
-    if (totalCount === 0 || onlineCount < totalCount) return false;
-    if (clusterTopology.state !== 'VALID_LEADER' || !clusterTopology.isReady) return false;
-    if (!leaderNodeData?.online || leaderNodeData.syncStatus?.activeRole !== 'master') return false;
-    for (const d of onlineNodes) {
-      if (!d.syncStatus?.running || !d.syncStatus.clockLocked) return false;
-      if (d.playbackParity?.status !== 'MATCHED') return false;
-    }
-    return true;
-  });
+  let clusterReadiness = $derived(evaluateClusterReadiness(
+    activeGroupNodes.map(d => ({
+      ip: d.node.ip, online: d.online, status: d.syncStatus,
+      playbackStatus: d.playbackParity?.status,
+    }))
+  ));
+  let isClusterReady = $derived(clusterReadiness.ready);
 
   let followers = $derived(
     onlineNodes.filter((d) => d.node.ip !== leaderIp)
   );
+
+  function clearLeaderAssets() {
+    ++leaderAssetsGeneration;
+    loadedLeaderIp = '';
+    availablePresets = [];
+    leaderTimeline = null;
+    availableCueLists = [];
+    leaderShowTransport = null;
+    if (manualCrossfadeThrottler) {
+      clearTimeout(manualCrossfadeThrottler);
+      manualCrossfadeThrottler = null;
+    }
+  }
 
   function handleRegistryChange() {
     refreshCluster();
@@ -244,10 +261,13 @@
       window.addEventListener(NODE_REGISTRY_CHANGED_EVENT, handleRegistryChange);
     }
     await refreshCluster();
-    pollInterval = setInterval(refreshCluster, 3000);
+    if (!destroyed) pollInterval = setInterval(refreshCluster, 3000);
   });
 
   onDestroy(() => {
+    destroyed = true;
+    ++refreshGeneration;
+    clearLeaderAssets();
     if (pollInterval) clearInterval(pollInterval);
     if (manualCrossfadeThrottler) clearTimeout(manualCrossfadeThrottler);
     if (typeof window !== 'undefined') {
@@ -256,6 +276,7 @@
   });
 
   async function loadLeaderAssets(ip: string) {
+    const assetGeneration = ++leaderAssetsGeneration;
     try {
       const [presets, seq, cues, transportStatus] = await Promise.all([
         getPresets(ip).catch(() => []),
@@ -263,7 +284,7 @@
         getCueLists(ip).catch(() => []),
         getShowTransportStatus(ip).catch(() => null),
       ]);
-      if (loadedLeaderIp === ip) {
+      if (!destroyed && loadedLeaderIp === ip && assetGeneration === leaderAssetsGeneration) {
         availablePresets = presets;
         leaderTimeline = seq;
         availableCueLists = cues;
@@ -278,10 +299,12 @@
   }
 
   async function refreshCluster() {
+    if (destroyed) return;
     const myGen = ++refreshGeneration;
     nodes = getSavedNodes();
     if (nodes.length === 0) {
       fleetData = {};
+      clearLeaderAssets();
       return;
     }
 
@@ -302,7 +325,7 @@
         }
 
         if (syncStatus) {
-          if (syncStatus.syncProtocol !== undefined && syncStatus.syncProtocol !== 5 && syncStatus.protocolVersion !== 5) {
+          if (syncProtocolCompatibility(syncStatus).state !== 'supported') {
             reachabilityState = 'ONLINE / SYNC INCOMPATIBLE';
           } else if (!syncStatus.syncEnabled) {
             reachabilityState = 'ONLINE / SYNC DISABLED';
@@ -370,10 +393,15 @@
 
     await Promise.all(Array.from({ length: Math.min(concurrency, nodes.length) }, () => worker()));
 
-    if (myGen !== refreshGeneration) return;
+    if (destroyed || myGen !== refreshGeneration) return;
+
+    for (const data of Object.values(nextData)) {
+      data.lastKnownGroup = rememberSyncGroup(data.syncStatus?.groupLabel, fleetData[data.node.ip]?.lastKnownGroup);
+    }
 
     // Evaluate cluster topology to find the real leader
-    const onlineList = Object.values(nextData).filter((d) => d.online && d.syncStatus);
+    const onlineList = Object.values(nextData).filter((d) => d.online && d.syncStatus &&
+      (selectedGroupLabel === 'All' || d.syncStatus.groupLabel === selectedGroupLabel));
     const topo = evaluateClusterTopology(
       onlineList.map((d) => ({ ip: d.node.ip, status: d.syncStatus }))
     );
@@ -396,15 +424,20 @@
     fleetData = nextData;
 
     // Leader change handling: reset leader cache and reload assets
-    if (discoveredLeaderIp && discoveredLeaderIp !== loadedLeaderIp) {
+    if (!discoveredLeaderIp) {
+      clearLeaderAssets();
+    } else if (discoveredLeaderIp !== loadedLeaderIp) {
+      clearLeaderAssets();
       loadedLeaderIp = discoveredLeaderIp;
-      availablePresets = [];
-      leaderTimeline = null;
-      availableCueLists = [];
-      leaderShowTransport = null;
       await loadLeaderAssets(discoveredLeaderIp);
-    } else if (discoveredLeaderIp && availablePresets.length === 0) {
+    } else if (availablePresets.length === 0) {
       await loadLeaderAssets(discoveredLeaderIp);
+    } else {
+      // Refresh status without reloading all scene documents on every poll.
+      const transport = await getShowTransportStatus(discoveredLeaderIp).catch(() => null);
+      if (!destroyed && myGen === refreshGeneration && loadedLeaderIp === discoveredLeaderIp) {
+        leaderShowTransport = transport;
+      }
     }
   }
 
@@ -671,7 +704,7 @@
   <header class="sync-header">
     <div class="sync-header-info">
       <div class="sync-badge-row">
-        <span class="sync-tag">SHOW TRANSPORT v2</span>
+        <span class="sync-tag">GROUP PLAYBACK</span>
         {#if isClusterReady}
           <span class="sync-status-pill sync-ready">● READY FOR SYNC</span>
         {:else if onlineCount < totalCount}
@@ -687,7 +720,7 @@
         {#if availableGroups.length > 0}
           <div class="sync-group-filter-wrap">
             <label for="group-filter-select" class="sync-filter-label">Group:</label>
-            <select id="group-filter-select" class="sync-filter-select" bind:value={selectedGroupLabel}>
+            <select id="group-filter-select" class="sync-filter-select" bind:value={selectedGroupLabel} onchange={(event) => { selectedGroupLabel = event.currentTarget.value; clearLeaderAssets(); refreshCluster(); }}>
               <option value="All">All Groups ({Object.keys(fleetData).length} nodes)</option>
               {#each availableGroups as grp}
                 <option value={grp}>{grp}</option>
@@ -696,9 +729,9 @@
           </div>
         {/if}
       </div>
-      <h1 class="sync-title">Multi-Node Cluster Management</h1>
+      <h1 class="sync-title">Synchronized lighting</h1>
       <p class="sync-desc">
-        Unified Scene, Timeline, and Cue transport coordination across distributed LumiGrid nodes with authoritative clock discipline.
+        Coordinate scenes, timelines and cues across LED Nodes. Readiness reflects the latest node reports, not measured output timing.
       </p>
     </div>
 
@@ -735,7 +768,7 @@
         {onlineCount} <span class="sync-metric-denom">/ {totalCount}</span>
       </div>
       <div class="sync-metric-sub">
-        {onlineCount === totalCount ? 'All nodes reachable' : `${totalCount - onlineCount} node(s) offline`}
+        {totalCount === 0 ? 'No group members' : onlineCount === totalCount ? 'All nodes reachable' : `${totalCount - onlineCount} node(s) offline`}
       </div>
     </div>
 
@@ -755,7 +788,7 @@
         {playbackParityCount} <span class="sync-metric-denom">/ {onlineCount}</span>
       </div>
       <div class="sync-metric-sub">
-        {playbackParityCount === onlineCount ? 'Scenes, cues, & timeline match' : 'Playback drift detected'}
+        {onlineCount === 0 ? 'No live playback data' : playbackParityCount === onlineCount ? 'Scenes, cues, & timeline match' : 'Playback content needs attention'}
       </div>
     </div>
 
@@ -765,7 +798,7 @@
         {scheduleParityCount} <span class="sync-metric-denom">/ {onlineCount}</span>
       </div>
       <div class="sync-metric-sub">
-        {scheduleParityCount === onlineCount ? 'Calendar schedules match' : 'Schedules differ (optional)'}
+        {onlineCount === 0 ? 'No live schedule data' : scheduleParityCount === onlineCount ? 'Calendar schedules match' : 'Schedules differ (optional)'}
       </div>
     </div>
 
@@ -784,7 +817,7 @@
   <section class="sync-section-card" aria-label="Sync Topology Map">
     <div class="sync-card-header">
       <div>
-        <h2 class="sync-section-title">Sync Topology & Protocol v4</h2>
+        <h2 class="sync-section-title">Group connections</h2>
         <p class="sync-section-desc">UDP clock discipline hierarchy and peer latency. Commands target Leader only.</p>
       </div>
     </div>
@@ -856,7 +889,7 @@
       <div>
         <h2 class="sync-section-title">Synchronized Show Transport</h2>
         <p class="sync-section-desc">
-          Unified transport controls sent to Leader ({leaderNodeData?.syncStatus?.activeRole === 'master' ? (leaderNodeData.node.name || leaderIp) : 'NO LEADER'}). Followers derive output locally via NodeSync protocol v4.
+          Unified transport controls sent to Leader ({leaderNodeData?.syncStatus?.activeRole === 'master' ? (leaderNodeData.node.name || leaderIp) : 'NO LEADER'}). Followers play the matching show content on their own outputs.
         </p>
       </div>
 
@@ -889,12 +922,8 @@
       </div>
 
       {#if !isClusterReady}
-        <div class="sync-gate-notice">
-          {#if clusterTopology.state !== 'VALID_LEADER'}
-            ⚠ Group transport locked due to topology state: {clusterTopology.state}.
-          {:else}
-            ⚠ Playback parity or clock lock not ready across all group members. Align content before starting synchronized playback.
-          {/if}
+        <div class="sync-gate-notice" role="status">
+          {clusterReadiness.reason}
         </div>
       {/if}
     </div>
@@ -2497,5 +2526,10 @@
   .sync-progress-err {
     font-size: 0.75rem;
     color: #f87171;
+  }
+  @media (max-width: 640px) {
+    .sync-actions, .transport-tabs, .sync-ctrl-input-group, .sync-cue-status-group { flex-wrap: wrap; }
+    .sync-control-block, .sync-node-main, .sync-ctrl-select { min-width: 0; }
+    .sync-actions button, .transport-tab-btn { min-height: 44px; }
   }
 </style>

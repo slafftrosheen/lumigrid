@@ -1,0 +1,52 @@
+#include "NodeSync.hpp"
+using namespace lg;
+#define CHECK(x) host::check((x),#x)
+struct ServiceGuard{explicit ServiceGuard(void*){}};
+enum class StartupStage{None,ProtocolsStarted,FactoryStarted,LightingStarted};
+enum class StartupState{Ready,Faulted};enum class RuntimeLifecycle{Running,Faulted};
+enum class ControlSource{LiveDmx,Factory};
+struct DiagnosticLog { static DiagnosticLog& instance(){static DiagnosticLog x;return x;}void set_stream_callback(void*){} };
+struct Registry {void unregister_task(const char*){}};
+Registry& task_stack_registry(){static Registry r;return r;}
+struct Service{int stops=0;int stop(){++stops;return ESP_OK;}};
+struct FactoryRunner:Service {enum class LifecycleState{Stopped};LifecycleState lifecycle_state(){return LifecycleState::Stopped;}};
+struct Output {bool enabled=true;int blackouts=0;void set_output_enabled(bool x){enabled=x;}void blackout(){++blackouts;}};
+struct SourceManager{void release(ControlSource){}};
+struct Plan{bool scheduler=true,sync=true;bool requires_scheduler_restart()const{return scheduler;}bool requires_sync_restart()const{return sync;}};
+struct LumigridRuntime{
+ LightingRuntime e;ConfigStore c;ClockDiscipline clock;NodeSync node_sync_{e,c,clock};
+ Service scheduler_,sacn_,artnet_,mdns_,fleet_discovery_,mqtt_,lighting_;FactoryRunner factory_runner_;Output output_;SourceManager source_manager_;
+ struct {bool mqtt=false,node_sync=true,scheduler=true,sacn=true,artnet=true,mdns=true,fleet_discovery=true,factory=false,lighting=true;} started_subsystems_;
+ void* services_mutex_=nullptr;bool services_started_=true,safe_mode_=false;
+ StartupState startup_state_=StartupState::Ready;RuntimeLifecycle lifecycle_state_=RuntimeLifecycle::Running;
+ StartupStage failing_stage_=StartupStage::None;int failing_error_=ESP_OK;
+ esp_err_t rollback_services(StartupStage,int);
+ esp_err_t change(const Plan& plan){
+@@ORDER@@
+ return ESP_OK;
+ }
+};
+@@ROLLBACK@@
+int main(int argc,char**argv){
+ CHECK(argc==2);std::string test=argv[1];LumigridRuntime r;CHECK(r.node_sync_.start(NodeRole::Worker)==ESP_OK);
+ if(test=="rollback_preserves_live_dependencies"){
+  CHECK(r.rollback_services(StartupStage::None,ESP_OK)==ESP_ERR_TIMEOUT);
+  CHECK(r.scheduler_.stops==0);CHECK(r.lighting_.stops==0);CHECK(r.started_subsystems_.node_sync);
+  CHECK(r.started_subsystems_.scheduler&&r.started_subsystems_.lighting);CHECK(!r.output_.enabled&&r.output_.blackouts==1);
+  CHECK(r.safe_mode_&&r.startup_state_==StartupState::Faulted&&r.lifecycle_state_==RuntimeLifecycle::Faulted);
+  host::run(0);CHECK(r.rollback_services(StartupStage::None,ESP_OK)==ESP_OK);CHECK(r.scheduler_.stops==1&&r.lighting_.stops==1);CHECK(!r.started_subsystems_.node_sync);
+ } else if(test=="rollback_keeps_original_failure"){
+  CHECK(r.rollback_services(StartupStage::FactoryStarted,ESP_ERR_NO_MEM)==ESP_ERR_NO_MEM);
+  CHECK(r.failing_stage_==StartupStage::FactoryStarted);CHECK(r.scheduler_.stops==0);host::run(0);r.node_sync_.stop();
+ } else if(test=="scheduler_restart_waits_for_sync"){
+  CHECK(r.change(Plan{})==ESP_ERR_TIMEOUT);CHECK(r.scheduler_.stops==0);CHECK(r.started_subsystems_.scheduler&&r.started_subsystems_.node_sync);
+  host::run(0);CHECK(r.change(Plan{})==ESP_OK);CHECK(r.scheduler_.stops==1);CHECK(!r.started_subsystems_.node_sync&&!r.started_subsystems_.scheduler);
+ } else if(test=="scheduler_only_restart_waits_for_sync"){
+  const Plan timezone_only{true,false};
+  CHECK(r.change(timezone_only)==ESP_ERR_TIMEOUT);CHECK(r.scheduler_.stops==0);
+  CHECK(r.started_subsystems_.scheduler&&r.started_subsystems_.node_sync);
+  host::run(0);CHECK(r.change(timezone_only)==ESP_OK);CHECK(r.scheduler_.stops==1);
+  CHECK(!r.started_subsystems_.node_sync&&!r.started_subsystems_.scheduler);
+ } else {return 2;}
+ std::printf("PASS %s\n",test.c_str());return 0;
+}

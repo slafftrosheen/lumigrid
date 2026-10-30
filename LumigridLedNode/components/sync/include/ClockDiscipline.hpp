@@ -27,6 +27,8 @@ public:
     /// Apply a remote heartbeat timestamp observed at the current monotonic time.
     void discipline(uint64_t master_clock_ms, bool master_has_epoch);
 
+    /// Lock indicates a valid sample within 3 seconds. Epoch holdover remains
+    /// available after loss of lock; it is not evidence of fresh synchronization.
     ClockSyncStatus status() const;
 
 private:

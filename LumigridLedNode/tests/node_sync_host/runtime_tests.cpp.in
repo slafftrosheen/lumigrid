@@ -1,0 +1,42 @@
+#include "NodeSync.hpp"
+using namespace lg;
+#define CHECK(x) host::check((x),#x)
+static int guard_depth=0;
+struct ServiceGuard { explicit ServiceGuard(void*){++guard_depth;}~ServiceGuard(){--guard_depth;} };
+struct Api { std::function<esp_err_t(const DeviceConfig&,const DeviceConfig&)> callback;
+ void set_config_apply_callback(decltype(callback) value){callback=std::move(value);}
+};
+struct RuntimeHarness {
+ LightingRuntime engine;ConfigStore config;ClockDiscipline clock;NodeSync node_sync_{engine,config,clock};
+ Api api_;bool safe_mode_=false;void* services_mutex_=nullptr;struct {bool node_sync=false;}started_subsystems_;
+ void install(){
+@@CALLBACK@@
+ }
+ void start(){CHECK(node_sync_.start(NodeRole::Worker)==ESP_OK);started_subsystems_.node_sync=true;}
+ void finish(){for(size_t i=0;i<host::tasks.size();++i)if(!host::tasks[i]->done)host::run(i);CHECK(node_sync_.stop(0)==ESP_OK);}
+};
+int main(int argc,char**argv){
+ CHECK(argc==2);std::string name=argv[1];RuntimeHarness r;r.install();DeviceConfig old{},desired{};
+ if(name=="disable_timeout_propagates"){
+  r.start();desired.sync_enabled=false;CHECK(r.api_.callback(old,desired)==ESP_ERR_TIMEOUT);CHECK(r.started_subsystems_.node_sync);CHECK(host::create_count==1);r.finish();
+ } else if(name=="role_restart_timeout_retains_owner"){
+  r.start();desired.sync_role=1;CHECK(r.api_.callback(old,desired)==ESP_ERR_TIMEOUT);CHECK(r.started_subsystems_.node_sync);CHECK(host::create_count==1);r.finish();
+ } else if(name=="token_restart_timeout_retains_owner"){
+  r.start();desired.sync_token=9999;CHECK(r.api_.callback(old,desired)==ESP_ERR_TIMEOUT);CHECK(r.started_subsystems_.node_sync);CHECK(host::create_count==1);r.finish();
+ } else if(name=="disable_success_releases_owner"){
+  r.start();host::run(0);desired.sync_enabled=false;CHECK(r.api_.callback(old,desired)==ESP_OK);CHECK(!r.started_subsystems_.node_sync);CHECK(host::create_count==1);
+ } else if(name=="restart_success_creates_once"){
+  r.start();host::run(0);desired.sync_role=1;CHECK(r.api_.callback(old,desired)==ESP_OK);CHECK(r.started_subsystems_.node_sync);CHECK(host::create_count==2);r.finish();
+ } else if(name=="restart_allocation_failure_is_reported"){
+  r.start();host::run(0);host::create_fails=true;desired.sync_role=1;CHECK(r.api_.callback(old,desired)==ESP_ERR_NO_MEM);CHECK(!r.started_subsystems_.node_sync);
+ } else if(name=="unchanged_config_is_noop"){
+  r.start();CHECK(r.api_.callback(old,desired)==ESP_OK);CHECK(r.started_subsystems_.node_sync);CHECK(host::create_count==1);r.finish();
+ } else if(name=="safe_mode_does_not_start_sync"){
+  r.safe_mode_=true;desired.sync_role=1;CHECK(r.api_.callback(old,desired)==ESP_OK);CHECK(host::create_count==0);
+ } else if(name=="service_reconcile_lock_held"){
+  old.sync_enabled=false;host::create_hook=[] {CHECK(guard_depth==1);};CHECK(r.api_.callback(old,desired)==ESP_OK);CHECK(guard_depth==0);host::create_hook=nullptr;r.finish();
+ } else if(name=="retry_after_timeout_completes"){
+  r.start();desired.sync_enabled=false;CHECK(r.api_.callback(old,desired)==ESP_ERR_TIMEOUT);host::run(0);CHECK(r.api_.callback(old,desired)==ESP_OK);CHECK(!r.started_subsystems_.node_sync);
+ } else {return 2;}
+ CHECK(guard_depth==0);std::printf("PASS %s\n",name.c_str());return 0;
+}

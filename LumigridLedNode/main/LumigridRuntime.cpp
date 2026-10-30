@@ -658,6 +658,17 @@ esp_err_t LumigridRuntime::rollback_services(StartupStage failed_stage,
     started_subsystems_.mqtt = false;
   }
   stop_owned(node_sync_, started_subsystems_.node_sync);
+  if (stop_error != ESP_OK) {
+    // A live sync callback may still access the scheduler, cue runner and
+    // lighting runtime. Leave those dependencies owned; output is inhibited.
+    services_started_ = false;
+    safe_mode_ = true;
+    startup_state_ = StartupState::Faulted;
+    lifecycle_state_ = RuntimeLifecycle::Faulted;
+    failing_stage_ = error != ESP_OK ? failed_stage : StartupStage::ProtocolsStarted;
+    failing_error_ = error != ESP_OK ? error : stop_error;
+    return failing_error_;
+  }
   stop_owned(scheduler_, started_subsystems_.scheduler);
   stop_owned(sacn_, started_subsystems_.sacn);
   stop_owned(artnet_, started_subsystems_.artnet);
@@ -978,6 +989,7 @@ esp_err_t LumigridRuntime::start() {
   api_.set_config_apply_callback([this](
                                      const DeviceConfig &old_cfg,
                                      const DeviceConfig &new_cfg) -> esp_err_t {
+    ServiceGuard guard(services_mutex_);
     if (safe_mode_)
       return ESP_OK;
 
@@ -991,14 +1003,16 @@ esp_err_t LumigridRuntime::start() {
 
     if (!new_cfg.sync_enabled) {
       if (started_subsystems_.node_sync) {
-        node_sync_.stop(1000);
+        const esp_err_t stop_err = node_sync_.stop(1000);
+        if (stop_err != ESP_OK) return stop_err;
         started_subsystems_.node_sync = false;
       }
       return ESP_OK;
     }
 
     if (started_subsystems_.node_sync) {
-      node_sync_.stop(1000);
+      const esp_err_t stop_err = node_sync_.stop(1000);
+      if (stop_err != ESP_OK) return stop_err;
       started_subsystems_.node_sync = false;
     }
 
@@ -1731,6 +1745,15 @@ esp_err_t LumigridRuntime::reconcile_services(const DeviceConfig &old_cfg,
     ServiceGuard guard(services_mutex_);
     // LG-038.3 В§64/В§65: compute old and new plans, act on differences only.
     const auto desired = compute_service_plan({is_safe_mode(), commissioning_plan_state(), network_plan_state_.load(), &new_cfg});
+    const bool sync_wanted = desired.node_sync;
+    if (!sync_wanted && started_subsystems_.node_sync) {
+        const esp_err_t stop_err = node_sync_.stop(1000);
+        if (stop_err != ESP_OK) return stop_err;
+        started_subsystems_.node_sync = false;
+        task_stack_registry().unregister_task("sync_master");
+        task_stack_registry().unregister_task("sync_worker");
+        task_stack_registry().unregister_task("sync_auto");
+    }
     // Prepare newly requested protocols before retiring any old protocol.
     // A second-worker allocation failure can then undo only the first new one.
     const bool had_artnet = started_subsystems_.artnet;
@@ -1847,15 +1870,6 @@ esp_err_t LumigridRuntime::reconcile_services(const DeviceConfig &old_cfg,
     }
 
     // в”Ђв”Ђ Sync follows config AND network (В§25, В§65) в”Ђв”Ђ
-    const bool sync_wanted = desired.node_sync;
-    if (!sync_wanted && started_subsystems_.node_sync) {
-        const esp_err_t stop_err = node_sync_.stop(1000);
-        if (stop_err != ESP_OK) return stop_err;
-        started_subsystems_.node_sync = false;
-        task_stack_registry().unregister_task("sync_master");
-        task_stack_registry().unregister_task("sync_worker");
-        task_stack_registry().unregister_task("sync_auto");
-    }
     if (sync_wanted && !started_subsystems_.node_sync) {
         const esp_err_t err = node_sync_.start(static_cast<NodeRole>(current.sync_role));
         if (err != ESP_OK) return err;
@@ -1972,19 +1986,20 @@ esp_err_t LumigridRuntime::apply_device_config(const DeviceConfig &old_cfg,
   }
 
   // Stop changed service instances before the planner starts their replacements.
-  if (plan.requires_scheduler_restart() && started_subsystems_.scheduler) {
-    const esp_err_t err = scheduler_.stop();
-    if (err != ESP_OK) return err;
-    started_subsystems_.scheduler = false;
-    task_stack_registry().unregister_task("scheduler");
-  }
-  if (plan.requires_sync_restart() && started_subsystems_.node_sync) {
+  if ((plan.requires_sync_restart() || plan.requires_scheduler_restart()) &&
+      started_subsystems_.node_sync) {
     const esp_err_t err = node_sync_.stop(1000);
     if (err != ESP_OK) return err;
     started_subsystems_.node_sync = false;
     task_stack_registry().unregister_task("sync_master");
     task_stack_registry().unregister_task("sync_worker");
     task_stack_registry().unregister_task("sync_auto");
+  }
+  if (plan.requires_scheduler_restart() && started_subsystems_.scheduler) {
+    const esp_err_t err = scheduler_.stop();
+    if (err != ESP_OK) return err;
+    started_subsystems_.scheduler = false;
+    task_stack_registry().unregister_task("scheduler");
   }
   if (plan.requires_mqtt_restart() && started_subsystems_.mqtt) {
     DiagnosticLog::instance().set_stream_callback(nullptr);

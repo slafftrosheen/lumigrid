@@ -70,8 +70,10 @@ export function normalizeEffectCatalog(data: unknown): EffectMeta[] {
     for (const key of ['supportsSpeed', 'supportsSecondaryColor', 'supportsPalette', 'spatial', 'pwmRecommended', 'hasParameter'] as const) {
       meta[key] = typeof raw[key] === 'boolean' ? raw[key] : known?.[key] ?? false;
     }
-    if (typeof raw.pwmRecommended !== 'boolean' && !known && typeof raw.spatial === 'boolean') {
-      meta.pwmRecommended = !raw.spatial;
+    // Non-spatial does not imply a brightness envelope. Unknown device effects
+    // need an explicit dimmer recommendation; never infer it from color motion.
+    for (const key of ['description', 'parameterLabel', 'parameterUnit'] as const) {
+      meta[key] = typeof raw[key] === 'string' ? raw[key] : known?.[key] ?? '';
     }
     const byte = (value: unknown, fallback: number) => typeof value === 'number' && Number.isFinite(value)
       ? Math.max(0, Math.min(255, Math.round(value))) : fallback;
@@ -95,4 +97,34 @@ export function normalizePaletteCatalog(data: unknown): PaletteMeta[] {
       usesSceneColors: typeof raw.usesSceneColors === 'boolean' ? raw.usesSceneColors : raw.id === 0,
     }];
   });
+}
+
+export interface EffectGuidance {
+  state: 'recommended' | 'limited' | 'unknown' | 'unavailable';
+  message: string;
+}
+
+/** Presentation only: never changes a saved effect, scene, or output. */
+export function effectGuidance(
+  meta: EffectMeta | undefined, channelIndex: number, pixelCount?: number,
+): EffectGuidance {
+  if (!Number.isInteger(channelIndex) || channelIndex < 0 || channelIndex >= 16) {
+    return { state: 'unknown', message: 'Choose an output to check this effect.' };
+  }
+  if (!meta) {
+    return { state: 'unavailable', message: 'This saved effect is not reported by the connected node. It has not been replaced.' };
+  }
+  if (channelIndex >= 8) {
+    if (meta.pwmRecommended === true) {
+      return { state: 'recommended', message: 'Suitable for this dimmer: the effect controls brightness, not individual colors.' };
+    }
+    if (meta.pwmRecommended === false) {
+      return { state: 'limited', message: 'This output controls brightness only. This effect is not recommended for a dimmer; strip color or movement may not appear.' };
+    }
+    return { state: 'unknown', message: 'Dimmer behavior is not declared for this effect. Check it at low brightness before use.' };
+  }
+  if (meta.spatial && pixelCount === 1) {
+    return { state: 'limited', message: 'This effect moves along a strip. A single light point cannot show that movement.' };
+  }
+  return { state: 'recommended', message: 'This effect is available for the selected animated-strip output. Preview is illustrative; check the connected lights.' };
 }

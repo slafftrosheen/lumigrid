@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import SceneThumbnail from '$lib/components/dashboard/SceneThumbnail.svelte';
+  import EffectGuidance from '$lib/components/dashboard/EffectGuidance.svelte';
   import TransitionEditor from '$lib/components/automation/TransitionEditor.svelte';
   import AutomationTrackEditor from '$lib/components/automation/AutomationTrackEditor.svelte';
   import OperatorDialog from '$lib/components/dashboard/OperatorDialog.svelte';
@@ -1115,9 +1116,10 @@
                 {#if layer}
                   {@const isPwm = activeInspectorChannel >= 8}
                   {@const effectMeta = effects.find(e => e.id === layer.effect)}
-                  {@const pwmRecommended = effectMeta ? (effectMeta.pwmRecommended ?? !effectMeta.spatial) : true}
+                  {@const pwmRecommended = effectMeta?.pwmRecommended === true}
 
                   <div class="layer-card" class:disabled={!layer.enabled}>
+                    <EffectGuidance effect={effectMeta} channel={activeInspectorChannel} />
                     <div class="layer-header-row">
                       <div class="layer-toggle-wrap">
                         <input

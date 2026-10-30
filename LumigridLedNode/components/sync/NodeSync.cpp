@@ -16,6 +16,32 @@ static const char* TAG = "sync";
 namespace lg {
 namespace {
 
+// Reject overlapping/reentrant lifecycle operations instead of deadlocking a
+// worker callback or allowing two starts to publish competing task owners.
+class LifecycleGuard {
+public:
+    explicit LifecycleGuard(std::atomic_flag& busy)
+        : busy_(busy), owned_(!busy_.test_and_set(std::memory_order_acquire)) {}
+    ~LifecycleGuard() { if (owned_) busy_.clear(std::memory_order_release); }
+    bool owned() const { return owned_; }
+private:
+    std::atomic_flag& busy_;
+    bool owned_;
+};
+
+int receive_sync_packet(int socket, NodeSync::SyncPacket& packet, sockaddr_in& sender) {
+    // One extra byte distinguishes a valid datagram from a truncated oversized
+    // one. Reading into a packet-sized buffer silently accepted valid prefixes.
+    uint8_t bytes[sizeof(NodeSync::SyncPacket) + 1]{};
+    socklen_t sender_len = sizeof(sender);
+    const int received = recvfrom(socket, bytes, sizeof(bytes), 0,
+        reinterpret_cast<sockaddr*>(&sender), &sender_len);
+    if (received == static_cast<int>(sizeof(packet))) {
+        std::memcpy(&packet, bytes, sizeof(packet));
+    }
+    return received;
+}
+
 uint32_t now_ms() {
     return static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
 }
@@ -45,7 +71,12 @@ NodeSync::NodeSync(
 }
 
 NodeSync::~NodeSync() {
-    stop(1500);
+    // Object destruction cannot safely abandon a worker that can still touch
+    // this object. Normal callers use bounded stop(); destruction joins it.
+    while (stop(1500) != ESP_OK) {
+        ESP_LOGW(TAG, "Waiting for NodeSync ownership to drain before destruction");
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
     if (shutdown_sem_) {
         vSemaphoreDelete(shutdown_sem_);
         shutdown_sem_ = nullptr;
@@ -72,12 +103,21 @@ void NodeSync::reset_config_cache() {
 }
 
 esp_err_t NodeSync::start(NodeRole role) {
-    if (task_handle_ != nullptr) return ESP_ERR_INVALID_STATE;
+    LifecycleGuard guard(lifecycle_busy_);
+    if (!guard.owned()) return ESP_ERR_INVALID_STATE;
+    if (role != NodeRole::Auto && role != NodeRole::Master && role != NodeRole::Worker)
+        return ESP_ERR_INVALID_ARG;
 
-    if (shutdown_sem_ == nullptr) {
-        shutdown_sem_ = xSemaphoreCreateBinary();
-    }
+    portENTER_CRITICAL(&status_mutex_);
+    const bool owned = task_handle_ != nullptr || stopping_;
+    portEXIT_CRITICAL(&status_mutex_);
+    if (owned) return ESP_ERR_INVALID_STATE;
 
+    if (shutdown_sem_ == nullptr) shutdown_sem_ = xSemaphoreCreateBinary();
+    if (shutdown_sem_ == nullptr) return ESP_ERR_NO_MEM;
+    // No worker is owned here. Discard an obsolete completion token before
+    // starting a new generation; it must never acknowledge the next worker.
+    while (xSemaphoreTake(shutdown_sem_, 0) == pdTRUE) {}
     reset_config_cache();
 
     portENTER_CRITICAL(&status_mutex_);
@@ -91,6 +131,9 @@ esp_err_t NodeSync::start(NodeRole role) {
     packets_received_ = 0;
     packets_missed_ = 0;
     remote_transport_snapshot_ = {};
+    local_transport_snapshot_ = {};
+    remote_timeline_enabled_ = false;
+    remote_bpm_ = 0;
     transport_apply_ok_ = true;
     transport_error_ = 0;
     for (auto& peer : peers_) peer = Peer{};
@@ -107,8 +150,9 @@ esp_err_t NodeSync::start(NodeRole role) {
         task_name = "sync_auto";
     }
 
+    TaskHandle_t created_task = nullptr;
     const BaseType_t ok = xTaskCreatePinnedToCore(
-        task, task_name, 4096, this, 3, &task_handle_, 0
+        task, task_name, 4096, this, 3, &created_task, 0
     );
     if (ok != pdPASS) {
         portENTER_CRITICAL(&status_mutex_);
@@ -118,6 +162,10 @@ esp_err_t NodeSync::start(NodeRole role) {
         return ESP_ERR_NO_MEM;
     }
 
+    portENTER_CRITICAL(&status_mutex_);
+    task_handle_ = created_task;
+    portEXIT_CRITICAL(&status_mutex_);
+
     ESP_LOGI(TAG, "Started as %s (port %u)",
              role == NodeRole::Master ? "Master" :
              role == NodeRole::Worker ? "Worker" : "Auto",
@@ -126,77 +174,110 @@ esp_err_t NodeSync::start(NodeRole role) {
 }
 
 esp_err_t NodeSync::stop(uint32_t timeout_ms) {
+    LifecycleGuard guard(lifecycle_busy_);
+    if (!guard.owned()) return ESP_ERR_INVALID_STATE;
+
     portENTER_CRITICAL(&status_mutex_);
-    if (!running_ && task_handle_ == nullptr) {
+    const TaskHandle_t owned_task = task_handle_;
+    if (owned_task == nullptr && !stopping_) {
         portEXIT_CRITICAL(&status_mutex_);
         return ESP_OK;
     }
+    stopping_ = true;
     running_ = false;
     portEXIT_CRITICAL(&status_mutex_);
 
-    // Unblock socket
-    if (sock_ >= 0) {
-        ::shutdown(sock_, SHUT_RDWR);
+    // The worker owns its socket through close(). No cross-task shutdown of a
+    // descriptor that may already have been closed and reused by another service.
+    // Validated bounded receive/send waits allow cooperative exit.
+    if (owned_task != nullptr) {
+        if (xTaskGetCurrentTaskHandle() == owned_task) return ESP_ERR_INVALID_STATE;
+        if (shutdown_sem_ == nullptr) return ESP_ERR_INVALID_STATE;
+        if (xSemaphoreTake(shutdown_sem_, pdMS_TO_TICKS(timeout_ms)) != pdTRUE) {
+            ESP_LOGW(TAG, "NodeSync task did not exit within %ums; ownership retained",
+                     static_cast<unsigned>(timeout_ms));
+            return ESP_ERR_TIMEOUT;
+        }
+        portENTER_CRITICAL(&status_mutex_);
+        task_handle_ = nullptr;
+        portEXIT_CRITICAL(&status_mutex_);
     }
 
-    // Wait bounded for task exit
-    if (task_handle_ && shutdown_sem_) {
-        if (xSemaphoreTake(shutdown_sem_, pdMS_TO_TICKS(timeout_ms)) != pdTRUE) {
-            ESP_LOGW(TAG, "NodeSync task did not exit within %ums", (unsigned)timeout_ms);
+    // Release remote cue ownership as well as remote scheduler state. If that
+    // callback rejects cleanup, retain stopping_ and allow a later stop to retry.
+    // Never call application code while holding the status spinlock.
+    ShowTransportSnapshot empty_snap{};
+    empty_snap.mode = ShowTransportMode::Standalone;
+    if (remote_transport_callback_) {
+        uint8_t error = 0;
+        if (!remote_transport_callback_(empty_snap, error)) {
+            portENTER_CRITICAL(&status_mutex_);
+            transport_apply_ok_ = false;
+            transport_error_ = error != 0 ? error :
+                static_cast<uint8_t>(SyncTransportError::RuntimeUnavailable);
+            portEXIT_CRITICAL(&status_mutex_);
+            return ESP_FAIL;
         }
     }
-    task_handle_ = nullptr;
+    if (transport_callback_) transport_callback_(empty_snap);
+    if (legacy_transport_callback_) legacy_transport_callback_(false, 120);
 
     portENTER_CRITICAL(&status_mutex_);
+    master_address_ = 0;
+    std::memset(master_mac_, 0, sizeof(master_mac_));
+    last_packet_ms_ = 0;
+    has_sequence_ = false;
     remote_timeline_enabled_ = false;
     remote_bpm_ = 0;
     remote_transport_snapshot_ = {};
+    local_transport_snapshot_ = {};
+    active_role_ = NodeRole::Auto;
     transport_apply_ok_ = true;
     transport_error_ = 0;
     last_config_cache_ms_ = 0;
     cached_sync_token_ = 0;
     cached_sync_enabled_ = false;
-    auto cb = transport_callback_;
-    auto legacy_cb = legacy_transport_callback_;
+    for (auto& peer : peers_) peer = Peer{};
+    stopping_ = false;
     portEXIT_CRITICAL(&status_mutex_);
-
-    if (cb) {
-        ShowTransportSnapshot empty_snap{};
-        empty_snap.mode = ShowTransportMode::Standalone;
-        cb(empty_snap);
-    }
-    if (legacy_cb) legacy_cb(false, 120);
-
     return ESP_OK;
+}
+
+bool NodeSync::should_run() const {
+    portENTER_CRITICAL(&status_mutex_);
+    const bool running = running_;
+    portEXIT_CRITICAL(&status_mutex_);
+    return running;
+}
+
+void NodeSync::finish_task() {
+    portENTER_CRITICAL(&status_mutex_);
+    running_ = false;
+    const SemaphoreHandle_t done = shutdown_sem_;
+    portEXIT_CRITICAL(&status_mutex_);
+    // Final access to instance-owned resources. After giving this semaphore the
+    // owner may finish stop() or destroy the object; the entry only self-deletes.
+    xSemaphoreGive(done);
 }
 
 void NodeSync::master_task_entry(void* arg) {
     auto* self = static_cast<NodeSync*>(arg);
     self->master_task();
-    self->task_handle_ = nullptr;
-    if (self->shutdown_sem_) {
-        xSemaphoreGive(self->shutdown_sem_);
-    }
+    self->finish_task();
     vTaskDelete(nullptr);
 }
 
 void NodeSync::worker_task_entry(void* arg) {
     auto* self = static_cast<NodeSync*>(arg);
     self->worker_task();
-    self->task_handle_ = nullptr;
-    if (self->shutdown_sem_) {
-        xSemaphoreGive(self->shutdown_sem_);
-    }
+    self->finish_task();
     vTaskDelete(nullptr);
 }
 
 void NodeSync::auto_task_entry(void* arg) {
     auto* self = static_cast<NodeSync*>(arg);
     self->auto_task();
-    self->task_handle_ = nullptr;
-    if (self->shutdown_sem_) {
-        xSemaphoreGive(self->shutdown_sem_);
-    }
+    self->finish_task();
     vTaskDelete(nullptr);
 }
 
@@ -206,30 +287,33 @@ bool NodeSync::open_socket(int& socket, bool broadcast) {
         ESP_LOGE(TAG, "Failed to create socket");
         return false;
     }
+    const auto fail = [&]() {
+        close(socket);
+        socket = -1;
+        return false;
+    };
+    int enabled = 1;
+    if (setsockopt(socket, SOL_SOCKET, SO_REUSEADDR, &enabled, sizeof(enabled)) < 0)
+        return fail();
+    if (broadcast && setsockopt(socket, SOL_SOCKET, SO_BROADCAST, &enabled, sizeof(enabled)) < 0)
+        return fail();
 
-    int reuse = 1;
-    setsockopt(socket, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
-    if (broadcast) {
-        int enabled = 1;
-        setsockopt(socket, SOL_SOCKET, SO_REUSEADDR, &enabled, sizeof(enabled));
-        setsockopt(socket, SOL_SOCKET, SO_BROADCAST, &enabled, sizeof(enabled));
+    // A silent receiver must not halve the requested 20 Hz manual-fade cadence.
+    timeval timeout{};
+    timeout.tv_usec = kSyncManualIntervalMs * 1000;
+    if (setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0 ||
+        setsockopt(socket, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) < 0) {
+        ESP_LOGE(TAG, "Failed to bound sync socket waits");
+        return fail();
     }
 
     sockaddr_in bind_addr{};
     bind_addr.sin_family = AF_INET;
     bind_addr.sin_port = htons(kSyncPort);
     bind_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-
-    timeval timeout{};
-    timeout.tv_sec = 0;
-    timeout.tv_usec = 100000; // 100 ms
-    setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
-
     if (bind(socket, reinterpret_cast<sockaddr*>(&bind_addr), sizeof(bind_addr)) < 0) {
         ESP_LOGE(TAG, "Failed to bind socket to port %u", kSyncPort);
-        close(socket);
-        socket = -1;
-        return false;
+        return fail();
     }
     return true;
 }
@@ -246,35 +330,22 @@ void NodeSync::reset_master() {
 void NodeSync::master_task() {
     int socket = -1;
     if (open_socket(socket, true)) {
-        sock_ = socket;
         master_loop(socket, false);
         close(socket);
     }
-    sock_ = -1;
-    portENTER_CRITICAL(&status_mutex_);
-    running_ = false;
-    portEXIT_CRITICAL(&status_mutex_);
-    task_handle_ = nullptr;
 }
 
 void NodeSync::worker_task() {
     int socket = -1;
     if (open_socket(socket, false)) {
-        sock_ = socket;
         worker_loop(socket, false);
         close(socket);
     }
-    sock_ = -1;
-    portENTER_CRITICAL(&status_mutex_);
-    running_ = false;
-    portEXIT_CRITICAL(&status_mutex_);
-    task_handle_ = nullptr;
 }
 
 void NodeSync::auto_task() {
     int socket = -1;
     if (open_socket(socket, true)) {
-        sock_ = socket;
         NodeRole next_role = NodeRole::Worker;
         for (;;) {
             portENTER_CRITICAL(&status_mutex_);
@@ -288,11 +359,6 @@ void NodeSync::auto_task() {
         }
         close(socket);
     }
-    sock_ = -1;
-    portENTER_CRITICAL(&status_mutex_);
-    running_ = false;
-    portEXIT_CRITICAL(&status_mutex_);
-    task_handle_ = nullptr;
 }
 
 NodeRole NodeSync::master_loop(int socket, bool auto_mode) {
@@ -324,6 +390,11 @@ NodeRole NodeSync::master_loop(int socket, bool auto_mode) {
                 transport.active_scene = engine_.active_scene_index();
                 transport.mode = ShowTransportMode::Scene;
             }
+
+            if (!should_run()) break;
+            portENTER_CRITICAL(&status_mutex_);
+            local_transport_snapshot_ = transport;
+            portEXIT_CRITICAL(&status_mutex_);
 
             SyncPacket packet{};
             packet.magic = kMagic;
@@ -376,15 +447,10 @@ NodeRole NodeSync::master_loop(int socket, bool auto_mode) {
 
         SyncPacket packet{};
         sockaddr_in sender{};
-        socklen_t sender_len = sizeof(sender);
-        const int received = recvfrom(
-            socket,
-            &packet,
-            sizeof(packet),
-            0,
-            reinterpret_cast<sockaddr*>(&sender),
-            &sender_len
-        );
+        const int received = receive_sync_packet(socket, packet, sender);
+        // Stop may have been requested during a blocking socket call. Do not
+        // admit another heartbeat or callback after observing that request.
+        if (!should_run()) break;
         if (received != sizeof(SyncPacket) ||
             packet.magic != kMagic ||
             packet.version != kPacketVersion) {
@@ -432,15 +498,10 @@ NodeRole NodeSync::worker_loop(int socket, bool auto_mode) {
 
         SyncPacket packet{};
         sockaddr_in sender{};
-        socklen_t sender_len = sizeof(sender);
-        const int received = recvfrom(
-            socket,
-            &packet,
-            sizeof(packet),
-            0,
-            reinterpret_cast<sockaddr*>(&sender),
-            &sender_len
-        );
+        const int received = receive_sync_packet(socket, packet, sender);
+        // Stop may have been requested during a blocking socket call. Do not
+        // admit another heartbeat or callback after observing that request.
+        if (!should_run()) break;
         if (received == sizeof(SyncPacket) &&
             packet.magic == kMagic &&
             packet.version == kPacketVersion &&
@@ -662,6 +723,13 @@ void NodeSync::update_peer(const sockaddr_in& sender, uint16_t latency_ms) {
     portEXIT_CRITICAL(&status_mutex_);
 }
 
+NodeRole NodeSync::role() const {
+    portENTER_CRITICAL(&status_mutex_);
+    const NodeRole role = configured_role_;
+    portEXIT_CRITICAL(&status_mutex_);
+    return role;
+}
+
 NodeRole NodeSync::active_role() const {
     portENTER_CRITICAL(&status_mutex_);
     const NodeRole role = active_role_;
@@ -680,7 +748,7 @@ NodeSyncStatus NodeSync::status() const {
     result.running = running_;
     result.packets_received = packets_received_;
     result.packets_missed = packets_missed_;
-    result.last_packet_age_ms = last_packet_ms_ == 0
+    result.last_packet_age_ms = !has_sequence_
         ? std::numeric_limits<uint32_t>::max()
         : elapsed_ms(now, last_packet_ms_);
 
@@ -688,11 +756,13 @@ NodeSyncStatus NodeSync::status() const {
 
     if (!running_) {
         result.transport = 0; // standalone
+        result.transport_apply_ok = !stopping_;
+        result.transport_error = transport_error_;
     } else if (active_role_ == NodeRole::Master) {
-        if (transport_provider_) {
-            auto local_snap = transport_provider_(clock_.now_ms());
+        {
+            const auto& local_snap = local_transport_snapshot_;
             result.transport = static_cast<uint8_t>(local_snap.mode);
-            result.transport_generation = local_snap.cue_generation;
+            result.transport_generation = local_snap.transport_generation;
             result.remote_bpm = local_snap.bpm;
             result.remote_timeline_enabled = (local_snap.mode == ShowTransportMode::Timeline);
             result.cue.active = (local_snap.mode == ShowTransportMode::Cue);
@@ -703,14 +773,12 @@ NodeSyncStatus NodeSync::status() const {
             result.cue.generation = local_snap.cue_generation;
             result.cue.paused_elapsed_ms = local_snap.cue_elapsed_ms;
             result.cue.manual_fade_q15 = local_snap.manual_fade_q15;
-        } else {
-            result.transport = 1; // scene
         }
         result.transport_apply_ok = true;
         result.transport_error = 0;
     } else {
         result.transport = static_cast<uint8_t>(remote_transport_snapshot_.mode);
-        result.transport_generation = remote_transport_snapshot_.cue_generation;
+        result.transport_generation = remote_transport_snapshot_.transport_generation;
         result.remote_bpm = remote_transport_snapshot_.bpm;
         result.remote_timeline_enabled = (remote_transport_snapshot_.mode == ShowTransportMode::Timeline);
         result.transport_apply_ok = transport_apply_ok_;
@@ -729,7 +797,7 @@ NodeSyncStatus NodeSync::status() const {
     }
     portEXIT_CRITICAL(&status_mutex_);
 
-    result.clock_locked = clock_status.locked;
+    result.clock_locked = result.running && clock_status.locked;
     result.clock_has_epoch = clock_status.epoch_valid;
     result.clock_offset_ms = clock_status.offset_ms;
     result.clock_jitter_us = clock_status.jitter_us;
