@@ -93,6 +93,7 @@ bool SceneManager::activate_scene_custom(uint8_t index, uint16_t fade_ms, Transi
     transition_progress_q15_ = 0;
     transitioning_ = true;
     manual_transition_ = false;
+    transition_frozen_ = false;
     active_index_ = index;
     fallback_active_ = false;
 
@@ -128,6 +129,7 @@ bool SceneManager::prepare_manual_transition(uint8_t target_index) {
     }
     transitioning_ = true;
     manual_transition_ = true;
+    transition_frozen_ = false;
     transition_progress_q15_ = 0;
     return true;
 }
@@ -189,6 +191,10 @@ bool SceneManager::resume_frozen_transition(uint32_t remaining_ms, uint32_t curr
 
 void SceneManager::activate_scene_direct(const SceneConfig& scene, uint32_t current_ms, bool immediate) {
     last_command_ms_ = current_ms;
+    // A new scene takes playback ownership from the old T-Bar/frozen cue.
+    // Retaining manual mode would strand a timed replacement at progress zero.
+    manual_transition_ = false;
+    transition_frozen_ = false;
     if (immediate) {
         current_scene_ = scene;
         target_scene_ = scene;
@@ -250,6 +256,8 @@ const SceneConfig& SceneManager::process_frame(uint32_t current_ms) {
                     transition_duration_ms_ = std::max<uint32_t>(1, fallback.transition_ms);
                     transition_progress_q15_ = 0;
                     transitioning_ = true;
+                    manual_transition_ = false;
+                    transition_frozen_ = false;
                     fallback_active_ = true;
                     active_index_ = device_cfg_.fallback_preset_index;
                 } else {

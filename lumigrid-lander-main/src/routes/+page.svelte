@@ -218,8 +218,8 @@
   .feature { display:flex; flex-direction:column; padding:clamp(1.3rem,2vw,1.8rem); min-height:240px; }
   .feature__number { color:var(--accent-primary); font-size:.8rem; font-weight:700; letter-spacing:.1em; }
   .feature p { flex:1; margin:.15rem 0 1.3rem; }
-  .feature a,.details__essential a { align-self:flex-start; color:var(--ink); text-decoration-thickness:1px; text-underline-offset:4px; font-size:.91rem; font-weight:600; }
-  .feature a:hover,.details__essential a:hover { color:var(--accent-primary); }
+  .details__essential a { align-self:flex-start; color:var(--ink); text-decoration-thickness:1px; text-underline-offset:4px; font-size:.91rem; font-weight:600; }
+  .details__essential a:hover { color:var(--accent-primary); }
   .output-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:1rem; }
   .output-card { display:flex; flex-direction:column; padding:clamp(1.4rem,2.5vw,2rem); min-width:0; }
   .output-card__heading { display:flex; justify-content:space-between; align-items:center; gap:1rem; }

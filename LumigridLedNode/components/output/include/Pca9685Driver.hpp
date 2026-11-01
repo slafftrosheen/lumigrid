@@ -17,6 +17,7 @@ enum class PcaFaultKind : uint8_t {
     SclStuckLow,
     RegisterVerificationFailed,
     RecoveryFailed,
+    OutputGateFailed,
 };
 
 inline const char* pca_fault_kind_name(PcaFaultKind k) {
@@ -29,6 +30,7 @@ inline const char* pca_fault_kind_name(PcaFaultKind k) {
         case PcaFaultKind::SclStuckLow: return "scl_stuck_low";
         case PcaFaultKind::RegisterVerificationFailed: return "register_verification_failed";
         case PcaFaultKind::RecoveryFailed: return "recovery_failed";
+        case PcaFaultKind::OutputGateFailed: return "output_gate_failed";
         default: return "unknown";
     }
 }
@@ -117,20 +119,21 @@ public:
     esp_err_t clear();
     esp_err_t commit();
 
-    // Fast fail-safe: immediately asserts /OE HIGH without requiring an I2C transaction
-    static void force_disable_outputs();
+    // Immediately request /OE HIGH without I2C. Return rejected GPIO writes;
+    // the enabled flag changes only after a successful GPIO operation.
+    static esp_err_t force_disable_outputs();
 
     // Output enable control: owned by OutputController safety state
     esp_err_t enable_outputs();
-    static void disable_outputs();
+    static esp_err_t disable_outputs();
     static bool is_outputs_enabled();
 #if defined(CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS) && CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS
     static void enable_test_output_mock();
 #endif
 
     bool zero_confirmed() const { return zero_confirmed_; }
-    bool recovery_required() const { return recovery_required_; }
-    PcaFaultKind last_fault_kind() const { return last_fault_kind_; }
+    bool recovery_required() const;
+    PcaFaultKind last_fault_kind() const;
 
     PcaDiagnostics diagnostics() const;
 

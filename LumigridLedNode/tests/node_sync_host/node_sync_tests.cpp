@@ -10,9 +10,9 @@ static NodeSync::SyncPacket heartbeat(){
  p.global_clock_ms=1000;p.transport=1;p.active_scene=3;p.bpm=120;
  p.transport_generation=42;p.cue_generation=7;return p;
 }
-static int deliver(const NodeSync::SyncPacket& p,void* dst,size_t len,sockaddr* src,socklen_t* slen,size_t extra=0){
+static int deliver(const NodeSync::SyncPacket& p,void* dst,size_t len,sockaddr* src,socklen_t* slen,size_t extra=0,uint32_t address=0xC0A80101){
  std::vector<uint8_t> bytes(sizeof(p)+extra);std::memcpy(bytes.data(),&p,sizeof(p));
- auto* addr=reinterpret_cast<sockaddr_in*>(src);addr->sin_family=AF_INET;addr->sin_addr.s_addr=htonl(0xC0A80101);*slen=sizeof(*addr);
+ auto* addr=reinterpret_cast<sockaddr_in*>(src);addr->sin_family=AF_INET;addr->sin_addr.s_addr=htonl(address);*slen=sizeof(*addr);
  size_t copied=std::min(len,bytes.size());std::memcpy(dst,bytes.data(),copied);return static_cast<int>(copied);
 }
 int main(int argc,char** argv){
@@ -102,6 +102,99 @@ int main(int argc,char** argv){
   Fixture f;host::socket_result=10;f.sync.start(NodeRole::Master);
   host::recv_hook=[&](void*,size_t,sockaddr*,socklen_t*){f.sync.stop(0);return -1;};host::run(0);
   CHECK(host::recv_timeout_us>0&&host::recv_timeout_us<=50000);CHECK(host::send_timeout_us>0&&host::send_timeout_us<=50000);CHECK(f.sync.stop(0)==ESP_OK);
+ } else if(name=="auto_loss_releases_before_leading"){
+  Fixture f;host::socket_result=10;int received=0,cleared=0;bool remote_owned=false;auto p=heartbeat();p.transport=3;
+  f.sync.set_remote_transport_callback([&](const auto& snap,uint8_t&){
+   CHECK(host::critical_depth==0);
+   if(snap.mode==ShowTransportMode::Standalone){++cleared;remote_owned=false;}
+   else remote_owned=true;
+   return true;
+  });
+  f.sync.set_transport_provider([&](uint64_t){CHECK(!remote_owned);CHECK(cleared==1);return ShowTransportSnapshot{};});
+  CHECK(f.sync.start(NodeRole::Auto)==ESP_OK);
+  host::recv_hook=[&](void* data,size_t len,sockaddr* from,socklen_t* slen){
+   if(received++==0)return deliver(p,data,len,from,slen);
+   if(received==2){CHECK(remote_owned);host::now_us+=1000000;return -1;}
+   CHECK(f.sync.active_role()==NodeRole::Master);CHECK(cleared==1);f.sync.stop(0);return -1;
+  };
+  host::run(0);CHECK(f.sync.stop(0)==ESP_OK);
+ } else if(name=="auto_cleanup_failure_blocks_promotion"){
+  Fixture f;host::socket_result=10;int received=0,releases=0,notified=0;bool allow=false;auto p=heartbeat();p.transport=2;
+  f.sync.set_remote_transport_callback([&](const auto& snap,uint8_t& error){
+   if(snap.mode!=ShowTransportMode::Standalone)return true;
+   ++releases;error=9;return allow;
+  });
+  f.sync.set_transport_callback([&](const auto&){++notified;});
+  f.sync.set_transport_provider([&](uint64_t){CHECK(allow&&releases==2&&notified==1);return ShowTransportSnapshot{};});
+  CHECK(f.sync.start(NodeRole::Auto)==ESP_OK);
+  host::recv_hook=[&](void* data,size_t len,sockaddr* from,socklen_t* slen){
+   if(received++==0)return deliver(p,data,len,from,slen);
+   if(received==2){host::now_us+=1000000;return -1;}
+   if(received==3){
+    auto status=f.sync.status();CHECK(status.active_role==NodeRole::Worker);CHECK(status.master_address!=0);
+    CHECK(status.transport==2);CHECK(!status.transport_apply_ok&&status.transport_error==9);
+    CHECK(releases==1&&notified==0);allow=true;return -1;
+   }
+   CHECK(f.sync.active_role()==NodeRole::Master);CHECK(releases==2&&notified==1);f.sync.stop(0);return -1;
+  };
+  host::run(0);CHECK(f.sync.stop(0)==ESP_OK);
+ } else if(name=="worker_timeout_retries_remote_cleanup"){
+  Fixture f;host::socket_result=10;int received=0,releases=0,notified=0;bool allow=false;auto p=heartbeat();p.transport=3;
+  f.sync.set_remote_transport_callback([&](const auto& snap,uint8_t&){
+   if(snap.mode!=ShowTransportMode::Standalone)return true;
+   ++releases;return allow;
+  });
+  f.sync.set_transport_callback([&](const auto&){++notified;});
+  CHECK(f.sync.start(NodeRole::Worker)==ESP_OK);
+  host::recv_hook=[&](void* data,size_t len,sockaddr* from,socklen_t* slen){
+   if(received++==0)return deliver(p,data,len,from,slen);
+   if(received==2){host::now_us+=3001000;return -1;}
+   if(received==3){
+    auto status=f.sync.status();CHECK(status.master_address!=0&&status.transport==3);
+    CHECK(!status.transport_apply_ok&&status.transport_error==4);CHECK(releases==1&&notified==0);
+    allow=true;return -1;
+   }
+   auto status=f.sync.status();CHECK(status.master_address==0&&status.transport==0);
+   CHECK(!status.transport_apply_ok&&status.transport_error==0);CHECK(status.last_packet_age_ms==3001);
+   CHECK(releases==2&&notified==1);f.sync.stop(0);return -1;
+  };
+  host::run(0);CHECK(f.sync.stop(0)==ESP_OK);
+ } else if(name=="worker_packet_at_zero_still_expires"){
+  Fixture f;host::socket_result=10;host::now_us=0;int received=0,cleared=0;auto p=heartbeat();
+  f.sync.set_remote_transport_callback([&](const auto& snap,uint8_t&){if(snap.mode==ShowTransportMode::Standalone)++cleared;return true;});
+  CHECK(f.sync.start(NodeRole::Worker)==ESP_OK);
+  host::recv_hook=[&](void* data,size_t len,sockaddr* from,socklen_t* slen){
+   if(received++==0)return deliver(p,data,len,from,slen);
+   if(received==2){host::now_us=3001000;return -1;}
+   CHECK(cleared==1);CHECK(f.sync.status().master_address==0);f.sync.stop(0);return -1;
+  };
+  host::run(0);CHECK(f.sync.stop(0)==ESP_OK);
+ } else if(name=="auto_first_election_preserves_local_transport"){
+  Fixture f;host::socket_result=10;int received=0,cleared=0;
+  f.sync.set_remote_transport_callback([&](const auto&,uint8_t&){++cleared;return true;});
+  f.sync.set_transport_provider([&](uint64_t){CHECK(cleared==0);ShowTransportSnapshot snap{};snap.mode=ShowTransportMode::Cue;return snap;});
+  CHECK(f.sync.start(NodeRole::Auto)==ESP_OK);
+  host::recv_hook=[&](void*,size_t,sockaddr*,socklen_t*){
+   if(received++==0){host::now_us+=1000000;return -1;}
+   CHECK(f.sync.active_role()==NodeRole::Master);CHECK(cleared==0);f.sync.stop(0);return -1;
+  };
+  host::run(0);CHECK(f.sync.stop(0)==ESP_OK);
+ } else if(name=="expired_peer_slots_recycled"||name=="live_peer_slots_preserved"){
+  Fixture f;host::socket_result=10;int received=0;auto p=heartbeat();p.type=NodeSync::PacketType::Acknowledgement;
+  const bool expire=name=="expired_peer_slots_recycled";
+  CHECK(f.sync.start(NodeRole::Master)==ESP_OK);
+  host::recv_hook=[&](void* data,size_t len,sockaddr* from,socklen_t* slen){
+   if(received<8){const uint32_t address=0xC0A80110+received++;return deliver(p,data,len,from,slen,0,address);}
+   if(received++==8){
+    CHECK(f.sync.status().peer_count==8);if(expire)host::now_us+=3001000;
+    return deliver(p,data,len,from,slen,0,0xC0A80199);
+   }
+   auto status=f.sync.status();CHECK(status.peer_count==(expire?1:8));
+   if(expire)CHECK(status.peers[0].address==htonl(0xC0A80199));
+   else for(uint8_t i=0;i<status.peer_count;++i)CHECK(status.peers[i].address!=htonl(0xC0A80199));
+   f.sync.stop(0);return -1;
+  };
+  host::run(0);CHECK(f.sync.stop(0)==ESP_OK);
  } else {std::fprintf(stderr,"unknown test %s\n",name.c_str());return 2;}
  CHECK(host::critical_depth==0);std::printf("PASS %s\n",name.c_str());return 0;
 }

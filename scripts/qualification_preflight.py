@@ -23,6 +23,20 @@ REQUIRED_CHECKS = (
 )
 IDENTITY_FIELDS = ('source_commit','firmware_sha256','pcb_revision','serial_number',
                    'wiring_revision','power_supply','load_profile','enclosure','antenna')
+RECORD_SCHEMA = 'lumigrid-qualification-v2'
+
+def identity_hash(identity: dict[str, Any]) -> str:
+    """Bind each check to the full build, specimen and installation identity.
+
+    This detects accidental mixing of records; it is not an attestation that
+    the declared setup or measurements are truthful.
+    """
+    if any(not isinstance(identity.get(field), str) or not identity[field].strip()
+           for field in IDENTITY_FIELDS):
+        return ''
+    encoded = json.dumps({field: identity[field] for field in IDENTITY_FIELDS},
+                         sort_keys=True, separators=(',', ':'), ensure_ascii=False)
+    return hashlib.sha256(encoded.encode('utf-8')).hexdigest()
 
 def file_hash(path: Path) -> str:
     digest=hashlib.sha256()
@@ -36,8 +50,8 @@ def evaluate(document: Any, evidence_root: Path, firmware: Path,
     root=evidence_root.resolve()
     problems: list[str]=[]
     report: dict[str, Any]={
-        'schema':'lumigrid-evidence-preflight-v1',
-        'policy_revision':'2026-10-30-sync-lifecycle',
+        'schema':'lumigrid-evidence-preflight-v2',
+        'policy_revision':'2026-11-01-bound-evidence',
         'evidence_complete':False,
         'conformity_assessment':'NOT_PERFORMED_BY_TOOL',
         'measurement_verification':'OPERATOR_DECLARATIONS_NOT_INDEPENDENTLY_VERIFIED',
@@ -46,12 +60,15 @@ def evaluate(document: Any, evidence_root: Path, firmware: Path,
     }
     if not isinstance(document,dict):
         problems.append('Evidence document must be an object.');return report
-    if document.get('schema')!='lumigrid-qualification-v1':problems.append('Unsupported evidence schema.')
+    if document.get('schema') != RECORD_SCHEMA:
+        problems.append(f'Unsupported evidence schema; expected {RECORD_SCHEMA} with declared identity and file hashes.')
     identity=document.get('identity')
     if not isinstance(identity,dict):identity={};problems.append('Identity must be an object.')
     for field in IDENTITY_FIELDS:
         if not isinstance(identity.get(field),str) or not identity[field].strip():
             problems.append(f'Missing identity: {field}.')
+    fingerprint = identity_hash(identity)
+    report['identity_sha256'] = fingerprint
     if not re.fullmatch(r'[0-9a-f]{40}',actual_commit or ''):problems.append('Actual source commit is invalid.')
     if identity.get('source_commit')!=actual_commit:problems.append('Source commit differs from the declared test build.')
     if dirty:problems.append('Source tree is dirty; commit and rebuild before freezing identity.')
@@ -77,20 +94,35 @@ def evaluate(document: Any, evidence_root: Path, firmware: Path,
         if entry.get('result')!='PASS':problems.append(f'{name}: result is {entry.get("result","MISSING")}.')
         if entry.get('firmware_sha256')!=firmware_hash:problems.append(f'{name}: different firmware identity.')
         if entry.get('pcb_revision')!=identity.get('pcb_revision'):problems.append(f'{name}: different PCB revision.')
+        if not fingerprint or entry.get('identity_sha256') != fingerprint:
+            problems.append(f'{name}: full test identity differs or is missing (build, unit, wiring, supply, loads, enclosure or antenna).')
         evidence=entry.get('evidence')
         if not isinstance(evidence,list) or not evidence:
             problems.append(f'{name}: missing evidence files.');continue
+        check_paths: set[str] = set()
         for value in evidence:
             try:
-                if not isinstance(value,str) or not value or Path(value).is_absolute():
+                if not isinstance(value, dict):
+                    raise ValueError('requires an object with path and recorded sha256')
+                relative_path = value.get('path')
+                declared_hash = value.get('sha256')
+                if not isinstance(relative_path,str) or not relative_path or Path(relative_path).is_absolute():
                     raise ValueError('requires a relative file path')
-                path=(root/value).resolve()
+                path=(root/relative_path).resolve()
                 if not path.is_relative_to(root):raise ValueError('path escapes evidence directory')
                 if not path.is_file() or path.stat().st_size==0:raise ValueError('missing, empty or not a file')
                 relative=path.relative_to(root).as_posix()
+                if relative in check_paths:
+                    raise ValueError('duplicate evidence file within this check')
+                check_paths.add(relative)
                 if relative not in files:
-                    files[relative]={'path':relative,'sha256':file_hash(path),'bytes':path.stat().st_size}
-            except (OSError,ValueError) as error:
+                    files[relative]={'path':relative,'sha256':file_hash(path),'bytes':path.stat().st_size,'checks':[]}
+                files[relative]['checks'].append(name)
+                if not isinstance(declared_hash, str) or not re.fullmatch(r'[0-9a-f]{64}', declared_hash):
+                    problems.append(f'{name}: missing or invalid recorded SHA-256 for {relative}.')
+                elif declared_hash != files[relative]['sha256']:
+                    problems.append(f'{name}: evidence hash changed for {relative}.')
+            except (OSError,ValueError,RuntimeError) as error:
                 problems.append(f'{name}: invalid evidence path ({error}).')
     for missing in sorted(set(REQUIRED_CHECKS)-seen):problems.append(f'Missing required check: {missing}.')
     report['evidence']=[files[key] for key in sorted(files)]

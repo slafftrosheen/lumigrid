@@ -6,7 +6,7 @@ This is a project bench plan, not a conformity assessment or certificate. The ac
 
 After applying the batch, completing application and firmware builds, and committing the reviewed source, record the new source commit, exact application-image SHA-256, PCB revision, serial number, wiring revision, supply, loads, antenna and enclosure. Do not reuse an older candidate's evidence as a pass for a modified image.
 
-The full ESP32 factory/test images and browser application have **not** been built or flashed as part of this patch package. Host regression results are recorded separately in its delivery report. No hardware pin assignment, radio setting, signed-update policy, effect ID or output count is changed by this batch.
+Build and verification results are revision-specific; see the dated change report for the candidate under test. The October 30 source batch did not include target builds or flashing. No software report establishes physical output behavior, and a previous image's build result does not qualify a modified image.
 
 ## Bench records
 
@@ -17,7 +17,7 @@ The full ESP32 factory/test images and browser application have **not** been bui
 | all_16_outputs | Connector-by-connector mapping and behavior for A1–A8 and P1–P8 with supported loads |
 | combined_outputs_and_network | Simultaneous output operation and network/API load; record selected effects, loads, timing captures, resets and memory minima |
 | network_loss_and_reconnect | Leader loss, stale and conflicting reports, reconnection, content mismatch and group selection; retain both nodes' logs |
-| sync_shutdown_and_recovery | On the actual PCB, repeat sync disable/enable, role/token changes and network rebind under simultaneous output load; retain timeout/retry behavior, worker counts, output captures, heap and stack minima. Demonstrate no replacement worker or dependency teardown before the old worker acknowledges exit. |
+| sync_shutdown_and_recovery | On the actual PCB, repeat sync disable/enable, role/token changes and network rebind under simultaneous output load; retain timeout/retry behavior, worker counts, output captures, heap and stack minima. Demonstrate no replacement worker or dependency teardown before the old worker acknowledges exit. Lose the leader during cue/timeline playback in Auto mode: local leadership must wait for remote cue/scheduler release; rejected release must remain visible and retry before takeover. |
 | ota_and_rollback | Valid update, interruption and rollback on the intended layout; preserve configuration and image identity |
 | configuration_power_loss | Interrupted save/restore and recovery; do not erase the only backup during the test |
 | thermal_endurance | Actual current and temperature observations with duration, ambient conditions and agreed limits; firmware does not invent temperature sensor data |
@@ -27,7 +27,28 @@ Set test limits and durations with the responsible engineer/lab and include thos
 
 ## Running the completeness preflight
 
-Keep measurement records outside the source tree so that adding evidence does not make the frozen source dirty. Copy `evidence-template.json`, fill the identity only from the exact tested build, and mark each result truthfully. Each check repeats the tested firmware hash and PCB revision to catch stale records. Evidence paths are relative to the evidence directory. Empty files, escaping paths, duplicates and mismatched identity block completeness.
+Keep measurement records outside the source tree so that adding evidence does not make the frozen source dirty. Copy `evidence-template.json`, fill the identity only from the exact tested build, and mark each result truthfully. The `lumigrid-qualification-v2` record binds every check to the full declared identity: source and firmware hashes, PCB revision, unit serial, wiring, supply, loads, enclosure and antenna. A check repeats the firmware hash and PCB revision and records `identity_sha256` for that complete setup. Changing any identity field invalidates results still bound to the old setup.
+
+Run the preflight with the filled identity and the checks still marked `NOT_RUN` to obtain the `identity_sha256` in its report. Exit 2 is expected at this stage. Record that value with each test **when it is performed**, and archive the original record. This digest detects mixed records; it cannot prove that the operator declared the physical setup truthfully.
+
+Each evidence entry is an object containing a relative `path` and the SHA-256 recorded when the capture was archived:
+
+```json
+{
+  "path": "safe-boot/scope.csv",
+  "sha256": "<64 lowercase hexadecimal characters from the archived capture>"
+}
+```
+
+For example, calculate a capture's digest with Python:
+
+```sh
+python -c "import hashlib,pathlib,sys; print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())" /path/to/evidence/safe-boot/scope.csv
+```
+
+The checker compares those recorded digests with the files present now. Replacing a capture at the same path blocks completeness. Empty files, escaping paths, duplicate paths within one check, missing hashes and mismatched setup identity also block completeness. A shared capture may support several checks; the report lists those associations. Current hashes appear in incomplete reports for diagnosis, but do not replace archived hashes merely to clear a mismatch.
+
+Version 1 records and plain path strings are rejected. Migrate from the original archived test records and capture hashes, preserving the tested setup and result. If that identity or evidence cannot be established, leave the check `NOT_RUN` and repeat it; do not automatically stamp old results with the current setup.
 
 ```sh
 python scripts/qualification_preflight.py \
@@ -41,7 +62,7 @@ Exit 0 means the specified bench-evidence records are complete, **not** that the
 
 ## Remaining engineering work before release
 
-The source batch includes a cooperative NodeSync shutdown ownership fix and exact runtime teardown/callback integration edits. Host behavior and interleavings have been tested; full target compilation, whole-runtime integration and on-board acceptance are still required. Oversized sync datagrams are rejected in host tests. Full UDP semantic/security validation, actual multi-node timing, hardware recovery, output coexistence and RF/EMC tests are not established by these host tests. Do not treat protocol compatibility, matching checksums or a green dashboard as a physical measurement.
+The source includes cooperative NodeSync shutdown ownership, runtime teardown/callback integration and acknowledged remote release before automatic leader takeover. Host behavior and interleavings have been tested; the dated change report records which target and web builds were actually completed. Whole-runtime on-board acceptance remains required. Oversized sync datagrams are rejected in host tests. Full UDP semantic/security validation, actual multi-node timing, hardware recovery, output coexistence and RF/EMC tests are not established by these host tests. Do not treat protocol compatibility, matching checksums or a green dashboard as a physical measurement.
 
 ## Regulatory boundary and sources
 

@@ -24,7 +24,7 @@ Memory admission governs scratch/output allocation. Factory and network-apply wo
 
 The SvelteKit project contains public content, docs and the external operator dashboard. `src/lib/api/` owns adapters; `src/lib/state/nodeStore.ts` owns live WS/snapshots; `src/lib/auth/storage.ts` owns browser storage.
 
-Storage consolidation is incomplete: `auth/nodeAuth.ts` and `fleet/registry.ts` also access browser storage directly. See the [source audit](SOURCE_OF_TRUTH.md) for this existing boundary-check failure.
+`auth/nodeAuth.ts` and `fleet/registry.ts` use the guarded helpers in `auth/storage.ts`. Both storage-property lookup and operations tolerate denied persistence; authentication keeps tab-scoped session credentials in memory when session storage is unavailable. The strict API/storage boundary audit passes.
 
 `embedded/dashboard.html` is a separate device interface. `scripts/build-embedded.mjs` minifies/compresses it into `LumigridLedNode/generated/dashboard_assets.hpp`.
 

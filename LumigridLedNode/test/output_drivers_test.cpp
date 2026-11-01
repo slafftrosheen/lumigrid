@@ -6,6 +6,7 @@
 #include "BoardOutputSafety.hpp"
 #include "lg_board_pins.hpp"
 #include "driver/rmt_tx.h"
+#include "driver/i2c.h"
 #include <algorithm>
 #include <array>
 #include <iostream>
@@ -258,6 +259,96 @@ void pca_failed_recovery() {
     require_disabled("second recovery bypassed controller enable");
 }
 
+void pca_gate_failure() {
+    PcaTransport transport;
+    Pca9685Driver pca(&transport);
+    host_gpio::fail_pin = board::kPcaOe;
+    host_gpio::fail_level = 1;
+    host_gpio::failures = 1;
+    require(pca.init() == ESP_FAIL && !transport.live, "failed /OE preload still initialized the bus");
+    require(!pca.diagnostics().healthy && pca.recovery_required(), "failed GPIO initialization claimed healthy output");
+    require(pca.init() == ESP_OK, "explicit init retry could not clear the gate fault");
+
+    pca.set(0, 1200);
+    require(pca.commit() == ESP_OK, "gate fixture frame failed");
+    host_gpio::fail_level = 0;
+    host_gpio::failures = 1;
+    require(pca.enable_outputs() == ESP_FAIL, "GPIO enable failure was reported as success");
+    require_disabled("GPIO enable failure did not retain inhibit");
+    const auto diag = pca.diagnostics();
+    require(diag.last_fault_kind == PcaFaultKind::OutputGateFailed && diag.last_error == ESP_FAIL &&
+            diag.recovery_required && !diag.healthy, "gate failure missing from diagnostics");
+    require(pca.clear() == ESP_OK && pca.enable_outputs() == ESP_ERR_INVALID_STATE,
+            "successful I2C zero bypassed the GPIO fault latch");
+    require(pca.recover() == ESP_OK && pca.enable_outputs() == ESP_OK, "gate recovery failed");
+
+    host_gpio::fail_level = 1;
+    host_gpio::failures = 1;
+    require(pca.disable_outputs() == ESP_FAIL, "GPIO inhibit failure was hidden");
+    require(Pca9685Driver::is_outputs_enabled() && board::sample_pca_oe_level() == 0,
+            "rejected inhibit falsely reported /OE disabled");
+    require(pca.disable_outputs() == ESP_OK && pca.recovery_required(),
+            "best-effort GPIO retry erased the recovery requirement");
+    require(pca.recover() == ESP_OK && !pca.recovery_required(), "verified retry did not clear the gate fault");
+    host_gpio::reset_faults();
+}
+
+void pca_recovery_retains_new_gate_fault() {
+    PcaTransport transport;
+    Pca9685Driver pca(&transport);
+    require(pca.init() == ESP_OK, "gate generation fixture failed");
+    transport.frame_hook = [] {
+        host_gpio::fail_pin = board::kPcaOe;
+        host_gpio::fail_level = 1;
+        host_gpio::failures = 1;
+        require(Pca9685Driver::force_disable_outputs() == ESP_FAIL, "interleaved gate fault was not injected");
+    };
+    require(pca.recover() == ESP_FAIL && pca.recovery_required(), "older recovery erased an interleaved gate fault");
+    require(pca.enable_outputs() == ESP_ERR_INVALID_STATE, "interleaved gate fault exposed output");
+    require(pca.recover() == ESP_OK && !pca.recovery_required(), "later recovery did not acknowledge the new fault");
+    host_gpio::reset_faults();
+}
+
+void production_i2c_recovery_guards() {
+    host_i2c::active = true;
+    Pca9685Driver pca; // Exercise the production transport, not PcaTransport.
+    require(pca.init() == ESP_OK && host_i2c::installs == 1, "production I2C init failed");
+    host_i2c::delete_failures = 1;
+    const auto before_gpio = host_gpio::configurations;
+    require(pca.recover() == ESP_FAIL, "failed I2C delete was ignored");
+    require(host_i2c::live && host_i2c::installs == 1 && host_gpio::configurations == before_gpio,
+            "failed delete reconfigured live I2C pins or installed another driver");
+    require(pca.recover() == ESP_OK && host_i2c::deletes == 2 && host_i2c::installs == 2,
+            "I2C delete ownership was lost on retry");
+
+    host_gpio::config_fail_pin = board::kI2cSda;
+    host_gpio::config_failures = 1;
+    require(pca.recover() == ESP_FAIL && !host_i2c::live && host_i2c::installs == 2,
+            "GPIO recovery config failure reinstalled I2C");
+    host_gpio::reset_faults();
+    require(pca.recover() == ESP_OK, "GPIO config retry failed");
+
+    host_gpio::fail_pin = board::kI2cSda;
+    host_gpio::fail_level = 0; // STOP generation, after initial line release.
+    host_gpio::failures = 1;
+    const auto before_stop = host_i2c::installs;
+    require(pca.recover() == ESP_FAIL && !host_i2c::live && host_i2c::installs == before_stop,
+            "failed STOP GPIO write was accepted as a successful bus clear");
+    host_gpio::reset_faults();
+    require(pca.recover() == ESP_OK, "STOP retry failed");
+
+    host_gpio::held_low_pin = board::kI2cScl;
+    host_gpio::held_low_after_reads = 2; // SCL releases initially, then sticks during STOP.
+    host_gpio::selected_reads = 0;
+    require(pca.recover() == ESP_ERR_TIMEOUT && !host_i2c::live,
+            "SCL held low during STOP was accepted as recovered");
+    host_gpio::reset_faults();
+    require(pca.recover() == ESP_OK && pca.diagnostics().recovery_successes == 4,
+            "production recovery did not resume after the line released");
+    require_disabled("production bus recovery enabled PWM");
+    host_i2c::active = false;
+}
+
 void rmt_recreated_lane() {
     RmtTransport transport;
     ParallelRmtDriver rmt(&transport);
@@ -389,6 +480,54 @@ void controller_enable_failure() {
     f.controller.pwm().set(0, 700);
     require(f.controller.try_commit() == ESP_OK && Pca9685Driver::is_outputs_enabled(), "verified recovery did not resume PWM");
     f.controller.blackout();
+}
+
+void controller_gpio_enable_failure() {
+    ControllerFixture f;
+    f.start(config(1, 1));
+    f.controller.pwm().set(0, 1300);
+    host_gpio::fail_pin = board::kPcaOe;
+    host_gpio::fail_level = 0;
+    host_gpio::failures = 1;
+    require(f.controller.try_commit() == ESP_FAIL, "controller ignored rejected /OE enable");
+    require(f.controller.commit_metrics().failed == 1 && f.controller.commit_metrics().successful == 0,
+            "GPIO enable failure counted as successful output");
+    require(f.pca.duties[0] == 0 && f.controller.pwm().recovery_required(), "GPIO failure did not zero/latch output");
+    require_disabled("GPIO enable failure left output enabled");
+    host_gpio::reset_faults();
+    require(f.controller.recover_pca() == ESP_OK, "controller could not recover GPIO failure");
+    f.controller.pwm().set(0, 1300);
+    require(f.controller.try_commit() == ESP_OK, "fresh frame failed after GPIO recovery");
+    f.controller.blackout();
+}
+
+void controller_gpio_disable_failure() {
+    ControllerFixture f;
+    f.start(config(1, 1));
+    f.controller.pwm().set(0, 1300);
+    require(f.controller.try_commit() == ESP_OK, "disable fixture failed");
+    host_gpio::fail_pin = board::kPcaOe;
+    host_gpio::fail_level = 1;
+    host_gpio::failures = 100;
+    const auto blackout = f.controller.blackout();
+    require(blackout.pwm_result == ESP_FAIL && !blackout.pwm_confirmed && f.pca.duties[0] == 0,
+            "failed GPIO inhibit claimed confirmed blackout or skipped emergency zeros");
+    require(Pca9685Driver::is_outputs_enabled(), "failed GPIO inhibit erased enabled state");
+    f.controller.latch_estop();
+    require(f.controller.clear_estop() == ESP_FAIL && f.controller.is_estop_latched(),
+            "stop reset ignored failed GPIO inhibit");
+    const auto generation = f.controller.topology_generation();
+    require(f.controller.reconfigure(config(3, 1, 20)) == ESP_FAIL,
+            "topology swap proceeded without confirmed PWM inhibit");
+    require(f.controller.topology_generation() == generation && f.controller.pixels().configured_pixels(0) == 4 &&
+            !f.controller.pixels().configured(1) && !f.controller.output_enabled(),
+            "rejected inhibit changed topology or re-armed output");
+    require(f.controller.rollback_to_last_good_topology() == ESP_FAIL && !f.controller.is_topology_valid(),
+            "rollback hid its own GPIO inhibit failure");
+    host_gpio::reset_faults();
+    require(f.controller.recover_pca() == ESP_OK && f.controller.reconfigure(config(1, 1)) == ESP_OK &&
+            f.controller.clear_estop() == ESP_OK, "recovery could not re-arm known-zero output");
+    require_disabled("stop reset exposed PWM without a fresh frame");
 }
 
 void controller_initial_recovery() {
@@ -842,6 +981,9 @@ const Test tests[] = {
     {"pca_nonzero_enable", pca_nonzero_enable},
     {"pca_fault_latch", pca_fault_latch},
     {"pca_failed_recovery", pca_failed_recovery},
+    {"pca_gate_failure", pca_gate_failure},
+    {"pca_recovery_retains_new_gate_fault", pca_recovery_retains_new_gate_fault},
+    {"production_i2c_recovery_guards", production_i2c_recovery_guards},
     {"rmt_recreated_lane", rmt_recreated_lane},
     {"rmt_retained_lane", rmt_retained_lane},
     {"rmt_cancel_candidate", rmt_cancel_candidate},
@@ -849,6 +991,8 @@ const Test tests[] = {
     {"controller_mixed_output", controller_mixed_output},
     {"controller_disabled_pwm", controller_disabled_pwm},
     {"controller_enable_failure", controller_enable_failure},
+    {"controller_gpio_enable_failure", controller_gpio_enable_failure},
+    {"controller_gpio_disable_failure", controller_gpio_disable_failure},
     {"controller_initial_recovery", controller_initial_recovery},
     {"controller_recovery_preserves_estop", controller_recovery_preserves_estop},
     {"controller_lane_toggle", controller_lane_toggle},
@@ -883,6 +1027,7 @@ int main(int argc, char** argv) {
         if (!selected) continue;
         try { test(); ++passed; std::cout << "PASS " << name << '\n'; }
         catch (const std::exception& error) { ++failed; std::cerr << "FAIL " << name << ": " << error.what() << '\n'; }
+        host_gpio::reset_faults();
         Pca9685Driver::force_disable_outputs();
     }
     std::cout << passed << " passed, " << failed << " failed\n";

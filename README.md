@@ -11,6 +11,7 @@ The firmware implements eight addressable lanes (WS2812 RGB or SK6812 RGBW), eig
 - [Source-backed audit](docs/SOURCE_OF_TRUTH.md)
 - [Build and contribute](docs/CONTRIBUTING.md)
 - [Firmware candidate 1.0.0-rc2 and bench acceptance](docs/FIRMWARE_RELEASE_CANDIDATE.md)
+- [Hardware, playback, sync and UI polish — 2026-11-01](docs/qualification/2026-11-01-POLISH.md)
 
 ## Two projects, one repository
 

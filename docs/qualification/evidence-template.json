@@ -1,5 +1,5 @@
 {
-  "schema": "lumigrid-qualification-v1",
+  "schema": "lumigrid-qualification-v2",
   "identity": {
     "source_commit": "",
     "firmware_sha256": "",
@@ -17,70 +17,80 @@
       "result": "NOT_RUN",
       "firmware_sha256": "",
       "pcb_revision": "",
-      "evidence": []
+      "evidence": [],
+      "identity_sha256": ""
     },
     {
       "id": "safe_boot_and_reset",
       "result": "NOT_RUN",
       "firmware_sha256": "",
       "pcb_revision": "",
-      "evidence": []
+      "evidence": [],
+      "identity_sha256": ""
     },
     {
       "id": "all_16_outputs",
       "result": "NOT_RUN",
       "firmware_sha256": "",
       "pcb_revision": "",
-      "evidence": []
+      "evidence": [],
+      "identity_sha256": ""
     },
     {
       "id": "combined_outputs_and_network",
       "result": "NOT_RUN",
       "firmware_sha256": "",
       "pcb_revision": "",
-      "evidence": []
+      "evidence": [],
+      "identity_sha256": ""
     },
     {
       "id": "network_loss_and_reconnect",
       "result": "NOT_RUN",
       "firmware_sha256": "",
       "pcb_revision": "",
-      "evidence": []
+      "evidence": [],
+      "identity_sha256": ""
     },
     {
       "id": "sync_shutdown_and_recovery",
       "result": "NOT_RUN",
       "firmware_sha256": "",
       "pcb_revision": "",
-      "evidence": []
+      "evidence": [],
+      "identity_sha256": ""
     },
     {
       "id": "ota_and_rollback",
       "result": "NOT_RUN",
       "firmware_sha256": "",
       "pcb_revision": "",
-      "evidence": []
+      "evidence": [],
+      "identity_sha256": ""
     },
     {
       "id": "configuration_power_loss",
       "result": "NOT_RUN",
       "firmware_sha256": "",
       "pcb_revision": "",
-      "evidence": []
+      "evidence": [],
+      "identity_sha256": ""
     },
     {
       "id": "thermal_endurance",
       "result": "NOT_RUN",
       "firmware_sha256": "",
       "pcb_revision": "",
-      "evidence": []
+      "evidence": [],
+      "identity_sha256": ""
     },
     {
       "id": "installation_limits_review",
       "result": "NOT_RUN",
       "firmware_sha256": "",
       "pcb_revision": "",
-      "evidence": []
+      "evidence": [],
+      "identity_sha256": ""
     }
   ]
 }

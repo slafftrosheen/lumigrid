@@ -10,22 +10,22 @@
            LUMIGRID OS — DESIGN SYSTEM (Dark Glassmorphism)
            ═══════════════════════════════════════════════════════ */
         :root {
-            --bg: #05060f;
-            --bg-subtle: #0a0b18;
-            --surface: rgba(14, 15, 28, 0.78);
-            --surface-elevated: rgba(22, 24, 42, 0.88);
-            --surface-hover: rgba(32, 35, 55, 0.92);
-            --surface-active: rgba(42, 46, 68, 0.95);
+            --bg: #050505;
+            --bg-subtle: #101011;
+            --surface: rgba(29, 29, 31, 0.78);
+            --surface-elevated: rgba(40, 40, 43, 0.88);
+            --surface-hover: rgba(50, 50, 54, 0.92);
+            --surface-active: rgba(60, 60, 65, 0.95);
             --border: rgba(255, 255, 255, 0.08);
             --border-subtle: rgba(255, 255, 255, 0.04);
-            --border-focus: rgba(129, 140, 248, 0.5);
-            --text: #eef0f6;
-            --text-secondary: #a0a4b8;
-            --text-muted: #6b7084;
-            --primary: #6366f1;
-            --primary-dim: #4f46e5;
-            --primary-soft: rgba(99, 102, 241, 0.14);
-            --primary-glow: rgba(99, 102, 241, 0.35);
+            --border-focus: rgba(255,100,127, 0.5);
+            --text: #f5f5f7;
+            --text-secondary: #b5b5bc;
+            --text-muted: #a1a1a6;
+            --primary: #ff2d55;
+            --primary-dim: #c91e42;
+            --primary-soft: rgba(255,45,85, 0.14);
+            --primary-glow: rgba(255,45,85, 0.35);
             --accent: #34d399;
             --accent-soft: rgba(52, 211, 153, 0.14);
             --accent-glow: rgba(52, 211, 153, 0.3);
@@ -59,9 +59,9 @@
             content: '';
             position: fixed; inset: 0;
             background:
-                radial-gradient(ellipse 80% 50% at 10% 35%, rgba(99,102,241,.08), transparent 60%),
+                radial-gradient(ellipse 80% 50% at 10% 35%, rgba(255,45,85,.08), transparent 60%),
                 radial-gradient(ellipse 60% 70% at 90% 20%, rgba(52,211,153,.06), transparent 50%),
-                radial-gradient(ellipse 70% 60% at 50% 90%, rgba(129,140,248,.05), transparent 60%);
+                radial-gradient(ellipse 70% 60% at 50% 90%, rgba(255,100,127,.05), transparent 60%);
             pointer-events: none; z-index: -1;
         }
 
@@ -72,7 +72,7 @@
         h4 { font-size: 0.95rem; }
         h5 { font-size: 0.82rem; font-weight: 700; color: var(--text-secondary); }
         .eyebrow {
-            color: #a5b4fc; font-size: 0.68rem; font-weight: 800;
+            color: #ffb3c1; font-size: 0.68rem; font-weight: 800;
             letter-spacing: 0.15em; text-transform: uppercase;
         }
         .muted { color: var(--text-muted); font-size: 0.85rem; }
@@ -83,14 +83,14 @@
         input, select {
             font-size: 0.88rem; border-radius: var(--radius-sm);
             border: 1px solid var(--border);
-            background: rgba(5, 6, 15, 0.6);
+            background: rgba(5,5,5, 0.6);
             color: var(--text); padding: 0.55rem 0.75rem;
             width: 100%; transition: border-color var(--transition), box-shadow var(--transition);
         }
         input:focus, select:focus {
             outline: none; border-color: var(--primary);
             box-shadow: 0 0 0 3px var(--primary-soft);
-            background: rgba(8, 10, 22, 0.8);
+            background: rgba(16,16,18, 0.8);
         }
         input::placeholder { color: var(--text-muted); }
         select { cursor: pointer; }
@@ -145,12 +145,14 @@
         }
         button:hover { background: rgba(255,255,255,0.12); border-color: rgba(255,255,255,0.15); }
         button:active { transform: scale(0.97); }
+        button:disabled { opacity: 0.55; cursor: wait; transform: none; }
+        button:focus-visible { outline: 2px solid var(--text); outline-offset: 3px; }
         .button-primary {
             border-color: transparent;
-            background: linear-gradient(135deg, #6366f1, #4f46e5);
-            box-shadow: 0 2px 8px rgba(99,102,241,0.3); font-weight: 700;
+            background: var(--primary-dim);
+            box-shadow: 0 2px 8px rgba(255,45,85,0.3); font-weight: 700;
         }
-        .button-primary:hover { filter: brightness(1.12); box-shadow: 0 4px 16px rgba(99,102,241,0.45); }
+        .button-primary:hover { filter: brightness(1.04); box-shadow: 0 4px 16px rgba(255,45,85,0.45); }
         .button-secondary { background: rgba(255,255,255,0.05); }
         .button-danger {
             color: #fecaca; border-color: rgba(248,113,113,0.35);
@@ -167,13 +169,13 @@
         .experience-login {
             position: relative; width: min(26rem, 100%);
             padding: 2.5rem 2rem 2rem; border-radius: var(--radius-xl);
-            background: rgba(10, 12, 24, 0.9); backdrop-filter: blur(24px);
+            background: rgba(20,20,22, 0.9); backdrop-filter: blur(24px);
             border: 1px solid rgba(255,255,255,0.09);
             box-shadow: 0 2rem 5rem rgba(0,0,0,0.6);
         }
         .experience-login h1 {
             font-size: clamp(1.8rem, 6vw, 2.4rem); letter-spacing: -0.04em; margin: 0.25rem 0 0.5rem;
-            background: linear-gradient(135deg, var(--text) 0%, #a5b4fc 50%, var(--accent) 100%);
+            background: linear-gradient(135deg, var(--text) 0%, #ffb3c1 50%, var(--accent) 100%);
             -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
         }
 
@@ -183,7 +185,7 @@
         .app-header {
             display: flex; flex-direction: column; gap: 0.75rem;
             padding: 1rem 1.25rem; border-radius: var(--radius-lg);
-            background: rgba(10, 12, 24, 0.85); backdrop-filter: blur(16px);
+            background: rgba(20,20,22, 0.85); backdrop-filter: blur(16px);
             border: 1px solid var(--border);
             box-shadow: 0 4px 16px rgba(0,0,0,0.25);
         }
@@ -194,8 +196,8 @@
         .brand { display: flex; align-items: center; gap: 0.75rem; min-width: 0; }
         .brand-mark {
             width: 2.5rem; height: 2.5rem; display: grid; place-items: center;
-            border-radius: 0.7rem; background: linear-gradient(135deg, #818cf8, #34d399);
-            box-shadow: 0 4px 12px rgba(99,102,241,0.35); flex-shrink: 0;
+            border-radius: 0.7rem; background: linear-gradient(135deg, #ff647f, #34d399);
+            box-shadow: 0 4px 12px rgba(255,45,85,0.35); flex-shrink: 0;
         }
         .online-pill {
             display: inline-flex; align-items: center; gap: 0.35rem;
@@ -205,6 +207,12 @@
             content: ""; width: 0.45rem; height: 0.45rem; border-radius: 50%;
             background: #34d399; box-shadow: 0 0 6px #34d399;
         }
+        .online-pill[data-state="connecting"], .online-pill[data-state="reconnecting"],
+        .online-pill[data-state="polling"] { color: var(--warning); }
+        .online-pill[data-state="offline"], .online-pill[data-state="disconnected"] { color: var(--danger); }
+        .online-pill:not([data-state="live"])::before { background: currentColor; box-shadow: none; }
+        .connection-detail { color: var(--text-secondary); font-size: 0.78rem; line-height: 1.5; overflow-wrap: anywhere; }
+        .connection-detail[data-stale="true"] { color: var(--warning); }
         .telemetry-pill {
             display: inline-flex; align-items: center; gap: 0.35rem;
             padding: 0.2rem 0.55rem; border-radius: var(--radius-full);
@@ -212,7 +220,7 @@
             font-size: 0.68rem; font-weight: 600; font-variant-numeric: tabular-nums;
         }
         .telemetry-pill.accent { color: var(--accent); border-color: rgba(52,211,153,0.3); }
-        .telemetry-pill.primary { color: #a5b4fc; border-color: rgba(129,140,248,0.3); }
+        .telemetry-pill.primary { color: #ffb3c1; border-color: rgba(255,100,127,0.3); }
         .header-actions { display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap; }
 
         /* Header mini ribbon preview */
@@ -225,7 +233,7 @@
         /* ── Navigation Rail ── */
         .nav-rail {
             display: flex; flex-wrap: wrap; gap: 0.35rem; padding: 0.35rem;
-            background: rgba(10, 12, 24, 0.7); border: 1px solid var(--border);
+            background: rgba(20,20,22, 0.7); border: 1px solid var(--border);
             border-radius: var(--radius);
         }
         .nav-rail button {
@@ -235,7 +243,7 @@
         .nav-rail button svg { width: 16px; height: 16px; opacity: 0.6; }
         .nav-rail button:hover { color: var(--text-secondary); background: rgba(255,255,255,0.04); }
         .nav-rail button.active {
-            color: white; background: rgba(129,140,248,0.18);
+            color: white; background: rgba(255,100,127,0.18);
             box-shadow: inset 0 0 0 1px rgba(165,180,252,0.25);
         }
         .nav-rail button.active svg { opacity: 1; }
@@ -314,7 +322,7 @@
         /* ── Fixture & DMX Patcher Table ── */
         .patcher-scroll {
             overflow-x: auto; border-radius: var(--radius);
-            border: 1px solid var(--border); background: rgba(5,6,15,0.4);
+            border: 1px solid var(--border); background: rgba(5,5,5,0.4);
         }
         .patcher-table {
             width: 100%; border-collapse: collapse; font-size: 0.8rem;
@@ -336,7 +344,7 @@
             display: inline-flex; align-items: center; padding: 0.15rem 0.45rem;
             border-radius: var(--radius-sm); font-size: 0.68rem; font-weight: 700;
         }
-        .badge-wash { background: rgba(99,102,241,0.18); color: #c7d2fe; }
+        .badge-wash { background: rgba(255,45,85,0.18); color: #ffd1da; }
         .badge-pixel { background: rgba(52,211,153,0.18); color: #a7f3d0; }
 
         /* ── Scene Designer ── */
@@ -366,13 +374,13 @@
             -webkit-appearance: none; appearance: none;
             width: 16px; height: 16px; border-radius: 50%;
             background: var(--primary); cursor: pointer;
-            box-shadow: 0 0 12px rgba(99,102,241,0.6);
+            box-shadow: 0 0 12px rgba(255,45,85,0.6);
             transition: transform 0.15s cubic-bezier(0.4, 0, 0.2, 1), background 0.15s;
         }
         input[type="range"]::-moz-range-thumb {
             width: 16px; height: 16px; border-radius: 50%; border: none;
             background: var(--primary); cursor: pointer;
-            box-shadow: 0 0 12px rgba(99,102,241,0.6);
+            box-shadow: 0 0 12px rgba(255,45,85,0.6);
             transition: transform 0.15s cubic-bezier(0.4, 0, 0.2, 1), background 0.15s;
         }
         input[type="range"]:active::-webkit-slider-thumb {
@@ -429,7 +437,7 @@
             .nav-rail {
                 position: fixed; bottom: 0; left: 0; right: 0; z-index: 50;
                 border-radius: var(--radius-lg) var(--radius-lg) 0 0; justify-content: space-around;
-                background: rgba(10, 12, 24, 0.95); backdrop-filter: blur(16px);
+                background: rgba(20,20,22, 0.95); backdrop-filter: blur(16px);
                 padding: 0.35rem 0.5rem calc(0.35rem + env(safe-area-inset-bottom, 0));
                 border-top: 1px solid var(--border);
             }
@@ -465,7 +473,7 @@
             </div>
             <label for="experience-token" style="display:block; font-size:0.75rem; font-weight:700; color:var(--text-secondary); margin-bottom:0.4rem;">Node Access Key</label>
             <input id="experience-token" type="password" autocomplete="current-password" placeholder="Enter operator or admin key" value="" required>
-            <button class="button-primary" type="submit" style="width: 100%; margin-top: 1.25rem; min-height: 2.5rem;">Connect to Node</button>
+            <button id="connect-button" class="button-primary" type="submit" style="width: 100%; margin-top: 1.25rem; min-height: 2.5rem;">Connect to Node</button>
         </form>
         <form id="first-setup" hidden onsubmit="lg.secureNode(); return false;">
             <h1>Welcome to LumiGrid</h1>
@@ -522,23 +530,24 @@
                     <div>
                         <div style="display:flex; align-items:center; gap:0.5rem;">
                             <p class="eyebrow">LumiGrid OS</p>
-                            <span class="online-pill">Connected</span>
+                            <span id="connection-state" class="online-pill" data-state="connecting" role="status">Connecting</span>
                         </div>
                         <h2 id="experience-node-name">LIGHTING NODE</h2>
                     </div>
                 </div>
 
                 <div class="header-actions">
-                    <div class="telemetry-pill accent"><span id="header-fps">0</span> FPS</div>
-                    <div class="telemetry-pill primary"><span id="header-owner">ScenePlayback</span></div>
-                    <div class="telemetry-pill"><span id="header-power">0 mW</span></div>
-                    <button class="button-secondary" onclick="lg.refresh()" title="Reload data">Refresh</button>
-                    <button class="button-danger" onclick="lg.blackout()" title="Instant blackout">Blackout</button>
+                    <div class="telemetry-pill accent" title="Browser preview frames, not measured output refresh rate"><span id="header-fps">0</span> preview FPS</div>
+                    <div class="telemetry-pill primary"><span id="header-owner">Awaiting status</span></div>
+                    <div class="telemetry-pill"><span id="header-power">—</span></div>
+                    <button id="refresh-button" class="button-secondary" onclick="lg.refresh()" title="Reload node status and saved data">Refresh</button>
+                    <button class="button-danger" onclick="lg.blackout()" title="Request blackout and check node status">Blackout</button>
                     <button class="button-secondary" onclick="lg.disconnect()" title="Log out">Disconnect</button>
                 </div>
             </div>
+            <p id="connection-detail" class="connection-detail" role="status">Waiting for the node's current state.</p>
             <!-- Live Preview Ribbon -->
-            <canvas id="live-preview-ribbon" height="6" title="Live hardware activity stream"></canvas>
+            <canvas id="live-preview-ribbon" height="6" title="Last received lighting preview; see connection status for freshness"></canvas>
         </header>
 
         <!-- Navigation Rail -->
@@ -569,23 +578,23 @@
             <div class="overview-grid">
                 <article class="product-card">
                     <h4>Current Engine State</h4>
-                    <p id="dash-playing" class="muted" style="font-size:1.1rem; font-weight:600; color:#c7d2fe;">Loading scene...</p>
+                    <p id="dash-playing" class="muted" style="font-size:1.1rem; font-weight:600; color:#ffd1da;">Loading scene...</p>
                     <div class="stat-list">
-                        <div class="stat-box"><span>Control Owner</span><strong id="dash-owner-text">ScenePlayback</strong></div>
-                        <div class="stat-box"><span>Transition</span><strong id="dash-trans-text">Steady</strong></div>
-                        <div class="stat-box"><span>Stream Protocol</span><strong id="dash-proto-text">Ready</strong></div>
-                        <div class="stat-box"><span>Safety Fallback</span><strong id="dash-safety-text">Normal</strong></div>
+                        <div class="stat-box"><span>Control Owner</span><strong id="dash-owner-text">Awaiting status</strong></div>
+                        <div class="stat-box"><span>Transition</span><strong id="dash-trans-text">Awaiting status</strong></div>
+                        <div class="stat-box"><span>Live input</span><strong id="dash-proto-text">Awaiting status</strong></div>
+                        <div class="stat-box"><span>Output state</span><strong id="dash-safety-text">Awaiting status</strong></div>
                     </div>
                 </article>
 
                 <article class="product-card">
-                    <h4>Power Consumption & Budget</h4>
+                    <h4>Estimated Power & Budget</h4>
                     <div style="display:flex; justify-content:space-between; align-items:baseline; margin-top:0.25rem;">
-                        <span id="dash-power-est" style="font-size:1.4rem; font-weight:700; color:var(--accent);">0 mW</span>
-                        <span id="dash-power-max" class="help">Max Budget: 30,000 mW</span>
+                        <span id="dash-power-est" style="font-size:1.4rem; font-weight:700; color:var(--accent);">—</span>
+                        <span id="dash-power-max" class="help">Budget not reported</span>
                     </div>
-                    <div class="power-meter"><div id="dash-power-bar" class="power-fill" style="width: 15%;"></div></div>
-                    <p class="help">Quiescent idle load (5 mW/px) + active channel draw subject to post-render power limiting.</p>
+                    <div class="power-meter"><div id="dash-power-bar" class="power-fill" style="width: 0%;"></div></div>
+                    <p id="dash-power-note" class="help">Calculated from the configured loads. This is an estimate, not a measured electrical reading.</p>
                 </article>
             </div>
 
@@ -786,7 +795,7 @@
                 <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.75rem; flex-wrap:wrap; gap:0.5rem;">
                     <div style="display:flex; gap:0.75rem; align-items:center;">
                         <span class="help">Universe Channels 1–512:</span>
-                        <span id="dmx-hover-val" class="help" style="color:#a5b4fc; font-family:monospace;">Hover a cell</span>
+                        <span id="dmx-hover-val" class="help" style="color:#ffb3c1; font-family:monospace;">Hover a cell</span>
                     </div>
                     <div style="display:flex; gap:0.35rem; align-items:center;">
                         <span style="font-size:0.65rem; color:var(--text-muted);">0</span>
@@ -811,7 +820,7 @@
                     <div style="display:flex; align-items:center; gap:0.75rem;">
                         <strong style="font-size:0.85rem;">Tempo</strong>
                         <input id="timeline-bpm" type="range" min="40" max="240" oninput="lg.setBpm(this.value)">
-                        <output id="timeline-bpm-output" style="font-weight:700; color:#c7d2fe;">120 BPM</output>
+                        <output id="timeline-bpm-output" style="font-weight:700; color:#ffd1da;">120 BPM</output>
                     </div>
                     <label class="switch-row">
                         <span>Play Timeline</span>
@@ -961,7 +970,7 @@
                             <h4 style="margin:0;">Node Diagnostic Stream</h4>
                             <button class="button-secondary" style="font-size:0.7rem; padding:0.25rem 0.6rem;" onclick="lg.loadLogs()">Stream Latest</button>
                         </div>
-                        <pre id="sys-logs-viewer" style="background:rgba(5,6,15,0.9); padding:1rem; border-radius:8px; font-size:0.75rem; font-family:monospace; color:#a5b4fc; border:1px solid var(--border-subtle); overflow-y:auto; flex:1; min-height:300px; max-height:500px; margin:0; white-space:pre-wrap; word-wrap:break-word;"></pre>
+                        <pre id="sys-logs-viewer" style="background:rgba(5,5,5,0.9); padding:1rem; border-radius:8px; font-size:0.75rem; font-family:monospace; color:#ffb3c1; border:1px solid var(--border-subtle); overflow-y:auto; flex:1; min-height:300px; max-height:500px; margin:0; white-space:pre-wrap; word-wrap:break-word;"></pre>
                     </div>
 
                     <div id="panel-audit" style="padding:1.25rem; display:none; flex-direction:column; height:100%;">
@@ -1079,6 +1088,12 @@ window.lg = (() => {
         config: null,
         status: null,
         health: null,
+        connection: 'disconnected',
+        lastStatusAt: null,
+        lastWsStatusAt: null,
+        statusRevision: 0,
+        statusStale: true,
+        resourceErrors: [],
         editing: null,
         editorBaseline: null,
         activeTimelineStep: { track: 0, step: 0 },
@@ -1110,29 +1125,187 @@ window.lg = (() => {
         toast.timer = setTimeout(() => { el.className = ''; }, 3500);
     }
 
+    const requestTimeoutMs = 8000;
+    const uploadTimeoutMs = 120000;
+    const statusPollMs = 5000;
+    const statusStaleMs = 10000;
+    let connectionGeneration = 0;
+    let refreshPromise = null;
+    const pendingRequests = new Set();
+    const documentResources = {
+        '/api/v1/config': 'Output configuration', '/api/v1/presets': 'Scenes',
+        '/api/v1/sequence': 'Timeline', '/api/v1/schedules': 'Schedules'
+    };
+
+    function nodeUrl(path) {
+        const host = state.host || (location.protocol !== 'file:' && location.host ? location.host : '192.168.4.1');
+        const protocol = host === location.host && location.protocol === 'https:' ? 'https:' : 'http:';
+        const base = /^https?:\/\//i.test(host) ? host : `${protocol}//${host}`;
+        return base.replace(/\/+$/, '') + path;
+    }
+
     async function api(path, method='GET', body) {
+        const resource = documentResources[path.split('?')[0]];
+        const dependsOnScenes = ['/api/v1/schedules', '/api/v1/sequence'].includes(path.split('?')[0]);
+        const failedResource = state.resourceErrors.includes(resource) ? resource
+            : dependsOnScenes && state.resourceErrors.includes('Scenes') ? 'Scenes' : null;
+        if (method !== 'GET' && resource && (refreshPromise || failedResource)) {
+            throw new Error(`Refresh ${(failedResource || resource).toLowerCase()} successfully before saving changes.`);
+        }
         const headers = { Authorization: 'Bearer ' + state.token };
         if (body !== undefined) headers['Content-Type'] = 'application/json';
-
-        let baseUrl = '';
-        const host = state.host || (location.protocol !== 'file:' && location.host ? location.host : '192.168.4.1');
-        if (host && !host.startsWith('http://') && !host.startsWith('https://')) {
-            baseUrl = `http://${host}`;
-        } else if (host) {
-            baseUrl = host;
+        const controller = new AbortController();
+        pendingRequests.add(controller);
+        let timedOut = false;
+        const timer = setTimeout(() => { timedOut = true; controller.abort(); }, requestTimeoutMs);
+        try {
+            const res = await fetch(nodeUrl(path), { method, headers, signal: controller.signal,
+                body: body !== undefined ? JSON.stringify(body) : undefined });
+            if (!res.ok) {
+                let msg = `Request failed (${res.status})`;
+                try { msg = (await res.json()).error || msg; } catch (_) {}
+                const err = new Error(msg);
+                err.status = res.status;
+                throw err;
+            }
+            return await res.json();
+        } catch (error) {
+            if (timedOut) throw new Error(method === 'GET'
+                ? 'Node did not respond. Check the connection and refresh.'
+                : 'No confirmation from the node. Check its status before repeating the command.');
+            throw error;
+        } finally {
+            clearTimeout(timer);
+            pendingRequests.delete(controller);
         }
-        baseUrl = baseUrl.replace(/\/+$/, '');
-        const targetUrl = `${baseUrl}${path}`;
+    }
 
-        const res = await fetch(targetUrl, { method, headers, body: body !== undefined ? JSON.stringify(body) : undefined });
-        if (!res.ok) {
-            let msg = `Request failed (${res.status})`;
-            try { msg = (await res.json()).error || msg; } catch (_) {}
-            const err = new Error(msg);
-            err.status = res.status;
-            throw err;
+    // Binary uploads and multi-step maintenance operations must keep the same
+    // target and credentials through every await, including response body reads.
+    function beginNodeOperation() {
+        const generation = connectionGeneration;
+        const base = nodeUrl('');
+        const token = state.token;
+        const current = () => generation === connectionGeneration && token === state.token && base === nodeUrl('');
+        const assertCurrent = () => {
+            if (!current()) throw new Error('Node connection changed. Operation cancelled.');
+        };
+        return { current, async wait(ms) {
+            assertCurrent();
+            const controller = new AbortController();
+            pendingRequests.add(controller);
+            let timer;
+            try {
+                await new Promise((resolve, reject) => {
+                    timer = setTimeout(resolve, ms);
+                    controller.signal.addEventListener('abort', () => reject(new Error('Operation cancelled.')), { once: true });
+                });
+                assertCurrent();
+            } finally { clearTimeout(timer); pendingRequests.delete(controller); }
+        }, async request(path, options = {}, responseType = 'json', timeoutMs = requestTimeoutMs) {
+            assertCurrent();
+            const controller = new AbortController();
+            pendingRequests.add(controller);
+            let timedOut = false;
+            const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
+            try {
+                const response = await fetch(base + path, { ...options, signal: controller.signal,
+                    headers: { ...options.headers, Authorization: 'Bearer ' + token } });
+                assertCurrent();
+                if (!response.ok) {
+                    let message = `Request failed (${response.status})`;
+                    try { message = (await response.json()).error || message; } catch (_) {}
+                    assertCurrent();
+                    throw new Error(message);
+                }
+                const data = responseType === 'blob' ? await response.blob()
+                    : responseType === 'text' ? await response.text() : await response.json();
+                assertCurrent();
+                return data;
+            } catch (error) {
+                if (timedOut) throw new Error('No confirmation from the node. Check its status before repeating the operation.');
+                throw error;
+            } finally {
+                clearTimeout(timer);
+                pendingRequests.delete(controller);
+            }
+        } };
+    }
+
+    function saveNodeSession() {
+        // One storage write binds host and token atomically. Old separate keys
+        // are not trusted for automatic sign-in after this format change.
+        const session = { host: nodeUrl(''), token: state.token };
+        try {
+            sessionStorage.setItem('lg_node_session', JSON.stringify(session));
+            sessionStorage.removeItem('lg_node_token');
+            sessionStorage.setItem('lg_node_host', session.host);
+        } catch (_) { /* The current session still works if browser storage is unavailable. */ }
+    }
+
+    function renderConnection() {
+        const pill = byId('connection-state');
+        const detail = byId('connection-detail');
+        const labels = { connecting: 'Connecting', live: 'Live status', polling: 'Status polling',
+            reconnecting: 'Reconnecting', offline: 'Offline', disconnected: 'Disconnected' };
+        if (pill) { updateText('connection-state', labels[state.connection]); pill.dataset.state = state.connection; }
+        if (detail) {
+            const notes = [];
+            if (state.statusStale) notes.push(state.lastStatusAt === null
+                ? 'Waiting for current node status. Output state is not yet confirmed.'
+                : 'Node status is stale. Displayed values are the last received; output state is unconfirmed.');
+            else if (state.connection !== 'live') notes.push('Status is refreshed over HTTP while the live stream reconnects.');
+            else notes.push('Live node status. Lighting previews are illustrative, not measured output.');
+            if (state.resourceErrors.length) notes.push(state.statusStale
+                ? 'Saved data is retained. Refresh when the node reconnects.'
+                : `Could not refresh: ${state.resourceErrors.join(', ')}. Last loaded data is retained; retry Refresh before editing it.`);
+            updateText('connection-detail', notes.join(' '));
+            detail.dataset.stale = String(state.statusStale || state.resourceErrors.length > 0);
         }
-        return res.json();
+        const ribbon = byId('live-preview-ribbon');
+        if (ribbon) ribbon.style.opacity = state.connection === 'live' ? '1' : '0.35';
+    }
+
+    function acceptStatus(status, fromWebSocket = false) {
+        if (!status || typeof status !== 'object' || Array.isArray(status) ||
+            (!status.runtime && status.controlSource === undefined && status.activePreset === undefined)) {
+            throw new Error('Node returned an invalid status snapshot.');
+        }
+        state.status = status;
+        state.statusRevision++;
+        state.lastStatusAt = performance.now();
+        state.statusStale = false;
+        if (fromWebSocket) state.lastWsStatusAt = state.lastStatusAt;
+        state.connection = fromWebSocket ? 'live' : 'polling';
+        renderConnection();
+        updateTelemetryUI();
+        // Only the playing label needs updating at telemetry frequency. Rebuilding
+        // the scene buttons would remove keyboard focus several times per second.
+        renderPlayingScene();
+    }
+
+    async function refreshStatus() {
+        const generation = connectionGeneration;
+        const revision = state.statusRevision;
+        try {
+            const status = await api('/api/v1/status');
+            if (generation !== connectionGeneration) return false;
+            // A stream snapshot received during this HTTP request is newer evidence.
+            if (revision === state.statusRevision) acceptStatus(status);
+            return true;
+        } catch (error) {
+            if (generation !== connectionGeneration) return false;
+            if (error.status === 401) {
+                disconnect();
+                toast('Session expired. Sign in again with your Node Access Key.', true);
+            } else if (revision === state.statusRevision &&
+                (state.lastWsStatusAt === null || performance.now() - state.lastWsStatusAt >= statusStaleMs)) {
+                state.statusStale = true;
+                state.connection = 'offline';
+                renderConnection();
+            }
+            return false;
+        }
     }
 
     function effectMeta(id) {
@@ -1162,23 +1335,96 @@ window.lg = (() => {
     function speedToMs(val) { return Math.round(10 * Math.pow(6000, (100 - clamp(val,1,100)) / 99)); }
     function speedLabel(val) { return val > 75 ? 'Fast' : val > 45 ? 'Balanced' : 'Slow'; }
 
-    // ── WebSocket Integration ──
+    // ── Owned live connection and bounded HTTP fallback ──
     let ws = null;
-    function initWebSocket() {
-        if (ws) { ws.close(); ws = null; }
-        const rawHost = state.host || (location.protocol !== 'file:' && location.host ? location.host : '192.168.4.1');
-        const cleanHost = rawHost.replace(/^https?:\/\//, '').replace(/\/+$/, '');
-        const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    let wsAttempt = 0;
+    let reconnectTimer = null;
+    let statusTimer = null;
+    let socketTimer = null;
+    let wsOpenedAt = null;
+    let reconnectAttempts = 0;
 
-        api('/api/v1/auth/ws-ticket', 'POST').then(ticketRes => {
-            const ticket = ticketRes && ticketRes.ticket ? ticketRes.ticket : '';
-            try {
-                ws = new WebSocket(`${proto}//${cleanHost}/ws`, ticket ? ['lumigrid-ticket.' + ticket] : undefined);
-            } catch (_) {
-                return;
+    function stopLiveConnection() {
+        connectionGeneration++;
+        wsAttempt++;
+        clearTimeout(reconnectTimer); reconnectTimer = null;
+        clearTimeout(statusTimer); statusTimer = null;
+        clearTimeout(socketTimer); socketTimer = null;
+        for (const request of pendingRequests) request.abort();
+        pendingRequests.clear();
+        refreshPromise = null;
+        if (ws) { ws.onclose = ws.onerror = ws.onmessage = ws.onopen = null; ws.close(); ws = null; }
+        wsOpenedAt = null;
+        reconnectAttempts = 0;
+        state.lastWsStatusAt = null;
+    }
+
+    function startStatusWatchdog() {
+        clearTimeout(statusTimer);
+        const generation = connectionGeneration;
+        const tick = async () => {
+            statusTimer = null;
+            if (generation !== connectionGeneration || !state.token) return;
+            const now = performance.now();
+            if (state.lastStatusAt === null || now - state.lastStatusAt >= statusStaleMs) {
+                state.statusStale = true;
+                state.connection = 'offline';
+                renderConnection();
             }
-            ws.binaryType = 'arraybuffer';
-            ws.onmessage = (event) => {
+            if (state.lastWsStatusAt === null || now - state.lastWsStatusAt >= statusPollMs) {
+                await refreshStatus();
+            }
+            if (generation !== connectionGeneration || !state.token) return;
+            // An open socket can silently stop delivering status. Replace it once
+            // its grace period expires; preview pixels alone do not prove state.
+            if (ws && wsOpenedAt !== null && now - (state.lastWsStatusAt ?? wsOpenedAt) >= statusStaleMs) {
+                initWebSocket();
+            }
+            statusTimer = setTimeout(tick, statusPollMs);
+        };
+        statusTimer = setTimeout(tick, statusPollMs);
+    }
+
+    function initWebSocket() {
+        clearTimeout(reconnectTimer); reconnectTimer = null;
+        clearTimeout(socketTimer); socketTimer = null;
+        const generation = connectionGeneration;
+        const attempt = ++wsAttempt;
+        if (ws) { ws.onclose = ws.onerror = ws.onmessage = ws.onopen = null; ws.close(); ws = null; }
+        wsOpenedAt = null;
+        if (!state.token) return;
+        const current = () => generation === connectionGeneration && attempt === wsAttempt && !!state.token;
+        const retry = () => {
+            if (!current()) return;
+            state.connection = state.statusStale ? 'offline' : 'reconnecting';
+            renderConnection();
+            if (reconnectTimer !== null) return;
+            const delay = Math.min(15000, 2000 * (2 ** Math.min(reconnectAttempts++, 3)));
+            reconnectTimer = setTimeout(() => {
+                reconnectTimer = null;
+                if (current()) initWebSocket();
+            }, delay);
+        };
+        api('/api/v1/auth/ws-ticket', 'POST').then(ticketRes => {
+            if (!current()) return;
+            if (!ticketRes?.ticket) throw new Error('Live connection ticket was not returned.');
+            const endpoint = new URL(nodeUrl('/ws'));
+            endpoint.protocol = endpoint.protocol === 'https:' ? 'wss:' : 'ws:';
+            const socket = new WebSocket(endpoint.href, ['lumigrid-ticket.' + ticketRes.ticket]);
+            ws = socket;
+            socket.binaryType = 'arraybuffer';
+            const ownsSocket = () => current() && ws === socket;
+            socketTimer = setTimeout(() => {
+                socketTimer = null;
+                if (ownsSocket()) { socket.close(); retry(); }
+            }, requestTimeoutMs);
+            socket.onopen = () => {
+                if (!ownsSocket()) return;
+                clearTimeout(socketTimer); socketTimer = null;
+                wsOpenedAt = performance.now();
+            };
+            socket.onmessage = (event) => {
+                if (!ownsSocket()) return;
                 if (event.data instanceof ArrayBuffer) {
                     const arr = new Uint8Array(event.data);
                     let lanes = 0, samples = 0, offset = 0;
@@ -1202,26 +1448,32 @@ window.lg = (() => {
                         const payload = JSON.parse(event.data);
                         if (payload.free_heap !== undefined || payload.uptime_s !== undefined) {
                             state.health = { ...state.health, ...payload };
-                            const stats = byId('health-stats');
-                            if (stats) {
-                            stats.textContent = `Uptime: ${state.health.uptime_s || 0}s\nFree Heap: ${state.health.free_heap || 0} bytes\nMin Free Heap: ${state.health.min_free_heap || 0} bytes\nFirmware Version: 2.1.0\nChip Revision: ESP32-S3`;
+                        } else {
+                            acceptStatus(payload, true);
+                            reconnectAttempts = 0;
                         }
-                    } else {
-                        state.status = { ...state.status, ...payload };
-                    }
-                    if (payload.dmx && Array.isArray(payload.dmx)) {
-                        for (let i = 0; i < Math.min(payload.dmx.length, 512); ++i) {
-                            state.dmxData[i] = payload.dmx[i];
+                        if (Array.isArray(payload.dmx)) {
+                            state.dmxData.fill(0);
+                            for (let i = 0; i < Math.min(payload.dmx.length, 512); ++i) state.dmxData[i] = payload.dmx[i];
                         }
-                    }
-                    updateTelemetryUI();
-                } catch (_) {}
-            }
-        };
-        ws.onclose = () => {
-            if (state.token) setTimeout(initWebSocket, 2000);
-        };
-        }).catch(e => toast('Live connection unavailable: ' + e.message, true));
+                    } catch (_) { /* Ignore malformed frames; the watchdog still expires. */ }
+                }
+            };
+            socket.onerror = () => { if (ownsSocket()) { socket.close(); retry(); } };
+            socket.onclose = () => {
+                if (!ownsSocket()) return;
+                clearTimeout(socketTimer); socketTimer = null;
+                ws = null;
+                wsOpenedAt = null;
+                retry();
+            };
+        }).catch(error => {
+            if (!current()) return;
+            if (error.status === 401) {
+                disconnect();
+                toast('Session expired. Sign in again with your Node Access Key.', true);
+            } else retry();
+        });
     }
 
     // ── Animation & Render Loop (Decoupled 60fps) ──
@@ -1410,17 +1662,27 @@ window.lg = (() => {
 
     // ── Auth & Connection ──
     async function connect() {
+        const button = byId('connect-button');
+        if (button?.disabled) return;
         const tokenInput = byId('experience-token');
         const hostInput = byId('experience-host');
         const keyVal = tokenInput ? tokenInput.value : '';
-        state.host = hostInput ? hostInput.value.trim() : '';
-        if (state.host) {
-            try { sessionStorage.setItem('lg_node_host', state.host); } catch (_) {}
-        }
         if (!keyVal) return toast('Enter node access key.', true);
+        stopLiveConnection();
+        clearNodeData();
+        state.token = '';
+        try { sessionStorage.removeItem('lg_node_session'); sessionStorage.removeItem('lg_node_token'); } catch (_) {}
+        const generation = connectionGeneration;
+        state.host = hostInput ? hostInput.value.trim() : '';
+        state.host = nodeUrl('');
+        if (hostInput) hostInput.value = state.host;
+        if (button) { button.disabled = true; button.textContent = 'Connecting…'; }
+        state.connection = 'connecting';
+        renderConnection();
         try {
             toast('Connecting to node...');
             const sessionRes = await api('/api/v1/auth/session', 'POST', { token: keyVal });
+            if (generation !== connectionGeneration) return;
             tokenInput.value = '';
             if (sessionRes.setupRequired) {
                 state.token = sessionRes.sessionToken;
@@ -1429,12 +1691,12 @@ window.lg = (() => {
             }
             state.token = sessionRes.sessionToken;
             state.role = sessionRes.role;
-            if (state.token) {
-                try { sessionStorage.setItem('lg_node_token', state.token); } catch (_) {}
-            }
-            await openDashboard();
+            if (state.token) saveNodeSession();
+            await openDashboard(generation);
+            if (generation !== connectionGeneration) return;
             toast('Connected to LumiGrid node.');
         } catch (e) {
+            if (generation !== connectionGeneration) return;
             const status = e.status || 0;
             const msg = e.message || 'Unknown error';
             if (status === 401 || msg.includes('401') || msg.includes('authorization_required')) {
@@ -1446,15 +1708,18 @@ window.lg = (() => {
             } else {
                 toast(`Connection error: ${msg}`, true);
             }
+        } finally {
+            if (generation === connectionGeneration && button) { button.disabled = false; button.textContent = 'Connect to Node'; }
         }
     }
 
     let animationLoopStarted = false;
     let canvasInteractionsSetup = false;
 
-    async function openDashboard() {
-            const status = await api('/api/v1/status');
-            state.status = status;
+    async function openDashboard(generation = connectionGeneration) {
+            const statusOk = await refreshStatus();
+            if (generation !== connectionGeneration) return;
+            if (!statusOk) throw new Error('Could not load current node status. Check the connection and sign in again.');
 
             // Reveal dashboard shell immediately after status
             byId('experience-auth').hidden = true;
@@ -1465,9 +1730,11 @@ window.lg = (() => {
 
             // Load remaining dashboard data sequentially
             await refresh();
+            if (generation !== connectionGeneration || !state.token) return;
 
             // Connect WebSocket and initialize loops idempotently
             initWebSocket();
+            startStatusWatchdog();
             if (!animationLoopStarted) {
                 animationLoopStarted = true;
                 startAnimationLoop();
@@ -1480,13 +1747,17 @@ window.lg = (() => {
 
     let setupStatus = null;
     async function detectFirstSetup() {
-        state.host = byId('experience-host').value.trim();
+        const host = byId('experience-host').value.trim();
+        if (host !== state.host) { disconnect(); state.host = host; }
+        const generation = connectionGeneration;
         setupStatus = null;
         byId('first-setup').hidden = true;
         byId('normal-login').hidden = false;
         byId('setup-unavailable').hidden = true;
         try {
-            setupStatus = await api('/api/v1/auth/status');
+            const result = await api('/api/v1/auth/status');
+            if (generation !== connectionGeneration) return;
+            setupStatus = result;
             if (!setupStatus.provisioned) {
                 byId('normal-login').hidden = true;
                 byId('first-setup').hidden = !setupStatus.bootstrapAllowed;
@@ -1495,14 +1766,14 @@ window.lg = (() => {
             } else if (state.token) {
                 try {
                     const session = await api('/api/v1/auth/session');
+                    if (generation !== connectionGeneration) return;
                     state.role = session.role;
-                    await openDashboard();
+                    await openDashboard(generation);
                 } catch (_) {
-                    state.token = '';
-                    try { sessionStorage.removeItem('lg_node_token'); } catch (_) {}
+                    if (generation === connectionGeneration) disconnect();
                 }
             }
-        } catch (e) { toast('Cannot reach node: ' + e.message, true); }
+        } catch (e) { if (generation === connectionGeneration) toast('Cannot reach node: ' + e.message, true); }
     }
     function generateSetupKey() {
         const bytes = crypto.getRandomValues(new Uint8Array(24));
@@ -1515,6 +1786,7 @@ window.lg = (() => {
         catch (_) { toast('Copy is unavailable. Choose a key you can save securely.', true); }
     }
     async function secureNode() {
+        const generation = connectionGeneration;
         const key = byId('setup-admin').value;
         const error = byId('setup-error');
         error.textContent = '';
@@ -1527,16 +1799,19 @@ window.lg = (() => {
         try {
             if (!setupStatus || setupStatus.provisioned || !setupStatus.bootstrapAllowed) throw new Error('First setup is unavailable.');
             const session = await api('/api/v1/auth/bootstrap', 'POST', { adminToken: key });
+            if (generation !== connectionGeneration) return;
             state.token = session.sessionToken;
             state.role = session.role;
             byId('setup-admin').value = byId('setup-confirm').value = '';
             setupStatus = null;
-            try { sessionStorage.setItem('lg_node_token', state.token); } catch (_) {}
+            saveNodeSession();
             byId('first-setup').hidden = true;
             byId('normal-login').hidden = false;
-            await openDashboard();
+            await openDashboard(generation);
+            if (generation !== connectionGeneration) return;
             byId('setup-wizard').hidden = false;
         } catch (e) {
+            if (generation !== connectionGeneration) return;
             error.textContent = 'Setup could not complete. Check your connection and retry. If the key was already saved, sign in with your new Admin Access Key.';
             await detectFirstSetup();
         } finally { button.disabled = false; }
@@ -1552,11 +1827,11 @@ window.lg = (() => {
         } catch (e) { message.textContent = 'Network change could not be confirmed: ' + e.message; }
     }
 
-    async function loadStorage() {
+    async function loadStorage(operation = beginNodeOperation()) {
         try {
-            const status = await api('/api/v1/ota/status');
+            const status = await operation.request('/api/v1/ota/status');
             state.otaCapacity = status.maxFirmwareBytes || 0;
-            const info = await api('/api/v1/info');
+            const info = await operation.request('/api/v1/info');
             const storage = info.storage;
             if (storage) byId('storage-summary').textContent = `Flash ${storage.flashMb} MB · Layout v${storage.layout} · Running ${storage.runningPartition} · Firmware ${(storage.imageBytes / 1048576).toFixed(2)} / ${(storage.appSlotBytes / 1048576).toFixed(2)} MB`;
             checkOtaCapacity();
@@ -1575,7 +1850,7 @@ window.lg = (() => {
             const configured = await api('/api/v1/auth/credentials');
             byId('access-roles').innerHTML = ['admin', 'installer', 'operator'].map(role => {
                 const label = role === 'admin' ? 'Administrator' : role === 'installer' ? 'Installer' : 'Operator';
-                const enabled = configured[role + 'Configured'];
+                const enabled = configured[role + 'Configured'] ?? configured[role]?.enabled === true;
                 return `<p>${label} — ${enabled ? 'Configured' : 'Not configured'}
                     <button onclick="lg.selectAccessRole('${role}')">${enabled ? 'Change ' + label + ' Key' : 'Create'}</button>
                     ${role !== 'admin' && enabled ? `<button onclick="lg.disableAccessRole('${role}')">Disable ${label}</button>` : ''}</p>`;
@@ -1613,101 +1888,146 @@ window.lg = (() => {
         } catch (e) { byId('access-status').textContent = e.message; }
     }
 
+    function clearNodeData() {
+        Object.assign(state, { status: null, health: null, config: null, presets: [], hardwareChannels: [],
+            sequence: { bpm: 120, enabled: false, tracks: [] }, schedules: null, cueLists: [],
+            effects: fallbackEffects, palettes: fallbackPalettes, editing: null, editorBaseline: null,
+            lastStatusAt: null, lastWsStatusAt: null, statusStale: true, resourceErrors: [], otaCapacity: 0 });
+        state.liveBuffer.fill(0);
+        state.dmxData.fill(0);
+        state.dirty = true;
+    }
+
     function disconnect() {
+        stopLiveConnection();
         state.token = '';
-        try { sessionStorage.removeItem('lg_node_token'); } catch (_) {}
-        if (ws) { ws.close(); ws = null; }
-        byId('product-app').hidden = true;
-        byId('experience-auth').hidden = false;
+        state.role = null;
+        clearNodeData();
+        state.connection = 'disconnected';
+        try { sessionStorage.removeItem('lg_node_session'); sessionStorage.removeItem('lg_node_token'); } catch (_) {}
+        const app = byId('product-app');
+        const auth = byId('experience-auth');
+        if (app) app.hidden = true;
+        if (auth) auth.hidden = false;
+        for (const [id, label] of [['connect-button', 'Connect to Node'], ['refresh-button', 'Refresh']]) {
+            const button = byId(id);
+            if (button) { button.disabled = false; button.textContent = label; }
+        }
+        renderConnection();
     }
 
     // ── Data Sync ──
     async function refresh() {
-        const status = state.status || await api('/api/v1/status').catch(() => ({}));
-        const config = await api('/api/v1/config').catch(() => ({}));
-        const [effects, palettes, hardwareChannels] = await Promise.all([
-            api('/api/v1/effects').catch(() => null),
-            api('/api/v1/palettes').catch(() => null),
-            Array.isArray(config.channels) ? Promise.resolve(config.channels)
-                : api('/api/v1/channels').then(data => data.channels).catch(() => [])
-        ]);
-        const presets = await api('/api/v1/presets').catch(() => []);
-        const sequence = await api('/api/v1/sequence').catch(() => ({ bpm: 120, enabled: false, tracks: [] }));
-        const health = await api('/api/v1/health').catch(() => ({}));
-        const schedules = await api('/api/v1/schedules').catch(() => []);
-        const cueLists = await api('/api/v1/cue-lists').catch(() => []);
-        state.cueLists = Array.isArray(cueLists) ? cueLists : [];
-
-        state.effects = resolveEffects(effects);
-        state.palettes = resolvePalettes(palettes);
-        state.hardwareChannels = Array.isArray(hardwareChannels) ? hardwareChannels : [];
-        state.presets = (Array.isArray(presets) ? presets : []).map(normalizeEditorScene);
-
-        state.status = status;
-        if (!sequence || typeof sequence !== 'object') {
-            state.sequence = { bpm: 120, enabled: false, tracks: [] };
-        } else {
-            state.sequence = sequence;
-            if (!Array.isArray(state.sequence.tracks)) state.sequence.tracks = [];
+        if (refreshPromise) return refreshPromise;
+        const generation = connectionGeneration;
+        const current = () => generation === connectionGeneration;
+        const button = byId('refresh-button');
+        if (button) { button.disabled = true; button.textContent = 'Refreshing…'; }
+        const task = (async () => {
+            const errors = [];
+            const object = data => data && typeof data === 'object' && !Array.isArray(data);
+            const objects = data => Array.isArray(data) && data.every(object);
+            const read = async (name, path, valid, apply) => {
+                if (!current()) return;
+                try {
+                    const data = await api(path);
+                    if (!current()) return;
+                    if (!valid(data)) throw new Error('Invalid node response');
+                    apply(data);
+                } catch (_) { if (current()) errors.push(name); }
+            };
+            const statusOk = await refreshStatus();
+            if (!current()) return;
+            if (!statusOk && state.statusStale) {
+                state.resourceErrors = [...Object.values(documentResources), 'Effects', 'Palettes', 'Cue lists'];
+                renderConnection();
+                return;
+            }
+            await read('Output configuration', '/api/v1/config', object, data => { state.config = data; });
+            if (!current()) return;
+            await Promise.all([
+                read('Effects', '/api/v1/effects', objects, data => { state.effects = resolveEffects(data); }),
+                read('Palettes', '/api/v1/palettes', objects, data => { state.palettes = resolvePalettes(data); }),
+                Array.isArray(state.config?.channels) && !errors.includes('Output configuration')
+                    ? Promise.resolve(state.hardwareChannels = state.config.channels)
+                    : read('Outputs', '/api/v1/channels', data => object(data) && objects(data.channels), data => { state.hardwareChannels = data.channels; })
+            ]);
+            await read('Scenes', '/api/v1/presets', objects, data => { state.presets = data.map(normalizeEditorScene); });
+            await read('Timeline', '/api/v1/sequence', object, data => {
+                state.sequence = { ...data, tracks: Array.isArray(data.tracks) ? data.tracks : [] };
+                if (!state.sequence.tracks.length) {
+                    state.sequence.tracks = [0, 1, 2, 3].map(() => ({ steps: [{ presetIndex: 0, lengthBeats: 4 }] }));
+                }
+            });
+            await read('Health', '/api/v1/health', object, data => { state.health = data; });
+            await read('Schedules', '/api/v1/schedules', objects, data => {
+                state.schedules = data.slice(0, 8);
+                while (state.schedules.length < 8) state.schedules.push({ enabled: false, hour: 0, minute: 0, daysOfWeek: 0, action: 'preset', presetIndex: 0 });
+            });
+            await read('Cue lists', '/api/v1/cue-lists', objects, data => { state.cueLists = data; });
+            if (!current()) return;
+            state.resourceErrors = errors;
+            const nodeNameEl = byId('experience-node-name');
+            if (nodeNameEl) nodeNameEl.textContent = (state.config?.deviceName || 'LIGHTING NODE').toUpperCase();
+            renderConnection();
+            updateTelemetryUI();
+            renderDashboard();
+            renderScenes();
+            renderZones();
+            renderPatcher();
+            renderDmxGrid();
+            renderTimeline();
+            renderSchedules();
+            renderCuePage();
+            renderCueTelemetry();
+        })();
+        refreshPromise = task;
+        try { await task; }
+        catch (error) { if (current()) toast('Refresh could not complete: ' + error.message, true); }
+        finally {
+            if (refreshPromise === task) refreshPromise = null;
+            if (current() && button) { button.disabled = false; button.textContent = 'Refresh'; }
         }
-        if (state.sequence.tracks.length === 0) {
-            state.sequence.tracks = [0, 1, 2, 3].map(() => ({ steps: [{ presetIndex: 0, lengthBeats: 4 }] }));
-        }
-
-        state.config = config;
-        state.health = health;
-        
-        let validScheds = Array.isArray(schedules) ? schedules : [];
-        while (validScheds.length < 8) validScheds.push({ enabled: false, hour: 0, minute: 0, daysOfWeek: 0, action: 'preset', presetIndex: 0 });
-        state.schedules = validScheds.slice(0, 8);
-
-        const nodeNameEl = byId('experience-node-name');
-        if (nodeNameEl) nodeNameEl.textContent = (config.deviceName || 'LIGHTING NODE').toUpperCase();
-        updateTelemetryUI();
-        renderDashboard();
-        renderScenes();
-        renderZones();
-        renderPatcher();
-        renderDmxGrid();
-        renderTimeline();
-        renderSchedules();
-        renderCuePage();
-        renderCueTelemetry();
     }
 
     function updateTelemetryUI() {
         const st = state.status;
-        const ownerEl = byId('header-owner');
-        const ownerTextEl = byId('dash-owner-text');
-        const powerEl = byId('header-power');
-        const powerEstEl = byId('dash-power-est');
+        const sources = ['Idle', 'Fallback', 'ScenePlayback', 'Scheduler', 'ManualOverride', 'LiveDmx', 'Factory', 'EStop'];
+        const owner = st?.runtime?.controlOwner ?? sources[st?.controlSource] ?? 'Not reported';
+        updateText('header-owner', owner);
+        updateText('dash-owner-text', owner);
+
+        const finite = value => typeof value === 'number' && Number.isFinite(value) && value >= 0;
+        const estMw = st?.output?.powerMw ?? st?.estimatedMilliwatts;
+        const maxMw = st?.output?.power?.limitMw ?? state.config?.maxPowerMw;
+        const estimateComplete = st?.output?.power?.estimateComplete;
+        const powerText = finite(estMw) ? `${estimateComplete === false ? 'Partial: ' : ''}${estMw} mW` : 'Not reported';
+        updateText('header-power', powerText);
+        updateText('dash-power-est', powerText);
+        updateText('dash-power-max', finite(maxMw) ? (maxMw > 0 ? `Budget: ${maxMw} mW` : 'No software power limit') : 'Budget not reported');
+        updateText('dash-power-note', estimateComplete === false
+            ? 'The node reports an incomplete load estimate. Review output load settings before relying on the budget.'
+            : 'Calculated from configured loads, not a measured electrical reading.' + (estimateComplete === undefined ? ' Estimate completeness is not reported.' : ''));
         const powerBar = byId('dash-power-bar');
-
-        let owner = 'ScenePlayback';
-        if (st?.runtime?.controlOwner !== undefined) {
-            owner = st.runtime.controlOwner;
-        } else if (st?.controlSource !== undefined) {
-            owner = st.controlSource === 2 ? 'LiveDmx' :
-                    st.controlSource === 1 ? 'Factory' :
-                    st.controlSource === 6 ? 'Fallback' : 'ScenePlayback';
-        }
-        if (ownerEl) ownerEl.textContent = owner;
-        if (ownerTextEl) ownerTextEl.textContent = owner;
-
-        const estMw = st?.output?.powerMw ?? st?.estimatedMilliwatts ?? 0;
-        const maxMw = state.config?.maxPowerMw || 30000;
-        const pct = Math.min(100, Math.round((estMw / maxMw) * 100));
-
-        if (powerEl) powerEl.textContent = `${estMw} mW`;
-        if (powerEstEl) powerEstEl.textContent = `${estMw} mW`;
         if (powerBar) {
+            const pct = finite(estMw) && finite(maxMw) && maxMw > 0 ? Math.min(100, Math.round(estMw * 100 / maxMw)) : 0;
             powerBar.style.width = `${pct}%`;
-            powerBar.className = 'power-fill' + (pct > 90 ? ' danger' : pct > 75 ? ' warning' : '');
+            powerBar.className = 'power-fill' + (estimateComplete === false || pct > 75 ? (pct > 90 ? ' danger' : ' warning') : '');
         }
 
-        const isTransitioning = st?.scene?.transitioning ?? st?.transitioning;
-        const transEl = byId('dash-trans-text');
-        if (transEl) transEl.textContent = isTransitioning ? 'Blending' : 'Steady';
+        const transitioning = st?.scene?.transitioning ?? st?.transitioning;
+        updateText('dash-trans-text', transitioning === undefined ? 'Not reported'
+            : st?.scene?.applyPending ? 'Change pending' : transitioning ? 'Blending' : 'Steady');
+        const output = st?.output;
+        updateText('dash-safety-text', output?.estopActive ? 'Emergency stop'
+            : output?.fault ? 'Output fault' : st?.scene?.fallbackActive ? 'Fallback active'
+            : output?.enabled === false ? 'Outputs disabled' : output?.state || 'Not reported');
+        const protocols = st?.protocols;
+        const active = [];
+        if (protocols?.artnet?.sources > 0) active.push('Art-Net');
+        if (protocols?.sacn?.sources > 0) active.push('sACN');
+        updateText('dash-proto-text', active.length ? active.join(' · ') : !protocols ? 'Not reported'
+            : protocols.artnet?.enabled || protocols.sacn?.enabled ? 'Waiting for input' : 'Disabled');
         renderCueTelemetry();
     }
 
@@ -1851,14 +2171,15 @@ window.lg = (() => {
     }
 
     // ── Dashboard View ──
-    function renderDashboard() {
+    function renderPlayingScene() {
         const activeIdx = state.status?.scene?.activePreset ?? state.status?.activePreset;
         const activeScene = state.presets.find(p => Number(p.index) === Number(activeIdx));
-        const playingEl = byId('dash-playing');
-        if (playingEl) {
-            playingEl.textContent = activeScene?.name || (activeIdx !== undefined && activeIdx >= 0 ? `Scene ${activeIdx + 1}` : 'No Scene Active');
-        }
+        updateText('dash-playing', activeIdx === undefined ? 'Awaiting node status'
+            : activeScene?.name || (activeIdx >= 0 && activeIdx < 32 ? `Scene ${Number(activeIdx) + 1}` : 'No scene active'));
+    }
 
+    function renderDashboard() {
+        renderPlayingScene();
         const quickGrid = byId('dash-quick-scenes');
         if (quickGrid) {
             quickGrid.innerHTML = state.presets.map(scene => `
@@ -1965,6 +2286,11 @@ window.lg = (() => {
     }
 
     function createNewScene() {
+        // Slot allocation must use a successfully loaded library. The shell is
+        // available before that read completes, and an empty cache is not a free slot.
+        if (refreshPromise || state.resourceErrors.includes('Scenes')) {
+            return toast('Refresh scenes successfully before creating a new scene.', true);
+        }
         let idx = -1;
         for(let i=0; i<32; i++) {
             if (!state.presets.some(p => Number(p.index) === i && p.name && p.name.trim() !== '')) {
@@ -2348,7 +2674,7 @@ window.lg = (() => {
 
             return `
                 <tr>
-                    <td style="font-weight:700; color:#a5b4fc;">F${i+1}</td>
+                    <td style="font-weight:700; color:#ffb3c1;">F${i+1}</td>
                     <td>
                         <select id="fix-zone-${i}">
                             ${[0,1,2,3,4,5,6,7].map(z => `<option value="${z}" ${f.zoneId === z ? 'selected' : ''}>${esc(state.config.zones?.[z]?.name || `Zone ${z+1}`)}</option>`).join('')}
@@ -2433,7 +2759,7 @@ window.lg = (() => {
         for (let i = 0; i < 512; ++i) {
             const val = state.dmxData[i] || 0;
             const norm = val / 255;
-            const bg = norm > 0 ? `rgba(99,102,241,${0.2 + norm * 0.8})` : 'rgba(255,255,255,0.03)';
+            const bg = norm > 0 ? `rgba(255,45,85,${0.2 + norm * 0.8})` : 'rgba(255,255,255,0.03)';
             const txtCol = norm > 0.6 ? '#fff' : 'rgba(255,255,255,0.4)';
             html += `<div class="dmx-cell" style="background:${bg}; color:${txtCol};" onmouseenter="lg.hoverDmxCell(${i+1}, ${val})"><span>${i+1}</span><strong>${val}</strong></div>`;
         }
@@ -2650,6 +2976,8 @@ window.lg = (() => {
             const h = String(sched.hour || 0).padStart(2, '0');
             const m = String(sched.minute || 0).padStart(2, '0');
             const mask = sched.daysOfWeek || 0;
+            const target = Number(sched.presetIndex ?? 0);
+            const missingTarget = !validPresets.some(preset => Number(preset.index) === target);
             const days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].map((d, i) => {
                 const checked = (mask & (1 << i)) ? 'checked' : '';
                 return `<label style="display:inline-flex; align-items:center; gap:0.25rem; font-size:0.7rem; color:var(--text-secondary);"><input type="checkbox" id="sched-${idx}-day-${i}" ${checked}> ${d}</label>`;
@@ -2679,6 +3007,7 @@ window.lg = (() => {
                         <div id="sched-${idx}-preset-wrap" style="display:${sched.action === 'sequence' ? 'none' : 'block'};">
                             <label style="font-size:0.75rem; font-weight:700; color:var(--text-secondary); display:block; margin-bottom:0.3rem;">Target Scene</label>
                             <select id="sched-${idx}-preset" style="width:100%;">
+                                ${missingTarget ? `<option value="${target}" selected>Scene ${target + 1} (not in loaded library)</option>` : ''}
                                 ${validPresets.map(p => `<option value="${p.index}" ${p.index === sched.presetIndex ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}
                             </select>
                         </div>
@@ -2720,15 +3049,16 @@ window.lg = (() => {
             const grid = byId('health-metrics-grid');
             if (grid) {
                 const h = health || {};
-                const uptime = h.uptime_s || 0;
-                const hh = Math.floor(uptime / 3600);
-                const mm = Math.floor((uptime % 3600) / 60);
-                const ss = uptime % 60;
-                const upStr = `${hh}h ${mm}m ${ss}s`;
-                
-                const free = Math.round((h.free_heap || 0) / 1024);
-                const minFree = Math.round((h.min_free_heap || 0) / 1024);
-                const rssi = h.rssi || -100;
+                const sys = h.system || h;
+                const uptime = sys.uptime_s;
+                const upStr = Number.isFinite(uptime)
+                    ? `${Math.floor(uptime / 3600)}h ${Math.floor((uptime % 3600) / 60)}m ${uptime % 60}s` : 'Not reported';
+                const kilobytes = value => Number.isFinite(value) ? `${Math.round(value / 1024)} KB` : 'Not reported';
+                const free = kilobytes(h.memory?.free8 ?? sys.free_heap);
+                const minFree = kilobytes(h.memory?.minimum_free ?? sys.min_free_heap);
+                const rssi = h.network?.wifi_rssi ?? h.rssi;
+                const rssiText = Number.isFinite(rssi) && rssi < 0 ? `${rssi} dBm` : 'Not reported';
+                const drops = h.dmx?.sources_dropped ?? h.dmx_drops;
                 
                 grid.innerHTML = `
                     <div style="background:rgba(0,0,0,0.2); padding:0.8rem; border-radius:6px;">
@@ -2737,19 +3067,19 @@ window.lg = (() => {
                     </div>
                     <div style="background:rgba(0,0,0,0.2); padding:0.8rem; border-radius:6px;">
                         <div style="font-size:0.7rem; color:var(--text-secondary); margin-bottom:0.25rem;">Wi-Fi Signal</div>
-                        <div style="font-size:1.1rem; font-weight:700; color:${rssi > -60 ? 'var(--primary)' : rssi > -80 ? 'orange' : 'var(--danger)'};">${rssi} dBm</div>
+                        <div style="font-size:1.1rem; font-weight:700;">${rssiText}</div>
                     </div>
                     <div style="background:rgba(0,0,0,0.2); padding:0.8rem; border-radius:6px;">
                         <div style="font-size:0.7rem; color:var(--text-secondary); margin-bottom:0.25rem;">Free Heap</div>
-                        <div style="font-size:1.1rem; font-weight:700;">${free} KB</div>
+                        <div style="font-size:1.1rem; font-weight:700;">${free}</div>
                     </div>
                     <div style="background:rgba(0,0,0,0.2); padding:0.8rem; border-radius:6px;">
                         <div style="font-size:0.7rem; color:var(--text-secondary); margin-bottom:0.25rem;">Min Free Heap (Lifetime)</div>
-                        <div style="font-size:1.1rem; font-weight:700;">${minFree} KB</div>
+                        <div style="font-size:1.1rem; font-weight:700;">${minFree}</div>
                     </div>
                     <div style="background:rgba(0,0,0,0.2); padding:0.8rem; border-radius:6px; grid-column:span 2;">
-                        <div style="font-size:0.7rem; color:var(--text-secondary); margin-bottom:0.25rem;">DMX Drops</div>
-                        <div style="font-size:1.1rem; font-weight:700;">${h.dmx_drops || 0}</div>
+                        <div style="font-size:0.7rem; color:var(--text-secondary); margin-bottom:0.25rem;">DMX sources dropped</div>
+                        <div style="font-size:1.1rem; font-weight:700;">${Number.isFinite(drops) ? drops : 'Not reported'}</div>
                     </div>
                 `;
             }
@@ -2827,120 +3157,91 @@ window.lg = (() => {
     }
 
     async function stopBurnIn() {
+        const operation = beginNodeOperation();
         try {
-            await api('/api/v1/factory/burn-in/stop', 'POST', {});
+            await operation.request('/api/v1/factory/burn-in/stop', { method: 'POST',
+                headers: { 'Content-Type': 'application/json' }, body: '{}' });
             toast('Burn-in cancellation requested. Waiting for worker status.');
         } catch (e) {
+            if (!operation.current()) return;
             try {
-                await api('/api/v1/factory/abort', 'POST', {});
+                await operation.request('/api/v1/factory/abort', { method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }, body: '{}' });
                 toast('Factory cancellation requested. Waiting for worker status.');
-            } catch (err) { toast(err.message, true); }
+            } catch (err) { if (operation.current()) toast(err.message, true); }
         }
     }
 
     async function uploadOta() {
-        const fileInput = byId('ota-file');
-        const file = fileInput?.files[0];
+        const file = byId('ota-file')?.files[0];
         if (!file) return toast('Select a .bin file first.', true);
-        if (!state.otaCapacity) await loadStorage();
-        if (state.otaCapacity && file.size > state.otaCapacity) return toast('Image exceeds OTA slot capacity.', true);
-
+        const operation = beginNodeOperation();
         const statusEl = byId('ota-status');
-        statusEl.textContent = 'Uploading firmware... please wait.';
+        if (statusEl) statusEl.textContent = 'Checking firmware capacity…';
         try {
-            const res = await fetch('/api/v1/ota', {
-                method: 'POST',
-                headers: { Authorization: 'Bearer ' + state.token },
-                body: file
-            });
-            if (!res.ok) throw new Error(`Upload failed (${res.statusText})`);
-            statusEl.textContent = 'Image accepted. Waiting for local verification…';
-            const deadline = Date.now() + 90000;
-            while (Date.now() < deadline) {
-                await new Promise(resolve => setTimeout(resolve, 2000));
+            // Always check this operation's node; cached capacity may belong to
+            // the previous node or have changed after a firmware update.
+            const capacity = await operation.request('/api/v1/ota/status');
+            state.otaCapacity = capacity.maxFirmwareBytes || 0;
+            if (state.otaCapacity && file.size > state.otaCapacity) throw new Error('Image exceeds OTA slot capacity.');
+            if (statusEl) statusEl.textContent = 'Uploading firmware... please wait.';
+            await operation.request('/api/v1/ota', { method: 'POST', body: file }, 'text', uploadTimeoutMs);
+            if (statusEl) statusEl.textContent = 'Image accepted. Waiting for local verification…';
+            const deadline = performance.now() + 90000;
+            while (performance.now() < deadline) {
+                await operation.wait(2000);
                 let status;
-                try { status = await api('/api/v1/ota/status'); } catch (_) { continue; }
+                try { status = await operation.request('/api/v1/ota/status'); }
+                catch (_) { if (!operation.current()) return; continue; }
                 if (status.state === 'confirmed' && status.targetVersion && status.runningVersion === status.targetVersion) {
-                    statusEl.textContent = 'Firmware update confirmed';
-                    await loadStorage(); return;
+                    if (statusEl) statusEl.textContent = 'Firmware update confirmed';
+                    await loadStorage(operation); return;
                 }
                 if (status.state === 'rolled_back' || status.state === 'failed') throw new Error(status.reason || 'Firmware update rolled back');
-                statusEl.textContent = 'Candidate pending verification…';
+                if (statusEl) statusEl.textContent = 'Candidate pending verification…';
             }
             throw new Error('Verification timeout. Check node status.');
-        } catch (e) {
-            statusEl.textContent = 'Error: ' + e.message;
-            toast(e.message, true);
+        } catch (error) {
+            if (!operation.current()) return;
+            if (statusEl) statusEl.textContent = 'Error: ' + error.message;
+            toast(error.message, true);
         }
     }
 
     async function downloadBackup() {
+        const operation = beginNodeOperation();
         try {
-            const res = await fetch('/api/v1/backup', { headers: { Authorization: 'Bearer ' + state.token } });
-            if (!res.ok) throw new Error('Backup download failed (' + res.statusText + ')');
-            const blob = await res.blob();
+            const blob = await operation.request('/api/v1/backup', {}, 'blob', uploadTimeoutMs);
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url; a.download = 'lumigrid_backup.lgbak';
             a.click(); URL.revokeObjectURL(url);
             toast('Streaming backup (.lgbak) downloaded.');
-        } catch (e) { toast(e.message, true); }
+        } catch (error) { if (operation.current()) toast(error.message, true); }
     }
 
     async function uploadRestore() {
-        const fileInput = byId('restore-file');
-        const file = fileInput?.files[0];
+        const file = byId('restore-file')?.files[0];
         if (!file) return toast('Select a .lgbak backup file first.', true);
-
+        const operation = beginNodeOperation();
         const statusEl = byId('restore-status');
         if (statusEl) statusEl.textContent = 'Validating backup package preflight...';
-
         try {
-            // Stage 1: Preflight validation
-            const validateRes = await fetch('/api/v1/restore/validate', {
-                method: 'POST',
-                headers: {
-                    Authorization: 'Bearer ' + state.token,
-                    'Content-Type': 'application/x-lumigrid-backup'
-                },
-                body: file
-            });
-            if (!validateRes.ok) {
-                const errData = await validateRes.json().catch(() => ({}));
-                throw new Error(errData.error || `Preflight validation failed (${validateRes.statusText})`);
-            }
-            const preflight = await validateRes.json();
-            if (!preflight.valid) {
-                throw new Error(preflight.error || 'Restore package is not valid');
-            }
-
+            const options = { method: 'POST', headers: { 'Content-Type': 'application/x-lumigrid-backup' }, body: file };
+            const preflight = await operation.request('/api/v1/restore/validate', options, 'json', uploadTimeoutMs);
+            if (!preflight.valid) throw new Error(preflight.error || 'Restore package is not valid');
             const sceneCount = preflight.plan?.scenes ?? 0;
             const cueCount = preflight.plan?.cueLists ?? 0;
             const hasCfg = preflight.plan?.deviceConfig ? 'Yes' : 'No';
-            if (statusEl) {
-                statusEl.textContent = `Preflight OK: Device Config: ${hasCfg}, Scenes: ${sceneCount}, Cue Lists: ${cueCount}. Applying restore...`;
-            }
-
-            // Stage 2: Commit restore
-            const restoreRes = await fetch('/api/v1/restore', {
-                method: 'POST',
-                headers: {
-                    Authorization: 'Bearer ' + state.token,
-                    'Content-Type': 'application/x-lumigrid-backup'
-                },
-                body: file
-            });
-            if (!restoreRes.ok) {
-                const errData = await restoreRes.json().catch(() => ({}));
-                throw new Error(errData.error || `Restore failed (${restoreRes.statusText})`);
-            }
-
-            if (statusEl) statusEl.textContent = 'Restore applied successfully! Node restarting...';
-            toast('Restore applied. Node restarting...');
-            setTimeout(() => location.reload(), 6000);
-        } catch (e) {
-            if (statusEl) statusEl.textContent = 'Error: ' + e.message;
-            toast(e.message, true);
+            if (statusEl) statusEl.textContent = `Preflight OK: Device Config: ${hasCfg}, Scenes: ${sceneCount}, Cue Lists: ${cueCount}. Applying restore...`;
+            await operation.request('/api/v1/restore', options, 'text', uploadTimeoutMs);
+            if (statusEl) statusEl.textContent = 'Restore applied. Node restarting…';
+            toast('Restore applied. Node restarting…');
+            operation.wait(6000).then(() => location.reload()).catch(() => {});
+        } catch (error) {
+            if (!operation.current()) return;
+            if (statusEl) statusEl.textContent = 'Error: ' + error.message;
+            toast(error.message, true);
         }
     }
 
@@ -2960,13 +3261,21 @@ window.lg = (() => {
 
     function updateText(id, txt) {
         const el = byId(id);
-        if (el) el.textContent = txt;
+        if (el && el.textContent !== String(txt)) el.textContent = String(txt);
     }
 
     function initAuthInputs() {
+        let savedSession = null;
+        let savedHost = null;
+        try {
+            const stored = JSON.parse(sessionStorage.getItem('lg_node_session') || 'null');
+            if (stored && typeof stored.host === 'string' && stored.host &&
+                typeof stored.token === 'string' && stored.token) savedSession = stored;
+            savedHost = savedSession?.host || sessionStorage.getItem('lg_node_host');
+            sessionStorage.removeItem('lg_node_token');
+        } catch (_) {}
         const hostInput = byId('experience-host');
         if (hostInput) {
-            const savedHost = localStorage.getItem('lg_node_host');
             if (savedHost) {
                 hostInput.value = savedHost;
                 state.host = savedHost;
@@ -2978,14 +3287,9 @@ window.lg = (() => {
                 state.host = '192.168.4.1';
             }
         }
-        const tokenInput = byId('experience-token');
-        if (tokenInput) {
-            let savedToken = null;
-            try { savedToken = sessionStorage.getItem('lg_node_token'); } catch (_) {}
-            if (savedToken) {
-                state.token = savedToken;
-            }
-        }
+        // Host and token only come from the same atomic session record. Legacy
+        // host preferences survive, but legacy separate tokens require sign-in.
+        if (savedSession && savedSession.host === state.host) state.token = savedSession.token;
     }
     initAuthInputs();
     byId('experience-host').addEventListener('change', detectFirstSetup);

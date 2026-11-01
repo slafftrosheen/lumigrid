@@ -82,12 +82,18 @@ jobs:
           python LumigridLedNode/scripts/test_factory_jobs.py
           python LumigridLedNode/scripts/test_factory_cancellation_api.py
           python LumigridLedNode/scripts/test_lighting_state.py
+          python LumigridLedNode/scripts/test_clock_discipline.py
+          python LumigridLedNode/scripts/test_node_sync.py
+          python LumigridLedNode/scripts/test_node_sync_threads.py
+          python LumigridLedNode/scripts/test_sync_runtime_integration.py
+          python LumigridLedNode/scripts/test_sync_dependency_order.py
           python LumigridLedNode/scripts/test_ota_boot_verifier.py
           python LumigridLedNode/scripts/test_ota_upload.py
           python LumigridLedNode/scripts/test_board_bootstrap.py
           python LumigridLedNode/scripts/test_certification_service.py
           python LumigridLedNode/scripts/test_certification_api.py
           python LumigridLedNode/scripts/test_certification_store.py
+          python -m unittest discover -s tests/qualification -v
           python LumigridLedNode/scripts/check_invariants.py
           # 6. Runtime mathematical and protocol simulation tests
           python LumigridLedNode/scripts/verify_runtime_math.py
@@ -104,6 +110,7 @@ jobs:
           python scripts/check_invariants.py
           echo "=== Building Test Environment ==="
           pio run -e test
+          "$PLATFORMIO_CORE_DIR/penv/.espidf-5.2.1/bin/python" scripts/test_prepare_managed_components.py
 
       - name: Firmware Build Success Status
         if: success()
@@ -160,6 +167,9 @@ jobs:
       - name: Build SvelteKit Web App
         run: |
           cd lumigrid-lander-main
+          npm run test:embedded
+          npm run check
+          npm run test:unit -- src/lib/auth/storage.test.ts src/lib/auth/nodeAuth.test.ts src/lib/api/transport.test.ts src/lib/api/integration.test.ts src/lib/server/documentation.test.ts
           npm run build
 
       - name: Web Build Success Status

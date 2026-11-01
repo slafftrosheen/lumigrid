@@ -203,24 +203,8 @@ esp_err_t NodeSync::stop(uint32_t timeout_ms) {
         portEXIT_CRITICAL(&status_mutex_);
     }
 
-    // Release remote cue ownership as well as remote scheduler state. If that
-    // callback rejects cleanup, retain stopping_ and allow a later stop to retry.
-    // Never call application code while holding the status spinlock.
-    ShowTransportSnapshot empty_snap{};
-    empty_snap.mode = ShowTransportMode::Standalone;
-    if (remote_transport_callback_) {
-        uint8_t error = 0;
-        if (!remote_transport_callback_(empty_snap, error)) {
-            portENTER_CRITICAL(&status_mutex_);
-            transport_apply_ok_ = false;
-            transport_error_ = error != 0 ? error :
-                static_cast<uint8_t>(SyncTransportError::RuntimeUnavailable);
-            portEXIT_CRITICAL(&status_mutex_);
-            return ESP_FAIL;
-        }
-    }
-    if (transport_callback_) transport_callback_(empty_snap);
-    if (legacy_transport_callback_) legacy_transport_callback_(false, 120);
+    // A rejected release retains stopping_ so a later stop can retry.
+    if (!release_remote_transport()) return ESP_FAIL;
 
     portENTER_CRITICAL(&status_mutex_);
     master_address_ = 0;
@@ -241,6 +225,29 @@ esp_err_t NodeSync::stop(uint32_t timeout_ms) {
     stopping_ = false;
     portEXIT_CRITICAL(&status_mutex_);
     return ESP_OK;
+}
+
+bool NodeSync::release_remote_transport() {
+    // Release remote cue ownership as well as scheduler state. Never publish a
+    // successful handover, or notify compatibility callbacks, before the owner
+    // acknowledges it. A failure retains the last remote snapshot for diagnosis.
+    // Application callbacks must remain outside the status spinlock.
+    ShowTransportSnapshot empty_snap{};
+    empty_snap.mode = ShowTransportMode::Standalone;
+    if (remote_transport_callback_) {
+        uint8_t error = 0;
+        if (!remote_transport_callback_(empty_snap, error)) {
+            portENTER_CRITICAL(&status_mutex_);
+            transport_apply_ok_ = false;
+            transport_error_ = error != 0 ? error :
+                static_cast<uint8_t>(SyncTransportError::RuntimeUnavailable);
+            portEXIT_CRITICAL(&status_mutex_);
+            return false;
+        }
+    }
+    if (transport_callback_) transport_callback_(empty_snap);
+    if (legacy_transport_callback_) legacy_transport_callback_(false, 120);
+    return true;
 }
 
 bool NodeSync::should_run() const {
@@ -516,9 +523,20 @@ NodeRole NodeSync::worker_loop(int socket, bool auto_mode) {
 
         const uint32_t now = now_ms();
         portENTER_CRITICAL(&status_mutex_);
-        const bool timed_out = (last_packet_ms_ != 0 && elapsed_ms(now, last_packet_ms_) > kPeerTimeoutMs);
-        if (timed_out && (master_address_ != 0 || remote_timeline_enabled_ || transport_apply_ok_)) {
-            // Phase 0.6: Timeout must clear every remote transport
+        const bool timed_out = has_sequence_ &&
+            elapsed_ms(now, last_packet_ms_) > kPeerTimeoutMs;
+        const uint32_t reference = has_sequence_ ? last_packet_ms_ : started_ms;
+        const bool election_due = auto_mode &&
+            elapsed_ms(now, reference) >= auto_election_delay(local_mac);
+        const bool has_remote_master = master_address_ != 0;
+        portEXIT_CRITICAL(&status_mutex_);
+
+        // Auto election is intentionally faster than the worker timeout. Both
+        // paths must relinquish remote transport before local ownership resumes.
+        // Keep the old snapshot/master on rejection and retry on the next loop.
+        if ((timed_out || election_due) && has_remote_master) {
+            if (!release_remote_transport()) continue;
+            portENTER_CRITICAL(&status_mutex_);
             master_address_ = 0;
             std::memset(master_mac_, 0, sizeof(master_mac_));
             remote_timeline_enabled_ = false;
@@ -527,40 +545,17 @@ NodeRole NodeSync::worker_loop(int socket, bool auto_mode) {
             transport_apply_ok_ = false;
             transport_error_ = 0;
             portEXIT_CRITICAL(&status_mutex_);
-
-            if (remote_transport_callback_) {
-                uint8_t dummy = 0;
-                ShowTransportSnapshot empty_snap{};
-                empty_snap.mode = ShowTransportMode::Standalone;
-                remote_transport_callback_(empty_snap, dummy);
-            }
-            if (transport_callback_) {
-                ShowTransportSnapshot empty_snap{};
-                empty_snap.mode = ShowTransportMode::Standalone;
-                transport_callback_(empty_snap);
-            }
-            if (legacy_transport_callback_) {
-                legacy_transport_callback_(false, 120);
-            }
-        } else {
-            portEXIT_CRITICAL(&status_mutex_);
         }
 
-        if (auto_mode) {
+        if (election_due) {
             portENTER_CRITICAL(&status_mutex_);
-            const uint32_t updated_last_packet_ms = last_packet_ms_;
+            const bool running = running_;
+            if (running) active_role_ = NodeRole::Master;
             portEXIT_CRITICAL(&status_mutex_);
-            const uint32_t reference = updated_last_packet_ms == 0
-                ? started_ms
-                : updated_last_packet_ms;
-            if (elapsed_ms(now, reference) >= auto_election_delay(local_mac)) {
-                ESP_LOGI(TAG, "Auto role elected this node as leader");
-                portENTER_CRITICAL(&status_mutex_);
-                active_role_ = NodeRole::Master;
-                portEXIT_CRITICAL(&status_mutex_);
-                reset_master();
-                return NodeRole::Master;
-            }
+            if (!running) break;
+            ESP_LOGI(TAG, "Auto role elected this node as leader");
+            reset_master();
+            return NodeRole::Master;
         }
     }
 
@@ -710,7 +705,8 @@ void NodeSync::update_peer(const sockaddr_in& sender, uint16_t latency_ms) {
             available = &peer;
             break;
         }
-        if (available == nullptr && peer.address == 0) {
+        if (available == nullptr &&
+            (peer.address == 0 || elapsed_ms(now, peer.last_seen_ms) > kPeerTimeoutMs)) {
             available = &peer;
         }
     }

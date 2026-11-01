@@ -201,7 +201,15 @@ esp_err_t OutputController::rollback_to_last_good_topology() {
         return ESP_OK;
     }
 #endif
-    Pca9685Driver::force_disable_outputs(); // /OE HIGH immediately
+    const esp_err_t inhibit_err = Pca9685Driver::force_disable_outputs();
+    if (inhibit_err != ESP_OK) {
+        pixels_.cancel_candidate();
+        topology_rollback_failures_++;
+        topology_valid_.store(false, std::memory_order_release);
+        output_enabled_.store(false, std::memory_order_release);
+        last_fault_domain_.store(OutputFaultDomain::Safety, std::memory_order_release);
+        return inhibit_err;
+    }
 
     if (!last_known_good_snapshot_.valid) {
         ESP_LOGE("output", "OUTPUT_RECONFIG rollback_failed: no valid last-known-good topology snapshot available");
@@ -292,11 +300,11 @@ esp_err_t OutputController::reconfigure_on_output_core(const DeviceConfig& cfg) 
     const bool previous_topology_valid = has_last_good && topology_valid_.load(std::memory_order_acquire);
     const bool previous_output_enabled = has_last_good ? output_enabled_.load(std::memory_order_acquire) : false;
 
-    auto abort_preswap = [&](esp_err_t err, const char* reason) -> esp_err_t {
+    auto abort_preswap = [&](esp_err_t err, const char* reason, bool inhibit = false) -> esp_err_t {
         pixels_.cancel_candidate();
         topology_valid_.store(previous_topology_valid, std::memory_order_release);
-        output_enabled_.store(previous_output_enabled, std::memory_order_release);
-        last_fault_domain_.store(OutputFaultDomain::Topology, std::memory_order_release);
+        output_enabled_.store(inhibit ? false : previous_output_enabled, std::memory_order_release);
+        last_fault_domain_.store(inhibit ? OutputFaultDomain::Safety : OutputFaultDomain::Topology, std::memory_order_release);
         // Note: Do not change /OE here; next normal frame may resume old topology
         topology_reconfigure_failures_++;
         ESP_LOGE("output", "OUTPUT_RECONFIG candidate_failed_preswap (%s): %s", reason, output_err_name(err));
@@ -344,7 +352,13 @@ esp_err_t OutputController::reconfigure_on_output_core(const DeviceConfig& cfg) 
     }
 
     // Step 4: Gate PCA /OE
-    Pca9685Driver::disable_outputs();
+    const esp_err_t inhibit_err = Pca9685Driver::disable_outputs();
+    if (inhibit_err != ESP_OK) {
+        // Preserve the old topology and stop accepting light. An emergency
+        // zero write is still useful when the GPIO operation was rejected.
+        last_blackout_result_ = blackout_locked();
+        return abort_preswap(inhibit_err, "pwm_inhibit_failed", true);
+    }
 
     // Step 5: Blackout old addressable topology
     AddressableCommitResult old_blackout = pixels_.blackout();
@@ -440,9 +454,10 @@ BlackoutResult OutputController::blackout_locked() {
         return res;
     }
 #endif
-    Pca9685Driver::disable_outputs();
+    const esp_err_t inhibit_err = Pca9685Driver::disable_outputs();
     AddressableCommitResult a_res = pixels_.blackout();
-    esp_err_t p_err = pwm_available_.load(std::memory_order_acquire) ? pwm_.clear() : ESP_OK;
+    const esp_err_t zero_err = pwm_available_.load(std::memory_order_acquire) ? pwm_.clear() : ESP_OK;
+    const esp_err_t p_err = inhibit_err != ESP_OK ? inhibit_err : zero_err;
 
     BlackoutResult res;
     res.addressable_result = a_res.result;
@@ -489,33 +504,8 @@ esp_err_t OutputController::clear_estop(uint32_t clear_generation) {
         unlock();
         return ESP_ERR_INVALID_STATE;
     }
-#if defined(CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS) && CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS
-    const bool mock = test_mode_.load(std::memory_order_acquire);
-    if (!mock) Pca9685Driver::disable_outputs();
-    esp_err_t p_err = mock ? ESP_OK :
-        (pwm_available_.load(std::memory_order_acquire) ? pwm_.clear() : ESP_OK);
-    AddressableCommitResult a_res{};
-    if (mock) a_res.result = ESP_OK;
-    else {
-        pixels_.clear();
-        a_res = pixels_.blackout();
-    }
-#else
-    Pca9685Driver::disable_outputs();
-
-    esp_err_t p_err = pwm_available_.load(std::memory_order_acquire) ? pwm_.clear() : ESP_OK;
-    pixels_.clear();
-    AddressableCommitResult a_res = pixels_.blackout();
-#endif
-
-    BlackoutResult b_res;
-    b_res.addressable_result = a_res.result;
-    b_res.pwm_result = p_err;
-    b_res.addressable_confirmed = (a_res.result == ESP_OK);
-    b_res.pwm_confirmed = (p_err == ESP_OK);
-    last_blackout_result_ = b_res;
-
-    esp_err_t err = (a_res.result != ESP_OK) ? a_res.result : p_err;
+    const BlackoutResult b_res = blackout_locked();
+    esp_err_t err = b_res;
 
     if (err == ESP_OK) {
         portENTER_CRITICAL(&safety_gate_mux_);
@@ -532,7 +522,7 @@ esp_err_t OutputController::clear_estop(uint32_t clear_generation) {
         // Leave /OE HIGH! The next successful commit exposes PWM.
     } else {
         ESP_LOGE("output", "clear_estop failed to zero hardware cleanly (addr=%s, pwm=%s)",
-                 output_err_name(a_res.result), esp_err_to_name(p_err));
+                 output_err_name(b_res.addressable_result), esp_err_to_name(b_res.pwm_result));
     }
     unlock();
     return err;

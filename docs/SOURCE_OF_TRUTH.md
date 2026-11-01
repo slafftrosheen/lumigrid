@@ -32,6 +32,6 @@ The old docs index linked missing Node Family, Embedded Integration, StyleSystem
 - Browser flasher referenced an absent release manifest; the page now explains installation prerequisites.
 - Physical timing, combined-load endurance, electrical/thermal behavior and current-revision OTA recovery require target evidence.
 - Historical reports remain scoped to their original build/context.
-- The strict API-boundary audit finds existing direct storage access in `src/lib/fleet/registry.ts` and `src/lib/auth/nodeAuth.ts`. Route-level storage, legacy API and WebSocket checks pass; the overall storage boundary does not. This rewrite does not change authentication or registry behavior.
+- At the audit baseline, the strict API-boundary audit found direct storage access in `src/lib/fleet/registry.ts` and `src/lib/auth/nodeAuth.ts`. The 2026-11-01 continuity batch moves those accesses behind guarded `auth/storage.ts` helpers, including session-only credential storage. The strict audit now passes; denied browser persistence is covered by the auth/storage regressions.
 
 Change source first, then guides/translations. Regenerate/check docs to detect route/capacity drift. Record fresh hardware evidence separately instead of rewriting an older report as though rerun.

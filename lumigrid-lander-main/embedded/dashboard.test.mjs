@@ -10,18 +10,37 @@ const plain = value => JSON.parse(JSON.stringify(value));
 
 // Run the actual embedded script with a small DOM and mocked node API. Only
 // expose the closure for assertions; the production functions are unchanged.
-function dashboard(responses = {}) {
+function snapshot(overrides = {}) {
+  return { schema: 3, runtime: { controlOwner: 'ScenePlayback' },
+    output: { enabled: true, fault: false, estopActive: false, state: 'healthy', powerMw: 1200,
+      power: { limitMw: 10000, estimateComplete: true } },
+    scene: { activePreset: 0, transitioning: false, applyPending: false, fallbackActive: false },
+    protocols: { artnet: { enabled: true, sources: 0 }, sacn: { enabled: false, sources: 0 } }, ...overrides };
+}
+
+const flush = async () => { for (let i = 0; i < 40; i++) await Promise.resolve(); };
+
+function dashboard(responses = {}, stored = {}, storageFailures = []) {
   const elements = new Map();
   const calls = [];
+  const reloads = [];
+  const timers = new Map();
+  const sockets = [];
+  let nextTimer = 1;
+  let now = 1000;
   const add = (id, value = '') => {
-    const element = { value, checked: false, hidden: false, textContent: '', style: {},
-      classList: { add() {}, remove() {} }, addEventListener() {} };
+    const element = { value, checked: false, hidden: false, disabled: false, textContent: '', style: {}, dataset: {},
+      classList: { add() {}, remove() {} }, addEventListener() {}, focus() {} };
     elements.set(id, element);
     return element;
   };
   for (const id of ['experience-host', 'experience-token', 'first-setup', 'normal-login', 'setup-unavailable',
     'setup-defaults', 'experience-toast', 'scene-editor-title', 'scene-name', 'scene-brightness',
-    'scene-brightness-out', 'scene-fade', 'scene-fade-out']) add(id);
+    'scene-brightness-out', 'scene-fade', 'scene-fade-out', 'experience-auth', 'product-app',
+    'connect-button', 'refresh-button', 'connection-state', 'connection-detail', 'header-owner',
+    'dash-owner-text', 'header-power', 'dash-power-est', 'dash-power-max', 'dash-power-note',
+    'dash-power-bar', 'dash-safety-text', 'dash-proto-text', 'dash-trans-text', 'dash-playing',
+    'ota-file', 'ota-status', 'restore-file', 'restore-status']) add(id);
   const editor = add('scene-zones-editor');
   let markup = '';
   Object.defineProperty(editor, 'innerHTML', {
@@ -46,23 +65,52 @@ function dashboard(responses = {}) {
   });
   const context = vm.createContext({
     window: {}, document: { getElementById: id => elements.get(id) ?? null, querySelectorAll: () => [], querySelector: () => null },
-    localStorage: { getItem: () => null }, sessionStorage: { getItem: () => null },
-    location: { protocol: 'http:', host: 'node.test', hostname: 'node.test' },
-    performance: { now: () => 0 }, setTimeout: () => 0, clearTimeout() {},
+    localStorage: { getItem: () => null }, sessionStorage: {
+      getItem: key => stored[key] ?? null, setItem: (key, value) => {
+        if (storageFailures.includes(key)) throw new Error('storage unavailable');
+        stored[key] = value;
+      }, removeItem: key => { delete stored[key]; }
+    },
+    location: { protocol: 'http:', host: 'node.test', hostname: 'node.test', reload: () => reloads.push(true) },
+    performance: { now: () => now }, URL, AbortController, ArrayBuffer, Uint8Array,
+    setTimeout: (callback, delay) => { const id = nextTimer++; timers.set(id, { callback, delay }); return id; },
+    clearTimeout: id => timers.delete(id), requestAnimationFrame: () => 0,
+    WebSocket: class {
+      constructor(url, protocols) { this.url = url; this.protocols = protocols; this.readyState = 0; sockets.push(this); }
+      close() { this.readyState = 3; this.onclose?.(); }
+    },
     fetch: async (url, options) => {
       const path = new URL(url).pathname;
-      calls.push({ path, ...options });
-      const value = responses[path];
+      calls.push({ path, url, ...options });
+      let value = responses[path];
+      if (typeof value === 'function') value = await value({ path, url, ...options });
       if (value instanceof Error) throw value;
-      return { ok: true, json: async () => plain(value ?? (path === '/api/v1/auth/status' ? { provisioned: true } : {})) };
+      const defaults = {
+        '/api/v1/auth/status': { provisioned: true }, '/api/v1/auth/session': { sessionToken: 'session', role: 'admin' },
+        '/api/v1/auth/ws-ticket': { ticket: 'ticket' }, '/api/v1/status': snapshot(),
+        '/api/v1/effects': [], '/api/v1/palettes': [], '/api/v1/presets': [], '/api/v1/schedules': [],
+        '/api/v1/cue-lists': [], '/api/v1/channels': { channels: [] }
+      };
+      return { ok: !value?._httpStatus, status: value?._httpStatus ?? 200,
+        json: async () => value?.json ? await value.json() : plain(value ?? defaults[path] ?? {}),
+        text: async () => JSON.stringify(value ?? defaults[path] ?? {}),
+        blob: async () => value?.blob ? await value.blob() : new Blob(['backup']) };
     },
   });
   const exposed = script.replace('    return {\n        connect, disconnect, refresh, nav, playScene, blackout,',
-    '    window.testing = { state, resolveEffects, resolvePalettes, renderSceneEditor, readSceneEditor, prepareScenePayload, effectDefaults, paletteDefaults };\n    return {\n        connect, disconnect, refresh, nav, playScene, blackout,');
+    '    window.testing = { state, api, acceptStatus, refreshStatus, initWebSocket, startStatusWatchdog, updateTelemetryUI, resolveEffects, resolvePalettes, renderSceneEditor, readSceneEditor, prepareScenePayload, effectDefaults, paletteDefaults };\n    return {\n        connect, disconnect, refresh, nav, playScene, blackout,');
   assert.notEqual(exposed, script, 'test hook must attach to the application return');
   vm.runInContext(exposed, context, { filename: 'dashboard.html' });
   const api = context.window.testing;
-  return { ...api, lg: context.window.lg, elements, calls, editor };
+  return { ...api, lg: context.window.lg, elements, calls, editor, timers, sockets, responses, stored, reloads,
+    advance: ms => { now += ms; },
+    async runTimer(delay) {
+      const entry = [...timers].find(([, timer]) => timer.delay === delay);
+      assert.ok(entry, `expected a ${delay} ms timer`);
+      timers.delete(entry[0]); now += delay;
+      await entry[1].callback(); await flush();
+    }
+  };
 }
 
 function layer(overrides = {}) {
@@ -299,4 +347,398 @@ test('legacy scenes retain eight zone names and a zones-only save payload', () =
   assert.equal(payload.channels, undefined);
   assert.equal(payload.zones[7].layers[0].effect, 'breathe');
   assert.equal(payload.zones[0].layers[0].effect, 'solid');
+});
+
+test('every refresh reads current status and updates playback without optimistic state', async () => {
+  const responses = { '/api/v1/status': snapshot() };
+  const app = dashboard(responses);
+  await app.lg.refresh();
+  assert.equal(app.elements.get('dash-playing').textContent, 'Scene 1');
+  responses['/api/v1/status'] = snapshot({ scene: { activePreset: 7 } });
+  await app.lg.refresh();
+  assert.equal(app.calls.filter(call => call.path === '/api/v1/status').length, 2);
+  assert.equal(app.elements.get('dash-playing').textContent, 'Scene 8');
+  await app.lg.playScene(2);
+  assert.equal(app.state.status.scene.activePreset, 7, 'accepted command is not applied state');
+});
+
+test('failed document reads preserve loaded data and block a destructive save until refresh succeeds', async () => {
+  const responses = {
+    '/api/v1/config': { deviceName: 'Lobby', channels: [] }, '/api/v1/presets': [scene()],
+    '/api/v1/sequence': { bpm: 137, enabled: true, tracks: [{ steps: [{ presetIndex: 2, lengthBeats: 8 }] }] },
+    '/api/v1/schedules': [{ enabled: true, hour: 8, minute: 30 }], '/api/v1/cue-lists': [{ index: 1, name: 'Evening' }]
+  };
+  const app = dashboard(responses);
+  await app.lg.refresh();
+  const before = plain({ config: app.state.config, presets: app.state.presets, sequence: app.state.sequence,
+    schedules: app.state.schedules, cueLists: app.state.cueLists });
+  for (const path of ['/api/v1/config', '/api/v1/presets', '/api/v1/sequence', '/api/v1/schedules', '/api/v1/cue-lists']) {
+    responses[path] = new Error('temporary network failure');
+  }
+  await app.lg.refresh();
+  assert.deepEqual(plain({ config: app.state.config, presets: app.state.presets, sequence: app.state.sequence,
+    schedules: app.state.schedules, cueLists: app.state.cueLists }), before);
+  assert.match(app.elements.get('connection-detail').textContent, /Could not refresh:.*Scenes.*Last loaded data is retained/);
+  await assert.rejects(app.api('/api/v1/presets', 'PUT', scene()), /Refresh scenes successfully/);
+  assert.equal(app.calls.filter(call => call.path === '/api/v1/presets' && call.method === 'PUT').length, 0);
+  responses['/api/v1/presets'] = [];
+  await app.lg.refresh();
+  assert.equal(app.state.presets.length, 0, 'a successfully loaded empty library is authoritative');
+  assert.ok(!app.state.resourceErrors.includes('Scenes'));
+});
+
+test('refresh is coalesced and a late request cannot repopulate a disconnected node', async () => {
+  let finishStatus;
+  const app = dashboard({ '/api/v1/status': () => new Promise(resolve => { finishStatus = resolve; }) });
+  await flush();
+  const first = app.lg.refresh();
+  const second = app.lg.refresh();
+  assert.equal(app.calls.filter(call => call.path === '/api/v1/status').length, 1);
+  app.lg.disconnect();
+  finishStatus(snapshot());
+  await Promise.all([first, second]);
+  assert.equal(app.state.status, null);
+  assert.equal(app.state.presets.length, 0);
+  assert.equal(app.calls.filter(call => call.path === '/api/v1/config').length, 0);
+  assert.equal(app.elements.get('connection-state').textContent, 'Disconnected');
+});
+
+test('a newer stream snapshot wins over an in-flight HTTP response', async () => {
+  let finishStatus;
+  const app = dashboard({ '/api/v1/status': () => new Promise(resolve => { finishStatus = resolve; }) });
+  await flush();
+  const pending = app.refreshStatus();
+  app.acceptStatus(snapshot({ scene: { activePreset: 12 } }), true);
+  finishStatus(snapshot({ scene: { activePreset: 2 } }));
+  await pending;
+  assert.equal(app.state.status.scene.activePreset, 12);
+  assert.equal(app.state.connection, 'live');
+});
+
+test('delayed websocket tickets cannot reopen a disconnected session', async () => {
+  let finishTicket;
+  const app = dashboard({ '/api/v1/auth/ws-ticket': () => new Promise(resolve => { finishTicket = resolve; }) });
+  await flush();
+  app.state.token = 'session';
+  app.initWebSocket();
+  app.lg.disconnect();
+  finishTicket({ ticket: 'old-ticket' });
+  await flush();
+  assert.equal(app.sockets.length, 0);
+  assert.equal(app.timers.size, 0, 'disconnect cancels pending requests and all connection timers');
+});
+
+test('late websocket callbacks cannot replace the current socket and target scheme is respected', async () => {
+  const app = dashboard();
+  await flush();
+  app.state.token = 'session';
+  app.state.host = 'https://node-proxy.test';
+  app.initWebSocket(); await flush();
+  const old = app.sockets[0];
+  const oldClose = old.onclose;
+  const oldMessage = old.onmessage;
+  assert.equal(old.url, 'wss://node-proxy.test/ws');
+  app.initWebSocket(); await flush();
+  oldClose();
+  oldMessage({ data: JSON.stringify(snapshot({ scene: { activePreset: 4 } })) });
+  assert.equal(app.sockets.length, 2);
+  assert.equal(app.state.status, null);
+  assert.ok(![...app.timers.values()].some(timer => timer.delay === 2000));
+  app.sockets[1].onopen();
+  app.sockets[1].onmessage({ data: JSON.stringify(snapshot({ scene: { activePreset: 8 } })) });
+  assert.equal(app.state.status.scene.activePreset, 8);
+  assert.equal(app.elements.get('connection-state').textContent, 'Live status');
+  app.lg.disconnect();
+});
+
+test('HTTP fallback recovers status while websocket tickets fail and stops on logout', async () => {
+  const app = dashboard({ '/api/v1/auth/ws-ticket': new Error('stream unavailable') });
+  await flush();
+  app.state.token = 'session';
+  app.initWebSocket(); app.startStatusWatchdog(); await flush();
+  assert.equal(app.state.connection, 'offline');
+  await app.runTimer(5000);
+  assert.equal(app.state.connection, 'polling');
+  assert.equal(app.state.statusStale, false);
+  assert.match(app.elements.get('connection-detail').textContent, /HTTP.*reconnects/);
+  app.responses['/api/v1/status'] = new Error('node unreachable');
+  await app.runTimer(5000);
+  assert.equal(app.state.connection, 'offline');
+  assert.match(app.elements.get('connection-detail').textContent, /stale.*last received/);
+  assert.equal(app.state.status.output.powerMw, 1200, 'last known telemetry is retained and labelled stale');
+  app.lg.disconnect();
+  assert.equal(app.timers.size, 0);
+});
+
+test('missing or malformed stream status cannot keep the status fresh', async () => {
+  const app = dashboard({ '/api/v1/status': new Error('unreachable') });
+  await flush();
+  app.state.token = 'session';
+  app.initWebSocket(); await flush();
+  const socket = app.sockets[0]; socket.onopen();
+  socket.onmessage({ data: JSON.stringify(snapshot()) });
+  const statusAt = app.state.lastStatusAt;
+  app.advance(11000);
+  socket.onmessage({ data: JSON.stringify({ unrelated: true }) });
+  socket.onmessage({ data: new Uint8Array([2, 1, 1, 0, 255, 0, 0]).buffer });
+  assert.equal(app.state.lastStatusAt, statusAt);
+  app.startStatusWatchdog(); await app.runTimer(5000);
+  assert.equal(app.state.statusStale, true);
+  assert.equal(app.state.connection, 'offline');
+  app.lg.disconnect();
+});
+
+test('expired sessions stop reconnects and request a new sign-in', async () => {
+  const app = dashboard({ '/api/v1/status': { _httpStatus: 401, error: 'authorization_required' } });
+  await flush();
+  app.state.token = 'expired';
+  app.startStatusWatchdog();
+  await app.runTimer(5000);
+  assert.equal(app.state.token, '');
+  assert.equal(app.elements.get('product-app').hidden, true);
+  assert.match(app.elements.get('experience-toast').textContent, /Session expired/);
+  assert.ok(![...app.timers.values()].some(timer => timer.delay === 5000));
+});
+
+test('request timeouts do not claim an unconfirmed write failed to apply', async () => {
+  const app = dashboard({ '/api/v1/activate': ({ signal }) => new Promise((_, reject) => {
+    signal.addEventListener('abort', () => reject(new Error('aborted')));
+  }) });
+  await flush();
+  const pending = app.api('/api/v1/activate', 'POST', { preset: 0 });
+  const rejected = assert.rejects(pending, /No confirmation.*before repeating/);
+  await app.runTimer(8000); await rejected;
+  assert.equal(app.calls.filter(call => call.path === '/api/v1/activate').length, 1, 'commands are never retried automatically');
+});
+
+test('output faults, pending changes, real budgets and incomplete estimates are visible', () => {
+  const app = dashboard();
+  app.acceptStatus(snapshot({ output: { enabled: false, fault: true, state: 'output_gate_failed', powerMw: 900,
+    power: { limitMw: 3200, estimateComplete: false } }, scene: { activePreset: 255, applyPending: true, transitioning: false },
+    protocols: { artnet: { enabled: true, sources: 2 }, sacn: { enabled: true, sources: 1 } } }));
+  assert.equal(app.elements.get('dash-safety-text').textContent, 'Output fault');
+  assert.equal(app.elements.get('dash-trans-text').textContent, 'Change pending');
+  assert.equal(app.elements.get('dash-playing').textContent, 'No scene active');
+  assert.equal(app.elements.get('dash-proto-text').textContent, 'Art-Net · sACN');
+  assert.equal(app.elements.get('dash-power-est').textContent, 'Partial: 900 mW');
+  assert.equal(app.elements.get('dash-power-max').textContent, 'Budget: 3200 mW');
+  assert.match(app.elements.get('dash-power-note').textContent, /incomplete/);
+  app.state.status.output.estopActive = true; app.updateTelemetryUI();
+  assert.equal(app.elements.get('dash-safety-text').textContent, 'Emergency stop');
+});
+
+test('restored credentials must have a matching saved host and node sessions do not retain old documents', async () => {
+  const unbound = dashboard({}, { lg_node_token: 'unbound' });
+  await flush();
+  assert.equal(unbound.state.token, '');
+  assert.ok(unbound.calls.every(call => call.headers.Authorization !== 'Bearer unbound'));
+  const app = dashboard(); await flush();
+  app.state.presets = [scene()]; app.state.config = { deviceName: 'Previous node' };
+  app.elements.get('experience-host').value = 'other-node.test';
+  app.elements.get('experience-token').value = 'operator-key';
+  await app.lg.connect(); await flush();
+  assert.equal(app.state.presets.length, 0);
+  assert.equal(app.state.config.deviceName, undefined);
+  assert.equal(app.stored.lg_node_host, 'http://other-node.test');
+  assert.deepEqual(JSON.parse(app.stored.lg_node_session), { host: 'http://other-node.test', token: 'session' });
+  assert.equal(app.stored.lg_node_token, undefined);
+  assert.ok(app.calls.filter(call => call.path !== '/api/v1/auth/status').every(call => call.url.startsWith('http://other-node.test/')));
+  app.lg.disconnect();
+});
+
+test('diagnostics read the nested health contract without inventing zero readings', async () => {
+  const app = dashboard({ '/api/v1/health': { system: { uptime_s: 3661, min_free_heap: 65536 },
+    memory: { free8: 131072 }, network: { wifi_rssi: -57 }, dmx: { sources_dropped: 3 } } });
+  const grid = { innerHTML: '' }; app.elements.set('health-metrics-grid', grid);
+  await app.lg.loadCommissioning();
+  assert.match(grid.innerHTML, /1h 1m 1s/);
+  assert.match(grid.innerHTML, /128 KB/);
+  assert.match(grid.innerHTML, /64 KB/);
+  assert.match(grid.innerHTML, /-57 dBm/);
+  assert.match(grid.innerHTML, /DMX sources dropped/);
+  app.responses['/api/v1/health'] = {};
+  await app.lg.loadCommissioning();
+  assert.match(grid.innerHTML, /Not reported/);
+  assert.doesNotMatch(grid.innerHTML, />0 KB|>-100 dBm/);
+});
+
+test('a login response arriving after disconnect cannot restore credentials or reveal the dashboard', async () => {
+  let finishLogin;
+  const app = dashboard({ '/api/v1/auth/session': () => new Promise(resolve => { finishLogin = resolve; }) });
+  await flush();
+  app.elements.get('experience-token').value = 'key';
+  const login = app.lg.connect();
+  app.lg.disconnect();
+  finishLogin({ sessionToken: 'old-session', role: 'admin' });
+  await login;
+  assert.equal(app.state.token, '');
+  assert.equal(app.stored.lg_node_token, undefined);
+  assert.equal(app.elements.get('product-app').hidden, true);
+  assert.equal(app.calls.filter(call => call.path === '/api/v1/status').length, 0);
+});
+
+test('new scene slots are not allocated from a loading or failed library', async () => {
+  let finishPresets;
+  const app = dashboard({ '/api/v1/presets': () => new Promise(resolve => { finishPresets = resolve; }) });
+  await flush();
+  const refreshing = app.lg.refresh();
+  await flush();
+  assert.equal(typeof finishPresets, 'function');
+  app.lg.createNewScene();
+  assert.equal(app.state.editing, null, 'the empty initial cache does not prove slot 0 is free');
+  assert.match(app.elements.get('experience-toast').textContent, /Refresh scenes successfully/);
+  finishPresets([{ ...scene(), index: 0, name: 'Existing scene' }]);
+  await refreshing;
+  app.lg.createNewScene();
+  assert.equal(app.state.editing.index, 1, 'allocation uses the completed library');
+  app.state.editing = null;
+  app.responses['/api/v1/presets'] = new Error('unreachable');
+  await app.lg.refresh();
+  app.lg.createNewScene();
+  assert.equal(app.state.editing, null, 'a failed library refresh also blocks allocation');
+});
+
+test('restore never commits to another node after delayed validation or body decoding', async () => {
+  for (const delayBody of [false, true]) {
+    let finish;
+    const waiting = new Promise(resolve => { finish = resolve; });
+    const app = dashboard({ '/api/v1/restore/validate': delayBody ? { json: () => waiting } : () => waiting });
+    await flush();
+    app.state.host = 'node-a.test'; app.state.token = 'token-a';
+    app.elements.get('restore-file').files = [{ size: 512, name: 'a.lgbak' }];
+    const restoring = app.lg.uploadRestore(); await flush();
+    const validation = app.calls.find(call => call.path === '/api/v1/restore/validate');
+    assert.equal(validation.url, 'http://node-a.test/api/v1/restore/validate');
+    assert.ok([...app.timers.values()].some(timer => timer.delay === 120000), 'backup transfer has a bounded upload-specific deadline');
+    app.lg.disconnect();
+    app.state.host = 'node-b.test'; app.state.token = 'token-b';
+    app.elements.get('restore-status').textContent = 'Node B';
+    assert.equal(validation.signal.aborted, true);
+    finish({ valid: true, plan: {} }); await restoring;
+    assert.equal(app.calls.filter(call => call.path === '/api/v1/restore').length, 0);
+    assert.equal(app.elements.get('restore-status').textContent, 'Node B');
+  }
+});
+
+test('a cancelled OTA capacity check cannot upload to the replacement node', async () => {
+  let finishCapacity;
+  const app = dashboard({ '/api/v1/ota/status': () => new Promise(resolve => { finishCapacity = resolve; }) });
+  await flush();
+  app.state.host = 'node-a.test'; app.state.token = 'token-a';
+  app.elements.get('ota-file').files = [{ size: 512, name: 'firmware.bin' }];
+  const uploading = app.lg.uploadOta(); await flush();
+  const capacityCall = app.calls.find(call => call.path === '/api/v1/ota/status');
+  app.lg.disconnect(); app.state.host = 'node-b.test'; app.state.token = 'token-b';
+  app.elements.get('ota-status').textContent = 'Node B';
+  finishCapacity({ maxFirmwareBytes: 1024 }); await uploading;
+  assert.equal(capacityCall.signal.aborted, true);
+  assert.equal(app.calls.filter(call => call.path === '/api/v1/ota').length, 0);
+  assert.equal(app.state.otaCapacity, 0);
+  assert.equal(app.elements.get('ota-status').textContent, 'Node B');
+});
+
+test('OTA transfer and verification stay owned by the starting node and stop on disconnect', async () => {
+  let finishUpload;
+  const app = dashboard({ '/api/v1/ota/status': { maxFirmwareBytes: 1024 },
+    '/api/v1/ota': () => new Promise(resolve => { finishUpload = resolve; }) });
+  await flush();
+  app.state.host = 'node-a.test'; app.state.token = 'token-a';
+  app.elements.get('ota-file').files = [{ size: 512, name: 'firmware.bin' }];
+  const uploading = app.lg.uploadOta(); await flush();
+  const transfer = app.calls.find(call => call.path === '/api/v1/ota');
+  assert.equal(transfer.headers.Authorization, 'Bearer token-a');
+  assert.ok([...app.timers.values()].some(timer => timer.delay === 120000));
+  assert.ok(![...app.timers.values()].some(timer => timer.delay === 8000), 'the short JSON deadline is not applied to firmware transfer');
+  finishUpload({}); await flush();
+  assert.ok([...app.timers.values()].some(timer => timer.delay === 2000), 'verification is waiting');
+  app.lg.disconnect(); app.state.host = 'node-b.test'; app.state.token = 'token-b';
+  await uploading;
+  assert.equal(app.calls.filter(call => call.path === '/api/v1/ota/status').length, 1, 'no verification poll reaches node B');
+  assert.ok(![...app.timers.values()].some(timer => timer.delay === 2000));
+});
+
+test('successful restore reload is cancelled when the operator leaves that node', async () => {
+  const app = dashboard({ '/api/v1/restore/validate': { valid: true, plan: {} } });
+  await flush();
+  app.state.host = 'node-a.test'; app.state.token = 'token-a';
+  app.elements.get('restore-file').files = [{ size: 512, name: 'a.lgbak' }];
+  await app.lg.uploadRestore();
+  const restore = app.calls.find(call => call.path === '/api/v1/restore');
+  assert.equal(restore.url, 'http://node-a.test/api/v1/restore');
+  assert.equal(restore.headers.Authorization, 'Bearer token-a');
+  assert.ok([...app.timers.values()].some(timer => timer.delay === 6000));
+  app.lg.disconnect(); app.state.host = 'node-b.test'; app.state.token = 'token-b';
+  await flush();
+  assert.ok(![...app.timers.values()].some(timer => timer.delay === 6000));
+  assert.equal(app.reloads.length, 0);
+});
+
+test('backup body reads are aborted and cannot publish completion for a new node', async () => {
+  let finishBlob;
+  const app = dashboard({ '/api/v1/backup': { blob: () => new Promise(resolve => { finishBlob = resolve; }) } });
+  await flush(); app.state.host = 'node-a.test'; app.state.token = 'token-a';
+  const downloading = app.lg.downloadBackup(); await flush();
+  const request = app.calls.find(call => call.path === '/api/v1/backup');
+  app.lg.disconnect(); app.state.host = 'node-b.test'; app.state.token = 'token-b';
+  app.elements.get('experience-toast').textContent = 'Node B';
+  finishBlob(new Blob(['backup'])); await downloading;
+  assert.equal(request.signal.aborted, true);
+  assert.equal(app.elements.get('experience-toast').textContent, 'Node B');
+});
+
+test('burn-in cancellation fallback cannot abort the newly selected node', async () => {
+  const app = dashboard({ '/api/v1/factory/burn-in/stop': ({ signal }) => new Promise((_, reject) => {
+    signal.addEventListener('abort', () => reject(new Error('aborted')));
+  }) });
+  await flush(); app.state.host = 'node-a.test'; app.state.token = 'token-a';
+  const stopping = app.lg.stopBurnIn(); await flush();
+  app.lg.disconnect(); app.state.host = 'node-b.test'; app.state.token = 'token-b';
+  await stopping;
+  assert.equal(app.calls.filter(call => call.path === '/api/v1/factory/abort').length, 0);
+  app.responses['/api/v1/factory/burn-in/stop'] = { _httpStatus: 503, error: 'busy' };
+  await app.lg.stopBurnIn();
+  const fallback = app.calls.find(call => call.path === '/api/v1/factory/abort');
+  assert.equal(fallback.url, 'http://node-b.test/api/v1/factory/abort', 'a new explicit stop still supports same-node fallback');
+  assert.equal(fallback.headers.Authorization, 'Bearer token-b');
+});
+
+test('blank host sign-in stores the effective target atomically and restores only its paired token', async () => {
+  const stored = { lg_node_host: 'old-node.test', lg_node_token: 'old-token' };
+  const responses = { '/api/v1/auth/session': { sessionToken: 'new-token', role: 'admin' } };
+  const app = dashboard(responses, stored); await flush();
+  app.elements.get('experience-host').value = '';
+  app.elements.get('experience-token').value = 'key';
+  await app.lg.connect(); await flush();
+  assert.deepEqual(JSON.parse(stored.lg_node_session), { host: 'http://node.test', token: 'new-token' });
+  const restored = dashboard(responses, { ...stored }); await flush();
+  assert.equal(restored.state.host, 'http://node.test');
+  assert.equal(restored.state.token, 'new-token');
+  assert.ok(restored.calls.every(call => call.url.startsWith('http://node.test/')));
+  app.lg.disconnect(); restored.lg.disconnect();
+});
+
+test('storage write failures cannot mix a previous host with a new session token', async () => {
+  for (const failedKey of ['lg_node_session', 'lg_node_host']) {
+    const stored = { lg_node_host: 'old-node.test', lg_node_session: JSON.stringify({ host: 'http://old-node.test', token: 'old-token' }) };
+    const app = dashboard({}, stored, [failedKey]); await flush();
+    app.elements.get('experience-host').value = 'new-node.test'; app.elements.get('experience-token').value = 'key';
+    await app.lg.connect(); await flush();
+    const restored = dashboard({}, { ...stored }); await flush();
+    assert.ok(restored.calls.every(call => call.headers.Authorization !== 'Bearer session' || call.url.startsWith('http://new-node.test/')));
+    if (failedKey === 'lg_node_session') assert.equal(restored.state.token, '');
+    else assert.equal(restored.state.host, 'http://new-node.test');
+    app.lg.disconnect(); restored.lg.disconnect();
+  }
+});
+
+test('schedules preserve missing scene targets and cannot save against a failed scene library', async () => {
+  const app = dashboard({ '/api/v1/presets': new Error('scene read failed'),
+    '/api/v1/schedules': [{ enabled: true, hour: 8, minute: 30, action: 'preset', presetIndex: 7 }] });
+  const grid = { innerHTML: '' }; app.elements.set('schedules-grid', grid);
+  await app.lg.refresh();
+  assert.match(grid.innerHTML, /option value="7" selected>Scene 8 \(not in loaded library\)/);
+  await app.lg.saveSchedules();
+  assert.equal(app.calls.filter(call => call.path === '/api/v1/schedules' && call.method === 'PUT').length, 0);
+  assert.equal(app.state.schedules[0].presetIndex, 7);
+  assert.match(app.elements.get('experience-toast').textContent, /Refresh scenes successfully/);
 });

@@ -6,55 +6,35 @@ import type {
   SavedNodeInfo
 } from './types';
 import { getNodeDisplayName } from './types';
+import {
+  NODE_LIST_KEY,
+  NODE_META_KEY,
+  NODE_REGISTRY_KEY,
+  readString,
+  writeString,
+  readStringList,
+  writeStringList,
+  getSelectedNodeIp,
+  setSelectedNodeIp,
+} from '../auth/storage';
 
-export const NODE_IP_KEY = 'lg_node_ip';
-export const NODE_LIST_KEY = 'lg_nodes';
-export const NODE_META_KEY = 'lg_nodes_meta';
-export const NODE_REGISTRY_KEY = 'lg_nodes_v3';
+// Preserve existing fleet imports while keeping browser persistence in its
+// shared boundary. No storage access occurs during module initialization.
+export {
+  NODE_IP_KEY,
+  NODE_LIST_KEY,
+  NODE_META_KEY,
+  NODE_REGISTRY_KEY,
+  readString,
+  writeString,
+  removeValue,
+  readStringList,
+  writeStringList,
+  getSelectedNodeIp,
+  setSelectedNodeIp,
+} from '../auth/storage';
 
 export const NODE_REGISTRY_CHANGED_EVENT = 'lumigrid:nodes-changed';
-
-function storage(): Storage | null {
-  return typeof localStorage === 'undefined' ? null : localStorage;
-}
-
-export function readString(key: string, fallback = ''): string {
-  return storage()?.getItem(key) ?? fallback;
-}
-
-export function writeString(key: string, value: string): void {
-  try { storage()?.setItem(key, value); } catch {}
-}
-
-export function removeValue(key: string): void {
-  try { storage()?.removeItem(key); } catch {}
-}
-
-export function readStringList(key: string): string[] {
-  const raw = readString(key, '[]');
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    return Array.isArray(parsed) && parsed.every(item => typeof item === 'string')
-      ? parsed
-      : [];
-  } catch {
-    return [];
-  }
-}
-
-export function writeStringList(key: string, values: string[]): void {
-  writeString(key, JSON.stringify(values));
-}
-
-export function getSelectedNodeIp(fallback = ''): string {
-  return readString(NODE_IP_KEY, fallback).trim();
-}
-
-export function setSelectedNodeIp(nodeIp: string): void {
-  const value = nodeIp.trim();
-  if (value) writeString(NODE_IP_KEY, value);
-  else removeValue(NODE_IP_KEY);
-}
 
 function notifyNodeRegistryChanged(): void {
   if (typeof window !== 'undefined') {

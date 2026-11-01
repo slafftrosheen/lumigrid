@@ -33,6 +33,8 @@ python scripts/verify_runtime_math.py
 
 Pre/post-build hooks generate embedded UI, check partitions/invariants and inspect ELF stack/image budget. Report the exact revision/artifact checked.
 
+CMake also prepares and verifies the locked managed dependencies. For the exact known incomplete cJSON checkout, it preserves the original tree under `.pio/dependency-snapshots/` and lets the component manager restore the pinned archive, then verifies the actual package hash. Modified or unfamiliar dependency trees fail without being replaced. Keep these backups until local changes have been reconciled; do not disable component integrity checks. The preparation helper's regression suite runs with ESP-IDF's Python environment after the first firmware build: `"$PLATFORMIO_CORE_DIR/penv/.espidf-5.2.1/bin/python" scripts/test_prepare_managed_components.py` (POSIX shell).
+
 To exercise the production effect renderer and catalogue API on a host, run from the repository root:
 
 ```powershell

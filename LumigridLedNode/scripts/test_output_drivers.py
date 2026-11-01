@@ -108,28 +108,85 @@ HOST_HEADERS = {
                GPIO_PULLDOWN_DISABLE, GPIO_INTR_DISABLE };
         struct gpio_config_t { uint64_t pin_bit_mask; int mode, pull_up_en, pull_down_en, intr_type; };
         inline int host_gpio_levels[40]{};
-        inline int gpio_set_level(gpio_num_t pin, int value) { host_gpio_levels[pin] = value; return ESP_OK; }
-        inline int gpio_get_level(gpio_num_t pin) { return host_gpio_levels[pin]; }
-        inline int gpio_config(const gpio_config_t*) { return ESP_OK; }
+        namespace host_gpio {
+            inline int fail_pin = -1, fail_level = -1, config_fail_pin = -1;
+            inline unsigned failures = 0, config_failures = 0, configurations = 0;
+            inline int held_low_pin = -1;
+            inline unsigned held_low_after_reads = 1, selected_reads = 0;
+            inline void reset_faults() {
+                fail_pin = fail_level = config_fail_pin = held_low_pin = -1;
+                failures = config_failures = selected_reads = 0;
+                held_low_after_reads = 1;
+            }
+        }
+        inline int gpio_set_level(gpio_num_t pin, int value) {
+            if (host_gpio::failures && pin == host_gpio::fail_pin &&
+                (host_gpio::fail_level < 0 || value == host_gpio::fail_level)) {
+                --host_gpio::failures; return ESP_FAIL;
+            }
+            host_gpio_levels[pin] = value; return ESP_OK;
+        }
+        inline int gpio_get_level(gpio_num_t pin) {
+            if (pin == host_gpio::held_low_pin &&
+                ++host_gpio::selected_reads >= host_gpio::held_low_after_reads) return 0;
+            return host_gpio_levels[pin];
+        }
+        inline int gpio_config(const gpio_config_t* cfg) {
+            ++host_gpio::configurations;
+            if (host_gpio::config_failures && host_gpio::config_fail_pin >= 0 &&
+                (cfg->pin_bit_mask & (1ULL << host_gpio::config_fail_pin))) {
+                --host_gpio::config_failures; return ESP_FAIL;
+            }
+            return ESP_OK;
+        }
         inline int gpio_reset_pin(gpio_num_t) { return ESP_OK; }
         inline int gpio_set_direction(gpio_num_t, int) { return ESP_OK; }
     """,
-    # Unused default transports fail closed. Most tests inject recording
-    # transports; one explicitly enables the SDK RMT stub to inspect the real
-    # EspRmtTransport queue policy. No encoder timing is simulated here.
+    # SDK transport stubs fail closed until explicitly enabled. Most cases use
+    # recording transports; production transport cases enable these boundaries
+    # to exercise I2C recovery and RMT lifecycle/queue policy. No timing is emulated.
     "driver/i2c.h": """
         #include "gpio.h"
+        #include <array>
+        #include <algorithm>
         using i2c_port_t = int;
         constexpr int I2C_NUM_0 = 0, I2C_MODE_MASTER = 1;
         struct i2c_config_t {
             int mode; gpio_num_t sda_io_num, scl_io_num; int sda_pullup_en, scl_pullup_en;
             struct { unsigned clk_speed; } master; unsigned clk_flags;
         };
-        inline int i2c_param_config(int, const i2c_config_t*) { return ESP_ERR_NOT_SUPPORTED; }
-        inline int i2c_driver_install(int, int, int, int, int) { return ESP_ERR_NOT_SUPPORTED; }
-        inline int i2c_driver_delete(int) { return ESP_ERR_NOT_SUPPORTED; }
-        inline int i2c_master_write_to_device(int, uint8_t, const uint8_t*, size_t, unsigned) { return ESP_ERR_NOT_SUPPORTED; }
-        inline int i2c_master_write_read_device(int, uint8_t, const uint8_t*, size_t, uint8_t*, size_t, unsigned) { return ESP_ERR_NOT_SUPPORTED; }
+        namespace host_i2c {
+            inline bool active = false, live = false;
+            inline unsigned installs = 0, deletes = 0, delete_failures = 0;
+            inline std::array<uint8_t, 256> registers{};
+        }
+        inline int i2c_param_config(int, const i2c_config_t*) {
+            return host_i2c::active ? ESP_OK : ESP_ERR_NOT_SUPPORTED;
+        }
+        inline int i2c_driver_install(int, int, int, int, int) {
+            if (!host_i2c::active) return ESP_ERR_NOT_SUPPORTED;
+            if (host_i2c::live) return ESP_ERR_INVALID_STATE;
+            host_i2c::live = true; ++host_i2c::installs; return ESP_OK;
+        }
+        inline int i2c_driver_delete(int) {
+            if (!host_i2c::active) return ESP_ERR_NOT_SUPPORTED;
+            ++host_i2c::deletes;
+            if (host_i2c::delete_failures) { --host_i2c::delete_failures; return ESP_FAIL; }
+            if (!host_i2c::live) return ESP_ERR_INVALID_STATE;
+            host_i2c::live = false; return ESP_OK;
+        }
+        inline int i2c_master_write_to_device(int, uint8_t, const uint8_t* data, size_t length, unsigned) {
+            if (!host_i2c::active || !host_i2c::live) return ESP_ERR_NOT_SUPPORTED;
+            if (length < 2 || size_t(data[0]) + length - 1 > host_i2c::registers.size()) return ESP_ERR_INVALID_ARG;
+            std::copy(data + 1, data + length, host_i2c::registers.begin() + data[0]);
+            return ESP_OK;
+        }
+        inline int i2c_master_write_read_device(int, uint8_t, const uint8_t* data, size_t write_length,
+                                              uint8_t* out, size_t read_length, unsigned) {
+            if (!host_i2c::active || !host_i2c::live) return ESP_ERR_NOT_SUPPORTED;
+            if (write_length != 1 || read_length != 1) return ESP_ERR_INVALID_ARG;
+            *out = host_i2c::registers[data[0]]; return ESP_OK;
+        }
     """,
     "driver/rmt_tx.h": """
         #include "gpio.h"

@@ -5,6 +5,11 @@ import {
   normalizeNodeAddress,
   NODE_IP_KEY,
   NODE_REGISTRY_CHANGED_EVENT,
+  readString,
+  readNodeRegistry,
+  readSessionString,
+  writeSessionString,
+  removeSessionValue,
 } from './storage';
 
 class MockStorage implements Storage {
@@ -78,6 +83,49 @@ describe('selected node storage', () => {
     expect(normalizeNodeAddress('lumigrid.local/api/v1')).toBeNull();
     expect(normalizeNodeAddress('192.168.1.20?x=1')).toBeNull();
     expect(normalizeNodeAddress('   ')).toBeNull();
+  });
+
+  it('keeps selected-node and fleet reads usable when persistent reads are denied', () => {
+    vi.spyOn(mockStorage, 'getItem').mockImplementation(() => { throw new Error('Storage denied'); });
+    expect(getSelectedNodeIp('192.168.1.1')).toBe('192.168.1.1');
+    expect(readString('setting', 'fallback')).toBe('fallback');
+    expect(readNodeRegistry()).toEqual({});
+  });
+
+  it('contains errors from the browser storage getters themselves', () => {
+    const blockedWindow = Object.defineProperties({}, {
+      localStorage: { get() { throw new Error('Storage denied'); } },
+      sessionStorage: { get() { throw new Error('Storage denied'); } },
+    });
+    vi.stubGlobal('window', blockedWindow);
+    expect(getSelectedNodeIp('fallback')).toBe('fallback');
+    expect(readNodeRegistry()).toEqual({});
+    expect(readSessionString('session', 'fallback')).toBe('fallback');
+    expect(() => setSelectedNodeIp('192.168.1.1')).not.toThrow();
+    expect(() => writeSessionString('session', 'value')).not.toThrow();
+    expect(() => removeSessionValue('session')).not.toThrow();
+  });
+
+  it('keeps session helpers separate from persistent storage', () => {
+    const tabStorage = new MockStorage();
+    vi.stubGlobal('sessionStorage', tabStorage);
+    writeSessionString('session', 'tab-token');
+    expect(readSessionString('session')).toBe('tab-token');
+    expect(mockStorage.getItem('session')).toBeNull();
+    removeSessionValue('session');
+    expect(tabStorage.getItem('session')).toBeNull();
+  });
+
+  it('contains session read, quota and removal failures', () => {
+    const tabStorage = new MockStorage();
+    vi.stubGlobal('sessionStorage', tabStorage);
+    for (const method of ['getItem', 'setItem', 'removeItem'] as const) {
+      vi.spyOn(tabStorage, method).mockImplementation(() => { throw new Error('Storage denied'); });
+    }
+    expect(readSessionString('session', 'fallback')).toBe('fallback');
+    expect(() => writeSessionString('session', 'value')).not.toThrow();
+    expect(() => removeSessionValue('session')).not.toThrow();
+    expect(mockStorage.length).toBe(0);
   });
 
   it('emits fleet-change events for structural edits but not presence heartbeats', async () => {

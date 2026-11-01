@@ -37,25 +37,53 @@ constexpr i2c_port_t kI2cPort = I2C_NUM_0;
 constexpr uint32_t kI2cHz = 100000;
 SemaphoreHandle_t s_i2c_mutex = nullptr;
 std::atomic<bool> s_outputs_enabled{false};
+// A failed GPIO operation cannot be cleared by an unrelated successful I2C
+// write (or a best-effort disable retry). Require explicit verified recovery.
+std::atomic<esp_err_t> s_output_gate_error{ESP_OK};
+std::atomic<uint32_t> s_output_gate_fault_generation{0};
+std::atomic<uint32_t> s_output_gate_recovered_generation{0};
 #if defined(CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS) && CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS
 std::atomic<bool> s_test_output_enable_mock{false};
 #endif
 
-void disable_pwm_outputs() {
-    // PCA9685 /OE is active-low. HIGH is the hardware fail-safe state.
-    gpio_set_level(lg::board::kPcaOe, 1);
-    s_outputs_enabled.store(false, std::memory_order_release);
+void record_output_gate_failure(esp_err_t err) {
+    s_output_gate_error.store(err, std::memory_order_relaxed);
+    s_output_gate_fault_generation.fetch_add(1, std::memory_order_release);
 }
 
-void enable_pwm_outputs() {
+esp_err_t output_gate_error() {
+    if (s_output_gate_fault_generation.load(std::memory_order_acquire) ==
+        s_output_gate_recovered_generation.load(std::memory_order_acquire)) return ESP_OK;
+    return s_output_gate_error.load(std::memory_order_acquire);
+}
+
+esp_err_t disable_pwm_outputs() {
+    // PCA9685 /OE is active-low. HIGH is the hardware fail-safe state.
+    const esp_err_t err = gpio_set_level(lg::board::kPcaOe, 1);
+    if (err == ESP_OK) {
+        s_outputs_enabled.store(false, std::memory_order_release);
+    } else {
+        // Preserve the last confirmed state rather than claim an inhibit that
+        // the GPIO driver rejected. Callers can still attempt a zero frame.
+        record_output_gate_failure(err);
+    }
+    return err;
+}
+
+esp_err_t enable_pwm_outputs() {
 #if defined(CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS) && CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS
     if (s_test_output_enable_mock.load(std::memory_order_acquire)) {
         s_outputs_enabled.store(true, std::memory_order_release);
-        return;
+        return ESP_OK;
     }
 #endif
-    gpio_set_level(lg::board::kPcaOe, 0);
-    s_outputs_enabled.store(true, std::memory_order_release);
+    const esp_err_t err = gpio_set_level(lg::board::kPcaOe, 0);
+    if (err == ESP_OK) {
+        s_outputs_enabled.store(true, std::memory_order_release);
+    } else {
+        record_output_gate_failure(err);
+    }
+    return err;
 }
 
 class LegacyEspI2cTransport final : public IPcaTransport {
@@ -95,7 +123,9 @@ public:
             xSemaphoreTake(s_i2c_mutex, portMAX_DELAY);
         }
         esp_err_t err = i2c_driver_delete(kI2cPort);
-        initialized_ = false;
+        // An unsuccessful delete has not released driver ownership. Recovery
+        // must not reconfigure its live pins or install a second driver.
+        if (err == ESP_OK) initialized_ = false;
         if (s_i2c_mutex != nullptr) {
             xSemaphoreGive(s_i2c_mutex);
         }
@@ -138,10 +168,10 @@ public:
         sda_released = false;
 
         // 1. Assert /OE HIGH
-        disable_pwm_outputs();
+        ESP_RETURN_ON_ERROR(disable_pwm_outputs(), TAG, "recovery /OE inhibit");
 
         // 2. Delete driver if active
-        deinit_bus();
+        ESP_RETURN_ON_ERROR(deinit_bus(), TAG, "recovery I2C delete");
 
         // 3. Configure SDA & SCL as open-drain GPIO
         gpio_config_t conf{};
@@ -150,11 +180,11 @@ public:
         conf.pull_up_en = GPIO_PULLUP_ENABLE;
         conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
         conf.intr_type = GPIO_INTR_DISABLE;
-        gpio_config(&conf);
+        ESP_RETURN_ON_ERROR(gpio_config(&conf), TAG, "recovery GPIO config");
 
         // 4. Release both lines HIGH
-        gpio_set_level(lg::board::kI2cSda, 1);
-        gpio_set_level(lg::board::kI2cScl, 1);
+        ESP_RETURN_ON_ERROR(gpio_set_level(lg::board::kI2cSda, 1), TAG, "release SDA");
+        ESP_RETURN_ON_ERROR(gpio_set_level(lg::board::kI2cScl, 1), TAG, "release SCL");
         esp_rom_delay_us(10);
 
         // 5. Sample lines
@@ -166,11 +196,12 @@ public:
         // If SDA is low, send up to 9 pulses on SCL
         if (gpio_get_level(lg::board::kI2cSda) == 0) {
             for (unsigned p = 0; p < 9; ++p) {
+                ESP_RETURN_ON_ERROR(gpio_set_level(lg::board::kI2cScl, 0), TAG, "clock SCL low");
+                esp_rom_delay_us(5);
+                ESP_RETURN_ON_ERROR(gpio_set_level(lg::board::kI2cScl, 1), TAG, "clock SCL high");
+                esp_rom_delay_us(5);
+                if (gpio_get_level(lg::board::kI2cScl) == 0) return ESP_ERR_TIMEOUT;
                 pulses_sent++;
-                gpio_set_level(lg::board::kI2cScl, 0);
-                esp_rom_delay_us(5);
-                gpio_set_level(lg::board::kI2cScl, 1);
-                esp_rom_delay_us(5);
                 if (gpio_get_level(lg::board::kI2cSda) != 0) {
                     break;
                 }
@@ -179,13 +210,18 @@ public:
 
         // 6. Check if SDA released
         if (gpio_get_level(lg::board::kI2cSda) != 0) {
-            // Generate I2C STOP condition: SDA low -> SCL high -> SDA high
-            gpio_set_level(lg::board::kI2cSda, 0);
+            // Generate STOP with SDA changing low while SCL is low, then
+            // release SCL before SDA. Check the lines actually release.
+            ESP_RETURN_ON_ERROR(gpio_set_level(lg::board::kI2cScl, 0), TAG, "STOP SCL low");
+            ESP_RETURN_ON_ERROR(gpio_set_level(lg::board::kI2cSda, 0), TAG, "STOP SDA low");
             esp_rom_delay_us(5);
-            gpio_set_level(lg::board::kI2cScl, 1);
+            ESP_RETURN_ON_ERROR(gpio_set_level(lg::board::kI2cScl, 1), TAG, "STOP SCL high");
             esp_rom_delay_us(5);
-            gpio_set_level(lg::board::kI2cSda, 1);
+            if (gpio_get_level(lg::board::kI2cScl) == 0) return ESP_ERR_TIMEOUT;
+            ESP_RETURN_ON_ERROR(gpio_set_level(lg::board::kI2cSda, 1), TAG, "STOP SDA high");
             esp_rom_delay_us(5);
+            if (gpio_get_level(lg::board::kI2cSda) == 0 ||
+                gpio_get_level(lg::board::kI2cScl) == 0) return ESP_FAIL;
             sda_released = true;
         } else {
             ESP_LOGE(TAG, "PCA recovery failed: SDA still held LOW after %lu clock pulses", (unsigned long)pulses_sent);
@@ -211,28 +247,38 @@ IPcaTransport& Pca9685Driver::transport() {
     return transport_ ? *transport_ : s_default_transport;
 }
 
-void Pca9685Driver::force_disable_outputs() {
-    disable_pwm_outputs();
+esp_err_t Pca9685Driver::force_disable_outputs() {
+    return disable_pwm_outputs();
 }
 
 esp_err_t Pca9685Driver::enable_outputs() {
     // init/recover establish the first verified zero frame. Later valid frames
     // may contain light; zero_confirmed_ describes the current frame only.
     // A successful blackout write must not bypass an outstanding recovery latch.
-    if (!initialized_ || !valid_frame_confirmed_ || recovery_required_) {
+    if (!initialized_ || !valid_frame_confirmed_ || recovery_required()) {
         disable_pwm_outputs();
         return ESP_ERR_INVALID_STATE;
     }
-    enable_pwm_outputs();
-    return ESP_OK;
+    const esp_err_t err = enable_pwm_outputs();
+    if (err != ESP_OK) disable_pwm_outputs();
+    return err;
 }
 
-void Pca9685Driver::disable_outputs() {
-    disable_pwm_outputs();
+esp_err_t Pca9685Driver::disable_outputs() {
+    return disable_pwm_outputs();
 }
 
 bool Pca9685Driver::is_outputs_enabled() {
     return s_outputs_enabled.load(std::memory_order_acquire);
+}
+
+bool Pca9685Driver::recovery_required() const {
+    return recovery_required_ || output_gate_error() != ESP_OK;
+}
+
+PcaFaultKind Pca9685Driver::last_fault_kind() const {
+    return output_gate_error() != ESP_OK
+        ? PcaFaultKind::OutputGateFailed : last_fault_kind_;
 }
 
 #if defined(CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS) && CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS
@@ -387,6 +433,7 @@ esp_err_t Pca9685Driver::write_zero_frame() {
 }
 
 esp_err_t Pca9685Driver::init() {
+    const uint32_t gate_generation = s_output_gate_fault_generation.load(std::memory_order_acquire);
     initialized_ = false;
     zero_confirmed_ = false;
     valid_frame_confirmed_ = false;
@@ -403,7 +450,7 @@ esp_err_t Pca9685Driver::init() {
 
     // Keep hardware disabled until the controller is configured, verified and a
     // known-safe frame has been written. This prevents boot-time PWM flashes.
-    disable_pwm_outputs(); // preload HIGH before enabling/reconfiguring the pad
+    ESP_RETURN_ON_ERROR(disable_pwm_outputs(), TAG, "/OE preload");
     const gpio_config_t oe_conf = {
         .pin_bit_mask = (1ULL << lg::board::kPcaOe),
         .mode = GPIO_MODE_INPUT_OUTPUT,
@@ -411,14 +458,20 @@ esp_err_t Pca9685Driver::init() {
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
         .intr_type = GPIO_INTR_DISABLE,
     };
-    ESP_RETURN_ON_ERROR(gpio_config(&oe_conf), TAG, "/OE gpio config");
-    disable_pwm_outputs();
+    const esp_err_t gate_config = gpio_config(&oe_conf);
+    if (gate_config != ESP_OK) {
+        record_output_gate_failure(gate_config);
+        return gate_config;
+    }
+    ESP_RETURN_ON_ERROR(disable_pwm_outputs(), TAG, "/OE inhibit");
 
     ESP_RETURN_ON_ERROR(initialise_bus(), TAG, "I2C init");
     ESP_RETURN_ON_ERROR(initialise_chip(), TAG, "chip init");
     ESP_RETURN_ON_ERROR(verify_chip(), TAG, "chip verify");
     ESP_RETURN_ON_ERROR(write_zero_frame(), TAG, "zero frame");
 
+    s_output_gate_recovered_generation.store(gate_generation, std::memory_order_release);
+    ESP_RETURN_ON_ERROR(output_gate_error(), TAG, "/OE fault during init");
     initialized_ = true;
     zero_confirmed_ = true;
     valid_frame_confirmed_ = true;
@@ -431,14 +484,20 @@ esp_err_t Pca9685Driver::init() {
 }
 
 esp_err_t Pca9685Driver::recover() {
-    disable_pwm_outputs();
+    const uint32_t gate_generation = s_output_gate_fault_generation.load(std::memory_order_acquire);
     // Recovery can also be requested while healthy. Invalidate the previous
-    // readiness before touching the bus so every failure remains disabled.
+    // readiness before touching the bus so a failure cannot re-arm output.
     initialized_ = false;
     zero_confirmed_ = false;
     valid_frame_confirmed_ = false;
     recovery_required_ = true;
     recovery_attempts_++;
+
+    const esp_err_t inhibit_err = disable_pwm_outputs();
+    if (inhibit_err != ESP_OK) {
+        recovery_failures_++;
+        return inhibit_err;
+    }
 
     ESP_LOGW(TAG, "Starting PCA bus recovery (attempt #%lu)...", (unsigned long)recovery_attempts_);
     bus_clear_attempts_++;
@@ -449,6 +508,7 @@ esp_err_t Pca9685Driver::recover() {
     if (bus_res != ESP_OK) {
         bus_clear_failures_++;
         recovery_failures_++;
+        last_error_ = bus_res;
         last_fault_kind_ = PcaFaultKind::RecoveryFailed;
         disable_pwm_outputs();
         return bus_res;
@@ -475,8 +535,21 @@ esp_err_t Pca9685Driver::recover() {
         return z_err;
     }
 
-    // Recovery succeeded! /OE remains HIGH. OutputController will enable after next valid frame.
-    disable_pwm_outputs();
+    // Require a final checked inhibit before publishing successful recovery.
+    // OutputController enables PWM only after the next valid frame.
+    const esp_err_t final_inhibit_err = disable_pwm_outputs();
+    if (final_inhibit_err != ESP_OK) {
+        recovery_failures_++;
+        return final_inhibit_err;
+    }
+    // A stop request can reach the GPIO from the other core while I2C recovery
+    // runs. Acknowledge only the gate faults present when this recovery began.
+    s_output_gate_recovered_generation.store(gate_generation, std::memory_order_release);
+    const esp_err_t concurrent_gate_err = output_gate_error();
+    if (concurrent_gate_err != ESP_OK) {
+        recovery_failures_++;
+        return concurrent_gate_err;
+    }
     recovery_successes_++;
     recovery_required_ = false;
     initialized_ = true;
@@ -485,7 +558,7 @@ esp_err_t Pca9685Driver::recover() {
     board::record_first_pwm_zero();
     last_fault_kind_ = PcaFaultKind::None;
     consecutive_failures_ = 0;
-    ESP_LOGI(TAG, "PCA recovery succeeded (pulses=%lu, zero_frame=ok, /OE latched HIGH)", (unsigned long)pulses);
+    ESP_LOGI(TAG, "PCA recovery succeeded (pulses=%lu, zero_frame=ok, /OE inhibit=ok)", (unsigned long)pulses);
     return ESP_OK;
 }
 
@@ -539,10 +612,11 @@ esp_err_t Pca9685Driver::commit() {
     const esp_err_t err = write_bytes(kRegLed0OnL, bytes, sizeof(bytes));
     if (err != ESP_OK) {
         commit_failures_++;
-        disable_pwm_outputs();
+        const esp_err_t inhibit_err = disable_pwm_outputs();
         zero_confirmed_ = false;
         valid_frame_confirmed_ = false;
-        ESP_LOGE(TAG, "PWM commit failed; /OE latched HIGH (%s)", esp_err_to_name(err));
+        ESP_LOGE(TAG, "PWM commit failed (%s); /OE inhibit result=%s",
+                 esp_err_to_name(err), esp_err_to_name(inhibit_err));
         return err;
     }
 
@@ -565,8 +639,8 @@ PcaDiagnostics Pca9685Driver::diagnostics() const {
     PcaDiagnostics diag;
     diag.initialized = initialized_;
     diag.outputs_enabled = is_outputs_enabled();
-    diag.healthy = (last_fault_kind_ == PcaFaultKind::None && !recovery_required_);
-    diag.recovery_required = recovery_required_;
+    diag.healthy = initialized_ && last_fault_kind() == PcaFaultKind::None && !recovery_required();
+    diag.recovery_required = recovery_required();
     diag.address = lg::board::kPcaAddress;
     diag.i2c_hz = kI2cHz;
     diag.pwm_hz = 1017;
@@ -577,10 +651,11 @@ PcaDiagnostics Pca9685Driver::diagnostics() const {
     diag.transactions = transactions_;
     diag.transaction_failures = transaction_failures_;
     diag.consecutive_failures = consecutive_failures_;
-    diag.last_error = last_error_;
+    const esp_err_t gate_error = output_gate_error();
+    diag.last_error = gate_error != ESP_OK ? gate_error : last_error_;
     diag.init_core = init_core_;
 
-    diag.last_fault_kind = last_fault_kind_;
+    diag.last_fault_kind = last_fault_kind();
     diag.last_sda_high = last_sda_high_;
     diag.last_scl_high = last_scl_high_;
 

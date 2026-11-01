@@ -101,6 +101,46 @@ describe('node-authoritative auth & session invariants', () => {
     expect(session?.sessionToken).toBe('persisted-session-123');
   });
 
+  it('keeps an in-memory session usable when the tab storage getter is denied', () => {
+    vi.stubGlobal('window', Object.defineProperty({}, 'sessionStorage', {
+      get() { throw new Error('Storage denied'); },
+    }));
+    expect(() => nodeAuthStore.setSession({
+      address: '192.168.1.100',
+      role: 'operator',
+      sessionToken: 'memory-only-token',
+      expiresAt: Date.now() + 60000,
+    })).not.toThrow();
+    expect(nodeAuthStore.getSession('192.168.1.100')?.sessionToken).toBe('memory-only-token');
+    expect(mockLocal.length).toBe(0);
+    expect(mockSession.length).toBe(0);
+    expect(() => nodeAuthStore.clearAllSessions()).not.toThrow();
+    expect(nodeAuthStore.getSession('192.168.1.100')).toBeNull();
+  });
+
+  it('initializes the auth module when tab persistence is disabled', async () => {
+    vi.stubGlobal('window', Object.defineProperty({}, 'sessionStorage', {
+      get() { throw new Error('Storage denied'); },
+    }));
+    vi.resetModules();
+    const restored = await import('./nodeAuth');
+    expect(restored.nodeAuthStore.getSession('192.168.1.100')).toBeNull();
+  });
+
+  it('restores a tab session during fresh module initialization', async () => {
+    mockSession.setItem('lg_node_sessions', JSON.stringify([{
+      address: '192.168.1.100',
+      nodeId: 'node-100',
+      role: 'operator',
+      sessionToken: 'initial-tab-token',
+      expiresAt: Date.now() + 60000,
+    }]));
+    vi.resetModules();
+    const restored = await import('./nodeAuth');
+    expect(restored.nodeAuthStore.getSession('192.168.1.100')?.sessionToken).toBe('initial-tab-token');
+    expect(mockLocal.length).toBe(0);
+  });
+
   it('discards expired sessions on restoreFromStorage', () => {
     mockSession.setItem(
       'lg_node_sessions',

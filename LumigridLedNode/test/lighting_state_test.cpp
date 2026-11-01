@@ -132,6 +132,65 @@ void lighting_case(const std::string& name) {
                 std::strcmp(f.runtime->current_render_scene_.name, stale_target.name) != 0 &&
                 f.runtime->current_render_scene_.global_brightness == 255,
                 "the first restarted frame resumed the old transition target or progress");
+    } else if (name == "new_scene_replaces_frozen_transition") {
+        LightingFixture f;
+        auto& manager = f.runtime->scene_manager();
+        SceneConfig previous{};
+        previous.global_brightness = 30;
+        manager.activate_scene_direct(previous, 1000, false);
+        manager.process_frame(1250);
+        require(manager.freeze_transition(), "replacement fixture could not freeze its old cue");
+
+        SceneConfig replacement{};
+        std::strcpy(replacement.name, "Replacement");
+        replacement.global_brightness = 201;
+        replacement.transition_ms = 200;
+        manager.activate_scene_direct(replacement, 1300, false);
+        require(manager.is_transitioning() && !manager.is_manual_transition() && !manager.is_transition_frozen(),
+                "new timed scene inherited frozen/manual mode");
+        manager.process_frame(1400);
+        require(manager.transition_progress_q15() > 0, "replacement remained at zero progress");
+        const auto& completed = manager.process_frame(1500);
+        require(!manager.is_transitioning() && completed.global_brightness == 201 &&
+                std::strcmp(completed.name, "Replacement") == 0, "replacement did not reach its new target");
+
+        manager.activate_scene_direct(previous, 1600, false);
+        require(manager.freeze_transition(), "immediate fixture could not freeze");
+        manager.activate_scene_direct(replacement, 1700, true);
+        require(!manager.is_transitioning() && !manager.is_manual_transition() && !manager.is_transition_frozen(),
+                "immediate scene retained stale transition controls");
+        require(manager.process_frame(1700).global_brightness == 201, "immediate replacement did not render");
+
+        manager.activate_scene_direct(previous, 1800, false);
+        require(manager.freeze_transition() && manager.prepare_manual_transition(2), "new manual fixture failed");
+        require(manager.is_manual_transition() && !manager.is_transition_frozen(),
+                "new T-Bar transition inherited the old cue's frozen flag");
+    } else if (name == "preset_and_watchdog_replace_manual_transition") {
+        LightingFixture f;
+        auto& manager = f.runtime->scene_manager();
+        require(manager.prepare_manual_transition(2), "manual preset fixture failed");
+        manager.set_manual_transition_progress(10000);
+        require(manager.freeze_transition(), "manual preset could not freeze");
+        require(manager.activate_scene_custom(3, 200, TransitionCurve::Linear, 1400), "replacement preset rejected");
+        require(!manager.is_manual_transition() && !manager.is_transition_frozen(),
+                "replacement preset retained stale transition controls");
+        manager.process_frame(1600);
+        require(!manager.is_transitioning() && manager.active_scene_index() == 3, "replacement preset did not complete");
+
+        auto cfg = stored_config;
+        cfg.watchdog_timeout_s = 1;
+        cfg.fallback_preset_index = 1;
+        manager.update_device_config(cfg);
+        require(manager.prepare_manual_transition(2), "watchdog manual fixture failed");
+        manager.set_manual_transition_progress(15000);
+        require(manager.freeze_transition(), "watchdog fixture could not freeze");
+        manager.process_frame(4000);
+        require(manager.is_fallback_active() && manager.active_scene_index() == 1 &&
+                !manager.is_manual_transition() && !manager.is_transition_frozen(),
+                "watchdog fallback inherited manual/frozen mode");
+        manager.process_frame(5000);
+        require(!manager.is_transitioning() && manager.transition_progress_q15() == 32768,
+                "watchdog fallback remained stuck instead of reaching its safe scene");
     } else if (name == "stop_timeout_retains_task") {
         LightingFixture f;
         const auto owner = f.runtime->task_handle_;

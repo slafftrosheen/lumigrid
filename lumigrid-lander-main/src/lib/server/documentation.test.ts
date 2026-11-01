@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { documentHref, guides, loadGuide } from './documentation';
-import { publicContent } from '$lib/publicContent';
+import { readFileSync } from 'node:fs';
 
 describe('published documentation', () => {
   it('resolves guide links and history links with anchors', () => {
@@ -32,9 +32,12 @@ describe('published documentation', () => {
     expect((await loadGuide('history/2026-10-21/LG-P0-BOOT-001_REPORT')).historical).toBe(true);
   });
 
-  it('all translated feature cards link to published guides', () => {
-    for (const copy of Object.values(publicContent)) {
-      for (const [, , slug] of copy.features) expect(Object.hasOwn(guides, slug)).toBe(true);
-    }
+  it('customer setup and landing pages link to published guides', () => {
+    const sources = ['../../routes/+page.svelte', '../../routes/start/+page.svelte']
+      .map(page => readFileSync(new URL(page, import.meta.url), 'utf8')).join('\n');
+    // Also covers Svelte's base-prefixed template-string hrefs.
+    const links = [...sources.matchAll(/\/docs\/([A-Za-z0-9_/-]+)/g)];
+    expect(links.length).toBeGreaterThan(0);
+    for (const [, slug] of links) expect(Object.hasOwn(guides, slug)).toBe(true);
   });
 });

@@ -176,6 +176,7 @@ private:
     NodeRole master_loop(int socket, bool auto_mode);
     NodeRole worker_loop(int socket, bool auto_mode);
     bool open_socket(int& socket, bool broadcast);
+    bool release_remote_transport();
     bool handle_heartbeat(const SyncPacket& packet, const sockaddr_in& sender);
     void send_ack(int socket, const SyncPacket& heartbeat, const sockaddr_in& sender, uint32_t token);
     void update_peer(const sockaddr_in& sender, uint16_t latency_ms);

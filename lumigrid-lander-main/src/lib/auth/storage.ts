@@ -13,12 +13,24 @@ export const API_TOKEN_KEY = 'lg_api_token';
 export const NODE_META_KEY = 'lg_nodes_meta';
 export const NODE_REGISTRY_KEY = 'lg_nodes_v3';
 
-function storage(): Storage | null {
-  return typeof localStorage === 'undefined' ? null : localStorage;
+function storage(scope: 'local' | 'session' = 'local'): Storage | null {
+  // Accessing the storage property itself can throw when browser persistence is
+  // disabled. Keep both that lookup and storage operations inside this boundary.
+  try {
+    if (typeof window !== 'undefined') {
+      const browserStore = scope === 'session' ? window.sessionStorage : window.localStorage;
+      if (browserStore) return browserStore;
+    }
+    return scope === 'session'
+      ? (typeof sessionStorage === 'undefined' ? null : sessionStorage)
+      : (typeof localStorage === 'undefined' ? null : localStorage);
+  } catch {
+    return null;
+  }
 }
 
 export function readString(key: string, fallback = ''): string {
-  return storage()?.getItem(key) ?? fallback;
+  try { return storage()?.getItem(key) ?? fallback; } catch { return fallback; }
 }
 
 export function writeString(key: string, value: string): void {
@@ -27,6 +39,19 @@ export function writeString(key: string, value: string): void {
 
 export function removeValue(key: string): void {
   try { storage()?.removeItem(key); } catch {}
+}
+
+/** Session credentials must remain scoped to the tab, never persistent storage. */
+export function readSessionString(key: string, fallback = ''): string {
+  try { return storage('session')?.getItem(key) ?? fallback; } catch { return fallback; }
+}
+
+export function writeSessionString(key: string, value: string): void {
+  try { storage('session')?.setItem(key, value); } catch {}
+}
+
+export function removeSessionValue(key: string): void {
+  try { storage('session')?.removeItem(key); } catch {}
 }
 
 export function readStringList(key: string): string[] {

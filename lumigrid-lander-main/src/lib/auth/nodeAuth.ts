@@ -6,6 +6,8 @@
  * No long-lived node access credentials are ever persisted.
  */
 
+import { readSessionString, writeSessionString, removeSessionValue } from './storage';
+
 export interface NodeAuthSession {
   nodeId?: string;
   address: string;
@@ -15,16 +17,6 @@ export interface NodeAuthSession {
 }
 
 const SESSION_STORAGE_KEY = 'lg_node_sessions';
-
-function getSessionStorage(): Storage | null {
-  if (typeof window !== 'undefined' && window.sessionStorage) {
-    return window.sessionStorage;
-  }
-  if (typeof sessionStorage !== 'undefined') {
-    return sessionStorage;
-  }
-  return null;
-}
 
 export function normalizeNodeAddress(address: string): string {
   if (!address) return '';
@@ -48,11 +40,8 @@ class NodeAuthSessionStore {
   }
 
   private loadFromSessionStorage(): void {
-    const storage = getSessionStorage();
-    if (!storage) return;
-
     try {
-      const raw = storage.getItem(SESSION_STORAGE_KEY);
+      const raw = readSessionString(SESSION_STORAGE_KEY);
       if (!raw) return;
       const parsed = JSON.parse(raw);
       const list: NodeAuthSession[] = Array.isArray(parsed)
@@ -85,17 +74,14 @@ class NodeAuthSessionStore {
   }
 
   private saveToSessionStorage(): void {
-    const storage = getSessionStorage();
-    if (!storage) return;
-
     try {
       const list = Array.from(this.sessionsByAddress.values()).filter(
         (s) => s.expiresAt > Date.now()
       );
       if (list.length > 0) {
-        storage.setItem(SESSION_STORAGE_KEY, JSON.stringify(list));
+        writeSessionString(SESSION_STORAGE_KEY, JSON.stringify(list));
       } else {
-        storage.removeItem(SESSION_STORAGE_KEY);
+        removeSessionValue(SESSION_STORAGE_KEY);
       }
     } catch {
       // Ignore storage errors (quota, disabled, etc.)
@@ -263,12 +249,7 @@ class NodeAuthSessionStore {
     this.sessionsByAddress.clear();
     this.sessionsByNodeId.clear();
     this.addressToNodeId.clear();
-    const storage = getSessionStorage();
-    if (storage) {
-      try {
-        storage.removeItem(SESSION_STORAGE_KEY);
-      } catch {}
-    }
+    removeSessionValue(SESSION_STORAGE_KEY);
     this.notify();
   }
 }

@@ -19,6 +19,9 @@ CASES = [
  'leader_transport_generation','follower_transport_generation','stop_clears_master_and_age',
  'packet_after_stop_not_applied','oversized_datagram_rejected','normal_datagram_still_applied',
  'self_stop_never_waits_for_itself','cleanup_reentrant_start_rejected','socket_wait_fits_manual_cadence',
+ 'auto_loss_releases_before_leading','auto_cleanup_failure_blocks_promotion',
+ 'worker_timeout_retries_remote_cleanup','worker_packet_at_zero_still_expires',
+ 'auto_first_election_preserves_local_transport','expired_peer_slots_recycled','live_peer_slots_preserved',
 ]
 def main():
  parser=argparse.ArgumentParser(description=__doc__)

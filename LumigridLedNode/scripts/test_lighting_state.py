@@ -160,7 +160,8 @@ def main():
                               "live_short_frame_tail", "manual_frame_snapshot", "new_estop_during_reset_blackout",
                               "new_estop_before_hardware_clear", "normal_estop_clear_requires_two_frames",
                               "armed_requires_a_commit", "reload_callback_can_clear_live",
-                              "restart_snapshot_excludes_initialization", "restart_discards_frozen_transition"]
+                              "restart_snapshot_excludes_initialization", "restart_discards_frozen_transition",
+                              "new_scene_replaces_frozen_transition", "preset_and_watchdog_replace_manual_transition"]
         failures = []
         for case in cases:
             result = subprocess.run([str(executable), case], env=env, capture_output=True, text=True, timeout=10)
