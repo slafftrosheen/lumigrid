@@ -18,6 +18,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--no-sanitize", action="store_true", help="omit ASan/UBSan")
     parser.add_argument("--case", action="append", default=[], help="run a named test group")
+    parser.add_argument("--baseline-ref", help="compare color pipeline implementation from an existing git ref")
     args = parser.parse_args()
     root = Path(__file__).resolve().parent.parent
     compiler = os.environ.get("CXX", "g++")
@@ -35,12 +36,19 @@ def main() -> int:
             encoding="utf-8",
         )
         executable = temp / "effects_test"
+        color_source = root / "components/signage/ColorPipeline.cpp"
+        if args.baseline_ref:
+            color_source = temp / "ColorPipeline.cpp"
+            color_source.write_bytes(subprocess.run(
+                ["git", "show", f"{args.baseline_ref}:LumigridLedNode/components/signage/ColorPipeline.cpp"],
+                cwd=root.parent, check=True, capture_output=True).stdout)
         command = [compiler, "-std=c++17", "-O1", "-g", "-Wall", "-Wextra", "-pedantic"]
         if not args.no_sanitize:
             command += ["-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-fno-pie", "-no-pie"]
         for directory in (temp, root / "components/config/include", root / "components/board/include", root / "components/signage/include"):
             command += ["-I", str(directory)]
-        command += [str(root / "test/effects_test.cpp"), str(root / "components/signage/EffectRenderer.cpp"), "-o", str(executable)]
+        command += [str(root / "test/effects_test.cpp"), str(root / "components/signage/EffectRenderer.cpp"),
+                    str(color_source), "-o", str(executable)]
         subprocess.run(command, check=True)
         env = os.environ.copy()
         # LSan requires /proc access unavailable in some container sandboxes.

@@ -1,5 +1,6 @@
 // Host behavioral tests: compile the production renderer, not a model of it.
 #include "EffectRenderer.hpp"
+#include "ColorPipeline.hpp"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -381,11 +382,96 @@ void bounds() {
     require(frame.pwm == 0 && !is_lit(frame.pixels[0]), "unknown effect should safely clear output");
 }
 
+void pwm_color_fallback() {
+    ChannelConfig channel{};
+    FixtureConfig fixture{};
+    fixture.profile = FixtureProfile::PWM_Single;
+    channel.gamma_correction = fixture.gamma_correction = false;
+    channel.max_brightness = fixture.max_brightness = 211;
+    const uint8_t global = 173;
+    const uint32_t brightness = uint32_t(global) * 211 / 255;
+    const LightValue color{255, 128, 64, 32};
+    const uint8_t levels[] = {255, 255, 255, 128, 64, 32};
+    for (uint8_t mode = 0; mode < 6; ++mode) {
+        channel.dmx_mode = mode;
+        const uint32_t expected = (uint32_t(levels[mode]) * 4095 / 255) * brightness / 255;
+        require(ColorPipeline::to_pwm(color, 0, channel, global) == expected,
+                "8-bit color fallback was treated as a 12-bit PWM duty");
+        require(ColorPipeline::to_pwm(color, 1300, channel, global) == 1300 * brightness / 255,
+                "explicit PWM no longer overrides fallback color");
+    }
+    std::array<uint16_t, 4> duties{};
+    ColorPipeline::to_pwm(color, 0, fixture, global, duties);
+    require(duties[0] == 4095 * brightness / 255 && duties[1] == 0 && duties[2] == 0 && duties[3] == 0,
+            "legacy monochrome fixture did not promote its color level to full PWM range");
+    channel.dmx_mode = 0;
+    channel.max_brightness = fixture.max_brightness = 255;
+    channel.gamma_correction = fixture.gamma_correction = true;
+    ColorPipeline::set_gamma(22);
+    for (const LightValue full : {LightValue{255, 0, 0, 0}, LightValue{0, 255, 0, 0},
+                                 LightValue{0, 0, 255, 0}, LightValue{0, 0, 0, 255}}) {
+        ColorPipeline::to_pwm(full, 0, fixture, 255, duties);
+        require(ColorPipeline::to_pwm(full, 0, channel, 255) == 4095 && duties[0] == 4095,
+                "gamma-corrected full color fallback did not reach full scale");
+    }
+    require(ColorPipeline::to_pwm({}, 0, channel, 255) == 0 &&
+            ColorPipeline::to_pwm(color, 65535, channel, 0) == 0,
+            "blackout or zero brightness became nonzero");
+    require(ColorPipeline::to_pwm({}, 65535, channel, 255) == 4095,
+            "oversized explicit PWM was not clamped before brightness/gamma");
+
+    // Multi-channel RGBW and explicit addressable white retain their semantics.
+    fixture.profile = FixtureProfile::PWM_RGBW;
+    fixture.gamma_correction = false;
+    ColorPipeline::to_pwm(color, 0, fixture, 255, duties);
+    require(duties == std::array<uint16_t, 4>{4095, 2055, 1027, 513},
+            "monochrome correction changed multi-channel RGBW conversion");
+    channel.addressable_type = AddressableType::SK6812;
+    channel.gamma_correction = false;
+    require(same_pixel(ColorPipeline::to_addressable(color, channel, 255), color),
+            "PWM correction changed explicit addressable RGBW color");
+}
+
+void pwm_gamma_precision() {
+    ChannelConfig channel{};
+    FixtureConfig fixture{};
+    fixture.profile = FixtureProfile::PWM_Single;
+    std::array<uint16_t, 4> duties{};
+    for (uint8_t gamma : {uint8_t(0), uint8_t(10), uint8_t(11), uint8_t(22), uint8_t(30)}) {
+        ColorPipeline::set_gamma(gamma);
+        uint16_t previous = 0;
+        std::set<uint16_t> levels;
+        for (uint16_t input = 0; input <= 4095; ++input) {
+            const uint16_t actual = ColorPipeline::to_pwm({}, input, channel, 255);
+            ColorPipeline::to_pwm({}, input, fixture, 255, duties);
+            require(actual == duties[0] && actual >= previous && actual <= 4095,
+                    "PWM gamma paths disagree, reverse, or exceed their range");
+            if (gamma == 0 || gamma == 10) {
+                require(actual == input, "linear gamma discarded low PWM bits");
+            } else {
+                const int reference = static_cast<int>(std::round(std::pow(double(input) / 4095.0, gamma / 10.0) * 4095.0));
+                require(std::abs(int(actual) - reference) <= 1,
+                        "PWM gamma fade differs from the configured curve by more than one duty count");
+            }
+            previous = actual;
+            levels.insert(actual);
+        }
+        require(previous == 4095 && *levels.begin() == 0 && levels.size() > 2000,
+                "gamma conversion is still restricted to an 8-bit staircase");
+    }
+    ColorPipeline::set_gamma(10);
+    channel.max_brightness = 153;
+    require(ColorPipeline::to_pwm({}, 2001, channel, 201) == (2001u * (201u * 153u / 255u)) / 255u,
+            "linear gamma changed the brightness-scaled 12-bit duty");
+    ColorPipeline::set_gamma(22);
+}
+
 using Test = std::pair<const char*, void(*)()>;
-constexpr std::array<Test, 12> kTests = {{{"catalogue", catalogue}, {"new_effects", new_effects},
+constexpr std::array<Test, 14> kTests = {{{"catalogue", catalogue}, {"new_effects", new_effects},
     {"deterministic", deterministic}, {"controls", controls}, {"palettes", palettes},
     {"smooth_motion", smooth_motion}, {"temporal_shapes", temporal_shapes}, {"pwm", pwm},
-    {"density", density}, {"uptime", uptime}, {"legacy_snapshots", legacy_snapshots}, {"bounds", bounds}}};
+    {"density", density}, {"uptime", uptime}, {"legacy_snapshots", legacy_snapshots}, {"bounds", bounds},
+    {"pwm_color_fallback", pwm_color_fallback}, {"pwm_gamma_precision", pwm_gamma_precision}}};
 } // namespace
 
 int main(int argc, char** argv) {

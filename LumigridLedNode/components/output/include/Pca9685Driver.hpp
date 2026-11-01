@@ -156,6 +156,7 @@ private:
     bool zero_confirmed_ = false;
     bool valid_frame_confirmed_ = false;
     bool recovery_required_ = false;
+    bool register_mismatch_ = false;
 
     uint8_t mode1_ = 0;
     uint8_t mode2_ = 0;

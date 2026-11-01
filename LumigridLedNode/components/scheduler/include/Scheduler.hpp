@@ -81,7 +81,14 @@ public:
     // Snapshot of current effective transport (LG-031 / LG-033)
     ShowTransportSnapshot transport_snapshot(uint64_t clock_ms = 0) const;
 
-    void start_local_timeline(uint16_t bpm = 0, uint64_t anchor_ms = 0);
+    enum class TimelineError : uint8_t {
+        None, Unavailable, ChecksumMismatch, Invalid, SceneMissing,
+    };
+
+    // Admit the exact content and its referenced scenes before preempting playback.
+    // A zero BPM uses the selected sequence's stored tempo.
+    esp_err_t start_local_timeline(uint16_t bpm = 0, uint64_t anchor_ms = 0,
+                                   TimelineError* error = nullptr);
     void stop_local_timeline();
     bool local_timeline_active() const;
     bool is_local_timeline_running() const;
@@ -89,20 +96,21 @@ public:
     uint32_t transport_generation() const;
     uint64_t timeline_anchor_ms() const;
     bool is_timeline_content_stale() const;
-    const Sequence& active_sequence() const;
-    const Sequence& persisted_sequence() const;
+    Sequence active_sequence() const;
+    Sequence persisted_sequence() const;
     void reload_sequence();
     void clear_remote_timeline();
 
     // Protocol v5 remote timeline synchronization
-    void apply_remote_timeline(
+    esp_err_t apply_remote_timeline(
         uint32_t generation,
         uint64_t anchor_ms,
         uint32_t checksum,
         uint16_t bpm,
-        uint64_t now_ms
+        uint64_t now_ms,
+        TimelineError* error = nullptr
     );
-    void apply_remote_timeline(
+    esp_err_t apply_remote_timeline(
         uint32_t generation,
         uint16_t bpm,
         uint64_t anchor_ms,
@@ -112,7 +120,8 @@ public:
 private:
     static void task_entry(void* arg);
     void task();
-    void evaluate(const Sequence& seq, uint64_t elapsed_ms);
+    void evaluate(const Sequence& seq, uint64_t elapsed_ms, uint16_t bpm = 0);
+    esp_err_t validate_timeline(const Sequence& seq, uint16_t bpm, TimelineError* error);
     void evaluate_calendar(const CalendarSchedule& schedule, uint64_t clock_ms);
     void refresh_config(uint64_t clock_ms);
 

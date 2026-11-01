@@ -1066,22 +1066,22 @@ esp_err_t LumigridRuntime::start() {
       }
       return true;
     } else if (remote_snap.mode == ShowTransportMode::Timeline) {
-      Sequence local_seq{};
-      if (config_.load_sequence(local_seq) != ESP_OK) {
-        out_error = static_cast<uint8_t>(SyncTransportError::TimelineMissing);
+      Scheduler::TimelineError timeline_error = Scheduler::TimelineError::None;
+      const esp_err_t applied = scheduler_.apply_remote_timeline(
+          remote_snap.transport_generation, remote_snap.timeline_anchor_ms,
+          remote_snap.timeline_active_checksum, remote_snap.bpm, clock_.now_ms(),
+          &timeline_error);
+      if (applied != ESP_OK) {
+        auto error = SyncTransportError::TimelineMissing;
+        if (timeline_error == Scheduler::TimelineError::ChecksumMismatch)
+          error = SyncTransportError::TimelineMismatch;
+        else if (timeline_error == Scheduler::TimelineError::SceneMissing)
+          error = SyncTransportError::SceneMissing;
+        else if (timeline_error == Scheduler::TimelineError::Invalid)
+          error = SyncTransportError::TimelineInvalid;
+        out_error = static_cast<uint8_t>(error);
         return false;
       }
-      if (remote_snap.timeline_active_checksum != 0 &&
-          local_seq.checksum != remote_snap.timeline_active_checksum) {
-        out_error = static_cast<uint8_t>(SyncTransportError::TimelineMismatch);
-        return false;
-      }
-      if (cue_runner_.snapshot(0).running)
-        cue_runner_.stop(CueStopReason::Preempted, clock_.now_ms());
-      scheduler_.apply_remote_timeline(remote_snap.transport_generation,
-                                       remote_snap.timeline_anchor_ms,
-                                       remote_snap.timeline_active_checksum,
-                                       remote_snap.bpm, clock_.now_ms());
       return true;
     } else if (remote_snap.mode == ShowTransportMode::Cue) {
       CueSyncSnapshot cue_snap{};

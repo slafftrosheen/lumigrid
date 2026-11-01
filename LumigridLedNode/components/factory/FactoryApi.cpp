@@ -3506,35 +3506,44 @@ esp_err_t post_show_control(httpd_req_t* request) {
         uint32_t active_cs = 0;
 
         if (strcmp(action, "start") == 0 || strcmp(action, "restart") == 0) {
-            uint16_t bpm = 120;
-            Sequence seq{};
-            const esp_err_t load_err = api_ptr->config()
-                ? api_ptr->config()->load_sequence(seq) : ESP_ERR_INVALID_STATE;
-            if (load_err != ESP_OK) {
-                cJSON_Delete(root);
-                api_ptr->command_journal().failed(cmd_id, load_err);
-                return send_error(request,
-                    load_err == ESP_ERR_NOT_FOUND ? "404 Not Found" : "503 Service Unavailable",
-                    load_err == ESP_ERR_NOT_FOUND ? "timeline_not_found" : "timeline_unavailable");
-            }
-            bpm = seq.bpm > 0 ? seq.bpm : 120;
+            uint16_t bpm = 0; // Missing override uses the admitted content's tempo.
             const cJSON* bpm_j = cJSON_GetObjectItemCaseSensitive(root, "bpm");
-            if (bpm_j && cJSON_IsNumber(bpm_j) && bpm_j->valueint > 0) {
+            if (bpm_j) {
+                if (!cJSON_IsNumber(bpm_j) || bpm_j->valuedouble < 10 ||
+                    bpm_j->valuedouble > 500 || bpm_j->valuedouble != bpm_j->valueint) {
+                    cJSON_Delete(root);
+                    api_ptr->command_journal().failed(cmd_id, ESP_ERR_INVALID_ARG);
+                    return send_error(request, "400 Bad Request", "invalid_bpm_10_500");
+                }
                 bpm = static_cast<uint16_t>(bpm_j->valueint);
             }
-            if (api_ptr->cue_runner()) {
-                api_ptr->cue_runner()->stop(CueStopReason::Preempted, now_ms);
+            Scheduler::TimelineError timeline_error = Scheduler::TimelineError::None;
+            const esp_err_t started = api_ptr->scheduler()
+                ? api_ptr->scheduler()->start_local_timeline(bpm, 0, &timeline_error)
+                : ESP_ERR_INVALID_STATE;
+            if (started != ESP_OK) {
+                cJSON_Delete(root);
+                api_ptr->command_journal().failed(cmd_id, started);
+                return send_error(request,
+                    started == ESP_ERR_INVALID_ARG ? "400 Bad Request" :
+                    started == ESP_ERR_NOT_FOUND ? "404 Not Found" : "503 Service Unavailable",
+                    timeline_error == Scheduler::TimelineError::SceneMissing ? "timeline_scene_not_found" :
+                    timeline_error == Scheduler::TimelineError::Invalid ? "timeline_invalid" :
+                    started == ESP_ERR_NOT_FOUND ? "timeline_not_found" : "timeline_unavailable");
             }
+            uint32_t saved_cs = 0;
             if (api_ptr->scheduler()) {
-                api_ptr->scheduler()->start_local_timeline(bpm);
                 auto snap = api_ptr->scheduler()->transport_snapshot(api_ptr->show_clock_now_ms());
+                bpm = snap.bpm;
                 anchor_ms = snap.timeline_anchor_ms;
                 transport_gen = snap.transport_generation;
                 active_cs = snap.timeline_active_checksum;
+                saved_cs = snap.timeline_saved_checksum;
             }
             if (api_ptr->show_transport()) {
+                // Both start and restart admit a new snapshot and reset its anchor.
                 api_ptr->show_transport()->set_timeline(
-                    true, bpm, anchor_ms, active_cs, seq.checksum, (strcmp(action, "restart") == 0)
+                    true, bpm, anchor_ms, active_cs, saved_cs, true
                 );
                 transport_gen = api_ptr->show_transport()->generation();
             }
@@ -7912,6 +7921,9 @@ static esp_err_t get_certification_status(httpd_req_t* request) {
         cJSON_AddStringToObject(root, "staleReason", stale_reason);
     }
     cJSON_AddStringToObject(root, "currentTest", cur_test ? cur_test : "");
+    cJSON_AddBoolToObject(root, "cancellationPending", api_ptr->certification_service()->cancellation_pending());
+    cJSON_AddBoolToObject(root, "confirmationPending", api_ptr->certification_service()->confirmation_pending());
+    cJSON_AddStringToObject(root, "evidenceBinding", "session_attempt_v1");
 
     // Test results matrix
     cJSON* tests_arr = cJSON_CreateArray();
@@ -7935,6 +7947,48 @@ static esp_err_t get_certification_status(httpd_req_t* request) {
     return send_json(request, root, "200 OK");
 }
 
+// New clients bind every mutation to the observed session and every result to
+// an execution attempt. Omitted bindings remain compatible with legacy tools;
+// the service still enforces active-test ownership for those requests.
+static bool certification_binding_matches(httpd_req_t* request, FactoryApi* api_ptr,
+                                          const cJSON* root, const char* test_id = nullptr) {
+    const cJSON* session_id = cJSON_GetObjectItemCaseSensitive(root, "certificationId");
+    const cJSON* started = cJSON_GetObjectItemCaseSensitive(root, "testStartedMs");
+    const cJSON* attempt = cJSON_GetObjectItemCaseSensitive(root, "testAttempt");
+    if (!session_id && !started && !attempt) return true;
+    if (!cJSON_IsString(session_id) || strlen(session_id->valuestring) >= sizeof(CertificationIdentity{}.certification_id)) {
+        send_error(request, "400 Bad Request", "A valid certificationId binding is required");
+        return false;
+    }
+    if (strcmp(session_id->valuestring, api_ptr->certification_service()->session().identity.certification_id) != 0) {
+        send_error(request, "409 Conflict", "Certification session changed; refresh before retrying");
+        return false;
+    }
+    if (!test_id) {
+        if (started || attempt) {
+            send_error(request, "400 Bad Request", "Test bindings only apply to result submissions");
+            return false;
+        }
+        return true;
+    }
+    const auto valid_integer = [](const cJSON* value, double minimum, double maximum) {
+        return cJSON_IsNumber(value) && std::isfinite(value->valuedouble) &&
+            value->valuedouble >= minimum && value->valuedouble <= maximum &&
+            std::floor(value->valuedouble) == value->valuedouble;
+    };
+    if (!valid_integer(started, 0, 9007199254740991.0) || !valid_integer(attempt, 1, UINT8_MAX)) {
+        send_error(request, "400 Bad Request", "Integer testStartedMs and testAttempt bindings are required");
+        return false;
+    }
+    const auto* result = api_ptr->certification_service()->get_test_result(test_id);
+    if (!result || result->started_ms != static_cast<uint64_t>(started->valuedouble) ||
+        result->attempts != static_cast<uint8_t>(attempt->valuedouble)) {
+        send_error(request, "409 Conflict", "Certification test attempt changed; refresh before retrying");
+        return false;
+    }
+    return true;
+}
+
 static esp_err_t post_certification_start(httpd_req_t* request) {
     if (!api::authorize(request, api::ApiRole::Admin)) return ESP_OK;
 
@@ -7945,25 +7999,29 @@ static esp_err_t post_certification_start(httpd_req_t* request) {
     api_ptr->certification_service()->tick(esp_timer_get_time() / 1000ULL);
 
     cJSON* root = nullptr;
-    read_json(request, &root);
+    if (read_json(request, &root) != ESP_OK || !cJSON_IsObject(root)) {
+        cJSON_Delete(root);
+        return send_error(request, "400 Bad Request", "A JSON object is required");
+    }
     CertificationProfile profile = CertificationProfile::ProductionUnit;
     const char* serial_num = nullptr;
-
-    if (root) {
-        cJSON* p = cJSON_GetObjectItem(root, "profile");
-        if (p && p->valuestring) {
-            parse_certification_profile(p->valuestring, profile);
-        }
-        cJSON* sn = cJSON_GetObjectItem(root, "serialNumber");
-        if (sn && sn->valuestring) {
-            serial_num = sn->valuestring;
-        }
+    const cJSON* p = cJSON_GetObjectItemCaseSensitive(root, "profile");
+    const cJSON* sn = cJSON_GetObjectItemCaseSensitive(root, "serialNumber");
+    if ((p && (!cJSON_IsString(p) || !parse_certification_profile(p->valuestring, profile))) ||
+        (sn && (!cJSON_IsString(sn) || strlen(sn->valuestring) >= sizeof(CertificationIdentity{}.serial_number)))) {
+        cJSON_Delete(root);
+        return send_error(request, "400 Bad Request", "Invalid profile or serial number (maximum 31 UTF-8 bytes)");
     }
+    if (sn) serial_num = sn->valuestring;
+    if (!certification_binding_matches(request, api_ptr, root)) { cJSON_Delete(root); return ESP_OK; }
 
     esp_err_t err = api_ptr->certification_service()->start_session(profile, serial_num);
-    if (root) cJSON_Delete(root);
+    cJSON_Delete(root);
 
     if (err != ESP_OK) {
+        if (err == ESP_ERR_NO_MEM) return send_error(request, "503 Service Unavailable", "Certification storage unavailable");
+        if (err == ESP_ERR_INVALID_STATE) return send_error(request, "409 Conflict", "Certification session is still active");
+        if (err != ESP_ERR_INVALID_ARG) return send_error(request, "500 Internal Server Error", "Certification session was not persisted");
         return send_error(request, "400 Bad Request", "Failed to start certification session (check serial/hw revision)");
     }
 
@@ -7988,20 +8046,26 @@ static esp_err_t post_certification_test_start(httpd_req_t* request) {
     api_ptr->certification_service()->tick(esp_timer_get_time() / 1000ULL);
 
     cJSON* root = nullptr;
-    if (read_json(request, &root) != ESP_OK || !root) {
+    if (read_json(request, &root) != ESP_OK || !cJSON_IsObject(root)) {
+        cJSON_Delete(root);
         return send_error(request, "400 Bad Request", "Missing JSON body");
     }
 
     cJSON* tid = cJSON_GetObjectItem(root, "testId");
-    if (!tid || !tid->valuestring) {
+    if (!cJSON_IsString(tid) || !tid->valuestring[0]) {
         cJSON_Delete(root);
         return send_error(request, "400 Bad Request", "Missing testId");
     }
+    if (!certification_binding_matches(request, api_ptr, root)) { cJSON_Delete(root); return ESP_OK; }
 
     esp_err_t err = api_ptr->certification_service()->start_test(tid->valuestring);
     cJSON_Delete(root);
 
     if (err != ESP_OK) {
+        if (err == ESP_ERR_NO_MEM) return send_error(request, "503 Service Unavailable", "Certification storage unavailable");
+        if (err == ESP_ERR_INVALID_STATE) return send_error(request, "409 Conflict", "Certification test cannot start in the current session state");
+        if (err != ESP_ERR_INVALID_ARG && err != ESP_ERR_NOT_FOUND)
+            return send_error(request, "500 Internal Server Error", "Certification test was not persisted");
         return send_error(request, "400 Bad Request", "Failed to start certification test");
     }
 
@@ -8021,7 +8085,8 @@ static esp_err_t post_certification_test_result(httpd_req_t* request) {
     api_ptr->certification_service()->tick(esp_timer_get_time() / 1000ULL);
 
     cJSON* root = nullptr;
-    if (read_json(request, &root) != ESP_OK || !root) {
+    if (read_json(request, &root) != ESP_OK || !cJSON_IsObject(root)) {
+        cJSON_Delete(root);
         return send_error(request, "400 Bad Request", "Missing JSON body");
     }
 
@@ -8035,6 +8100,7 @@ static esp_err_t post_certification_test_result(httpd_req_t* request) {
         cJSON_Delete(root);
         return send_error(request, "400 Bad Request", "Unknown certification test");
     }
+    if (!certification_binding_matches(request, api_ptr, root, tid->valuestring)) { cJSON_Delete(root); return ESP_OK; }
 
     bool passed = false;
     cJSON* p = cJSON_GetObjectItem(root, "passed");
@@ -8057,7 +8123,7 @@ static esp_err_t post_certification_test_result(httpd_req_t* request) {
     EvidenceSource src = EvidenceSource::OperatorObservation;
     cJSON* src_item = cJSON_GetObjectItem(root, "evidenceSource");
     if ((src_item && (!cJSON_IsString(src_item) || !parse_evidence_source(src_item->valuestring, src))) ||
-        src == EvidenceSource::Automatic) {
+        src == EvidenceSource::Automatic || definition->required_evidence == EvidenceSource::Automatic) {
         // Automatic results are created by executed internal probes/jobs.
         // HTTP submissions represent operator observations or measurements.
         cJSON_Delete(root);
@@ -8082,9 +8148,9 @@ static esp_err_t post_certification_test_result(httpd_req_t* request) {
 
     const char* unit = "";
     cJSON* u = cJSON_GetObjectItem(root, "unit");
-    if (u && !cJSON_IsString(u)) {
+    if (u && (!cJSON_IsString(u) || strlen(u->valuestring) >= sizeof(CertificationTestResult{}.unit))) {
         cJSON_Delete(root);
-        return send_error(request, "400 Bad Request", "unit must be a string");
+        return send_error(request, "400 Bad Request", "unit must be a string of at most 7 UTF-8 bytes");
     }
     if (u) unit = u->valuestring;
     if (instrument_result && strcmp(unit, definition->unit) != 0) {
@@ -8094,9 +8160,9 @@ static esp_err_t post_certification_test_result(httpd_req_t* request) {
 
     const char* note = "";
     cJSON* n = cJSON_GetObjectItem(root, "note");
-    if (n && !cJSON_IsString(n)) {
+    if (n && (!cJSON_IsString(n) || strlen(n->valuestring) >= sizeof(CertificationTestResult{}.note))) {
         cJSON_Delete(root);
-        return send_error(request, "400 Bad Request", "note must be a string");
+        return send_error(request, "400 Bad Request", "note must be a string of at most 95 UTF-8 bytes");
     }
     if (n) note = n->valuestring;
 
@@ -8107,6 +8173,8 @@ static esp_err_t post_certification_test_result(httpd_req_t* request) {
     if (err != ESP_OK) {
         if (err == ESP_ERR_NO_MEM)
             return send_error(request, "503 Service Unavailable", "Certification storage unavailable");
+        if (err == ESP_ERR_INVALID_STATE)
+            return send_error(request, "409 Conflict", "Certification test is no longer waiting for this evidence");
         if (err != ESP_ERR_INVALID_ARG && err != ESP_ERR_INVALID_STATE && err != ESP_ERR_NOT_FOUND)
             return send_error(request, "500 Internal Server Error", "Certification evidence was not persisted");
         return send_error(request, "400 Bad Request", "Failed to record test result (validation / anti-spoof check failed)");
@@ -8128,6 +8196,17 @@ static esp_err_t post_certification_abort(httpd_req_t* request) {
     }
     api_ptr->certification_service()->tick(esp_timer_get_time() / 1000ULL);
 
+    // Empty bodies remain valid for existing service tools.
+    if (request->content_len > 0) {
+        cJSON* root = nullptr;
+        if (read_json(request, &root) != ESP_OK || !cJSON_IsObject(root)) {
+            cJSON_Delete(root);
+            return send_error(request, "400 Bad Request", "A JSON object is required");
+        }
+        const bool matches = certification_binding_matches(request, api_ptr, root);
+        cJSON_Delete(root);
+        if (!matches) return ESP_OK;
+    }
     const esp_err_t err = api_ptr->certification_service()->abort();
     if (err != ESP_OK) {
         if (err == ESP_ERR_INVALID_STATE) {

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { readFileSync } from 'node:fs';
 import {
   expandChannelMask,
@@ -6,11 +6,15 @@ import {
   clampChannelValue,
   putManualState,
   releaseManualState,
+  buildManualSnapshot,
+  captureLiveDeskToScene,
   type ManualAddressableValue,
   type ManualPwmValue,
   type ManualChannelValue,
 } from '$lib/api/manual';
 import * as transport from '$lib/api/transport';
+import { loadPageFunctions } from '$lib/testing/pageScriptHarness';
+import { MAX_PRESETS, MAX_SCENE_NAME_BYTES, getUtf8ByteLength } from '$lib/api/scenes';
 
 function readSource(relativePath: string): string {
   return readFileSync(new URL(relativePath, import.meta.url), 'utf8');
@@ -144,3 +148,168 @@ describe('Live Desk & Channel Group contracts', () => {
   });
 });
 
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+
+function deviceConfig() {
+  return { channels: Array.from({ length: 16 }, (_, index) => ({
+    index, port: index < 8 ? `A${index + 1}` : `P${index - 7}`,
+    kind: index < 8 ? 'addressable' : 'pwm', name: '', configured: true, enabled: true,
+  })) };
+}
+
+function workspace() {
+  let epoch = 0;
+  let auth = {};
+  const c: Record<string, any> = {
+    nodeIp: 'node-a', workspaceGeneration: 1, configRequest: 0, disposed: false, workspaceOwner: null,
+    workspaceSession: auth, config: null, loadingConfig: false, configLoaded: true, configError: '',
+    selectedIndices: [0], controlledIndices: [0], multiSelect: false, channels: [],
+    lastManualSnapshot: null, sendThrottleTimer: null, lastSendTimestamp: 0, toastTimeout: null, toast: '',
+    sessionState: 'active', isManualActive: true, isSessionBusy: false, isConnected: true, sessionSending: false,
+    sessionErrorMessage: null, controlledLabels: 'A1', acceptedValues: [{ index: 0, r: 100, g: 60, b: 20, brightness: 200 }],
+    saveDialogOpen: false, savingScene: false, saveCapture: null, saveSceneError: '', sceneNameInput: '',
+    MAX_PRESETS, MAX_SCENE_NAME_BYTES, getUtf8ByteLength, buildManualSnapshot, captureLiveDeskToScene,
+    getDeviceConfig: vi.fn(async () => deviceConfig()), getPresets: vi.fn(async () => []),
+    savePreset: vi.fn(async () => ({ saved: true, checksum: 42 })), showToast: vi.fn(),
+    nodeAuthStore: { getSession: () => auth },
+    session: { destroy: vi.fn(), cancel: vi.fn(), sendValues: vi.fn(async () => true),
+      acquire: vi.fn(async () => true), release: vi.fn(async () => true), updateTargets: vi.fn(async () => true) },
+    captureNodeOperation: (ip: string) => {
+      const generation = epoch; const capturedAuth = auth;
+      return { ip, isCurrent: () => ip === c.nodeIp && generation === epoch && auth === capturedAuth };
+    },
+  };
+  const page = loadPageFunctions(new URL('./+page.svelte', import.meta.url), [
+    'createDeskChannels', 'captureWorkspaceOperation', 'applyChannelConfiguration', 'loadConfig', 'syncFocusedNode',
+    'clearPendingSend', 'sendManualSnapshot', 'commitImmediateSend', 'takeManualControl', 'releaseControl', 'updateTargets',
+    'openSaveSceneDialog', 'handleConfirmSaveScene', 'buildControlledSnapshot', 'blackoutSelected',
+  ], c);
+  c.channels = page.createDeskChannels();
+  page.applyChannelConfiguration(deviceConfig());
+  c.workspaceOwner = page.captureWorkspaceOperation();
+  return { c, page, changeNode: (ip = 'node-b') => { ++epoch; ++c.workspaceGeneration; c.nodeIp = ip; },
+    reconnect: () => { ++epoch; }, changeSession: () => { auth = {}; } };
+}
+
+describe('Live Desk production page continuity', () => {
+  afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); });
+
+  it('maps all 16 physical ports by identity rather than response position and disables unconfigured outputs', () => {
+    const { c, page } = workspace();
+    const config = deviceConfig(); config.channels.reverse();
+    config.channels.find(ch => ch.index === 0)!.name = 'Front wash';
+    config.channels.find(ch => ch.index === 8)!.configured = false;
+    c.channels[0].r = 17;
+    page.applyChannelConfiguration(config);
+    expect(c.channels[0]).toMatchObject({ index: 0, name: 'Front wash', kind: 'addressable', enabled: true, r: 17 });
+    expect(c.channels[8]).toMatchObject({ index: 8, name: 'P1', kind: 'pwm', enabled: false });
+    expect(c.channels[15]).toMatchObject({ index: 15, name: 'P8', enabled: true });
+  });
+
+  it('keeps saved configuration failures explicit instead of enabling all channels', async () => {
+    const { c, page } = workspace();
+    c.channels[0].r = 17; c.getDeviceConfig.mockRejectedValueOnce(new Error('Read unavailable'));
+    await page.loadConfig();
+    expect(c.configLoaded).toBe(false); expect(c.configError).toBe('Read unavailable');
+    expect(c.channels.every((ch: any) => !ch.enabled)).toBe(true);
+    expect(c.channels[0].r).toBe(17);
+    await page.takeManualControl(); expect(c.session.acquire).not.toHaveBeenCalled();
+  });
+
+  it('rejects incomplete or contradictory physical mappings', async () => {
+    const { c, page } = workspace();
+    c.getDeviceConfig.mockResolvedValueOnce({ channels: deviceConfig().channels.slice(0, 8) });
+    await page.loadConfig(); expect(c.configLoaded).toBe(false);
+    const ambiguous = deviceConfig(); ambiguous.channels[8].port = 'A1';
+    c.getDeviceConfig.mockResolvedValueOnce(ambiguous); await page.loadConfig();
+    expect(c.configLoaded).toBe(false); expect(c.configError).toMatch(/ambiguous/);
+  });
+
+  it('does not publish a late configuration after A → B → A or clear a newer loading flag', async () => {
+    const { c, page, changeNode } = workspace(); const pending = deferred<any>();
+    c.getDeviceConfig.mockReturnValueOnce(pending.promise);
+    const load = page.loadConfig(); changeNode(); changeNode('node-a');
+    c.loadingConfig = true; c.configError = 'Current request';
+    pending.resolve(deviceConfig()); await load;
+    expect(c.configLoaded).toBe(false); expect(c.loadingConfig).toBe(true); expect(c.configError).toBe('Current request');
+  });
+
+  it('cancels an old lease and delayed send on reconnect while preserving same-session draft values', async () => {
+    vi.useFakeTimers();
+    const { c, page, reconnect } = workspace(); c.channels[0].r = 17;
+    c.sendThrottleTimer = setTimeout(() => page.sendManualSnapshot(), 100);
+    reconnect(); page.syncFocusedNode('node-a'); await Promise.resolve();
+    expect(c.session.destroy).toHaveBeenCalledWith('node-a');
+    expect(c.channels[0].r).toBe(17);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(c.session.sendValues).not.toHaveBeenCalled();
+  });
+
+  it('clears a foreign-session draft and dialog even when the selected address is unchanged', () => {
+    const { c, page, changeSession } = workspace(); c.channels[0].r = 17; page.openSaveSceneDialog();
+    changeSession(); page.syncFocusedNode('node-a');
+    expect(c.channels[0].r).toBe(255);
+    expect(c.saveDialogOpen).toBe(false); expect(c.saveCapture).toBeNull();
+    expect(c.session.destroy).toHaveBeenCalledWith('node-a');
+  });
+
+  it('freezes accepted values before the scene-library read and uses conditional creation', async () => {
+    const { c, page } = workspace(); page.openSaveSceneDialog();
+    const library = deferred<any[]>(); c.getPresets.mockReturnValueOnce(library.promise);
+    const save = page.handleConfirmSaveScene('Captured look');
+    c.acceptedValues[0].r = 240; c.channels[0].r = 240; c.controlledIndices = [8];
+    library.resolve([]); await save;
+    const [ip, submitted] = c.savePreset.mock.calls[0];
+    expect(ip).toBe('node-a'); expect(submitted.expectedSceneChecksum).toBe(0);
+    expect(submitted.channels[0].layers[0].primaryColor.r).toBe(100);
+    expect(submitted.channels[8].layers[0].enabled).toBe(false);
+    expect(c.showToast).toHaveBeenCalledWith('Saved as Scene 1: "Captured look"');
+  });
+
+  it('never saves an old capture after node or same-host credential replacement', async () => {
+    for (const change of ['node', 'session']) {
+      const { c, page, changeNode, changeSession } = workspace(); page.openSaveSceneDialog();
+      const library = deferred<any[]>(); c.getPresets.mockReturnValueOnce(library.promise);
+      const save = page.handleConfirmSaveScene('Captured look');
+      if (change === 'node') changeNode(); else changeSession();
+      c.savingScene = true; library.resolve([]); await save;
+      expect(c.savePreset).not.toHaveBeenCalled(); expect(c.showToast).not.toHaveBeenCalled();
+      expect(c.savingScene).toBe(true);
+    }
+  });
+
+  it('retains capture errors and never reports an unacknowledged scene save as success', async () => {
+    const { c, page } = workspace(); page.openSaveSceneDialog();
+    c.savePreset.mockResolvedValueOnce({ saved: false }); await page.handleConfirmSaveScene('Captured look');
+    expect(c.saveDialogOpen).toBe(true); expect(c.saveSceneError).toMatch(/did not confirm/);
+    expect(c.showToast).not.toHaveBeenCalled(); expect(c.savingScene).toBe(false);
+  });
+
+  it('rejects an empty or oversized UTF-8 scene name before touching the node', async () => {
+    const { c, page } = workspace(); page.openSaveSceneDialog();
+    await page.handleConfirmSaveScene('  '); await page.handleConfirmSaveScene('é'.repeat(12));
+    expect(c.getPresets).not.toHaveBeenCalled(); expect(c.saveSceneError).toMatch(/UTF-8 bytes/);
+  });
+
+  it('does not claim release success on rejection or after the source node changes', async () => {
+    const { c, page, changeNode } = workspace(); c.session.release.mockResolvedValueOnce(false);
+    await page.releaseControl(); expect(c.showToast).not.toHaveBeenCalled();
+    const pending = deferred<boolean>(); c.session.release.mockReturnValueOnce(pending.promise);
+    const release = page.releaseControl(); changeNode(); pending.resolve(true); await release;
+    expect(c.showToast).not.toHaveBeenCalled();
+  });
+
+  it('keeps zeroing an uncontrolled selection draft-only and does not claim physical blackout', () => {
+    const { c, page } = workspace(); c.selectedIndices = [8]; c.channels[8].pwm = 4095;
+    page.blackoutSelected();
+    expect(c.channels[8].pwm).toBe(0);
+    expect(page.buildControlledSnapshot().map((ch: any) => ch.index)).toEqual([0]);
+    expect(c.showToast).toHaveBeenCalledWith(expect.stringContaining('Other selections remain draft-only'));
+  });
+});

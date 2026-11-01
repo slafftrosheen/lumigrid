@@ -134,6 +134,23 @@ undo an already accepted update. See [Flash layout](FLASH_LAYOUT.md), including
 the effective signed-OTA setting. Backup and restore are separate from credential
 recovery; inspect validation/scope before applying a restore.
 
+Hardware acceptance status advertises `evidenceBinding: "session_attempt_v1"`.
+Bind start/test-start/abort to the observed `certificationId`; a new session
+uses the previous status ID (empty before the first session). Result submissions
+also send `testStartedMs` and `testAttempt` from that test's `startedMs` and
+`attempts`. Mismatched bindings return 409 before mutation. Legacy requests
+omitting all binding fields retain active-test guards but cannot reject every
+delayed request for a later attempt. Automatic checks remain firmware-owned.
+
+Only the active manual test waiting for evidence accepts an observation. Both
+passed and failed instrument results need finite measurements and exact units;
+zero is valid. Serial/note/unit limits are 31/95/7 UTF-8 bytes. Physical result
+acceptance can leave `confirmationPending: true` until the owned runner stops
+output; new work remains blocked and failed blackout becomes failed evidence.
+`cancellationPending` similarly distinguishes accepted abort from completion.
+Report timestamps are device uptime, and reporting-image metadata describes
+the exporting image. See [Hardware acceptance](HARDWARE_CERTIFICATION.md).
+
 ## Registered routes
 
 Role values below are extracted from direct `api::authorize` calls. Entries

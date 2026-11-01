@@ -4,6 +4,14 @@
 
 namespace lg {
 
+uint64_t timeline_elapsed_beats(uint64_t elapsed_ms, uint16_t bpm) {
+    const uint64_t tempo = bpm > 0 ? bpm : 120;
+    const uint64_t minutes = elapsed_ms / 60000;
+    const uint64_t remainder_beats = ((elapsed_ms % 60000) * tempo) / 60000;
+    if (minutes > (UINT64_MAX - remainder_beats) / tempo) return UINT64_MAX;
+    return minutes * tempo + remainder_beats;
+}
+
 uint32_t get_track_total_beats(const SequencerTrack& track) {
     if (!track.enabled || track.num_steps == 0) return 0;
     uint32_t total = 0;

@@ -80,6 +80,10 @@ export interface CertificationStatusResponse {
   stale: boolean;
   staleReason?: string;
   currentTest?: string;
+  /** Absent on older firmware: its evidence endpoints are read-only in this UI. */
+  evidenceBinding?: 'session_attempt_v1' | string;
+  cancellationPending?: boolean;
+  confirmationPending?: boolean;
   tests: CertificationTestResultItem[];
 }
 
@@ -106,6 +110,9 @@ export interface CertificationReportResponse {
   nodeId: string;
   serialNumber: string;
   firmwareVersion: string;
+  /** Identifies the image exporting this report, not necessarily the tested image. */
+  reportingFirmwareVersion?: string;
+  reportingFirmwareElfSha256?: string;
   hardwareRevision: string;
   projectName: string;
   planVersion: number;
@@ -143,27 +150,29 @@ export async function getCertificationStatus(
 export async function startCertification(
   ip: string,
   profile: CertificationProfile,
-  serialNumber?: string,
+  serialNumber: string,
+  certificationId: string,
   apiKey?: string
 ): Promise<{ certificationId: string; planVersion: number; profile: string; state: string }> {
   return apiJson(ip, '/api/v1/certification/start', {
     apiKey,
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ profile, serialNumber }),
+    body: JSON.stringify({ profile, serialNumber, certificationId }),
   });
 }
 
 export async function startCertificationTest(
   ip: string,
   testId: string,
+  certificationId: string,
   apiKey?: string
 ): Promise<{ status: string }> {
   return apiJson(ip, '/api/v1/certification/test/start', {
     apiKey,
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ testId }),
+    body: JSON.stringify({ testId, certificationId }),
   });
 }
 
@@ -171,6 +180,9 @@ export async function submitCertificationTestResult(
   ip: string,
   data: {
     testId: string;
+    certificationId: string;
+    testStartedMs: number;
+    testAttempt: number;
     passed: boolean;
     state?: CertificationTestState;
     evidenceSource?: EvidenceSource;
@@ -190,13 +202,14 @@ export async function submitCertificationTestResult(
 
 export async function abortCertification(
   ip: string,
+  certificationId: string,
   apiKey?: string
-): Promise<{ status: string }> {
+): Promise<{ status: string; accepted?: boolean; cancellationRequested?: boolean }> {
   return apiJson(ip, '/api/v1/certification/abort', {
     apiKey,
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: '{}',
+    body: JSON.stringify({ certificationId }),
   });
 }
 

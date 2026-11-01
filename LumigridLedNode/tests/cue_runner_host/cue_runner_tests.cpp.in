@@ -19,6 +19,9 @@ namespace lg {
 // real state machine, mutex, timing, active content and event dispatch.
 struct Scheduler {
     enum class RemoteShowMode { None, Scene, Timeline, Cue };
+    enum class TimelineError { None, Unavailable, ChecksumMismatch, Invalid, SceneMissing };
+    ConfigStore* config = nullptr;
+    CueRunner* cue = nullptr;
     RemoteShowMode mode = RemoteShowMode::None;
     unsigned mode_changes = 0, timeline_starts = 0, timeline_stops = 0;
     unsigned sync_clears = 0;
@@ -26,12 +29,26 @@ struct Scheduler {
     void apply_remote_show_mode(RemoteShowMode value, uint16_t, uint64_t) {
         mode = value; ++mode_changes;
     }
-    void apply_remote_timeline(uint32_t, uint64_t, uint32_t, uint16_t, uint64_t) {
+    esp_err_t apply_remote_timeline(uint32_t, uint64_t, uint32_t, uint16_t, uint64_t,
+                                    TimelineError* = nullptr) {
         mode = RemoteShowMode::Timeline; ++mode_changes;
+        return ESP_OK;
     }
     void clear_remote_show_mode() { mode = RemoteShowMode::None; ++mode_changes; }
     void clear_sync_transport() { ++sync_clears; }
-    void start_local_timeline(uint16_t) { local_timeline = true; ++timeline_starts; }
+    esp_err_t start_local_timeline(uint16_t, uint64_t = 0, TimelineError* error = nullptr) {
+        Sequence candidate{};
+        const auto result = config->load_sequence(candidate);
+        if (result != ESP_OK) {
+            if (error) *error = TimelineError::Unavailable;
+            return result;
+        }
+        // Scheduler admission itself is covered by test_scheduler.py; this
+        // boundary records the successfully admitted preemption for Cue tests.
+        cue->stop(CueStopReason::Preempted, 100000);
+        local_timeline = true; ++timeline_starts;
+        return ESP_OK;
+    }
     void stop_local_timeline() { local_timeline = false; ++timeline_stops; }
     ShowTransportSnapshot transport_snapshot(uint64_t now) const {
         ShowTransportSnapshot result{};
@@ -58,6 +75,8 @@ struct Harness {
     } node_sync_;
     unsigned events = 0;
     Harness() {
+        scheduler_.config = &config_;
+        scheduler_.cue = &cue_runner_;
         cue_runner_.set_event_callback([this](CueRunner::Event) { ++events; });
         @@REMOTE_CALLBACK@@
     }

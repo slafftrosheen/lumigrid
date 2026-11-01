@@ -338,6 +338,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--no-sanitize", action="store_true", help="omit ASan/UBSan")
     parser.add_argument("--case", action="append", default=[], help="run a named test group")
+    parser.add_argument("--baseline-ref", help="compare PCA implementation from an existing git ref")
     args = parser.parse_args()
     root = Path(__file__).resolve().parent.parent
     compiler = os.environ.get("CXX", "g++")
@@ -352,6 +353,12 @@ def main() -> int:
             content = content.replace("GPIO_ENUM_VALUES", ", ".join(f"GPIO_NUM_{n} = {n}" for n in range(40)))
             path.write_text("#pragma once\n" + textwrap.dedent(content), encoding="utf-8")
         executable = temp / "output_drivers_test"
+        baseline_pca = None
+        if args.baseline_ref:
+            baseline_pca = temp / "Pca9685Driver.cpp"
+            baseline_pca.write_bytes(subprocess.run(
+                ["git", "show", f"{args.baseline_ref}:LumigridLedNode/components/output/Pca9685Driver.cpp"],
+                cwd=root.parent, check=True, capture_output=True).stdout)
         command = [compiler, "-std=c++17", "-O1", "-g", "-Wall", "-Wextra", "-Wno-unused-parameter", "-pthread"]
         if not args.no_sanitize:
             command += ["-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-fno-pie", "-no-pie"]
@@ -360,7 +367,8 @@ def main() -> int:
         for source in ("test/output_drivers_test.cpp", "components/output/Pca9685Driver.cpp",
                        "components/output/ParallelRmtDriver.cpp", "components/output/AddressableDriver.cpp",
                        "components/output/OutputController.cpp", "components/board/BoardOutputSafety.cpp"):
-            command.append(str(root / source))
+            command.append(str(baseline_pca if baseline_pca and source == "components/output/Pca9685Driver.cpp"
+                               else root / source))
         subprocess.run([*command, "-o", str(executable)], check=True)
         env = os.environ.copy()
         # LeakSanitizer requires /proc access unavailable in some CI sandboxes.

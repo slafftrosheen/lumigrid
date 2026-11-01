@@ -1,1477 +1,793 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import {
-    getCertificationPlan,
-    getCertificationStatus,
-    startCertification,
-    startCertificationTest,
-    submitCertificationTestResult,
-    abortCertification,
-    getCertificationReport,
-    type CertificationPlanResponse,
-    type CertificationStatusResponse,
-    type CertificationReportResponse,
-    type CertificationProfile,
-    type CertificationTestDefinition,
-    type CertificationTestResultItem,
-    type EvidenceSource,
+    getCertificationPlan, getCertificationStatus, startCertification, startCertificationTest,
+    submitCertificationTestResult, abortCertification, getCertificationReport,
+    type CertificationPlanResponse, type CertificationStatusResponse, type CertificationReportResponse,
+    type CertificationProfile, type CertificationTestDefinition, type CertificationTestResultItem,
   } from '$lib/api/certification';
-  import { getSelectedNodeIp } from '$lib/auth/storage';
-  import { nodeStore } from '$lib/state/nodeStore';
-  import { postFactoryAbort, getFactoryStatus, type FactoryStatus } from '$lib/api/factory';
+  import { nodeStore, captureNodeOperation } from '$lib/state/nodeStore';
+  import { nodeAuthStore } from '$lib/auth/nodeAuth';
+  import { getFactoryStatus, type FactoryStatus } from '$lib/api/factory';
+  import OperatorDialog from '$lib/components/dashboard/OperatorDialog.svelte';
+
+  type WorkspaceOwner = { ip: string; isCurrent: () => boolean };
+  type TestBinding = { certificationId: string; testId: string; testStartedMs: number; testAttempt: number };
+  const STATUS_MAX_AGE_MS = 10000;
+  const SERIAL_MAX_BYTES = 31;
+  const NOTE_MAX_BYTES = 95;
+  const ADDRESSABLE_PORTS = ['A1', 'A2', 'A3', 'A4', 'A5', 'A6', 'A7', 'A8'];
+  const PWM_PORTS = ['P1', 'P2', 'P3', 'P4', 'P5', 'P6', 'P7', 'P8'];
+  const FAILURE_CATEGORIES = [
+    { value: 'no_output', label: 'No output / dead port' },
+    { value: 'wrong_port', label: 'Wrong port illuminated' },
+    { value: 'wrong_color_order', label: 'Wrong color order' },
+    { value: 'partial_strip', label: 'Partial strip illumination' },
+    { value: 'flicker', label: 'Flicker / glitching' },
+    { value: 'crosstalk', label: 'Crosstalk on adjacent port' },
+    { value: 'unstable', label: 'Unstable / dropped signal' },
+    { value: 'measurement_out_of_tolerance', label: 'Measurement out of tolerance' },
+    { value: 'other', label: 'Other observed failure' },
+  ];
 
   let nodeIp = $state('');
+  let clock = $state(Date.now());
   let loading = $state(true);
   let error = $state('');
+  let readError = $state('');
+  let factoryError = $state('');
   let successMsg = $state('');
-
-  let plan = $state<CertificationPlanResponse | null>(null);
-  let status = $state<CertificationStatusResponse | null>(null);
-  let factoryStatus = $state<FactoryStatus | null>(null);
-
-  // Profile setup
+  let plan = $state.raw<CertificationPlanResponse | null>(null);
+  let status = $state.raw<CertificationStatusResponse | null>(null);
+  let factoryStatus = $state.raw<FactoryStatus | null>(null);
+  let statusReadAt = $state(0);
+  let statusReadOk = $state(false);
+  let factoryReadAt = $state(0);
+  let currentRole = $state('unknown');
   let selectedProfile = $state<CertificationProfile>('production_unit');
   let serialNumberInput = $state('');
-  let startingSession = $state(false);
+  let mutation = $state<'session' | 'test' | 'result' | 'abort' | null>(null);
+  let abortAwaiting = $state('');
+  let pendingEvidence = $state.raw<{ binding: TestBinding; requestedPass: boolean } | null>(null);
 
-  // Test modal & active selection
   let selectedTestId = $state<string | null>(null);
-  let activeModal = $state<'test_dialog' | 'report_modal' | 'burnin_modal' | null>(null);
-  let testingInProgress = $state(false);
-  let submittingResult = $state(false);
-
-  // Operator verification checklist
-  let operatorChecks = $state({
-    onlyPort: false,
-    colorOrder: false,
-    pixelLength: false,
-    chaseStable: false,
-  });
-
-  // Failure dialog
+  let activeModal = $state<'test_dialog' | 'report_modal' | null>(null);
+  let dialogBinding = $state.raw<TestBinding | null>(null);
+  let dialogChanged = $state('');
   let isFailureMode = $state(false);
   let failureCategory = $state('no_output');
   let failureNotes = $state('');
-
-  // Instrument dialog
-  let measuredValueInput = $state<number | string>('');
+  let operatorChecks = $state({ onlyPort: false, colorOrder: false, pixelLength: false, chaseStable: false });
+  let measuredValueInput = $state<number | string | undefined>('');
   let measurementUnitInput = $state('');
   let measurementMethodInput = $state('');
   let measurementNotes = $state('');
-
-  // Report modal
-  let reportData = $state<CertificationReportResponse | null>(null);
+  let reportData = $state.raw<CertificationReportResponse | null>(null);
   let loadingReport = $state(false);
 
-  // Live node data from store
-  const liveSnapshot = $derived($nodeStore.snapshot);
-  const liveNode = $derived(liveSnapshot?.node);
-  const isOutputTestActive = $derived(
-    liveSnapshot?.runtime?.testActive || status?.currentTest !== '' || false
-  );
+  let disposed = true;
+  let workspaceGeneration = 0;
+  let dataEpoch = 0;
+  let workspaceOwner: ReturnType<typeof captureNodeOperation> | null = null;
+  let workspaceSession: ReturnType<typeof nodeAuthStore.getSession> = null;
+  let dialogOwner: WorkspaceOwner | null = null;
+  let reportOwner: WorkspaceOwner | null = null;
+  let readPromise: Promise<boolean> | null = null;
 
-  let pollTimer: ReturnType<typeof setInterval> | null = null;
+  const statusFresh = $derived(status !== null && statusReadOk && clock - statusReadAt <= STATUS_MAX_AGE_MS);
+  const factoryFresh = $derived(factoryStatus !== null && clock - factoryReadAt <= STATUS_MAX_AGE_MS);
+  const liveFresh = $derived($nodeStore.route === nodeIp && $nodeStore.snapshot !== null &&
+    clock - $nodeStore.lastSnapshotAt <= STATUS_MAX_AGE_MS && ['online', 'degraded'].includes($nodeStore.connection));
+  const liveNode = $derived(liveFresh ? $nodeStore.snapshot?.node : null);
+  const outputReportedActive = $derived(factoryFresh
+    ? factoryStatus?.testActive === true || factoryStatus?.outputsEnabled === true
+    : liveFresh && $nodeStore.snapshot?.runtime?.testActive === true);
+  const hasSessionWork = $derived(Boolean(status?.certificationId) &&
+    (status?.state === 'in_progress' || Boolean(status?.currentTest) || status?.cancellationPending === true ||
+      status?.confirmationPending === true || Boolean(abortAwaiting)));
+  const busy = $derived(mutation !== null);
+  const mutationProblem = $derived.by(() => { clock; return getMutationProblem(); });
+  const sessionProblem = $derived.by(() => { clock; return getSessionStartProblem(); });
+  const testStartProblem = $derived.by(() => { clock; return selectedTestId ? getTestStartProblem(selectedTestId) : 'Select a test.'; });
+  const evidenceProblem = $derived.by(() => { clock; return selectedTestId ? getEvidenceProblem(selectedTestId) : 'Select a test.'; });
+  const passProblem = $derived.by(() => { clock; return selectedTestId ? validateResult(selectedTestId, true) : 'Select a test.'; });
+  const failProblem = $derived.by(() => { clock; return selectedTestId ? validateResult(selectedTestId, false) : 'Select a test.'; });
+  const notePreview = $derived(composeNote(!isFailureMode));
 
-  const ADDRESSABLE_PORTS = ['A1', 'A2', 'A3', 'A4', 'A5', 'A6', 'A7', 'A8'];
-  const PWM_PORTS = ['P1', 'P2', 'P3', 'P4', 'P5', 'P6', 'P7', 'P8'];
-
-  const FAILURE_CATEGORIES = [
-    { value: 'no_output', label: 'No Output / Dead Port' },
-    { value: 'wrong_port', label: 'Wrong Port Illuminated' },
-    { value: 'wrong_color_order', label: 'Wrong Color Order (e.g. RGB vs GRB)' },
-    { value: 'partial_strip', label: 'Partial Strip Illumination' },
-    { value: 'flicker', label: 'Flicker / Glitching' },
-    { value: 'crosstalk', label: 'Crosstalk on Adjacent Port' },
-    { value: 'unstable', label: 'Unstable / Dropped Signal' },
-    { value: 'measurement_out_of_tolerance', label: 'Measurement Out of Tolerance' },
-    { value: 'other', label: 'Other Hardware Defect' },
-  ];
-
-  async function loadData() {
-    if (!nodeIp) return;
-    try {
-      const [p, s, f] = await Promise.all([
-        getCertificationPlan(nodeIp),
-        getCertificationStatus(nodeIp),
-        getFactoryStatus(nodeIp).catch(() => null),
-      ]);
-      plan = p;
-      status = s;
-      factoryStatus = f;
-      if (s.serialNumber && !serialNumberInput) {
-        serialNumberInput = s.serialNumber;
-      }
-      error = '';
-    } catch (e: any) {
-      error = e.message || 'Failed to connect to node certification service';
-    } finally {
-      loading = false;
+  function utf8Bytes(value: string): number { return new TextEncoder().encode(value).length; }
+  function errorMessage(value: unknown): string { return value instanceof Error ? value.message : String(value); }
+  function captureWorkspaceOperation(): WorkspaceOwner {
+    const owner = captureNodeOperation(nodeIp);
+    const generation = workspaceGeneration;
+    return { ip: owner.ip, isCurrent: () => !disposed && generation === workspaceGeneration && owner.isCurrent() };
+  }
+  function getTestResult(testId: string): CertificationTestResultItem | undefined {
+    return status?.tests?.find(test => test.id === testId);
+  }
+  function getTestDefinition(testId: string): CertificationTestDefinition | undefined {
+    return plan?.tests?.find(test => test.id === testId);
+  }
+  function getPortStatus(port: string): CertificationTestResultItem | undefined {
+    return getTestResult(`${port.startsWith('A') ? 'ADDR' : 'PWM'}-${port}`);
+  }
+  function getRequirement(test: CertificationTestDefinition): string {
+    const profile = status?.certificationId ? status.profile : selectedProfile;
+    return profile === 'development' ? test.reqDev : profile === 'release_candidate' ? test.reqRc : test.reqProd;
+  }
+  function stateLabel(state: string | undefined): string {
+    if (!state) return 'Unavailable';
+    return state === 'passed' ? 'Internal checks passed' : state.replaceAll('_', ' ');
+  }
+  function hasStoredMeasurement(result: CertificationTestResultItem | undefined): boolean {
+    return Boolean(result && ['passed', 'failed'].includes(result.state) &&
+      (result.attempts > 0 || result.completedMs > 0) && result.unit && Number.isFinite(result.measuredValue));
+  }
+  function measurementLabel(result: CertificationTestResultItem | undefined): string {
+    // The persisted record has no measurement-presence bit. An execution error
+    // may leave the initialized value, or follow submitted evidence and a failed
+    // output stop. Keep the number visible without claiming either provenance.
+    return result?.errorCode === 0 ? 'Recorded measurement' : 'Stored value (measurement unconfirmed)';
+  }
+  function formatUptime(ms: number | undefined): string {
+    return typeof ms === 'number' && Number.isFinite(ms) && ms >= 0 ? `${(ms / 1000).toFixed(3)} s since device boot` : 'Unavailable';
+  }
+  function reportDuration(report: CertificationReportResponse): string {
+    return report.completedMs > 0 && report.completedMs >= report.startedMs
+      ? `${((report.completedMs - report.startedMs) / 1000).toFixed(3)} s` : 'Not completed';
+  }
+  function getMutationProblem(): string {
+    if (!nodeIp || disposed || !workspaceOwner?.isCurrent()) return 'Select a connected node to continue.';
+    const session = nodeAuthStore.getSession(nodeIp);
+    if (!session || session !== workspaceSession || session.role !== 'admin') return 'An active Admin session is required to record evidence or run tests.';
+    if (!status || !statusReadOk || Date.now() - statusReadAt > STATUS_MAX_AGE_MS) return 'Fresh acceptance status is required. Refresh the selected node status.';
+    if (status.evidenceBinding !== 'session_attempt_v1') return 'This firmware does not support session and attempt binding. Update the node firmware to run acceptance tests; existing evidence is read-only.';
+    if (mutation) return 'Waiting for the current command.';
+    return '';
+  }
+  function getSessionStartProblem(): string {
+    const problem = getMutationProblem();
+    if (problem) return problem;
+    if (status?.state === 'in_progress' || status?.currentTest || status?.cancellationPending || status?.confirmationPending || abortAwaiting) return 'Finish or cancel the current session before starting a new one.';
+    if (selectedProfile === 'production_unit' && !serialNumberInput.trim()) return 'A serial number is required for the Production Unit profile.';
+    if (utf8Bytes(serialNumberInput.trim()) > SERIAL_MAX_BYTES) return `Serial number exceeds ${SERIAL_MAX_BYTES} UTF-8 bytes.`;
+    return '';
+  }
+  function getTestStartProblem(testId: string): string {
+    const problem = getMutationProblem();
+    if (problem) return problem;
+    if (!status?.certificationId || status.state !== 'in_progress' || status.stale) return 'Start a current acceptance session before running a test.';
+    if (status.currentTest || status.cancellationPending || status.confirmationPending || abortAwaiting || pendingEvidence) return 'Wait for the current test and output stop to finish.';
+    if (!getTestDefinition(testId)) return 'The current test plan is unavailable.';
+    if ((getTestResult(testId)?.attempts ?? 0) >= 255) return 'This test has reached 255 attempts. Cancel the current session before starting a new one.';
+    return '';
+  }
+  function makeBinding(testId: string): TestBinding | null {
+    const result = getTestResult(testId);
+    if (!status?.certificationId || !result) return null;
+    return { certificationId: status.certificationId, testId, testStartedMs: result.startedMs, testAttempt: result.attempts };
+  }
+  function bindingMatches(binding: TestBinding | null): boolean {
+    const result = binding && getTestResult(binding.testId);
+    return Boolean(binding && result && status?.certificationId === binding.certificationId &&
+      result.startedMs === binding.testStartedMs && result.attempts === binding.testAttempt);
+  }
+  function physicalTarget(testId: string): { kind: string; channel: number } | null {
+    if (/^ADDR-A[1-8]$/.test(testId)) return { kind: 'addressable_channel', channel: Number(testId.slice(-1)) - 1 };
+    if (/^PWM-P[1-8]$/.test(testId)) return { kind: 'pwm_channel', channel: Number(testId.slice(-1)) + 7 };
+    if (testId === 'ADDR-XTALK') return { kind: 'addressable_channel', channel: 0 };
+    if (testId === 'PWM-XTALK') return { kind: 'pwm_channel', channel: 8 };
+    if (['SAFE-ESTOP-ADDRESSABLE', 'SAFE-ESTOP-PWM', 'SAFE-DISABLE-001'].includes(testId)) return { kind: 'safety_gate', channel: -1 };
+    return null;
+  }
+  function matchingFactorySession(testId: string): boolean {
+    const target = physicalTarget(testId);
+    const result = getTestResult(testId);
+    const session = factoryStatus?.session;
+    return Boolean(target && result && status?.currentTest === testId && factoryStatus &&
+      Date.now() - factoryReadAt <= STATUS_MAX_AGE_MS && session && session.id > 0 &&
+      session.kind === target.kind && session.channel === target.channel &&
+      typeof session.startedMs === 'number' && session.startedMs >= result.startedMs);
+  }
+  function getEvidenceProblem(testId: string): string {
+    const problem = getMutationProblem();
+    if (problem) return problem;
+    if (getTestDefinition(testId)?.requiredEvidence === 'automatic') return 'Automatic evidence is produced by the firmware probe. Operator Pass/Fail is unavailable.';
+    if (!dialogOwner?.isCurrent() || selectedTestId !== testId || !bindingMatches(dialogBinding) || dialogChanged) return 'The session or test attempt changed. Close and reopen this test to review the current attempt.';
+    if (status?.stale || status?.state !== 'in_progress' || status?.currentTest !== testId || getTestResult(testId)?.state !== 'waiting_for_operator') return 'Evidence can be recorded only for the current test while it is waiting for the operator.';
+    if (status.cancellationPending || abortAwaiting) return 'Cancellation is accepted; waiting for the controller to stop.';
+    if (status.confirmationPending || pendingEvidence) return 'Evidence is accepted; waiting for output stop confirmation.';
+    if (physicalTarget(testId) && (!matchingFactorySession(testId) || factoryStatus?.session?.state !== 'waiting_for_operator')) return 'Matching physical test status is unavailable or not ready. Wait for a fresh factory status.';
+    return '';
+  }
+  function composeNote(passed: boolean): string {
+    const parts: string[] = [];
+    if (measurementMethodInput.trim()) parts.push(`Method: ${measurementMethodInput.trim()}`);
+    if (measurementNotes.trim()) parts.push(`Notes: ${measurementNotes.trim()}`);
+    if (!passed && failureNotes.trim()) parts.push(`[${failureCategory}] ${failureNotes.trim()}`);
+    return parts.join('; ');
+  }
+  function validateResult(testId: string, passed: boolean): string {
+    const problem = getEvidenceProblem(testId);
+    if (problem) return problem;
+    const definition = getTestDefinition(testId);
+    if (!definition) return 'The current test plan is unavailable.';
+    if (!passed && !failureNotes.trim()) return 'Failure notes are required.';
+    if (passed && testId.startsWith('ADDR-A') && !Object.values(operatorChecks).every(Boolean)) return 'Confirm each observation before recording a pass.';
+    const note = composeNote(passed);
+    if (utf8Bytes(note) > NOTE_MAX_BYTES) return `Combined method and notes exceed ${NOTE_MAX_BYTES} UTF-8 bytes.`;
+    if (definition.requiredEvidence === 'instrument_measurement') {
+      const value = Number(measuredValueInput);
+      if (measuredValueInput === undefined || String(measuredValueInput).trim() === '' || !Number.isFinite(value)) return 'Enter a finite numeric measured value, including zero when measured.';
+      if (measurementUnitInput !== definition.unit || utf8Bytes(measurementUnitInput) > 7) return `The unit must exactly match the plan: ${definition.unit || '(empty)'}.`;
+      if (passed && definition.tolerance > 0 && Math.abs(value - definition.expectedValue) > definition.tolerance && !note) return 'This reading is outside the plan tolerance. Add a note; the node may record it as failed.';
     }
+    return '';
+  }
+  function resetEvidenceInputs() {
+    isFailureMode = false; failureCategory = 'no_output'; failureNotes = '';
+    operatorChecks = { onlyPort: false, colorOrder: false, pixelLength: false, chaseStable: false };
+    measuredValueInput = ''; measurementMethodInput = ''; measurementNotes = '';
+    measurementUnitInput = selectedTestId ? getTestDefinition(selectedTestId)?.unit || '' : '';
+  }
+  function observeStatus(next: CertificationStatusResponse) {
+    const previousId = status?.certificationId;
+    status = next;
+    if (previousId && previousId !== next.certificationId) {
+      pendingEvidence = null; abortAwaiting = '';
+      reportData = null; reportOwner = null;
+      if (activeModal === 'report_modal') activeModal = null;
+    }
+    if (pendingEvidence && !bindingMatches(pendingEvidence.binding)) {
+      pendingEvidence = null; successMsg = '';
+      if (!error) error = 'The test attempt changed before this page confirmed the earlier result. Review the current attempt.';
+    }
+    if (activeModal === 'test_dialog' && dialogBinding && !bindingMatches(dialogBinding)) {
+      resetEvidenceInputs(); dialogBinding = null;
+      dialogChanged = 'The session or test attempt changed. Previous inputs were cleared. Close and reopen this test to review the current attempt.';
+    }
+    if (pendingEvidence && bindingMatches(pendingEvidence.binding) && !next.confirmationPending && !next.cancellationPending) {
+      const result = getTestResult(pendingEvidence.binding.testId);
+      if (result && ['passed', 'failed', 'blocked'].includes(result.state) && next.currentTest !== result.id) {
+        successMsg = `Node recorded ${result.id} as ${result.state}.${result.state === 'failed' && pendingEvidence.requestedPass ? ' The requested pass was not confirmed; inspect the recorded evidence and error code.' : ''}`;
+        pendingEvidence = null;
+      }
+    }
+    if (abortAwaiting === next.certificationId && !next.cancellationPending && !next.confirmationPending && !next.currentTest && next.state !== 'in_progress' &&
+      factoryStatus && Date.now() - factoryReadAt <= STATUS_MAX_AGE_MS && factoryStatus.testActive === false && factoryStatus.outputsEnabled === false) {
+      abortAwaiting = ''; pendingEvidence = null;
+      successMsg = 'Session cancelled. The controller reports output testing stopped.';
+    }
+  }
+  async function readData(owner: WorkspaceOwner, epoch: number): Promise<boolean> {
+    try {
+      const [p, s, f] = await Promise.allSettled([
+        plan ? Promise.resolve(plan) : getCertificationPlan(owner.ip),
+        getCertificationStatus(owner.ip), getFactoryStatus(owner.ip),
+      ]);
+      if (!owner.isCurrent() || epoch !== dataEpoch) return false;
+      if (p.status === 'fulfilled') plan = p.value;
+      if (f.status === 'fulfilled' && typeof f.value.testActive === 'boolean' && typeof f.value.outputsEnabled === 'boolean') {
+        factoryStatus = f.value; factoryReadAt = Date.now(); factoryError = '';
+      } else {
+        factoryStatus = null; factoryReadAt = 0;
+        factoryError = `Factory output status unavailable: ${f.status === 'rejected' ? errorMessage(f.reason) : 'invalid controller response'}`;
+      }
+      if (s.status === 'rejected') throw s.reason;
+      if (typeof s.value.certificationId !== 'string' || !Array.isArray(s.value.tests) || !s.value.state) throw new Error('The node returned an invalid acceptance status.');
+      if (workspaceSession?.nodeId && s.value.nodeId && workspaceSession.nodeId !== s.value.nodeId) throw new Error('Acceptance status belongs to a different node identity.');
+      statusReadAt = Date.now(); statusReadOk = true; clock = Date.now();
+      observeStatus(s.value);
+      if (s.value.serialNumber && !serialNumberInput) serialNumberInput = s.value.serialNumber;
+      readError = p.status === 'rejected' ? `Test plan unavailable: ${errorMessage(p.reason)}` : '';
+      return true;
+    } catch (cause) {
+      if (owner.isCurrent() && epoch === dataEpoch) {
+        statusReadOk = false;
+        readError = `Acceptance status unavailable: ${errorMessage(cause)}`;
+      }
+      return false;
+    } finally {
+      if (owner.isCurrent() && epoch === dataEpoch) loading = false;
+    }
+  }
+  function loadData(): Promise<boolean> {
+    if (readPromise) return readPromise;
+    if (!nodeIp || disposed || !workspaceSession || !workspaceOwner?.isCurrent()) return Promise.resolve(false);
+    const request = readData(captureWorkspaceOperation(), dataEpoch);
+    readPromise = request;
+    void request.finally(() => { if (readPromise === request) readPromise = null; });
+    return request;
+  }
+  async function refreshOwned(owner: WorkspaceOwner): Promise<boolean> {
+    if (readPromise) await readPromise;
+    if (!owner.isCurrent()) return false;
+    return loadData();
+  }
+  function syncFocusedNode(ip: string) {
+    const session = nodeAuthStore.getSession(ip);
+    if (ip === nodeIp && session === workspaceSession && workspaceOwner?.isCurrent()) return;
+    ++workspaceGeneration; ++dataEpoch;
+    nodeIp = ip; workspaceSession = session; workspaceOwner = captureNodeOperation(ip);
+    currentRole = session?.role || 'unknown';
+    plan = status = factoryStatus = null;
+    statusReadAt = factoryReadAt = 0; statusReadOk = false;
+    activeModal = selectedTestId = null; dialogBinding = null; dialogOwner = null; dialogChanged = '';
+    reportData = null; reportOwner = null; loadingReport = false;
+    mutation = null; pendingEvidence = null; abortAwaiting = '';
+    error = readError = factoryError = successMsg = ''; serialNumberInput = '';
+    resetEvidenceInputs(); loading = Boolean(ip && session);
+    if (ip && session) void refreshOwned(captureWorkspaceOperation());
+  }
+  function beginCommand(kind: NonNullable<typeof mutation>): WorkspaceOwner {
+    const owner = captureWorkspaceOperation();
+    mutation = kind; ++dataEpoch; statusReadOk = false; error = ''; successMsg = '';
+    return owner;
+  }
+  async function handleStartSession() {
+    const problem = getSessionStartProblem();
+    if (problem) { error = problem; return; }
+    const profile = selectedProfile;
+    const serial = serialNumberInput.trim();
+    const certificationId = status!.certificationId;
+    const owner = beginCommand('session');
+    try {
+      const result = await startCertification(owner.ip, profile, serial, certificationId);
+      if (!owner.isCurrent()) return;
+      statusReadOk = false;
+      const refreshed = await refreshOwned(owner);
+      if (!owner.isCurrent()) return;
+      successMsg = refreshed && status?.certificationId === result.certificationId
+        ? `Acceptance session ${result.certificationId} started.` : 'Session start accepted. Waiting for current acceptance status.';
+    } catch (cause) {
+      if (owner.isCurrent()) error = `Session start was not confirmed: ${errorMessage(cause)}`;
+    } finally { if (owner.isCurrent()) mutation = null; }
+  }
+  function openTestDialog(testId: string) {
+    if (mutation || !getTestDefinition(testId)) return;
+    selectedTestId = testId; dialogOwner = captureWorkspaceOperation(); dialogBinding = makeBinding(testId);
+    dialogChanged = ''; resetEvidenceInputs(); activeModal = 'test_dialog';
+  }
+  function closeDialog() { if (!mutation) activeModal = null; }
+  async function handleStartTest(testId: string) {
+    const problem = getTestStartProblem(testId);
+    if (problem) { error = problem; return; }
+    const certificationId = status!.certificationId;
+    const owner = beginCommand('test');
+    try {
+      await startCertificationTest(owner.ip, testId, certificationId);
+      if (!owner.isCurrent()) return;
+      statusReadOk = false;
+      const refreshed = await refreshOwned(owner);
+      if (!owner.isCurrent()) return;
+      if (refreshed && status?.certificationId !== certificationId) {
+        error = 'The acceptance session changed while this test was starting. Inspect the current node evidence.';
+        return;
+      }
+      if (refreshed && status?.certificationId === certificationId && selectedTestId === testId) {
+        resetEvidenceInputs(); dialogBinding = makeBinding(testId); dialogChanged = '';
+      }
+      successMsg = refreshed ? `Current state for ${testId}: ${getTestResult(testId)?.state || 'unavailable'}.` : 'Test start accepted. Waiting for current acceptance status.';
+    } catch (cause) {
+      if (owner.isCurrent()) error = `Test start was not confirmed: ${errorMessage(cause)}`;
+    } finally { if (owner.isCurrent()) mutation = null; }
+  }
+  async function handleRecordResult(testId: string, passed: boolean) {
+    const problem = validateResult(testId, passed);
+    if (problem) { error = problem; return; }
+    const binding = { ...dialogBinding! };
+    const definition = getTestDefinition(testId)!;
+    const payload = { ...binding, passed, evidenceSource: definition.requiredEvidence, note: composeNote(passed),
+      ...(definition.requiredEvidence === 'instrument_measurement' ? { measuredValue: Number(measuredValueInput), unit: measurementUnitInput } : {}) };
+    const owner = beginCommand('result');
+    try {
+      await submitCertificationTestResult(owner.ip, payload);
+      if (!owner.isCurrent()) return;
+      pendingEvidence = { binding, requestedPass: passed }; statusReadOk = false;
+      successMsg = 'Evidence accepted. Waiting for the node to confirm the final result and output stop.';
+      await refreshOwned(owner);
+      if (!owner.isCurrent()) return;
+      if (pendingEvidence && !bindingMatches(binding)) {
+        pendingEvidence = null;
+        error = 'Evidence response arrived after the session or attempt changed. Inspect the current node evidence.';
+      }
+    } catch (cause) {
+      if (owner.isCurrent()) error = `Evidence was not confirmed: ${errorMessage(cause)}`;
+    } finally { if (owner.isCurrent()) mutation = null; }
+  }
+  async function handleEmergencyAbort() {
+    const problem = getMutationProblem();
+    if (problem) { error = problem; return; }
+    if (!status?.certificationId || !hasSessionWork) { error = 'There is no current acceptance session to cancel.'; return; }
+    const certificationId = status.certificationId;
+    const owner = beginCommand('abort');
+    try {
+      const response = await abortCertification(owner.ip, certificationId);
+      if (!owner.isCurrent()) return;
+      if (response.accepted === false) throw new Error('The node did not accept cancellation.');
+      abortAwaiting = certificationId; statusReadOk = false;
+      successMsg = 'Cancellation accepted. Waiting for the controller to confirm output testing stopped.';
+      await refreshOwned(owner);
+      if (!owner.isCurrent()) return;
+    } catch (cause) {
+      if (owner.isCurrent()) error = `Cancellation was not confirmed. Retry cancellation for this session: ${errorMessage(cause)}`;
+    } finally { if (owner.isCurrent()) mutation = null; }
+  }
+  async function handleOpenReport() {
+    if (loadingReport || mutation || !status?.certificationId || !status.nodeId || !workspaceOwner?.isCurrent()) return;
+    const owner = captureWorkspaceOperation();
+    const certificationId = status.certificationId;
+    const nodeId = status.nodeId;
+    loadingReport = true; error = '';
+    try {
+      const report = await getCertificationReport(owner.ip);
+      if (!owner.isCurrent() || status?.certificationId !== certificationId || status?.nodeId !== nodeId) return;
+      if (report.certificationId !== certificationId || report.nodeId !== nodeId) throw new Error('The report identity does not match the selected node and session. Refresh status before trying again.');
+      reportData = report;
+      reportOwner = { ip: owner.ip, isCurrent: () => owner.isCurrent() && status?.certificationId === certificationId && status?.nodeId === nodeId };
+      activeModal = 'report_modal';
+    } catch (cause) {
+      if (owner.isCurrent() && status?.certificationId === certificationId) error = `Report unavailable: ${errorMessage(cause)}`;
+    } finally { if (owner.isCurrent()) loadingReport = false; }
+  }
+  function downloadReportJson() {
+    const report = reportData;
+    if (!report || !reportOwner?.isCurrent()) return;
+    const blob = new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `lumigrid-acceptance-${report.nodeId}-${report.certificationId}.json`.replace(/[^a-zA-Z0-9._-]/g, '_');
+    anchor.click(); URL.revokeObjectURL(url);
   }
 
   onMount(() => {
-    nodeIp = getSelectedNodeIp() || '192.168.4.1';
-    loadData();
-    pollTimer = setInterval(() => {
-      if (nodeIp) loadData();
-    }, 2000);
+    disposed = false;
+    const unsubscribe = nodeStore.subscribe(state => syncFocusedNode(state.route || ''));
+    const authUnsubscribe = nodeAuthStore.subscribe(() => syncFocusedNode($nodeStore.route || ''));
+    const timer = setInterval(() => {
+      clock = Date.now(); syncFocusedNode($nodeStore.route || '');
+      if (!mutation && !readPromise && nodeIp && clock - statusReadAt >= 2000) void loadData();
+    }, 1000);
+    return () => { unsubscribe(); authUnsubscribe(); clearInterval(timer); };
   });
-
-  onDestroy(() => {
-    if (pollTimer) clearInterval(pollTimer);
-  });
-
-  function getTestResult(testId: string): CertificationTestResultItem | undefined {
-    return status?.tests?.find((t) => t.id === testId);
-  }
-
-  function getTestDefinition(testId: string): CertificationTestDefinition | undefined {
-    return plan?.tests?.find((t) => t.id === testId);
-  }
-
-  function getPortStatus(port: string): CertificationTestResultItem | undefined {
-    const isAddr = port.startsWith('A');
-    const testId = isAddr ? `ADDR-${port}` : `PWM-${port}`;
-    return getTestResult(testId);
-  }
-
-  async function handleStartSession() {
-    if (!nodeIp) return;
-    if (selectedProfile === 'production_unit' && !serialNumberInput.trim()) {
-      error = 'Serial Number is required for ProductionUnit certification!';
-      return;
-    }
-    startingSession = true;
-    error = '';
-    successMsg = '';
-    try {
-      const res = await startCertification(nodeIp, selectedProfile, serialNumberInput.trim());
-      successMsg = `Certification session ${res.certificationId} started!`;
-      await loadData();
-    } catch (e: any) {
-      error = e.message || 'Failed to start certification session';
-    } finally {
-      startingSession = false;
-    }
-  }
-
-  function openTestDialog(testId: string) {
-    selectedTestId = testId;
-    isFailureMode = false;
-    failureCategory = 'no_output';
-    failureNotes = '';
-    operatorChecks = {
-      onlyPort: false,
-      colorOrder: false,
-      pixelLength: false,
-      chaseStable: false,
-    };
-
-    const def = getTestDefinition(testId);
-    if (def?.requiredEvidence === 'instrument_measurement') {
-      measuredValueInput = '';
-      measurementUnitInput = def.unit || '';
-      measurementMethodInput = '';
-      measurementNotes = '';
-    }
-
-    activeModal = 'test_dialog';
-  }
-
-  async function handleStartTest(testId: string) {
-    if (!nodeIp) return;
-    testingInProgress = true;
-    error = '';
-    try {
-      await startCertificationTest(nodeIp, testId);
-      await loadData();
-    } catch (e: any) {
-      error = e.message || 'Failed to launch test';
-    } finally {
-      testingInProgress = false;
-    }
-  }
-
-  async function handleRecordPass(testId: string) {
-    if (!nodeIp) return;
-    const def = getTestDefinition(testId);
-    submittingResult = true;
-    error = '';
-    try {
-      let measuredVal = 0;
-      let unit = '';
-      if (def?.requiredEvidence === 'instrument_measurement') {
-        measuredVal = parseFloat(String(measuredValueInput));
-        if (isNaN(measuredVal)) {
-          error = 'Please enter a valid numeric measured value!';
-          submittingResult = false;
-          return;
-        }
-        unit = measurementUnitInput;
-      }
-
-      await submitCertificationTestResult(nodeIp, {
-        testId,
-        passed: true,
-        evidenceSource: def?.requiredEvidence || 'operator_observation',
-        measuredValue: measuredVal,
-        unit,
-        note: measurementNotes,
-      });
-
-      activeModal = null;
-      await loadData();
-    } catch (e: any) {
-      error = e.message || 'Failed to record test result';
-    } finally {
-      submittingResult = false;
-    }
-  }
-
-  async function handleRecordFail(testId: string) {
-    if (!nodeIp) return;
-    if (!failureNotes.trim()) {
-      error = 'Failure notes are mandatory when marking a test as failed!';
-      return;
-    }
-
-    submittingResult = true;
-    error = '';
-    try {
-      const def = getTestDefinition(testId);
-      const notePayload = `[${failureCategory}] ${failureNotes.trim()}`;
-      await submitCertificationTestResult(nodeIp, {
-        testId,
-        passed: false,
-        evidenceSource: def?.requiredEvidence || 'operator_observation',
-        note: notePayload,
-      });
-
-      activeModal = null;
-      await loadData();
-    } catch (e: any) {
-      error = e.message || 'Failed to record failure';
-    } finally {
-      submittingResult = false;
-    }
-  }
-
-  async function handleEmergencyAbort() {
-    if (!nodeIp) return;
-    try {
-      await abortCertification(nodeIp);
-      await postFactoryAbort(nodeIp);
-      await loadData();
-      successMsg = 'Cancellation and blackout requested. Waiting for controller status.';
-    } catch (e: any) {
-      error = e.message || 'Failed to abort';
-    }
-  }
-
-  async function handleOpenReport() {
-    if (!nodeIp) return;
-    loadingReport = true;
-    try {
-      reportData = await getCertificationReport(nodeIp);
-      activeModal = 'report_modal';
-    } catch (e: any) {
-      error = e.message || 'Failed to load report';
-    } finally {
-      loadingReport = false;
-    }
-  }
-
-  function downloadReportJson() {
-    if (!reportData) return;
-    const blob = new Blob([JSON.stringify(reportData, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `lumigrid-certification-${reportData.nodeId}-${reportData.firmwareVersion}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
-  }
-
-  const allChecksSatisfied = $derived(
-    operatorChecks.onlyPort &&
-    operatorChecks.colorOrder &&
-    operatorChecks.pixelLength &&
-    operatorChecks.chaseStable
-  );
+  onDestroy(() => { disposed = true; ++workspaceGeneration; ++dataEpoch; });
 </script>
 
-<svelte:head>
-  <title>LumiGrid | Hardware Certification Bench</title>
-</svelte:head>
+<svelte:head><title>LumiGrid | Hardware Acceptance Bench</title></svelte:head>
 
 <div class="cert-container">
-  <!-- Top Emergency Safety Bar (Spec §92) -->
-  {#if isOutputTestActive}
-    <div class="emergency-bar">
+  {#if hasSessionWork || outputReportedActive}
+    <div class="emergency-bar" role="status">
       <div class="emergency-text">
-        <span class="pulse-indicator">⚠️</span>
-        <strong>PHYSICAL HARDWARE TEST ACTIVE</strong> — Output energized according to factory limits.
+        {#if status?.cancellationPending || abortAwaiting}<strong>Cancellation accepted — waiting for confirmed stop.</strong>
+        {:else if status?.confirmationPending}<strong>Evidence accepted — stopping outputs…</strong>
+        {:else if status?.currentTest}<strong>Current test: {status.currentTest}</strong>
+        {:else}<strong>{hasSessionWork ? 'Acceptance session in progress' : 'Node output activity reported'}</strong>{/if}
+        <span>{outputReportedActive ? 'The node reports output testing active.' : factoryFresh ? 'Output state is available from the controller.' : 'Output state is unconfirmed.'}</span>
       </div>
-      <button class="emergency-btn" onclick={handleEmergencyAbort}>
-        ⬛ BLACKOUT / ABORT TEST
-      </button>
+      {#if hasSessionWork}<button type="button" class="cert-btn cert-btn-danger" onclick={handleEmergencyAbort} disabled={Boolean(mutationProblem)}>{mutation === 'abort' ? 'Requesting cancellation…' : 'Cancel Session / Stop Test'}</button>{/if}
     </div>
   {/if}
 
-  <!-- Header Card -->
   <header class="cert-header">
     <div class="header-top">
       <div>
         <div class="title-row">
-          <h1>Hardware Certification Bench</h1>
-          {#if status?.stale}
-            <span class="cert-badge cert-badge-stale">⚠️ CERTIFICATION STALE</span>
-          {:else if status?.state === 'passed'}
-            <span class="cert-badge cert-badge-passed">✓ CERTIFIED</span>
-          {:else if status?.state === 'failed'}
-            <span class="cert-badge cert-badge-failed">✗ FAILED</span>
-          {:else if status?.state === 'in_progress'}
-            <span class="cert-badge cert-badge-progress">IN PROGRESS</span>
-          {:else}
-            <span class="cert-badge cert-badge-muted">NOT STARTED</span>
-          {/if}
+          <h1>Hardware Acceptance Bench</h1>
+          <span class="cert-badge" class:passed={status?.state === 'passed' && !status.stale} class:failed={status?.state === 'failed'}>
+            {status?.stale ? 'Evidence stale' : stateLabel(status?.state)}
+          </span>
         </div>
-        {#if status?.stale}
-          <div class="stale-alert">
-            Reason: <strong>{status.staleReason || 'Hardware configuration or firmware modified since certification'}</strong>.
-            Required verification tests must be re-run to recertify.
-          </div>
-        {/if}
+        <p class="section-desc">Collect internal hardware test evidence. A passed session means internal checks passed; it does not establish CE approval.</p>
+        {#if status?.stale}<p class="alert" role="status">Stored evidence is stale: {status.staleReason || 'The node reports changed firmware or configuration.'}</p>{/if}
       </div>
-
-      <div class="header-actions">          <button class="cert-btn cert-btn-outline" onclick={handleOpenReport} disabled={loadingReport || !status}>
-          📄 Certification Report
-        </button>
-        {#if isOutputTestActive}
-          <button class="cert-btn cert-btn-danger" onclick={handleEmergencyAbort}>
-            Abort Test
-          </button>
-        {/if}
+      <div class="header-actions">
+        <button type="button" class="cert-btn cert-btn-outline" onclick={handleOpenReport} aria-busy={loadingReport} aria-disabled={loadingReport || busy || !status?.certificationId || !status?.nodeId} disabled={busy || !status?.certificationId || !status?.nodeId}>{loadingReport ? 'Loading report…' : 'Acceptance Report'}</button>
       </div>
     </div>
 
-    <!-- Metadata Grid -->
     <div class="meta-grid">
-      <div class="meta-item">
-        <span class="meta-label">Node ID</span>
-        <span class="meta-value mono">{status?.nodeId || liveNode?.id || '—'}</span>
-      </div>
-      <div class="meta-item">
-        <span class="meta-label">Serial Number</span>
-        <span class="meta-value mono">{status?.serialNumber || 'Unassigned'}</span>
-      </div>
-      <div class="meta-item">
-        <span class="meta-label">Hardware Revision</span>
-        <span class="meta-value">{status?.hardwareRevision || 'v1.0'}</span>
-      </div>
-      <div class="meta-item">
-        <span class="meta-label">Firmware Version</span>
-        <span class="meta-value mono">{status?.firmwareVersion || '—'}</span>
-      </div>
-      <div class="meta-item">
-        <span class="meta-label">Certification ID</span>
-        <span class="meta-value mono">{status?.certificationId || '—'}</span>
-      </div>
-      <div class="meta-item">
-        <span class="meta-label">Plan Version</span>
-        <span class="meta-value">v{status?.planVersion || 1}</span>
-      </div>
+      <div class="meta-item"><span class="meta-label">Node ID</span><span class="meta-value mono">{status?.nodeId || liveNode?.id || 'Unknown'}</span></div>
+      <div class="meta-item"><span class="meta-label">Serial Number</span><span class="meta-value mono">{status?.serialNumber || 'Unassigned'}</span></div>
+      <div class="meta-item"><span class="meta-label">Hardware Revision</span><span class="meta-value">{status?.hardwareRevision || 'Unknown'}</span></div>
+      <div class="meta-item"><span class="meta-label">Firmware Version</span><span class="meta-value mono">{status?.firmwareVersion || 'Unavailable'}</span></div>
+      <div class="meta-item"><span class="meta-label">Session ID</span><span class="meta-value mono">{status?.certificationId || 'Unavailable'}</span></div>
+      <div class="meta-item"><span class="meta-label">Plan Version</span><span class="meta-value">{status?.planVersion ?? plan?.planVersion ?? 'Unavailable'}</span></div>
     </div>
 
-    <!-- Progress Overview -->
+    <div class="status-line" role="status">
+      {nodeIp || 'No node selected'} · {currentRole === 'unknown' ? 'No current session' : `${currentRole} session`} ·
+      {loading ? 'Loading acceptance status…' : statusFresh ? 'Acceptance status current' : status ? 'Acceptance status stale or unavailable' : 'Acceptance status unavailable'}
+      <button type="button" class="cert-btn cert-btn-sm cert-btn-outline" onclick={() => loadData()} disabled={busy || loading || !nodeIp}>Refresh Status</button>
+    </div>
+    {#if readError}<p class="alert alert-error" role="alert">{readError}</p>{/if}
+    {#if factoryError}<p class="alert alert-error" role="alert">{factoryError}. Physical evidence requires matching current output status.</p>{/if}
+    {#if mutationProblem && !busy}<p class="alert" role="status">{mutationProblem}</p>{/if}
+
     {#if status && status.state !== 'not_started'}
       <div class="progress-section">
-        <div class="progress-labels">
-          <span>Overall Plan Completion</span>
-          <span>{status.passed} passed / {status.failed} failed / {status.total} total</span>
-        </div>
-        <div class="progress-bar-bg">
-          <div class="progress-fill-pass" style="width: {(status.passed / (status.total || 1)) * 100}%"></div>
-          <div class="progress-fill-fail" style="width: {(status.failed / (status.total || 1)) * 100}%"></div>
-        </div>
+        <div class="progress-labels"><span>Overall plan completion</span><span>{status.passed} passed / {status.failed} failed / {status.total} total</span></div>
+        <div class="progress-bar-bg" aria-hidden="true"><div class="progress-fill-pass" style:width={`${status.passed / (status.total || 1) * 100}%`}></div><div class="progress-fill-fail" style:width={`${status.failed / (status.total || 1) * 100}%`}></div></div>
       </div>
     {/if}
 
-    <!-- Session Start Controls -->
-    {#if !status || status.state === 'not_started' || status.state === 'passed' || status.state === 'failed' || status.state === 'incomplete' || status.state === 'invalidated'}
-      <div class="session-start-box">
-        <div class="session-form">
-          <label>
-            <span>Target Profile:</span>
-            <select bind:value={selectedProfile}>
-              <option value="production_unit">Production Unit (Hardware QA & Bring-Up)</option>
-              <option value="development">Development (Rapid Bring-Up)</option>
-              <option value="release_candidate">Release Candidate (Full Qualification Matrix)</option>
-            </select>
-          </label>
-
-          {#if selectedProfile === 'production_unit'}
-            <label>
-              <span>Serial Number (Mandatory):</span>
-              <input type="text" placeholder="e.g. SN-LG-2026-0042" bind:value={serialNumberInput} />
-            </label>
-          {/if}
-
-          <button class="cert-btn cert-btn-primary" onclick={handleStartSession} disabled={startingSession}>
-            {startingSession ? 'Initializing Session...' : 'Start New Certification'}
-          </button>
-        </div>
+    <div class="session-start-box">
+      <div class="session-form">
+        <label><span>Target Profile</span><select bind:value={selectedProfile} disabled={busy || hasSessionWork}>
+          <option value="production_unit">Production Unit</option><option value="development">Development</option><option value="release_candidate">Release Candidate</option>
+        </select></label>
+        <label><span>Serial Number{selectedProfile === 'production_unit' ? ' (required)' : ' (optional)'}</span><input type="text" bind:value={serialNumberInput} disabled={busy || hasSessionWork} aria-describedby="serial-limit" /></label>
+        <button type="button" class="cert-btn cert-btn-primary" onclick={handleStartSession} disabled={Boolean(sessionProblem)}>{mutation === 'session' ? 'Starting session…' : 'Start New Session'}</button>
       </div>
-    {/if}
-
-    {#if error}
-      <div class="alert alert-error">{error}</div>
-    {/if}
-    {#if successMsg}
-      <div class="alert alert-success">{successMsg}</div>
-    {/if}
+      <p id="serial-limit" class="field-help">{utf8Bytes(serialNumberInput.trim())}/{SERIAL_MAX_BYTES} UTF-8 bytes after trimming.</p>
+      {#if !mutationProblem && sessionProblem}<p class="field-help">{sessionProblem}</p>{/if}
+    </div>
+    {#if error && activeModal !== 'test_dialog'}<p class="alert alert-error" role="alert">{error}</p>{/if}
+    {#if successMsg && activeModal !== 'test_dialog'}<p class="alert alert-success" role="status">{successMsg}</p>{/if}
   </header>
 
-  <!-- Physical Output Topology Grid (Spec §74) -->
   <section class="cert-section">
-    <div class="section-header">
-      <h2>Physical Channel Topology Bench</h2>
-      <p class="section-desc">Independent physical verification for every channel connector. Click any port to run test sequence.</p>
-    </div>
-
+    <div class="section-header"><h2>Physical Channel Topology Bench</h2><p class="section-desc">Inspect each connector and its evidence. Start a test from its dialog when the current session is ready.</p></div>
     <div class="topology-grid">
-      <!-- Addressable Ports Row A1-A8 -->
-      <div class="port-row-header">
-        <span class="row-tag tag-addr">Addressable (Pixel Lanes A1–A8)</span>
-      </div>
+      <h3 class="port-row-header">Addressable (Pixel Lanes A1–A8)</h3>
       <div class="tiles-row">
         {#each ADDRESSABLE_PORTS as port}
-          {@const res = getPortStatus(port)}
-          <button
-            class="cert-port-tile"
-            class:cert-state-passed={res?.state === 'passed'}
-            class:cert-state-failed={res?.state === 'failed'}
-            class:cert-state-running={res?.state === 'running'}
-            class:cert-state-waiting={res?.state === 'waiting_for_operator'}
-            class:cert-state-blocked={res?.state === 'blocked'}
-            onclick={() => openTestDialog(`ADDR-${port}`)}
-          >
-            <div class="cert-tile-top">
-              <span class="cert-tile-port">{port}</span>
-              <span class="cert-tile-pill">
-                {#if res?.state === 'passed'}PASS
-                {:else if res?.state === 'failed'}FAIL
-                {:else if res?.state === 'running'}
-                  {#if factoryStatus?.session?.stage}
-                    {factoryStatus.session.stage.toUpperCase()}
-                  {:else}
-                    TESTING
-                  {/if}
-                {:else if res?.state === 'waiting_for_operator'}WAITING
-                {:else if res?.state === 'blocked'}BLOCKED
-                {:else}NOT TESTED{/if}
-              </span>
-            </div>
-            <div class="cert-tile-body">
-              <span class="cert-tile-type">WS2812/SK6812</span>
-              {#if res?.attempts && res.attempts > 1}
-                <span class="cert-tile-attempts">Attempts: {res.attempts}</span>
-              {/if}
-            </div>
+          {@const result = getPortStatus(port)}
+          <button type="button" class="cert-port-tile" class:passed={result?.state === 'passed'} class:failed={result?.state === 'failed'} onclick={() => openTestDialog(`ADDR-${port}`)} disabled={busy || !getTestDefinition(`ADDR-${port}`)}>
+            <span class="cert-tile-top"><span class="cert-tile-port">{port}</span><span class="cert-tile-pill">{result?.state.replaceAll('_', ' ') || 'not tested'}</span></span>
+            <span class="cert-tile-body"><span>Addressable output</span>{#if result?.attempts}<span>Attempts: {result.attempts}</span>{/if}</span>
           </button>
         {/each}
       </div>
-
-      <!-- PWM Ports Row P1-P8 -->
-      <div class="port-row-header mt-4">
-        <span class="row-tag tag-pwm">PWM Dimming (Auxiliary P1–P8)</span>
-      </div>
+      <h3 class="port-row-header">PWM Dimming (Auxiliary P1–P8)</h3>
       <div class="tiles-row">
         {#each PWM_PORTS as port}
-          {@const res = getPortStatus(port)}
-          <button
-            class="cert-port-tile"
-            class:cert-state-passed={res?.state === 'passed'}
-            class:cert-state-failed={res?.state === 'failed'}
-            class:cert-state-running={res?.state === 'running'}
-            class:cert-state-waiting={res?.state === 'waiting_for_operator'}
-            class:cert-state-blocked={res?.state === 'blocked'}
-            onclick={() => openTestDialog(`PWM-${port}`)}
-          >
-            <div class="cert-tile-top">
-              <span class="cert-tile-port">{port}</span>
-              <span class="cert-tile-pill">
-                {#if res?.state === 'passed'}PASS
-                {:else if res?.state === 'failed'}FAIL
-                {:else if res?.state === 'running'}
-                  {#if factoryStatus?.session?.stage}
-                    {factoryStatus.session.stage.toUpperCase()}
-                  {:else}
-                    TESTING
-                  {/if}
-                {:else if res?.state === 'waiting_for_operator'}WAITING
-                {:else if res?.state === 'blocked'}BLOCKED
-                {:else}NOT TESTED{/if}
-              </span>
-            </div>
-            <div class="cert-tile-body">
-              <span class="cert-tile-type">PCA9685 Raw</span>
-              {#if res?.measuredValue}
-                <span class="cert-tile-measured">{res.measuredValue} {res.unit}</span>
-              {/if}
-            </div>
+          {@const result = getPortStatus(port)}
+          <button type="button" class="cert-port-tile" class:passed={result?.state === 'passed'} class:failed={result?.state === 'failed'} onclick={() => openTestDialog(`PWM-${port}`)} disabled={busy || !getTestDefinition(`PWM-${port}`)}>
+            <span class="cert-tile-top"><span class="cert-tile-port">{port}</span><span class="cert-tile-pill">{result?.state.replaceAll('_', ' ') || 'not tested'}</span></span>
+            <span class="cert-tile-body"><span>PWM output</span>{#if hasStoredMeasurement(result)}<span>{measurementLabel(result)}: {result?.measuredValue} {result?.unit}</span>{:else if result?.attempts}<span>Attempts: {result.attempts}</span>{/if}</span>
           </button>
         {/each}
       </div>
     </div>
   </section>
 
-  <!-- Non-Port Qualification Matrix -->
   <section class="cert-section">
-    <div class="section-header">
-      <h2>System, Safety, DMX & Recovery Matrix</h2>
-      <p class="section-desc">Firmware contract, safe power states, and protocol compliance tests.</p>
-    </div>
-
+    <div class="section-header"><h2>System, Safety, DMX & Recovery Matrix</h2><p class="section-desc">Firmware probes and operator evidence follow the selected session plan.</p></div>
     <div class="test-table-container">
       <table class="test-table">
-        <thead>
-          <tr>
-            <th>Test ID</th>
-            <th>Category</th>
-            <th>Title</th>
-            <th>Evidence Method</th>
-            <th>Status</th>
-            <th>Result / Measurement</th>
-            <th>Actions</th>
-          </tr>
-        </thead>
+        <thead><tr><th>Test ID</th><th>Category</th><th>Title</th><th>Evidence Method</th><th>Requirement</th><th>Status</th><th>Result / Measurement</th><th>Actions</th></tr></thead>
         <tbody>
-          {#if plan}
-            {#each plan.tests as test}
-              {#if !test.id.startsWith('ADDR-A') && !test.id.startsWith('PWM-P')}
-                {@const res = getTestResult(test.id)}
-                <tr>
-                  <td class="mono font-semibold">{test.id}</td>
-                  <td><span class="category-tag">{test.category}</span></td>
-                  <td>{test.title}</td>
-                  <td>
-                    <span class="cert-evidence-pill cert-evidence-{test.requiredEvidence}">
-                      {test.requiredEvidence.replace('_', ' ')}
-                    </span>
-                  </td>
-                  <td>
-                    <span class="cert-status-pill cert-status-{res?.state || 'pending'}">
-                      {res?.state || 'pending'}
-                    </span>
-                  </td>
-                  <td class="mono text-sm">
-                    {#if res?.measuredValue}
-                      {res.measuredValue} {res.unit}
-                    {:else if res?.note}
-                      {res.note}
-                    {:else}
-                      —
-                    {/if}
-                  </td>
-                  <td>
-                    <button class="cert-btn cert-btn-sm cert-btn-outline" onclick={() => openTestDialog(test.id)}>
-                      {res?.state === 'passed' || res?.state === 'failed' ? 'Re-Test' : 'Test'}
-                    </button>
-                  </td>
-                </tr>
-              {/if}
-            {/each}
-          {/if}
+          {#if plan}{#each plan.tests as test}{#if !/^ADDR-A[1-8]$/.test(test.id) && !/^PWM-P[1-8]$/.test(test.id)}
+            {@const result = getTestResult(test.id)}
+            <tr>
+              <td class="mono">{test.id}</td><td>{test.category}</td><td>{test.title}</td><td>{test.requiredEvidence.replaceAll('_', ' ')}</td><td>{getRequirement(test)}</td>
+              <td><span class="cert-status-pill" class:passed={result?.state === 'passed'} class:failed={result?.state === 'failed'}>{result?.state.replaceAll('_', ' ') || 'pending'}</span></td>
+              <td>{#if hasStoredMeasurement(result)}<div>{measurementLabel(result)}: <span class="mono">{result?.measuredValue} {result?.unit}</span></div>{/if}{#if result?.note}<div>{result.note}</div>{:else if !hasStoredMeasurement(result)}—{/if}</td>
+              <td><button type="button" class="cert-btn cert-btn-sm cert-btn-outline" onclick={() => openTestDialog(test.id)} disabled={busy}>Inspect Test</button></td>
+            </tr>
+          {/if}{/each}{:else}<tr><td colspan="8">{loading ? 'Loading test plan…' : 'The test plan is unavailable.'}</td></tr>{/if}
         </tbody>
       </table>
     </div>
   </section>
 </div>
 
-<!-- Guided Test Interaction Modal (Spec §75, §76, §78) -->
 {#if activeModal === 'test_dialog' && selectedTestId}
-  {@const def = getTestDefinition(selectedTestId)}
-  {@const res = getTestResult(selectedTestId)}
-  <div class="modal-backdrop">
-    <div class="modal-card">
-      <div class="modal-header">
-        <div>
-          <h3>{selectedTestId}: {def?.title || selectedTestId}</h3>
-          <span class="modal-subtitle">Category: {def?.category} • Evidence: {def?.requiredEvidence}</span>
-        </div>
-        <button class="close-btn" onclick={() => activeModal = null}>✕</button>
+  {@const definition = getTestDefinition(selectedTestId)}
+  {@const result = getTestResult(selectedTestId)}
+  <OperatorDialog open title={`${selectedTestId}: ${definition?.title || selectedTestId}`} description={`Category: ${definition?.category || 'Unavailable'} · Evidence: ${definition?.requiredEvidence.replaceAll('_', ' ') || 'Unavailable'}`} {busy} oncancel={closeDialog}>
+    <div class="cert-dialog-content">
+      <div class="header-actions"><button type="button" data-dialog-cancel class="cert-btn cert-btn-outline" onclick={closeDialog} disabled={busy}>Close</button></div>
+      <p class="test-current-status">Current state: <strong>{result?.state.replaceAll('_', ' ') || 'pending'}</strong> · Attempts: {result?.attempts ?? 0} · {definition ? getRequirement(definition) : 'Unavailable'}</p>
+      {#if dialogChanged}<p class="alert alert-error" role="alert">{dialogChanged}</p>{/if}
+      {#if status?.confirmationPending && status.currentTest === selectedTestId}<p class="alert" role="status">Evidence accepted. Stopping outputs… The final result is pending controller acknowledgement.</p>{/if}
+      {#if matchingFactorySession(selectedTestId)}<p class="field-help">Physical test: {factoryStatus?.session?.state.replaceAll('_', ' ')}{factoryStatus?.session?.stage ? ` · Stage: ${factoryStatus.session.stage}` : ''}</p>{/if}
+      {#if result?.note}<p class="field-help">Recorded note: {result.note}</p>{/if}
+      {#if result?.errorCode}<p class="alert alert-error">Controller error code: {result.errorCode}</p>{/if}
+      {#if hasStoredMeasurement(result)}<p class="field-help">{measurementLabel(result)}: {result?.measuredValue} {result?.unit}</p>{/if}
+
+      <div class="instruction-box">
+        {#if selectedTestId.startsWith('ADDR-A')}
+          <h3>Addressable output verification</h3>
+          <ol><li>Connect the fixture to port {selectedTestId.replace('ADDR-', '')}.</li><li>Start the test and observe red, green, blue, white, chase, and blackout phases.</li><li>Wait for operator readiness and confirm the observations below.</li></ol>
+        {:else if selectedTestId.startsWith('PWM-P')}
+          <h3>PWM output verification</h3><p>Connect a test load to {selectedTestId.replace('PWM-', '')}. Observe the stepped duty levels and final cutoff; verify that neighboring outputs remain inactive.</p>
+        {:else if definition?.requiredEvidence === 'automatic'}
+          <h3>Firmware probe</h3><p>Run the probe to collect automatic evidence. The firmware owns its result; manual Pass/Fail submission is unavailable.</p>
+        {:else if definition?.requiredEvidence === 'instrument_measurement'}
+          <h3>Instrument measurement</h3><p>Start the test, then record the measured value and instrument or method using the exact plan unit.</p>
+        {:else}<h3>Operator observation</h3><p>Start this test and record your observation when the node reports it is waiting for the operator.</p>{/if}
       </div>
 
-      <div class="modal-body">
-        {#if !isFailureMode}
-          <!-- Standard Test View -->
-          <div class="test-instruction">
-            {#if selectedTestId.startsWith('ADDR-A')}
-              <div class="instruction-box">
-                <h4>Addressable Output Verification Procedure</h4>
-                <ol>
-                  <li>Connect fixture to port <strong>{selectedTestId.replace('ADDR-', '')}</strong>.</li>
-                  <li>Click <strong>Execute Test Pattern</strong>.</li>
-                  <li>Observe sequenced phases: <em>Solid Red → Green → Blue → White → Moving Chase → Blackout</em>.</li>
-                  <li>Confirm all checkpoints below before recording PASS.</li>
-                </ol>
-              </div>
-
-              <!-- Operator Checklist (Spec §25) -->
-              <div class="checklist-box">
-                <h4>Operator Observation Checklist</h4>
-                <label class="check-item">
-                  <input type="checkbox" bind:checked={operatorChecks.onlyPort} />
-                  <span>Only port <strong>{selectedTestId.replace('ADDR-', '')}</strong> illuminated (no crosstalk on others)</span>
-                </label>
-                <label class="check-item">
-                  <input type="checkbox" bind:checked={operatorChecks.colorOrder} />
-                  <span>Color sequence matched exact order: Red, Green, Blue, White</span>
-                </label>
-                <label class="check-item">
-                  <input type="checkbox" bind:checked={operatorChecks.pixelLength} />
-                  <span>Entire configured strip length responded without dropped LEDs</span>
-                </label>
-                <label class="check-item">
-                  <input type="checkbox" bind:checked={operatorChecks.chaseStable} />
-                  <span>Chase direction is correct and output is clean without flickering</span>
-                </label>
-              </div>
-            {:else if selectedTestId.startsWith('PWM-P')}
-              <div class="instruction-box">
-                <h4>PWM Auxiliary Output Verification Procedure</h4>
-                <ol>
-                  <li>Connect test load/meter to port <strong>{selectedTestId.replace('PWM-', '')}</strong>.</li>
-                  <li>Click <strong>Execute Test Pattern</strong>.</li>
-                  <li>Observe stepped duty levels: <em>0% → 25% → 50% → 75% → 100% → 0%</em>.</li>
-                  <li>Confirm smooth transition, full cutoff at 0%, and zero neighboring activity.</li>
-                </ol>
-              </div>
-            {:else if def?.requiredEvidence === 'instrument_measurement'}
-              <div class="instruction-box">
-                <h4>Calibrated Instrument Measurement Required</h4>
-                <p>Use a calibrated multimeter, oscilloscope, or power bench meter. Record physical reading below.</p>
-                <div class="measurement-fields">
-                  <label>
-                    <span>Expected Target:</span>
-                    <input type="text" readonly value="{def.expectedValue} {def.unit} (±{def.tolerance} {def.unit})" />
-                  </label>
-                  <label>
-                    <span>Measured Value:</span>
-                    <input type="number" step="any" placeholder="Enter measured number" bind:value={measuredValueInput} />
-                  </label>
-                  <label>
-                    <span>Measurement Instrument / Method:</span>
-                    <input type="text" placeholder="e.g. Fluke 87V, Rigol DS1054Z Channel 1" bind:value={measurementMethodInput} />
-                  </label>
-                  <label>
-                    <span>Notes:</span>
-                    <input type="text" placeholder="Optional notes" bind:value={measurementNotes} />
-                  </label>
-                </div>
-              </div>
-            {:else}
-              <div class="instruction-box">
-                <h4>Automated Firmware Qualification</h4>
-                <p>Click execute to trigger firmware invariant assertion and verify subsystem state.</p>
-              </div>
-            {/if}
-
-            <div class="test-current-status">
-              Current Test Status: <strong>{res?.state || 'pending'}</strong>
-              {#if res?.attempts} • Attempts: {res.attempts}{/if}
-            </div>
-
-            {#if factoryStatus?.session?.stage}
-              <div class="test-stage-indicator">
-                <span class="stage-pulse">●</span>
-                <span>Stage {(factoryStatus.session.stageIndex ?? 0) + 1} / {factoryStatus.session.stageCount ?? 6}: <strong>{factoryStatus.session.stage.toUpperCase()}</strong></span>
-              </div>
-            {/if}
+      {#if definition?.requiredEvidence !== 'automatic'}
+        {#if selectedTestId.startsWith('ADDR-A') && !isFailureMode}
+          <fieldset disabled={Boolean(evidenceProblem)}><legend>Operator observations</legend>
+            <label class="check-item"><input type="checkbox" bind:checked={operatorChecks.onlyPort} /><span>Only the selected port illuminated; no crosstalk.</span></label>
+            <label class="check-item"><input type="checkbox" bind:checked={operatorChecks.colorOrder} /><span>Color order matched red, green, blue, white.</span></label>
+            <label class="check-item"><input type="checkbox" bind:checked={operatorChecks.pixelLength} /><span>The full configured strip length responded.</span></label>
+            <label class="check-item"><input type="checkbox" bind:checked={operatorChecks.chaseStable} /><span>Chase direction and output remained stable.</span></label>
+          </fieldset>
+        {/if}
+        {#if definition?.requiredEvidence === 'instrument_measurement'}
+          <div class="measurement-fields">
+            <p class="field-help">Expected: {definition.expectedValue} {definition.unit} ± {definition.tolerance} {definition.unit}</p>
+            <label><span>Measured Value</span><input type="number" step="any" bind:value={measuredValueInput} disabled={Boolean(evidenceProblem)} /></label>
+            <label><span>Unit</span><input type="text" bind:value={measurementUnitInput} readonly /></label>
+            <label><span>Measurement Instrument / Method</span><input type="text" bind:value={measurementMethodInput} disabled={Boolean(evidenceProblem)} aria-describedby="note-limit" /></label>
           </div>
-
-          <div class="modal-footer">              <button class="cert-btn cert-btn-outline" onclick={() => handleStartTest(selectedTestId)} disabled={testingInProgress}>
-              {testingInProgress ? 'Running...' : 'Execute Test Pattern'}
-            </button>
-
-            <div class="footer-result-actions">
-              <button class="cert-btn cert-btn-danger" onclick={() => isFailureMode = true} disabled={submittingResult}>
-                Record Failure
-              </button>
-
-              <button
-                class="cert-btn cert-btn-success"
-                onclick={() => handleRecordPass(selectedTestId)}
-                disabled={submittingResult || (selectedTestId.startsWith('ADDR-A') && !allChecksSatisfied)}
-              >
-                {submittingResult ? 'Saving...' : '✓ PASS'}
-              </button>
-            </div>
-          </div>
-        {:else}
-          <!-- Failure Recording View (Spec §76) -->
+        {/if}
+        <label><span>Notes</span><textarea rows="2" bind:value={measurementNotes} disabled={Boolean(evidenceProblem)} aria-describedby="note-limit"></textarea></label>
+        {#if isFailureMode}
           <div class="failure-box">
-            <h4>Record Test Failure</h4>
-            <p>Specify the physical defect category and provide clear diagnostic notes.</p>
-
-            <label>
-              <span>Defect Category:</span>
-              <select bind:value={failureCategory}>
-                {#each FAILURE_CATEGORIES as cat}
-                  <option value={cat.value}>{cat.label}</option>
-                {/each}
-              </select>
-            </label>
-
-            <label>
-              <span>Failure Notes (Mandatory):</span>
-              <textarea
-                placeholder="Explain the observed failure (e.g. green LED flickering at pixel index 45, wrong connector wired)"
-                rows="4"
-                bind:value={failureNotes}
-              ></textarea>
-            </label>
+            <h3>Record test failure</h3>
+            <label><span>Defect Category</span><select bind:value={failureCategory} disabled={Boolean(evidenceProblem)}>{#each FAILURE_CATEGORIES as category}<option value={category.value}>{category.label}</option>{/each}</select></label>
+            <label><span>Failure Notes</span><textarea rows="3" bind:value={failureNotes} disabled={Boolean(evidenceProblem)} aria-describedby="note-limit"></textarea></label>
           </div>
-
-          <div class="modal-footer">
-            <button class="cert-btn cert-btn-outline" onclick={() => isFailureMode = false}>
-              Back
-            </button>
-            <button
-              class="cert-btn cert-btn-danger"
-              onclick={() => handleRecordFail(selectedTestId)}
-              disabled={submittingResult || !failureNotes.trim()}
-            >
-              {submittingResult ? 'Saving Failure...' : 'Confirm Test Failure'}
-            </button>
-          </div>
+        {/if}
+        <p id="note-limit" class="field-help">Combined stored method and notes: {utf8Bytes(notePreview)}/{NOTE_MAX_BYTES} UTF-8 bytes. Method and notes are saved together.</p>
+        {#if isFailureMode ? failProblem : passProblem}<p class="field-help">{isFailureMode ? failProblem : passProblem}</p>{/if}
+      {/if}
+      {#if error}<p class="alert alert-error" role="alert">{error}</p>{/if}
+      {#if successMsg}<p class="alert alert-success" role="status">{successMsg}</p>{/if}
+      {#if testStartProblem}<p class="field-help">Start unavailable: {testStartProblem}</p>{/if}
+      <div class="modal-footer">
+        <button type="button" class="cert-btn cert-btn-outline" onclick={() => handleStartTest(selectedTestId!)} disabled={Boolean(testStartProblem)}>{mutation === 'test' ? 'Starting…' : definition?.requiredEvidence === 'automatic' ? 'Run Firmware Probe' : 'Start Test'}</button>
+        {#if definition?.requiredEvidence !== 'automatic'}
+          {#if isFailureMode}
+            <button type="button" class="cert-btn cert-btn-outline" onclick={() => isFailureMode = false} disabled={busy}>Back</button>
+            <button type="button" class="cert-btn cert-btn-danger" onclick={() => handleRecordResult(selectedTestId!, false)} disabled={Boolean(failProblem)}>{mutation === 'result' ? 'Saving…' : 'Confirm Test Failure'}</button>
+          {:else}
+            <button type="button" class="cert-btn cert-btn-danger" onclick={() => isFailureMode = true} disabled={Boolean(evidenceProblem)}>Record Failure</button>
+            <button type="button" class="cert-btn cert-btn-success" onclick={() => handleRecordResult(selectedTestId!, true)} disabled={Boolean(passProblem)}>{mutation === 'result' ? 'Saving…' : 'Record Pass'}</button>
+          {/if}
         {/if}
       </div>
     </div>
-  </div>
+  </OperatorDialog>
 {/if}
 
-<!-- Report Modal (Spec §79, §80) -->
 {#if activeModal === 'report_modal' && reportData}
-  <div class="modal-backdrop">
-    <div class="modal-card modal-wide printable-report">
-      <div class="modal-header">
-        <div>
-          <h3>LumiGrid Hardware Certification Report</h3>
-          <span class="modal-subtitle">ID: {reportData.certificationId} • Completed: {new Date(reportData.completedMs).toLocaleString()}</span>
-        </div>
-        <div class="header-btns">
-          <button class="cert-btn cert-btn-sm cert-btn-outline" onclick={() => window.print()}>🖨️ Print</button>
-          <button class="cert-btn cert-btn-sm cert-btn-primary" onclick={downloadReportJson}>⬇ Download JSON</button>
-          <button class="close-btn" onclick={() => activeModal = null}>✕</button>
-        </div>
+  <OperatorDialog open title="LumiGrid Hardware Acceptance Report" description={`Internal test evidence · Session ${reportData.certificationId}`} oncancel={closeDialog}>
+    <div class="cert-dialog-content cert-report">
+      <div class="header-actions"><button type="button" data-dialog-cancel class="cert-btn cert-btn-outline" onclick={closeDialog}>Close</button><button type="button" class="cert-btn cert-btn-outline" onclick={() => window.print()}>Print</button><button type="button" class="cert-btn cert-btn-primary" onclick={downloadReportJson}>Download JSON</button></div>
+      <div class="report-meta-table">
+        <div><strong>Node ID:</strong> {reportData.nodeId || 'Unknown'}</div><div><strong>Serial Number:</strong> {reportData.serialNumber || 'Unassigned'}</div>
+        <div><strong>Hardware Revision:</strong> {reportData.hardwareRevision || 'Unknown'}</div><div><strong>Session Firmware Version:</strong> {reportData.firmwareVersion || 'Unavailable'}</div>
+        <div><strong>Profile:</strong> {reportData.profile || 'Unavailable'}</div><div><strong>Plan Version:</strong> {reportData.planVersion ?? 'Unavailable'}</div>
+        <div><strong>Overall State:</strong> {stateLabel(reportData.state)}</div><div><strong>Evidence:</strong> {reportData.stale ? `Stale — ${reportData.staleReason || 'reason unavailable'}` : 'Not marked stale by the node'}</div>
+        <div><strong>Started at device uptime:</strong> {formatUptime(reportData.startedMs)}</div><div><strong>Completed at device uptime:</strong> {reportData.completedMs > 0 ? formatUptime(reportData.completedMs) : 'Not completed'}</div>
+        <div><strong>Elapsed session duration:</strong> {reportDuration(reportData)}</div>
       </div>
-
-      <div class="modal-body">
-        <div class="report-meta-table">
-          <div><strong>Node ID:</strong> {reportData.nodeId}</div>
-          <div><strong>Serial Number:</strong> {reportData.serialNumber || 'N/A'}</div>
-          <div><strong>HW Revision:</strong> {reportData.hardwareRevision}</div>
-          <div><strong>Firmware Version:</strong> {reportData.firmwareVersion}</div>
-          <div><strong>Profile:</strong> {reportData.profile}</div>
-          <div><strong>Overall State:</strong> <span class="badge badge-{reportData.state}">{reportData.state.toUpperCase()}</span></div>
-        </div>
-
-        <h4>Verification Matrix</h4>
-        <table class="report-table">
-          <thead>
-            <tr>
-              <th>ID</th>
-              <th>Category</th>
-              <th>Status</th>
-              <th>Evidence</th>
-              <th>Measurement / Notes</th>
-            </tr>
-          </thead>
-          <tbody>
-            {#each reportData.tests as t}
-              <tr>
-                <td class="cert-mono">{t.id}</td>
-                <td>{t.category || ''}</td>
-                <td><span class="status-pill status-{t.state}">{t.state}</span></td>
-                <td>{t.evidenceSource}</td>
-                <td>
-                  {#if t.measuredValue}{t.measuredValue} {t.unit}{/if}
-                  {#if t.note}{t.note}{/if}
-                </td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
-
-        {#if reportData.burnIn?.durationS > 0}
-          <h4>Burn-In Endurance Diagnostics</h4>
-          <div class="burnin-grid">
-            <div>Duration: {reportData.burnIn.durationS}s</div>
-            <div>Heap Min: {reportData.burnIn.minFreeHeap} B</div>
-            <div>Heap Delta: {(reportData.burnIn.startFreeHeap - reportData.burnIn.endFreeHeap)} B</div>
-            <div>Commit Failures: {reportData.burnIn.commitFailures}</div>
-            <div>Output Faults: {reportData.burnIn.outputFaults}</div>
-          </div>
-        {/if}
-
-        <div class="qr-payload-box">
-          <h4>Compact Manufacturing QR Payload (Spec §105)</h4>
-          <pre class="qr-pre">lumigrid:
+      {#if reportData.reportingFirmwareVersion || reportData.reportingFirmwareElfSha256}
+        <div class="instruction-box"><h3>Report exporter</h3><p>This identifies the image exporting this report. It does not prove which image ran the stored tests.</p><p>Exporting firmware version: {reportData.reportingFirmwareVersion || 'Unavailable'}</p><p class="mono">Exporting ELF SHA-256: {reportData.reportingFirmwareElfSha256 || 'Unavailable'}</p></div>
+      {/if}
+      <h3>Verification Matrix</h3>
+      <!-- svelte-ignore a11y_no_noninteractive_tabindex (Keyboard focus is needed to scroll all report columns with arrow keys.) -->
+      <div class="test-table-container" role="region" aria-label="Acceptance report verification matrix" tabindex="0"><table class="report-table">
+        <thead><tr><th>ID</th><th>Category</th><th>Requirement</th><th>Status</th><th>Evidence</th><th>Measurement / Notes</th></tr></thead>
+        <tbody>{#each reportData.tests as test}<tr>
+          <td class="mono">{test.id}</td><td>{test.category || 'Unavailable'}</td><td>{test.requirement || 'Unavailable'}</td><td>{test.state.replaceAll('_', ' ')}{#if test.errorCode}<div>Error {test.errorCode}</div>{/if}</td><td>{test.evidenceSource.replaceAll('_', ' ')}</td>
+          <td>{#if hasStoredMeasurement(test)}<div>{measurementLabel(test)}: <span class="mono">{test.measuredValue} {test.unit}</span></div>{/if}{#if test.note}<div>{test.note}</div>{:else if !hasStoredMeasurement(test)}—{/if}</td>
+        </tr>{/each}</tbody>
+      </table></div>
+      {#if reportData.burnIn?.durationS > 0}
+        <h3>Burn-In Endurance Diagnostics</h3><div class="burnin-grid"><div>Duration: {reportData.burnIn.durationS} s</div><div>Heap minimum: {reportData.burnIn.minFreeHeap} B</div><div>Heap delta: {reportData.burnIn.startFreeHeap - reportData.burnIn.endFreeHeap} B</div><div>Commit failures: {reportData.burnIn.commitFailures}</div><div>Output faults: {reportData.burnIn.outputFaults}</div></div>
+      {/if}
+      <div class="qr-payload-box"><h3>Compact manufacturing payload</h3><pre>lumigrid:
 node={reportData.nodeId}
 serial={reportData.serialNumber}
 hw={reportData.hardwareRevision}
 fw={reportData.firmwareVersion}
 cert={reportData.certificationId}
 plan={reportData.planVersion}
-result={reportData.state}</pre>
-        </div>
-      </div>
+result={reportData.state}</pre></div>
     </div>
-  </div>
+  </OperatorDialog>
 {/if}
 
 <style>
-  .cert-container {
-    max-width: 1200px;
-    margin: 0 auto;
-    display: flex;
-    flex-direction: column;
-    gap: 1.5rem;
-    padding-bottom: 3rem;
-  }
-
-  /* Emergency Safety Bar */
-  .emergency-bar {
-    background: linear-gradient(90deg, #7f1d1d, #991b1b);
-    border: 2px solid #ef4444;
-    border-radius: 8px;
-    padding: 0.75rem 1.25rem;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    box-shadow: 0 4px 16px rgba(239, 68, 68, 0.4);
-    animation: pulseGlow 2s infinite alternate;
-  }
-  .emergency-text {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-    color: #fef2f2;
-    font-size: 0.95rem;
-  }
-  .pulse-indicator {
-    animation: bounce 1s infinite alternate;
-  }
-  .emergency-btn {
-    background: #dc2626;
-    color: #fff;
-    border: 1px solid #f87171;
-    border-radius: 6px;
-    padding: 0.5rem 1rem;
-    font-weight: 700;
-    cursor: pointer;
-  }
-  .emergency-btn:hover {
-    background: #b91c1c;
-  }
-
-  /* Cards */
-  .cert-header {
-    background: linear-gradient(180deg, #111827 0%, #0f172a 100%);
-    border: 1px solid #374151;
-    border-radius: 12px;
-    padding: 1.5rem;
-  }
-  .cert-section {
-    background: #111827;
-    border: 1px solid #1f2937;
-    border-radius: 12px;
-    padding: 1.5rem;
-  }
-  .header-top {
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    gap: 1rem;
-    flex-wrap: wrap;
-  }
-  .title-row {
-    display: flex;
-    align-items: center;
-    gap: 1rem;
-  }
-  h1 {
-    font-size: 1.5rem;
-    font-weight: 700;
-    color: #f3f4f6;
-    margin: 0;
-  }
-  .stale-alert {
-    background: #451a03;
-    border: 1px solid #f59e0b;
-    color: #fef3c7;
-    padding: 0.5rem 0.75rem;
-    border-radius: 6px;
-    font-size: 0.85rem;
-    margin-top: 0.5rem;
-  }
-  .header-actions {
-    display: flex;
-    gap: 0.5rem;
-  }
-
-  /* Badges */
-  .cert-badge {
-    padding: 0.25rem 0.6rem;
-    border-radius: 9999px;
-    font-size: 0.75rem;
-    font-weight: 700;
-    letter-spacing: 0.05em;
-  }
-  .cert-badge-passed { background: #065f46; color: #6ee7b7; border: 1px solid #10b981; }
-  .cert-badge-failed { background: #7f1d1d; color: #fca5a5; border: 1px solid #ef4444; }
-  .cert-badge-progress { background: #1e3a8a; color: #93c5fd; border: 1px solid #0ea5e9; }
-  .cert-badge-stale { background: #78350f; color: #fde68a; border: 1px solid #f59e0b; }
-  .cert-badge-muted { background: #374151; color: #9ca3af; }
-
-  /* Metadata Grid */
-  .meta-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-    gap: 1rem;
-    margin-top: 1.25rem;
-    padding-top: 1.25rem;
-    border-top: 1px solid #1f2937;
-  }
-  .meta-item {
-    display: flex;
-    flex-direction: column;
-    gap: 0.25rem;
-  }
-  .meta-label {
-    font-size: 0.75rem;
-    color: #9ca3af;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-  }
-  .meta-value {
-    font-size: 0.95rem;
-    font-weight: 600;
-    color: #e5e7eb;
-  }
-  .cert-mono {
-    font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
-  }
-
-  /* Progress Section */
-  .progress-section {
-    margin-top: 1.25rem;
-  }
-  .progress-labels {
-    display: flex;
-    justify-content: space-between;
-    font-size: 0.85rem;
-    color: #9ca3af;
-    margin-bottom: 0.4rem;
-  }
-  .progress-bar-bg {
-    height: 8px;
-    background: #1f2937;
-    border-radius: 9999px;
-    display: flex;
-    overflow: hidden;
-  }
-  .progress-fill-pass {
-    background: #10b981;
-    height: 100%;
-    transition: width 0.3s;
-  }
-  .progress-fill-fail {
-    background: #ef4444;
-    height: 100%;
-    transition: width 0.3s;
-  }
-
-  /* Session Start Form */
-  .session-start-box {
-    margin-top: 1.25rem;
-    padding-top: 1.25rem;
-    border-top: 1px dashed #374151;
-  }
-  .session-form {
-    display: flex;
-    gap: 1rem;
-    align-items: flex-end;
-    flex-wrap: wrap;
-  }
-  .session-form label {
-    display: flex;
-    flex-direction: column;
-    gap: 0.3rem;
-    font-size: 0.85rem;
-    color: #d1d5db;
-  }
-  .session-form select,
-  .session-form input {
-    background: #1f2937;
-    border: 1px solid #374151;
-    color: #f3f4f6;
-    padding: 0.5rem 0.75rem;
-    border-radius: 6px;
-    font-size: 0.9rem;
-  }
-
-  /* Buttons */
-  .cert-btn {
-    padding: 0.5rem 1rem;
-    border-radius: 6px;
-    font-weight: 600;
-    font-size: 0.9rem;
-    cursor: pointer;
-    border: 1px solid transparent;
-    transition: background 0.15s;
-  }
-  .cert-btn-primary { background: #2563eb; color: #fff; border-color: #0ea5e9; }
-  .cert-btn-primary:hover { background: #1d4ed8; }
-  .cert-btn-outline { background: transparent; color: #d1d5db; border-color: #374151; }
-  .cert-btn-outline:hover { background: #1f2937; color: #f3f4f6; }
-  .cert-btn-danger { background: #dc2626; color: #fff; border-color: #ef4444; }
-  .cert-btn-danger:hover { background: #b91c1c; }
-  .cert-btn-success { background: #059669; color: #fff; border-color: #10b981; }
-  .cert-btn-success:hover { background: #047857; }
-  .cert-btn-sm { padding: 0.3rem 0.6rem; font-size: 0.8rem; }
-
-  /* Alerts */
-  .alert {
-    padding: 0.75rem 1rem;
-    border-radius: 6px;
-    margin-top: 1rem;
-    font-size: 0.9rem;
-  }
-  .alert-error { background: #450a0a; border: 1px solid #991b1b; color: #fca5a5; }
-  .alert-success { background: #064e3b; border: 1px solid #065f46; color: #6ee7b7; }
-
-  /* Physical Topology Grid */
-  .section-header h2 {
-    font-size: 1.25rem;
-    font-weight: 700;
-    color: #f3f4f6;
-    margin: 0;
-  }
-  .section-desc {
-    color: #9ca3af;
-    font-size: 0.85rem;
-    margin-top: 0.25rem;
-    margin-bottom: 1.25rem;
-  }
-  .port-row-header {
-    margin-bottom: 0.5rem;
-  }
-  .row-tag {
-    font-size: 0.75rem;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    padding: 0.2rem 0.5rem;
-    border-radius: 4px;
-  }
-  .tag-addr { background: #1e1b4b; color: #a5b4fc; border: 1px solid #4338ca; }
-  .tag-pwm { background: #14532d; color: #86efac; border: 1px solid #16a34a; }
-  .mt-4 { margin-top: 1.25rem; }
-
-  .tiles-row {
-    display: grid;
-    grid-template-columns: repeat(8, 1fr);
-    gap: 0.75rem;
-  }
-  @media (max-width: 900px) {
-    .tiles-row {
-      grid-template-columns: repeat(4, 1fr);
-    }
-  }
-  @media (max-width: 500px) {
-    .tiles-row {
-      grid-template-columns: repeat(2, 1fr);
-    }
-  }
-
-  .cert-port-tile {
-    background: #1e293b;
-    border: 1px solid #334155;
-    border-radius: 8px;
-    padding: 0.75rem;
-    text-align: left;
-    cursor: pointer;
-    transition: all 0.2s;
-    display: flex;
-    flex-direction: column;
-    gap: 0.4rem;
-  }
-  .cert-port-tile:hover {
-    border-color: #64748b;
-    transform: translateY(-2px);
-  }
-  .cert-tile-top {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-  }
-  .cert-tile-port {
-    font-size: 1.1rem;
-    font-weight: 800;
-    color: #f1f5f9;
-  }
-  .cert-tile-pill {
-    font-size: 0.65rem;
-    font-weight: 700;
-    padding: 0.15rem 0.4rem;
-    border-radius: 4px;
-    background: #334155;
-    color: #94a3b8;
-  }
-  .cert-tile-body {
-    display: flex;
-    flex-direction: column;
-    gap: 0.1rem;
-  }
-  .cert-tile-type {
-    font-size: 0.75rem;
-    color: #64748b;
-  }
-  .cert-tile-attempts, .cert-tile-measured {
-    font-size: 0.7rem;
-    color: #38bdf8;
-    font-family: monospace;
-  }
-
-  /* State styles for tiles */
-  .cert-state-passed {
-    border-color: #059669;
-    background: #064e3b22;
-  }
-  .cert-state-passed .cert-tile-pill {
-    background: #065f46;
-    color: #6ee7b7;
-  }
-  .cert-state-failed {
-    border-color: #dc2626;
-    background: #7f1d1d22;
-  }
-  .cert-state-failed .cert-tile-pill {
-    background: #991b1b;
-    color: #fca5a5;
-  }
-  .cert-state-running {
-    border-color: #0ea5e9;
-    background: #1e3a8a33;
-    animation: pulseBorder 1.5s infinite;
-  }
-  .cert-state-running .cert-tile-pill {
-    background: #1d4ed8;
-    color: #bfdbfe;
-  }
-  .cert-state-waiting {
-    border-color: #eab308;
-    background: #713f1233;
-  }
-  .cert-state-waiting .cert-tile-pill {
-    background: #854d0e;
-    color: #fde047;
-  }
-
-  /* Linked state-pill styles for tile context */
-  .cert-state-passed .cert-tile-pill,
-  .cert-state-failed .cert-tile-pill,
-  .cert-state-running .cert-tile-pill,
-  .cert-state-waiting .cert-tile-pill {
-    border-radius: 9999px;
-    padding: 0.15rem 0.5rem;
-    font-size: 0.7rem;
-    font-weight: 700;
-    letter-spacing: 0.05em;
-    text-transform: uppercase;
-  }
-
-  /* Table */
-  .test-table-container {
-    overflow-x: auto;
-  }
-  .test-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 0.85rem;
-  }
-  .test-table th {
-    text-align: left;
-    padding: 0.6rem 0.8rem;
-    color: #9ca3af;
-    border-bottom: 1px solid #374151;
-    font-size: 0.75rem;
-    text-transform: uppercase;
-  }
-  .test-table td {
-    padding: 0.6rem 0.8rem;
-    border-bottom: 1px solid #1f2937;
-    color: #e5e7eb;
-  }
-  .category-tag {
-    font-size: 0.7rem;
-    background: #1f2937;
-    padding: 0.15rem 0.4rem;
-    border-radius: 4px;
-    color: #9ca3af;
-  }
-  .cert-evidence-pill {
-    font-size: 0.7rem;
-    padding: 0.15rem 0.4rem;
-    border-radius: 4px;
-    text-transform: capitalize;
-  }
-  .cert-evidence-automatic { background: #1e293b; color: #94a3b8; }
-  .cert-evidence-operator_observation { background: #2e1065; color: #d8b4fe; }
-  .cert-evidence-instrument_measurement { background: #022c22; color: #6ee7b7; }
-  .cert-status-pill {
-    font-size: 0.7rem;
-    font-weight: 700;
-    padding: 0.15rem 0.4rem;
-    border-radius: 4px;
-    text-transform: uppercase;
-  }
-  .cert-status-passed { background: #065f46; color: #6ee7b7; }
-  .cert-status-failed { background: #991b1b; color: #fca5a5; }
-  .cert-status-pending { background: #374151; color: #9ca3af; }
-  .cert-status-running { background: #1d4ed8; color: #bfdbfe; }
-  .cert-status-blocked { background: #7c2d12; color: #fdba74; }
-
-  /* Modals */
-  .modal-backdrop {
-    position: fixed;
-    top: 0; left: 0; right: 0; bottom: 0;
-    background: rgba(0, 0, 0, 0.75);
-    backdrop-filter: blur(4px);
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    z-index: 1000;
-    padding: 1rem;
-  }
-  .modal-card {
-    background: #1e293b;
-    border: 1px solid #334155;
-    border-radius: 12px;
-    max-width: 650px;
-    width: 100%;
-    max-height: 90vh;
-    display: flex;
-    flex-direction: column;
-    box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5);
-  }
-  .modal-wide {
-    max-width: 950px;
-  }
-  .modal-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    padding: 1.25rem;
-    border-bottom: 1px solid #334155;
-  }
-  .modal-header h3 {
-    margin: 0;
-    font-size: 1.15rem;
-    color: #f1f5f9;
-  }
-  .modal-subtitle {
-    font-size: 0.8rem;
-    color: #94a3b8;
-  }
-  .close-btn {
-    background: transparent;
-    border: none;
-    color: #94a3b8;
-    font-size: 1.2rem;
-    cursor: pointer;
-  }
-  .modal-body {
-    padding: 1.25rem;
-    overflow-y: auto;
-    display: flex;
-    flex-direction: column;
-    gap: 1rem;
-  }
-  .modal-footer {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding-top: 1rem;
-    border-top: 1px solid #334155;
-  }
-  .footer-result-actions {
-    display: flex;
-    gap: 0.75rem;
-  }
-
-  /* Modal content styling */
-  .instruction-box {
-    background: #0f172a;
-    border: 1px solid #334155;
-    border-radius: 8px;
-    padding: 1rem;
-  }
-  .instruction-box h4 {
-    margin-top: 0;
-    margin-bottom: 0.5rem;
-    color: #38bdf8;
-    font-size: 0.95rem;
-  }
-  .instruction-box ol {
-    margin: 0;
-    padding-left: 1.2rem;
-    color: #cbd5e1;
-    font-size: 0.85rem;
-    display: flex;
-    flex-direction: column;
-    gap: 0.3rem;
-  }
-  .checklist-box {
-    background: #0f172a;
-    border: 1px solid #334155;
-    border-radius: 8px;
-    padding: 1rem;
-    display: flex;
-    flex-direction: column;
-    gap: 0.75rem;
-  }
-  .test-stage-indicator {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    padding: 0.5rem 0.75rem;
-    background: #022c22;
-    border: 1px solid #059669;
-    border-radius: 6px;
-    color: #6ee7b7;
-    font-size: 0.85rem;
-    font-weight: 600;
-  }
-  .stage-pulse {
-    animation: stagePulse 1.2s infinite ease-in-out;
-    color: #10b981;
-    font-size: 0.9rem;
-  }
-  @keyframes stagePulse {
-    0%, 100% { opacity: 1; transform: scale(1); }
-    50% { opacity: 0.4; transform: scale(0.85); }
-  }
-  .checklist-box h4 {
-    margin: 0;
-    color: #e2e8f0;
-    font-size: 0.95rem;
-  }
-  .check-item {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-    color: #cbd5e1;
-    font-size: 0.85rem;
-    cursor: pointer;
-  }
-  .measurement-fields {
-    display: flex;
-    flex-direction: column;
-    gap: 0.75rem;
-    margin-top: 0.75rem;
-  }
-  .measurement-fields label {
-    display: flex;
-    flex-direction: column;
-    gap: 0.25rem;
-    font-size: 0.85rem;
-    color: #94a3b8;
-  }
-  .measurement-fields input {
-    background: #1e293b;
-    border: 1px solid #334155;
-    color: #f1f5f9;
-    padding: 0.5rem;
-    border-radius: 6px;
-  }
-  .failure-box {
-    display: flex;
-    flex-direction: column;
-    gap: 1rem;
-  }
-  .failure-box select, .failure-box textarea {
-    background: #0f172a;
-    border: 1px solid #334155;
-    color: #f1f5f9;
-    padding: 0.6rem;
-    border-radius: 6px;
-    width: 100%;
-  }
-
-  /* Printable Report */
-  .report-meta-table {
-    display: grid;
-    grid-template-columns: repeat(2, 1fr);
-    gap: 0.5rem;
-    background: #0f172a;
-    padding: 1rem;
-    border-radius: 8px;
-    font-size: 0.85rem;
-  }
-  .report-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 0.85rem;
-  }
-  .report-table th, .report-table td {
-    padding: 0.5rem;
-    border: 1px solid #334155;
-  }
-  .burnin-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-    gap: 0.75rem;
-    background: #0f172a;
-    padding: 1rem;
-    border-radius: 8px;
-    font-size: 0.85rem;
-  }
-  .qr-pre {
-    background: #0f172a;
-    border: 1px dashed #475569;
-    padding: 0.75rem;
-    border-radius: 6px;
-    font-family: monospace;
-    font-size: 0.8rem;
-    color: #38bdf8;
-    white-space: pre-wrap;
-  }
-
-  /* Buttons */
-  .btn {
-    padding: 0.5rem 1rem;
-    border-radius: 6px;
-    font-size: 0.85rem;
-    font-weight: 600;
-    cursor: pointer;
-    border: 1px solid transparent;
-    transition: all 0.15s;
-  }
-  .btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-  @keyframes pulseGlow {
-    from { box-shadow: 0 0 10px rgba(239, 68, 68, 0.4); }
-    to { box-shadow: 0 0 25px rgba(239, 68, 68, 0.8); }
-  }
-  @keyframes pulseBorder {
-    0% { border-color: #60a5fa; }
-    50% { border-color: #93c5fd; }
-    100% { border-color: #60a5fa; }
+  .cert-container { max-width: 1200px; margin: 0 auto; display: flex; flex-direction: column; gap: 24px; padding-bottom: 48px; color: var(--dash-text); }
+  .cert-header, .cert-section { min-width: 0; padding: 24px; background: var(--dash-surface); border: 1px solid var(--dash-border); border-radius: var(--dash-radius-lg); }
+  .header-top, .title-row, .header-actions, .status-line, .progress-labels, .modal-footer { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+  .header-top { align-items: flex-start; justify-content: space-between; }
+  .header-top > div { min-width: 0; }
+  .title-row { gap: 16px; }
+  h1 { margin: 0; font-size: 1.5rem; font-weight: 700; color: var(--dash-text); }
+  h2 { margin: 0; font-size: 1.25rem; font-weight: 700; color: var(--dash-text); }
+  h3 { margin: 0; font-size: 1rem; font-weight: 700; color: var(--dash-text); }
+  p { margin: 0; }
+  .section-desc, .field-help { color: var(--dash-muted); font-size: .85rem; line-height: 1.5; overflow-wrap: anywhere; }
+  .section-desc { margin-top: 8px; max-width: 68ch; }
+  .field-help { margin-top: 8px; }
+  .section-header { margin-bottom: 24px; }
+  .mono { font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace; overflow-wrap: anywhere; }
+  .cert-badge, .cert-status-pill { display: inline-block; padding: 4px 8px; border-radius: var(--dash-radius-sm); border: 1px solid var(--dash-border); color: var(--dash-text); font-size: .75rem; font-weight: 700; }
+  .passed { border-color: var(--dash-ok); color: var(--dash-ok); }
+  .failed { border-color: var(--dash-danger); color: var(--dash-danger); }
+  .meta-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 16px; margin-top: 20px; padding-top: 20px; border-top: 1px solid var(--dash-border); }
+  .meta-item { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+  .meta-label { font-size: .75rem; color: var(--dash-muted); text-transform: uppercase; letter-spacing: .05em; }
+  .meta-value { font-size: .95rem; font-weight: 600; overflow-wrap: anywhere; }
+  .status-line { margin-top: 20px; color: var(--dash-muted); font-size: .85rem; }
+  .alert { margin-top: 12px; padding: 12px; background: var(--dash-surface-strong); border: 1px solid var(--dash-border); border-radius: var(--dash-radius-sm); font-size: .85rem; line-height: 1.5; overflow-wrap: anywhere; }
+  .alert-error { color: var(--dash-danger); border-color: var(--dash-danger); }
+  .alert-success { color: var(--dash-text); }
+  .progress-section { margin-top: 20px; }
+  .progress-labels { justify-content: space-between; color: var(--dash-muted); font-size: .85rem; margin-bottom: 8px; }
+  .progress-bar-bg { height: 8px; display: flex; overflow: hidden; border-radius: var(--dash-radius-sm); background: var(--dash-surface-strong); }
+  .progress-fill-pass { height: 100%; background: var(--dash-ok); }
+  .progress-fill-fail { height: 100%; background: var(--dash-danger); }
+  .session-start-box { margin-top: 20px; padding-top: 20px; border-top: 1px solid var(--dash-border); }
+  .session-form { display: flex; gap: 16px; align-items: flex-end; flex-wrap: wrap; }
+  label { display: flex; flex-direction: column; gap: 8px; min-width: 0; color: var(--dash-text); font-size: .85rem; }
+  input, select, textarea { box-sizing: border-box; max-width: 100%; min-height: var(--dash-control-h); background: var(--dash-surface-strong); border: 1px solid var(--dash-border); border-radius: var(--dash-radius-sm); color: var(--dash-text); padding: 8px 12px; font: inherit; }
+  textarea { width: 100%; resize: vertical; }
+  input:disabled, select:disabled, textarea:disabled, fieldset:disabled { opacity: .6; }
+  input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-visible, .test-table-container:focus-visible { outline: 2px solid var(--dash-accent); outline-offset: 2px; }
+  .cert-btn { min-height: var(--dash-control-h); padding: 8px 16px; border-radius: var(--dash-radius-sm); border: 1px solid var(--dash-border); font: inherit; font-size: .9rem; font-weight: 600; cursor: pointer; color: var(--dash-text); }
+  .cert-btn-primary { background: var(--dash-accent); border-color: var(--dash-accent); color: #000; }
+  .cert-btn-primary:hover:not(:disabled) { background: var(--dash-accent-hover); }
+  .cert-btn-outline { background: var(--dash-surface); }
+  .cert-btn-outline:hover:not(:disabled) { background: var(--dash-surface-strong); }
+  .cert-btn-danger { background: var(--dash-surface-strong); color: var(--dash-danger); border-color: var(--dash-danger); }
+  .cert-btn-success { background: var(--dash-surface-strong); color: var(--dash-ok); border-color: var(--dash-ok); }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .cert-btn-sm { font-size: .8rem; padding: 8px 12px; }
+  .emergency-bar { background: var(--dash-surface-strong); border: 1px solid var(--dash-danger); border-radius: var(--dash-radius-md); padding: 16px 20px; display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 16px; }
+  .emergency-text { display: flex; flex-direction: column; gap: 8px; font-size: .9rem; }
+  .emergency-text span { color: var(--dash-muted); }
+  .topology-grid { display: flex; flex-direction: column; gap: 16px; }
+  .port-row-header { color: var(--dash-text); font-size: .9rem; }
+  .tiles-row { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+  .cert-port-tile { min-width: 0; min-height: 96px; display: flex; flex-direction: column; gap: 16px; text-align: left; background: var(--dash-surface-strong); border: 1px solid var(--dash-border); border-radius: var(--dash-radius-md); padding: 16px; color: var(--dash-text); cursor: pointer; font: inherit; }
+  .cert-port-tile.passed { border-color: var(--dash-ok); }
+  .cert-port-tile.failed { border-color: var(--dash-danger); }
+  .cert-tile-top { display: flex; gap: 8px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+  .cert-tile-port { font-size: 1.25rem; font-weight: 700; }
+  .cert-tile-pill { font-size: .75rem; text-transform: uppercase; }
+  .cert-tile-body { display: flex; flex-direction: column; gap: 4px; color: var(--dash-muted); font-size: .8rem; }
+  .test-table-container { max-width: 100%; min-width: 0; overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: .85rem; }
+  th, td { text-align: left; padding: 12px; border-bottom: 1px solid var(--dash-border); vertical-align: top; }
+  th { color: var(--dash-muted); font-size: .75rem; font-weight: 700; }
+  td { color: var(--dash-text); overflow-wrap: anywhere; min-width: 80px; }
+  :global(.dialog-card:has(.cert-dialog-content)) { width: min(640px, 100%); max-height: calc(100dvh - 32px); min-width: 0; box-sizing: border-box; }
+  :global(.dialog-card:has(.cert-report)) { width: min(1000px, 100%); }
+  .cert-dialog-content { min-width: 0; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 16px; padding: 4px; color: var(--dash-text); }
+  .cert-dialog-content > * { flex-shrink: 0; }
+  .cert-dialog-content .field-help, .cert-dialog-content .alert { margin-top: 0; }
+  .test-current-status { font-size: .85rem; color: var(--dash-muted); }
+  .instruction-box, fieldset, .failure-box { min-width: 0; margin: 0; padding: 16px; border: 1px solid var(--dash-border); border-radius: var(--dash-radius-sm); background: var(--dash-surface); }
+  .instruction-box p { margin-top: 8px; font-size: .85rem; color: var(--dash-muted); line-height: 1.5; }
+  .instruction-box ol { padding-left: 20px; margin: 8px 0 0; font-size: .85rem; line-height: 1.5; }
+  fieldset { display: flex; flex-direction: column; gap: 12px; }
+  legend { font-size: .85rem; padding: 0 4px; }
+  .check-item { flex-direction: row; align-items: center; gap: 12px; }
+  .check-item input { min-height: 20px; width: 20px; flex-shrink: 0; accent-color: var(--dash-accent); }
+  .measurement-fields, .failure-box { display: flex; flex-direction: column; gap: 16px; }
+  .modal-footer { justify-content: flex-end; padding-top: 16px; border-top: 1px solid var(--dash-border); }
+  .report-meta-table, .burnin-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 24px; font-size: .85rem; }
+  .report-meta-table > div { overflow-wrap: anywhere; }
+  .report-table { min-width: 720px; }
+  .qr-payload-box pre { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--dash-muted); font-size: .8rem; margin: 12px 0 0; }
+  @media (max-width: 700px) {
+    .cert-header, .cert-section { padding: 16px; }
+    .tiles-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .cert-port-tile { padding: 12px; }
+    .report-meta-table, .burnin-grid { grid-template-columns: minmax(0, 1fr); }
+    .session-form, .session-form label { width: 100%; }
+    .session-form .cert-btn { width: 100%; }
+    .modal-footer { justify-content: stretch; }
+    .modal-footer .cert-btn { flex: 1 1 160px; }
+  }
+  @media print {
+    .cert-container { display: none; }
+    .cert-report .header-actions { display: none; }
+    .cert-report { overflow: visible; }
+    .cert-report .test-table-container { overflow: visible; }
+    .report-table { min-width: 0; }
+    :global(.dialog-card:has(.cert-report)) { max-height: none; }
+    :global(.dialog-backdrop:has(.cert-report)) { position: static; padding: 0; }
   }
 </style>

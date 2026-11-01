@@ -33,7 +33,7 @@ public:
 
     /// Authoritative conversion for PWM fixtures (PWM_Single, PWM_RGB, PWM_RGBW).
     /// Applies effective brightness, white balance, profile color space, and configurable 12-bit gamma,
-    /// producing calibrated 12-bit duty cycles (0..4095) for up to 4 physical channels.
+    /// producing 12-bit duty cycles (0..4095) for up to 4 physical channels.
     static void to_pwm(
         const LightValue& input,
         uint16_t single_pwm_in,
@@ -60,6 +60,7 @@ public:
     }
 
 private:
+    static uint16_t apply_pwm_gamma(uint16_t duty);
     static uint8_t gamma8_lut_[256];
     static uint16_t gamma12_lut_[256];
     static uint8_t current_gamma_x10_;

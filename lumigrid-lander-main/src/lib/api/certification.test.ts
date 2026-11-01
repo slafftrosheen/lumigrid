@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   getCertificationPlan,
   getCertificationStatus,
@@ -286,6 +286,7 @@ describe('certification API client functions', () => {
       testIp,
       'production_unit',
       'SN-LG-2026-0042',
+      'cert-previous',
       testApiKey,
     );
     expect(result.certificationId).toBe('cert-a84f703c-7e12');
@@ -315,7 +316,7 @@ describe('certification API client functions', () => {
       clone() { return this; },
     });
 
-    const result = await startCertification(testIp, 'development', undefined, testApiKey);
+    const result = await startCertification(testIp, 'development', '', '', testApiKey);
     expect(result.certificationId).toBe('cert-dev-001');
   });
 
@@ -327,7 +328,7 @@ describe('certification API client functions', () => {
       clone() { return this; },
     });
 
-    const result = await startCertificationTest(testIp, 'ADDR-A4', testApiKey);
+    const result = await startCertificationTest(testIp, 'ADDR-A4', 'cert-current', testApiKey);
     expect(result.status).toBe('started');
     expect(global.fetch).toHaveBeenCalledWith(
       expect.stringContaining(`http://${testIp}/api/v1/certification/test/start`),
@@ -346,6 +347,7 @@ describe('certification API client functions', () => {
     });
 
     const result = await submitCertificationTestResult(testIp, {
+      certificationId: 'cert-current', testStartedMs: 12000, testAttempt: 1,
       testId: 'ADDR-A4',
       passed: true,
       evidenceSource: 'operator_observation',
@@ -364,6 +366,7 @@ describe('certification API client functions', () => {
     });
 
     const result = await submitCertificationTestResult(testIp, {
+      certificationId: 'cert-current', testStartedMs: 12000, testAttempt: 1,
       testId: 'ADDR-A4',
       passed: false,
       evidenceSource: 'operator_observation',
@@ -381,6 +384,7 @@ describe('certification API client functions', () => {
     });
 
     const result = await submitCertificationTestResult(testIp, {
+      certificationId: 'cert-current', testStartedMs: 12000, testAttempt: 1,
       testId: 'PWM-P4',
       passed: true,
       evidenceSource: 'instrument_measurement',
@@ -399,7 +403,7 @@ describe('certification API client functions', () => {
       clone() { return this; },
     });
 
-    const result = await abortCertification(testIp, testApiKey);
+    const result = await abortCertification(testIp, 'cert-current', testApiKey);
     expect(result.status).toBe('aborted');
     expect(global.fetch).toHaveBeenCalledWith(
       expect.stringContaining(`http://${testIp}/api/v1/certification/abort`),
@@ -502,157 +506,79 @@ describe('certification API client functions', () => {
   });
 });
 
-describe('LG-037 §83 Frontend Specification Requirements (A–L)', () => {
-  // A. A1-A8 render correctly
-  it('A. A1-A8 addressable ports are complete and uniquely mapped', () => {
-    const addressablePorts = ['A1', 'A2', 'A3', 'A4', 'A5', 'A6', 'A7', 'A8'];
-    expect(addressablePorts).toHaveLength(8);
-    expect(new Set(addressablePorts).size).toBe(8);
-    for (let i = 1; i <= 8; i++) {
-      expect(addressablePorts).toContain(`A${i}`);
-    }
+
+describe('acceptance client wire contracts', () => {
+const ip = '192.168.1.50';
+const apiKey = 'test-automation-key';
+let fetchMock: ReturnType<typeof vi.fn>;
+function requestBody() { return JSON.parse(fetchMock.mock.calls.at(-1)![1].body); }
+
+beforeEach(() => {
+  fetchMock = vi.fn(async () => new Response(JSON.stringify({ status: 'recorded', accepted: true, overallState: 'in_progress' }), {
+    status: 200, headers: { 'Content-Type': 'application/json' },
+  }));
+  vi.stubGlobal('fetch', fetchMock);
+});
+afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+
+  it.each([
+    ['plan', getCertificationPlan], ['status', getCertificationStatus], ['report', getCertificationReport],
+  ] as const)('reads %s using the captured node and explicit automation credential', async (endpoint, read) => {
+    await read(ip, apiKey);
+    expect(fetchMock.mock.calls[0][0]).toBe(`http://${ip}/api/v1/certification/${endpoint}`);
+    expect(fetchMock.mock.calls[0][1].headers.get('X-API-Key')).toBe(apiKey);
   });
 
-  // B. P1-P8 render correctly
-  it('B. P1-P8 PWM ports are complete and uniquely mapped', () => {
-    const pwmPorts = ['P1', 'P2', 'P3', 'P4', 'P5', 'P6', 'P7', 'P8'];
-    expect(pwmPorts).toHaveLength(8);
-    expect(new Set(pwmPorts).size).toBe(8);
-    for (let i = 1; i <= 8; i++) {
-      expect(pwmPorts).toContain(`P${i}`);
-    }
+  it('binds session replacement to the observed previous session, including an empty initial ID', async () => {
+    await startCertification(ip, 'production_unit', 'SN-0042', 'cert-old', apiKey);
+    expect(requestBody()).toEqual({ profile: 'production_unit', serialNumber: 'SN-0042', certificationId: 'cert-old' });
+    await startCertification(ip, 'development', '', '', apiKey);
+    expect(requestBody()).toEqual({ profile: 'development', serialNumber: '', certificationId: '' });
   });
 
-  // C. PASS unavailable before evidence stage
-  it('C. PASS submission is rejected or blocked before evidence stage', () => {
-    function canSubmitPass(state: CertificationTestState): boolean {
-      return state === 'waiting_for_operator';
-    }
-    expect(canSubmitPass('pending')).toBe(false);
-    expect(canSubmitPass('running')).toBe(false);
-    expect(canSubmitPass('blocked')).toBe(false);
-    expect(canSubmitPass('waiting_for_operator')).toBe(true);
+  it('binds test start to its session', async () => {
+    await startCertificationTest(ip, 'ADDR-A4', 'cert-current', apiKey);
+    expect(fetchMock.mock.calls[0][1].method).toBe('POST');
+    expect(requestBody()).toEqual({ testId: 'ADDR-A4', certificationId: 'cert-current' });
   });
 
-  // D. FAIL requires reason
-  it('D. FAIL submission requires mandatory reason or note', () => {
-    function validateFailSubmission(note: string | undefined): boolean {
-      return Boolean(note && note.trim().length > 0);
-    }
-    expect(validateFailSubmission('')).toBe(false);
-    expect(validateFailSubmission('   ')).toBe(false);
-    expect(validateFailSubmission(undefined)).toBe(false);
-    expect(validateFailSubmission('[no_output] Port A3 remained black')).toBe(true);
-  });
-
-  // E. RETEST increments visible attempt history
-  it('E. RETEST increments attempt count upon repeated execution', () => {
-    let attempts = 1;
-    attempts++;
-    expect(attempts).toBe(2);
-    attempts++;
-    expect(attempts).toBe(3);
-  });
-
-  // F. measurement input required for instrument test
-  it('F. measurement input is mandatory for instrument measurement tests', () => {
-    function validateInstrumentSubmission(val: number | undefined, unit: string | undefined): boolean {
-      if (val === undefined || isNaN(val)) return false;
-      if (!unit || unit.trim().length === 0) return false;
-      return true;
-    }
-    expect(validateInstrumentSubmission(undefined, 'percent')).toBe(false);
-    expect(validateInstrumentSubmission(49.8, '')).toBe(false);
-    expect(validateInstrumentSubmission(49.8, 'percent')).toBe(true);
-    expect(validateInstrumentSubmission(3200, 'mW')).toBe(true);
-  });
-
-  // G. stale certification never renders Certified
-  it('G. stale certification never renders Certified badge', () => {
-    function getDisplayBadge(state: CertificationState, stale: boolean): string {
-      if (stale) return 'CERTIFICATION STALE';
-      switch (state) {
-        case 'passed': return 'CERTIFIED';
-        case 'failed': return 'FAILED';
-        case 'in_progress': return 'IN PROGRESS';
-        case 'incomplete': return 'INCOMPLETE';
-        default: return 'NOT TESTED';
-      }
-    }
-    expect(getDisplayBadge('passed', true)).toBe('CERTIFICATION STALE');
-    expect(getDisplayBadge('passed', false)).toBe('CERTIFIED');
-    expect(getDisplayBadge('failed', true)).toBe('CERTIFICATION STALE');
-  });
-
-  // H. node ID, firmware, hardware revision visible
-  it('H. node ID, firmware version, and hardware revision are present in status', () => {
-    const status: Partial<CertificationStatusResponse> = {
-      nodeId: 'lg-84f703c29110',
-      firmwareVersion: '1.2.0',
-      hardwareRevision: 'v1.0',
-      serialNumber: 'SN-LG-0012',
-    };
-    expect(status.nodeId).toBeTruthy();
-    expect(status.firmwareVersion).toBeTruthy();
-    expect(status.hardwareRevision).toBeTruthy();
-    expect(status.serialNumber).toBeTruthy();
-  });
-
-  // I. report includes evidence
-  it('I. report includes explicit evidence source for every test', () => {
-    const testReportItem = {
-      id: 'ADDR-A1',
-      evidenceSource: 'operator_observation' as EvidenceSource,
-      state: 'passed' as CertificationTestState,
-      note: 'Verified visually',
-    };
-    expect(testReportItem.evidenceSource).toBe('operator_observation');
-  });
-
-  // J. report excludes secrets
-  it('J. report strictly excludes credentials, keys, and tokens', () => {
-    const reportJson = JSON.stringify({
-      schema: 'lumigrid-certification-v1',
-      certificationId: 'cert-001',
-      nodeId: 'lg-001',
-      tests: [{ id: 'ADDR-A1', state: 'passed' }],
+  it.each([true, false])('preserves zero instrument evidence and the entire attempt tuple for passed=%s', async passed => {
+    const result = await submitCertificationTestResult(ip, {
+      testId: 'SAFE-ESTOP-PWM', certificationId: 'cert-current', testStartedMs: 12000, testAttempt: 2,
+      passed, evidenceSource: 'instrument_measurement', measuredValue: 0, unit: 'us',
+      note: 'Method: scope CH1; Notes: zero crossing',
+    }, apiKey);
+    expect(requestBody()).toEqual({
+      testId: 'SAFE-ESTOP-PWM', certificationId: 'cert-current', testStartedMs: 12000, testAttempt: 2,
+      passed, evidenceSource: 'instrument_measurement', measuredValue: 0, unit: 'us',
+      note: 'Method: scope CH1; Notes: zero crossing',
     });
-    const forbidden = [
-      'adminToken',
-      'syncToken',
-      'wifi_pass',
-      'wifiPassword',
-      'password',
-      'sessionToken',
-      'installerToken',
-      'apiKey',
-    ];
-    for (const secret of forbidden) {
-      expect(reportJson.includes(`"${secret}"`)).toBe(false);
-    }
+    expect(result.overallState).toBe('in_progress');
   });
 
-  // K. reconnect keeps certification by immutable node ID
-  it('K. reconnect associates certification session with immutable node ID', () => {
-    const sessionMap = new Map<string, string>();
-    const immutableNodeId = 'lg-84f703c29110';
-    sessionMap.set(immutableNodeId, 'cert-lg84f703c-001');
-
-    // IP changes from 192.168.1.100 to 192.168.1.150
-    // Querying by immutableNodeId still returns the same session ID:
-    expect(sessionMap.get(immutableNodeId)).toBe('cert-lg84f703c-001');
+  it('sends one bound cancellation and preserves the queued acknowledgement', async () => {
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ status: 'cancellation_requested', accepted: true, cancellationRequested: true }), { status: 202 }));
+    const response = await abortCertification(ip, 'cert-current', apiKey);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][0]).toBe(`http://${ip}/api/v1/certification/abort`);
+    expect(requestBody()).toEqual({ certificationId: 'cert-current' });
+    expect(response).toEqual({ status: 'cancellation_requested', accepted: true, cancellationRequested: true });
   });
 
-  // L. page reload resumes existing certification session
-  it('L. page reload resumes existing active certification session from status', () => {
-    const cachedStatus: Partial<CertificationStatusResponse> = {
-      certificationId: 'cert-lg84f703c-001',
-      state: 'in_progress',
-      currentTest: 'PWM-P3',
-      passed: 12,
-      total: 36,
-    };
-    expect(cachedStatus.state).toBe('in_progress');
-    expect(cachedStatus.currentTest).toBe('PWM-P3');
+  it('does not turn a stale-attempt conflict into a successful evidence receipt', async () => {
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ error: 'test attempt changed' }), { status: 409 }));
+    await expect(submitCertificationTestResult(ip, {
+      testId: 'POWER-LIMIT-001', certificationId: 'old-cert', testStartedMs: 1000, testAttempt: 1, passed: false,
+      evidenceSource: 'instrument_measurement', measuredValue: 0, unit: 'mW', note: 'No load detected',
+    }, apiKey)).rejects.toThrow(/409.*test attempt changed/);
+  });
+
+  it('preserves exported image metadata separately from the stored session firmware', async () => {
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ certificationId: 'cert-current', firmwareVersion: 'tested-v1',
+      reportingFirmwareVersion: 'exporter-v2', reportingFirmwareElfSha256: 'f'.repeat(64) }), { status: 200 }));
+    const report = await getCertificationReport(ip, apiKey);
+    expect(report.firmwareVersion).toBe('tested-v1');
+    expect(report.reportingFirmwareVersion).toBe('exporter-v2');
+    expect(report.reportingFirmwareElfSha256).toBe('f'.repeat(64));
   });
 });

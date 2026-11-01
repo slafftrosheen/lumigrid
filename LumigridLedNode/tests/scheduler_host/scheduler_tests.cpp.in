@@ -1,0 +1,333 @@
+#include "CueRunner.hpp"
+#include "NodeSync.hpp"
+#include "ShowTransport.hpp"
+#include "TimelineEvaluator.hpp"
+#include "cJSON.h"
+#include "host.hpp"
+#include <cassert>
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <inttypes.h>
+#include <string>
+#include <condition_variable>
+#include <chrono>
+#include <thread>
+// Inspect the real evaluator without adding production-only test entrypoints.
+#define private public
+#include "Scheduler.hpp"
+#undef private
+
+struct httpd_req_t {
+    void* user_ctx = nullptr;
+    std::string input, status, output;
+};
+namespace lg {
+struct Harness {
+    ConfigStore config_;
+    LightingRuntime lighting_;
+    ClockDiscipline clock_;
+    CueRunner cue_runner_{config_, lighting_};
+    Scheduler scheduler_{config_, lighting_, clock_, &cue_runner_};
+    struct SyncBoundary {
+        NodeSync::RemoteTransportCallback callback;
+        void set_remote_transport_callback(NodeSync::RemoteTransportCallback value) {
+            callback = std::move(value);
+        }
+    } node_sync_;
+    Harness() {
+        @@REMOTE_CALLBACK@@
+    }
+};
+namespace api {
+enum class ApiRole { Operator };
+bool authorize(httpd_req_t*, ApiRole) { return true; }
+struct AuditLog {
+    static AuditLog& instance() { static AuditLog instance; return instance; }
+    void log(ApiRole, const char*, const char*) {}
+};
+}
+enum class CommandDomain { Scene, Timeline, Cue };
+struct Journal {
+    unsigned accepted = 0, applied_count = 0, failed_count = 0;
+    esp_err_t failure = ESP_OK;
+    uint32_t accept(CommandDomain, uint32_t = 0) { return ++accepted; }
+    void applied(uint32_t) { ++applied_count; }
+    void failed(uint32_t, esp_err_t error) { ++failed_count; failure = error; }
+};
+struct FactoryApi {
+    Harness& harness;
+    Journal journal;
+    ShowTransportCoordinator transport;
+    explicit FactoryApi(Harness& value) : harness(value) {}
+    LightingRuntime* signage() { return &harness.lighting_; }
+    CueRunner* cue_runner() { return &harness.cue_runner_; }
+    ConfigStore* config() { return &harness.config_; }
+    Scheduler* scheduler() { return &harness.scheduler_; }
+    uint64_t show_clock_now_ms() { return harness.clock_.now_ms(); }
+    Journal& command_journal() { return journal; }
+    ShowTransportCoordinator* show_transport() { return &transport; }
+    void notify_status_async() {}
+};
+bool is_sync_follower_read_only(FactoryApi*, char*, size_t) { return false; }
+esp_err_t read_json(httpd_req_t* request, cJSON** root) {
+    *root = cJSON_Parse(request->input.c_str());
+    return *root ? ESP_OK : ESP_ERR_INVALID_ARG;
+}
+bool json_u8(const cJSON* root, const char* key, uint8_t minimum,
+             uint8_t maximum, uint8_t& out) {
+    const auto* value = cJSON_GetObjectItemCaseSensitive(root, key);
+    if (!cJSON_IsNumber(value) || value->valuedouble < minimum ||
+        value->valuedouble > maximum || std::floor(value->valuedouble) != value->valuedouble)
+        return false;
+    out = static_cast<uint8_t>(value->valuedouble);
+    return true;
+}
+esp_err_t send_json(httpd_req_t* request, const char* body, const char* status) {
+    request->output = body; request->status = status; return ESP_OK;
+}
+esp_err_t send_error(httpd_req_t* request, const char* status, const char* error) {
+    request->output = error; request->status = status; return ESP_OK;
+}
+@@FACTORY_HANDLERS@@
+}
+using namespace lg;
+
+Sequence content(uint32_t checksum, uint16_t bpm = 137, uint8_t first_scene = 1) {
+    Sequence result{};
+    result.checksum = checksum; result.bpm = bpm;
+    for (uint8_t i = 0; i < 16; ++i) result.tracks[i].channel_id = i;
+    auto& track = result.tracks[0];
+    track.enabled = true; track.num_steps = 2;
+    track.steps[0].preset_index = first_scene; track.steps[0].length_beats = 1;
+    track.steps[1].preset_index = first_scene + 1; track.steps[1].length_beats = 1;
+    return result;
+}
+void cue(Harness& h) {
+    h.config_.present[0] = true;
+    auto& list = h.config_.lists[0];
+    list.count = 1; list.checksum = 123; list.mode = CueRunMode::Loop;
+    list.cues[0].scene_index = 7; list.cues[0].hold_ms = 1000;
+    assert(h.cue_runner_.start(0, 0, h.clock_.now_ms()) == ESP_OK);
+}
+ShowTransportSnapshot packet(uint32_t checksum, uint32_t generation = 10, uint16_t bpm = 0) {
+    ShowTransportSnapshot result{};
+    result.mode = ShowTransportMode::Timeline; result.bpm = bpm;
+    result.transport_generation = generation;
+    result.timeline_anchor_ms = 90000;
+    result.timeline_active_checksum = checksum;
+    return result;
+}
+bool apply(Harness& h, const ShowTransportSnapshot& request, uint8_t* error = nullptr) {
+    uint8_t local_error = 0;
+    const bool accepted = h.node_sync_.callback(request, local_error);
+    if (error) *error = local_error;
+    return accepted;
+}
+httpd_req_t local(Harness& h, const std::string& body) {
+    FactoryApi api(h);
+    httpd_req_t request{&api, body, {}, {}};
+    assert(post_show_control(&request) == ESP_OK);
+    return request;
+}
+void assert_cue(Harness& h) {
+    const auto state = h.cue_runner_.snapshot(h.clock_.now_ms());
+    assert(state.running && state.current_scene == 7);
+    assert(!h.scheduler_.is_remote_timeline_running());
+    assert(!h.scheduler_.is_local_timeline_running());
+}
+
+int main(int argc, char** argv) {
+    assert(argc == 2); const std::string name = argv[1];
+    Harness h;
+    h.config_.sequence = content(111);
+    if (name == "remote_admits_fresh_content") {
+        h.scheduler_.reload_sequence();
+        h.config_.sequence = content(222, 149, 3);
+        assert(apply(h, packet(222)));
+        const auto active = h.scheduler_.active_sequence();
+        assert(active.checksum == 222 && active.tracks[0].steps[0].preset_index == 3);
+        assert(h.scheduler_.transport_snapshot().bpm == 149);
+    } else if (name == "remote_saved_edit_preserves_matching_active") {
+        h.scheduler_.reload_sequence(); assert(apply(h, packet(111)));
+        h.config_.sequence = content(222, 149, 3); h.scheduler_.reload_sequence();
+        assert(apply(h, packet(111)));
+        assert(h.scheduler_.active_sequence().checksum == 111);
+        assert(h.scheduler_.transport_snapshot().timeline_content_stale);
+    } else if (name == "remote_matching_active_survives_storage_failure") {
+        h.scheduler_.reload_sequence(); assert(apply(h, packet(111)));
+        h.config_.sequence_result = ESP_FAIL;
+        assert(apply(h, packet(111)));
+        assert(h.scheduler_.active_sequence().checksum == 111);
+    } else if (name == "remote_same_generation_replaces_checksum") {
+        h.scheduler_.reload_sequence(); assert(apply(h, packet(111)));
+        h.config_.sequence = content(222, 149, 3);
+        assert(apply(h, packet(222)));
+        assert(h.scheduler_.active_sequence().checksum == 222);
+        assert(h.scheduler_.active_sequence().tracks[0].steps[0].preset_index == 3);
+    } else if (name == "remote_restart_retains_matching_active_content") {
+        h.scheduler_.reload_sequence(); assert(apply(h, packet(111)));
+        h.config_.sequence = content(222, 149, 3); h.scheduler_.reload_sequence();
+        auto next = packet(111, 11); next.timeline_anchor_ms = 95000;
+        assert(apply(h, next));
+        assert(h.scheduler_.transport_generation() == 11);
+        assert(h.scheduler_.timeline_anchor_ms() == 95000);
+        assert(h.scheduler_.active_sequence().checksum == 111);
+    } else if (name == "remote_checksum_failure_preserves_owner") {
+        h.scheduler_.reload_sequence(); assert(apply(h, packet(111)));
+        const auto before = h.scheduler_.transport_snapshot();
+        uint8_t error = 0; assert(!apply(h, packet(222, 11), &error));
+        assert(error == static_cast<uint8_t>(SyncTransportError::TimelineMismatch));
+        const auto after = h.scheduler_.transport_snapshot();
+        assert(after.timeline_anchor_ms == before.timeline_anchor_ms);
+        assert(after.transport_generation == before.transport_generation);
+        assert(after.timeline_active_checksum == before.timeline_active_checksum);
+    } else if (name == "remote_missing_scene_preserves_cue") {
+        cue(h); h.config_.scenes[2] = false;
+        uint8_t error = 0; assert(!apply(h, packet(111), &error));
+        assert(error == static_cast<uint8_t>(SyncTransportError::SceneMissing));
+        assert_cue(h);
+    } else if (name == "remote_invalid_track_preserves_cue") {
+        cue(h); h.config_.sequence.tracks[0].num_steps = 17;
+        assert(!apply(h, packet(111))); assert_cue(h);
+    } else if (name == "remote_invalid_tempo_preserves_cue") {
+        cue(h); uint8_t error = 0;
+        assert(!apply(h, packet(111, 10, 65535), &error));
+        assert(error == static_cast<uint8_t>(SyncTransportError::TimelineInvalid));
+        assert_cue(h);
+    } else if (name == "remote_missing_content_preserves_cue") {
+        cue(h); h.config_.sequence_result = ESP_ERR_NOT_FOUND;
+        assert(!apply(h, packet(111))); assert_cue(h);
+    } else if (name == "remote_legacy_checksum_zero_admits_current_content") {
+        cue(h); h.scheduler_.reload_sequence();
+        h.config_.sequence = content(222, 149, 3);
+        assert(apply(h, packet(0)));
+        assert(h.scheduler_.active_sequence().checksum == 222);
+        assert(!h.cue_runner_.snapshot(0).running);
+    } else if (name == "remote_duplicate_does_not_reanchor") {
+        h.scheduler_.reload_sequence(); assert(apply(h, packet(111)));
+        auto same = packet(111); same.timeline_anchor_ms = 99999;
+        assert(apply(h, same)); assert(h.scheduler_.timeline_anchor_ms() == 90000);
+        assert(h.scheduler_.transport_generation() == 10);
+    } else if (name == "remote_tempo_override_does_not_mutate_content") {
+        h.scheduler_.reload_sequence(); assert(apply(h, packet(111, 10, 155)));
+        assert(h.scheduler_.active_sequence().bpm == 137);
+        assert(h.scheduler_.transport_snapshot().bpm == 155);
+        assert(apply(h, packet(111, 11)));
+        assert(h.scheduler_.transport_snapshot().bpm == 137);
+    } else if (name == "remote_release_does_not_resurrect_preempted_local") {
+        h.scheduler_.reload_sequence(); h.scheduler_.start_local_timeline();
+        h.config_.sequence = content(222, 149, 3);
+        assert(apply(h, packet(222)));
+        h.scheduler_.clear_sync_transport();
+        assert(!h.scheduler_.is_local_timeline_running());
+        assert(!h.scheduler_.is_remote_timeline_running());
+        assert(h.scheduler_.transport_snapshot().mode == ShowTransportMode::Scene);
+    } else if (name == "local_start_admits_fresh_content_and_tempo") {
+        cue(h); h.scheduler_.reload_sequence();
+        h.config_.sequence = content(222, 149, 3);
+        const auto response = local(h, R"({"mode":"timeline","action":"start"})");
+        assert(response.status == "200 OK");
+        assert(h.scheduler_.active_sequence().checksum == 222);
+        assert(h.scheduler_.active_sequence().tracks[0].steps[0].preset_index == 3);
+        assert(h.scheduler_.transport_snapshot().bpm == 149);
+        assert(!h.cue_runner_.snapshot(0).running);
+    } else if (name == "local_start_without_cache_uses_storage") {
+        h.scheduler_.start_local_timeline();
+        assert(h.scheduler_.active_sequence().checksum == 111);
+        assert(h.scheduler_.transport_snapshot().bpm == 137);
+    } else if (name == "local_missing_scene_preserves_cue") {
+        cue(h); h.config_.scenes[2] = false;
+        const auto response = local(h, R"({"mode":"timeline"})");
+        assert(response.status == "404 Not Found"); assert_cue(h);
+    } else if (name == "local_missing_content_preserves_cue") {
+        cue(h); h.config_.sequence_result = ESP_FAIL;
+        const auto response = local(h, R"({"mode":"timeline"})");
+        assert(response.status == "503 Service Unavailable"); assert_cue(h);
+    } else if (name == "local_invalid_bpm_preserves_cue") {
+        cue(h);
+        for (const auto* value : {"0", "9", "501", "65535", "65536", "120.5", R"("fast")"}) {
+            const auto response = local(h, std::string(R"({"mode":"timeline","bpm":)") + value + "}");
+            assert(response.status == "400 Bad Request"); assert_cue(h);
+        }
+    } else if (name == "local_override_does_not_change_saved_content_tempo") {
+        h.scheduler_.reload_sequence(); h.scheduler_.start_local_timeline(155);
+        assert(h.scheduler_.active_sequence().bpm == 137);
+        assert(h.scheduler_.transport_snapshot().bpm == 155);
+        h.scheduler_.start_local_timeline();
+        assert(h.scheduler_.transport_snapshot().bpm == 137);
+    } else if (name == "reload_failure_preserves_saved_cache") {
+        h.scheduler_.reload_sequence(); h.config_.sequence = content(222);
+        h.config_.sequence_result = ESP_FAIL; h.scheduler_.reload_sequence();
+        assert(h.scheduler_.persisted_sequence().checksum == 111);
+    } else if (name == "reload_storage_runs_outside_critical_section") {
+        h.scheduler_.reload_sequence(); assert(!h.config_.io_inside_critical);
+    } else if (name == "failed_restart_preserves_timeline") {
+        h.scheduler_.reload_sequence(); h.scheduler_.start_local_timeline(137, 90000);
+        h.config_.sequence = content(222, 149, 3); h.config_.scenes[3] = false;
+        const auto response = local(h, R"({"mode":"timeline","action":"restart"})");
+        assert(response.status == "404 Not Found");
+        assert(h.scheduler_.timeline_anchor_ms() == 90000);
+        assert(h.scheduler_.transport_generation() == 1);
+        assert(h.scheduler_.active_sequence().checksum == 111);
+    } else if (name == "snapshot_without_cue_runner_reports_timeline") {
+        Scheduler scheduler(h.config_, h.lighting_, h.clock_);
+        scheduler.reload_sequence(); scheduler.start_local_timeline();
+        assert(scheduler.transport_snapshot().mode == ShowTransportMode::Timeline);
+    } else if (name == "beat_snapshot_avoids_fractional_period_drift") {
+        h.scheduler_.reload_sequence(); h.scheduler_.start_local_timeline(137, 1000);
+        // At 137 BPM, beat 137 is exactly one minute after the anchor.
+        assert(h.scheduler_.transport_snapshot(1000 + 59999).timeline_current_beat == 136);
+        assert(h.scheduler_.transport_snapshot(1000 + 60000).timeline_current_beat == 137);
+        assert(h.scheduler_.transport_snapshot(1000 + 3600000).timeline_current_beat == 8220);
+    } else if (name == "beat_evaluation_matches_exact_boundaries") {
+        const auto sequence = content(111);
+        h.scheduler_.evaluate(sequence, 59999);
+        assert(h.lighting_.last_composite.global_brightness == 101);
+        h.scheduler_.evaluate(sequence, 60000);
+        assert(h.lighting_.last_composite.global_brightness == 102);
+    } else if (name == "invalid_calendar_tempo_does_not_divide_by_zero") {
+        h.scheduler_.evaluate(content(111, 65535), 1000);
+        assert(h.lighting_.activations == 0 && h.lighting_.releases == 1);
+    } else if (name == "missing_scene_in_upper_slots_is_rejected") {
+        cue(h); h.config_.sequence = content(111, 137, 30);
+        h.config_.scenes[31] = false;
+        assert(!apply(h, packet(111))); assert_cue(h);
+    } else if (name == "threaded_rejected_admission_keeps_cue_running") {
+        cue(h); h.config_.scenes[2] = false;
+        std::mutex gate;
+        std::condition_variable condition;
+        bool entered = false, released = false, accepted = true;
+        h.config_.load_sequence_hook = [&] {
+            std::unique_lock<std::mutex> lock(gate);
+            entered = true; condition.notify_all();
+            condition.wait(lock, [&] { return released; });
+        };
+        std::thread worker([&] { accepted = apply(h, packet(111)); });
+        {
+            std::unique_lock<std::mutex> lock(gate);
+            assert(condition.wait_for(lock, std::chrono::seconds(1), [&] { return entered; }));
+        }
+        assert_cue(h);
+        assert(h.scheduler_.transport_snapshot().mode == ShowTransportMode::Cue);
+        {
+            std::lock_guard<std::mutex> lock(gate);
+            released = true; condition.notify_all();
+        }
+        worker.join();
+        assert(!accepted); assert_cue(h);
+    } else if (name == "each_accepted_start_advances_command_generation") {
+        FactoryApi api(h);
+        httpd_req_t first{&api, R"({"mode":"timeline","action":"start"})", {}, {}};
+        assert(post_show_control(&first) == ESP_OK && first.status == "200 OK");
+        const auto before = api.transport.generation();
+        host::timer_us += 1000000;
+        httpd_req_t second{&api, R"({"mode":"timeline","action":"start"})", {}, {}};
+        assert(post_show_control(&second) == ESP_OK && second.status == "200 OK");
+        assert(api.transport.generation() == before + 1);
+        assert(h.scheduler_.transport_generation() == 2);
+    } else {
+        std::fprintf(stderr, "Unknown case: %s\n", name.c_str()); return 2;
+    }
+    std::printf("PASS %s\n", name.c_str());
+}

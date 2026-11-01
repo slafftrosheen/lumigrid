@@ -8,7 +8,9 @@
 #include "esp_timer.h"
 #include "esp_rom_crc.h"
 #include "esp_app_desc.h"
+#include "esp_random.h"
 #include "cJSON.h"
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -104,9 +106,17 @@ esp_err_t CertificationService::start_session(CertificationProfile profile, cons
         }
     }
 
+    // Reject evidence that would be silently truncated in the durable record.
+    if (sn && strlen(sn) >= sizeof(CertificationIdentity{}.serial_number)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    bool has_serial = false;
+    for (const char* p = sn; p && *p; ++p) {
+        if (!std::isspace(static_cast<unsigned char>(*p))) has_serial = true;
+    }
     // Spec §102: ProductionUnit requires non-empty serial number
     if (profile == CertificationProfile::ProductionUnit) {
-        if (!sn || sn[0] == '\0') {
+        if (!has_serial) {
             ESP_LOGE(TAG, "BLOCKED: serial number required for ProductionUnit certification");
             return ESP_ERR_INVALID_ARG;
         }
@@ -124,10 +134,13 @@ esp_err_t CertificationService::start_session(CertificationProfile profile, cons
     reset_certification_record(rec);
     rec.schema_version = kCertificationRecordSchemaVersion;
 
-    // Unique immutable session ID
-    uint32_t t = static_cast<uint32_t>(now_ms());
+    // Uptime alone repeats after reboot. Keep each immutable evidence session
+    // distinct, including sessions started at the same uptime on one node.
+    const uint32_t random_high = esp_random();
+    const uint32_t random_low = esp_random();
     snprintf(rec.session.identity.certification_id, sizeof(rec.session.identity.certification_id),
-             "cert-%.8s-%08lx", identity_.id, (unsigned long)t);
+             "cert-%.8s-%08lx%08lx", identity_.id,
+             static_cast<unsigned long>(random_high), static_cast<unsigned long>(random_low));
     strncpy(rec.session.identity.node_id, identity_.id, sizeof(rec.session.identity.node_id) - 1);
     strncpy(rec.session.identity.firmware_version, identity_.fw_version, sizeof(rec.session.identity.firmware_version) - 1);
     strncpy(rec.session.identity.project_name, "LumiGrid", sizeof(rec.session.identity.project_name) - 1);
@@ -168,6 +181,7 @@ esp_err_t CertificationService::start_session(CertificationProfile profile, cons
 
     current_test_[0] = '\0';
     current_test_started_ms_ = 0;
+    confirmation_pending_ = false;
     is_stale_ = false;
     stale_reason_[0] = '\0';
 
@@ -215,6 +229,10 @@ esp_err_t CertificationService::start_test(const char* test_id) {
 
     CertificationRecord& rec = store_.current_record();
     CertificationTestResult& res = rec.results[idx];
+    // Attempts identify an execution, not the number of result submissions.
+    // Never wrap a binding and let an old client target a later attempt.
+    if (res.attempts == UINT8_MAX) return ESP_ERR_INVALID_STATE;
+    ++res.attempts;
 
     current_factory_session_id_ = 0;
     strncpy(current_test_, test_id, sizeof(current_test_) - 1);
@@ -225,6 +243,10 @@ esp_err_t CertificationService::start_test(const char* test_id) {
     res.started_ms = esp_timer_get_time() / 1000ULL;
     res.completed_ms = 0;
     res.error_code = 0;
+    res.evidence_source = def->required_evidence;
+    res.measured_value = 0.0f;
+    snprintf(res.unit, sizeof(res.unit), "%s", def->unit);
+    res.note[0] = '\0';
 
     // Route physical tests to FactoryRunner.
     // LG-038.3 §20: holding a FactoryRunner pointer is fine, but automatic
@@ -365,7 +387,6 @@ esp_err_t CertificationService::start_test(const char* test_id) {
         if (auto_pass) {
             res.state = CertificationTestState::Passed;
             res.completed_ms = esp_timer_get_time() / 1000ULL;
-            res.attempts++;
             if (note_str) strncpy(res.note, note_str, sizeof(res.note) - 1);
             current_test_[0] = '\0';
             evaluate_overall_state();
@@ -373,7 +394,6 @@ esp_err_t CertificationService::start_test(const char* test_id) {
         } else if (auto_fail) {
             res.state = CertificationTestState::Failed;
             res.completed_ms = esp_timer_get_time() / 1000ULL;
-            res.attempts++;
             res.error_code = -1;
             if (note_str) strncpy(res.note, note_str, sizeof(res.note) - 1);
             current_test_[0] = '\0';
@@ -382,7 +402,6 @@ esp_err_t CertificationService::start_test(const char* test_id) {
         } else if (auto_blocked) {
             res.state = CertificationTestState::Blocked;
             res.completed_ms = esp_timer_get_time() / 1000ULL;
-            res.attempts++;
             res.error_code = -1;
             if (note_str) strncpy(res.note, note_str, sizeof(res.note) - 1);
             current_test_[0] = '\0';
@@ -409,7 +428,7 @@ esp_err_t CertificationService::record_result(const char* test_id,
                                               float measured_value,
                                               const char* unit,
                                               const char* note) {
-    if (!is_in_progress() || cancellation_pending_) {
+    if (!is_in_progress() || cancellation_pending_ || confirmation_pending_) {
         return ESP_ERR_INVALID_STATE;
     }
     if (source > EvidenceSource::InstrumentMeasurement ||
@@ -434,42 +453,30 @@ esp_err_t CertificationService::record_result(const char* test_id,
 
     // Physical observations and instrument measurements cannot be replaced by
     // weaker evidence (including an Automatic label supplied by a client).
-    if (source < def->required_evidence) {
+    if (def->required_evidence == EvidenceSource::Automatic || source < def->required_evidence ||
+        (unit && strlen(unit) >= sizeof(res.unit)) || (note && strlen(note) >= sizeof(res.note))) {
         ESP_LOGE(TAG, "Rejected: Test %s requires stronger evidence", test_id);
         return ESP_ERR_INVALID_ARG;
     }
+    if (strcmp(current_test_, test_id) != 0 || res.state != CertificationTestState::WaitingForOperator) {
+        // An observation must belong to the executing test. Never create
+        // evidence for an unstarted test or overwrite a completed attempt.
+        return ESP_ERR_INVALID_STATE;
+    }
 
     // Spec §86, §87, §112 M, N, O: For physical tests, verify active FactoryRunner session
-    if (def->required_evidence == EvidenceSource::OperatorObservation || def->required_evidence == EvidenceSource::InstrumentMeasurement) {
-        if (runner_) {
-            FactoryStatus fstat = runner_->status();
-            // If the test required a channel test session
-            if (strncmp(test_id, "ADDR-A", 6) == 0 || strncmp(test_id, "PWM-P", 5) == 0 ||
-                strcmp(test_id, "ADDR-XTALK") == 0 || strcmp(test_id, "PWM-XTALK") == 0 ||
-                strcmp(test_id, "SAFE-ESTOP-ADDRESSABLE") == 0 || strcmp(test_id, "SAFE-ESTOP-PWM") == 0 ||
-                strcmp(test_id, "SAFE-DISABLE-001") == 0) {
-                if (fstat.session.owner != FactorySessionOwner::Certification) {
-                    ESP_LOGE(TAG, "Rejected: Factory session owner is not Certification");
-                    return ESP_ERR_INVALID_STATE;
-                }
-                if (strcmp(fstat.session.certification_test_id, test_id) != 0) {
-                    ESP_LOGE(TAG, "Rejected: Factory certification_test_id (%s) mismatch with %s",
-                             fstat.session.certification_test_id, test_id);
-                    return ESP_ERR_INVALID_STATE;
-                }
-                if (current_factory_session_id_ != 0 && fstat.session.session_id != current_factory_session_id_) {
-                    ESP_LOGE(TAG, "Rejected: Factory session ID (%lu) mismatch with expected (%lu)",
-                             (unsigned long)fstat.session.session_id, (unsigned long)current_factory_session_id_);
-                    return ESP_ERR_INVALID_STATE;
-                }
-                if (fstat.session.state != FactoryTestState::WaitingForOperator &&
-                    fstat.session.state != FactoryTestState::Passed &&
-                    fstat.session.state != FactoryTestState::Failed) {
-                    ESP_LOGE(TAG, "Rejected: Factory session has not reached operator wait state (state=%d)",
-                             static_cast<int>(fstat.session.state));
-                    return ESP_ERR_INVALID_STATE;
-                }
-            }
+    const bool physical_test = strncmp(test_id, "ADDR-A", 6) == 0 || strncmp(test_id, "PWM-P", 5) == 0 ||
+        strcmp(test_id, "ADDR-XTALK") == 0 || strcmp(test_id, "PWM-XTALK") == 0 ||
+        strcmp(test_id, "SAFE-ESTOP-ADDRESSABLE") == 0 || strcmp(test_id, "SAFE-ESTOP-PWM") == 0 ||
+        strcmp(test_id, "SAFE-DISABLE-001") == 0;
+    if (physical_test) {
+        if (!runner_ || current_factory_session_id_ == 0) return ESP_ERR_INVALID_STATE;
+        const FactoryStatus fstat = runner_->status();
+        if (fstat.session.owner != FactorySessionOwner::Certification ||
+            strcmp(fstat.session.certification_test_id, test_id) != 0 ||
+            fstat.session.session_id != current_factory_session_id_ ||
+            fstat.session.state != FactoryTestState::WaitingForOperator) {
+            return ESP_ERR_INVALID_STATE;
         }
     }
 
@@ -494,35 +501,30 @@ esp_err_t CertificationService::record_result(const char* test_id,
         }
     }
 
+    // Queue the owned output confirmation before accepting its observation.
+    // A full queue is not a recorded pass and leaves this attempt open.
+    if (physical_test && !runner_->confirm_test_session(
+            current_factory_session_id_, final_state == CertificationTestState::Passed, note)) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
     // Apply result
-    res.state = final_state;
+    // Persist an unfinished execution until its output stop is acknowledged.
+    // If the node reboots here, this attempt must not reappear as passed.
+    res.state = physical_test ? CertificationTestState::Running : final_state;
     res.evidence_source = source;
-    res.completed_ms = esp_timer_get_time() / 1000ULL;
+    res.completed_ms = physical_test ? 0 : esp_timer_get_time() / 1000ULL;
     res.measured_value = measured_value;
-    if (unit && unit[0] != '\0') {
-        strncpy(res.unit, unit, sizeof(res.unit) - 1);
-        res.unit[sizeof(res.unit) - 1] = '\0';
-    }
-    if (note && note[0] != '\0') {
-        strncpy(res.note, note, sizeof(res.note) - 1);
-        res.note[sizeof(res.note) - 1] = '\0';
-    }
-    if (res.attempts < UINT8_MAX) ++res.attempts;
+    snprintf(res.unit, sizeof(res.unit), "%s", unit ? unit : "");
+    snprintf(res.note, sizeof(res.note), "%s", note ? note : "");
 
-    if (strcmp(current_test_, test_id) == 0) {
+    if (physical_test) {
+        confirmation_pending_ = true;
+        confirmation_result_state_ = final_state;
+    } else {
         current_test_[0] = '\0';
+        evaluate_overall_state();
     }
-
-    // Clean up / confirm factory session if applicable
-    if (runner_) {
-        FactoryStatus fstat = runner_->status();
-        if (fstat.session.owner == FactorySessionOwner::Certification &&
-            strcmp(fstat.session.certification_test_id, test_id) == 0) {
-            runner_->confirm_test_session(fstat.session.session_id, final_state == CertificationTestState::Passed, note);
-        }
-    }
-
-    evaluate_overall_state();
     return persist_record();
 }
 
@@ -537,6 +539,7 @@ esp_err_t CertificationService::persist_record() {
     rec.session.completed_ms = esp_timer_get_time() / 1000ULL;
     is_stale_ = true;
     snprintf(stale_reason_, sizeof(stale_reason_), "persistence_failed");
+    confirmation_pending_ = false;
     if (!cancellation_pending_) {
         const esp_err_t cancel_error = request_output_cancellation();
         if (cancel_error != ESP_OK) ESP_LOGE(TAG, "Certification cancellation was not queued; tick will retry");
@@ -666,7 +669,7 @@ esp_err_t CertificationService::request_output_cancellation() {
 }
 
 esp_err_t CertificationService::abort() {
-
+    confirmation_pending_ = false;
     if (current_test_[0] != '\0') {
         int idx = find_result_index(current_test_);
         if (idx >= 0) {
@@ -779,11 +782,64 @@ void CertificationService::finish_burn_in(bool passed, const char* reason) {
 }
 
 void CertificationService::tick(uint64_t now_ms) {
+    if (confirmation_pending_ && (!is_in_progress() || is_stale_)) {
+        // A configuration/image invalidation supersedes a submitted result.
+        // Still stop the owned outputs, but a late success cannot re-certify
+        // evidence whose enclosing session is no longer current.
+        confirmation_pending_ = false;
+        auto& record = store_.current_record();
+        const int index = find_result_index(current_test_);
+        if (index >= 0) {
+            record.results[index].state = CertificationTestState::Blocked;
+            record.results[index].completed_ms = now_ms;
+            record.results[index].error_code = ESP_ERR_INVALID_STATE;
+        }
+        if (record.session.state == CertificationState::InProgress) {
+            record.session.state = CertificationState::Incomplete;
+            record.session.completed_ms = now_ms;
+        }
+        request_output_cancellation();
+        persist_record();
+        return;
+    }
     // Persistence failure and explicit abort make evidence Incomplete before
     // the worker stops. Continue cancellation retry/acknowledgement regardless
     // of that evidence state, retaining ownership until the worker responds.
     if (cancellation_pending_) {
         request_output_cancellation();
+        return;
+    }
+    if (confirmation_pending_) {
+        const int index = find_result_index(current_test_);
+        if (!runner_ || index < 0) return;
+        const FactoryStatus status = runner_->status();
+        if (status.session.owner != FactorySessionOwner::Certification ||
+            status.session.session_id != current_factory_session_id_ ||
+            strcmp(status.session.certification_test_id, current_test_) != 0 ||
+            status.outputs_enabled || status.test_active ||
+            (status.session.state != FactoryTestState::Passed &&
+             status.session.state != FactoryTestState::Failed &&
+             status.session.state != FactoryTestState::Aborted)) return;
+
+        auto& result = store_.current_record().results[index];
+        result.state = confirmation_result_state_;
+        result.completed_ms = now_ms;
+        result.error_code = status.session.error_code;
+        if (status.session.state == FactoryTestState::Aborted) {
+            result.state = CertificationTestState::Blocked;
+        } else if (status.session.error_code != ESP_OK ||
+                   (status.session.state == FactoryTestState::Passed) !=
+                       (confirmation_result_state_ == CertificationTestState::Passed)) {
+            result.state = CertificationTestState::Failed;
+            if (result.error_code == ESP_OK) result.error_code = ESP_ERR_INVALID_STATE;
+        }
+        // Keep the submitted method/observation intact; the runner error code
+        // records a failed stop without truncating or replacing that evidence.
+        confirmation_pending_ = false;
+        current_factory_session_id_ = 0;
+        current_test_[0] = '\0';
+        evaluate_overall_state();
+        persist_record();
         return;
     }
     if (!is_in_progress()) return;

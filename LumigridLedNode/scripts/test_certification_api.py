@@ -3,6 +3,7 @@ from pathlib import Path
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -21,14 +22,16 @@ using esp_err_t=int;
 constexpr int ESP_OK=0, ESP_FAIL=-1, ESP_ERR_NO_MEM=0x101,
               ESP_ERR_INVALID_ARG=0x102, ESP_ERR_INVALID_STATE=0x103,
               ESP_ERR_NOT_FOUND=0x105;
-struct httpd_req_t { void* user_ctx=nullptr; std::string input, status, output; };
+struct httpd_req_t { void* user_ctx=nullptr; std::string input, status, output; int content_len=0; };
 constexpr int64_t fake_time_us=5000000000000LL;
 int64_t esp_timer_get_time() { return fake_time_us; }
 namespace lg {
 namespace api { enum class ApiRole { Admin }; bool authorize(httpd_req_t*,ApiRole) { return true; } }
 struct FakeService {
     CertificationSession value{};
+    CertificationTestResult test{};
     int result_calls=0, abort_calls=0, result_error=ESP_OK, abort_error=ESP_OK;
+    int start_calls=0, test_start_calls=0, start_error=ESP_OK;
     bool pending_cancellation=false;
     int ticks=0; uint64_t tick_time=0;
     void tick(uint64_t time) { ++ticks; tick_time=time; }
@@ -36,6 +39,9 @@ struct FakeService {
         ++result_calls; return result_error;
     }
     int abort() { ++abort_calls; return abort_error; }
+    int start_session(CertificationProfile, const char*) { ++start_calls; return start_error; }
+    int start_test(const char*) { ++test_start_calls; return start_error; }
+    const CertificationTestResult* get_test_result(const char*) { return &test; }
     bool cancellation_pending() const { return pending_cancellation; }
     const CertificationSession& session() { return value; }
 };
@@ -105,10 +111,53 @@ int main(int argc,char** argv) {
         std::cout << "PASS " << name << '\n'; return 0;
     }
     httpd_req_t request; request.user_ctx=&api;
+    std::strcpy(api.service.value.identity.certification_id,"cert-bound");
+    api.service.test.started_ms=1234;
+    api.service.test.attempts=2;
+    if(name.rfind("session_",0)==0 || name.rfind("test_start_",0)==0 || name=="abort_stale_session" || name=="abort_empty_body") {
+        request.input=R"({"profile":"development","serialNumber":"bench","certificationId":"cert-bound","testId":"POWER-LIMIT-001"})";
+        if(name=="session_invalid_json") request.input="{";
+        else if(name=="session_not_object") request.input="[]";
+        else if(name=="session_invalid_profile") request.input=R"({"profile":"anything","serialNumber":"bench"})";
+        else if(name=="session_invalid_serial") request.input=R"({"profile":"development","serialNumber":123})";
+        else if(name=="session_oversize_serial") request.input=R"({"serialNumber":"12345678901234567890123456789012"})";
+        else if(name=="session_stale_binding" || name=="test_start_stale_binding" || name=="abort_stale_session")
+            request.input=R"({"profile":"development","certificationId":"old","testId":"POWER-LIMIT-001"})";
+        else if(name=="session_storage_failure") api.service.start_error=ESP_ERR_NO_MEM;
+        else if(name=="test_start_storage_failure") api.service.start_error=ESP_FAIL;
+        else if(name=="abort_empty_body") request.input="";
+        else assert(name=="session_bound" || name=="test_start_bound");
+        request.content_len=request.input.size();
+        if(name.rfind("session_",0)==0) assert(post_certification_start(&request)==ESP_OK);
+        else if(name.rfind("test_start_",0)==0) assert(post_certification_test_start(&request)==ESP_OK);
+        else assert(post_certification_abort(&request)==ESP_OK);
+        const int mutations=api.service.start_calls+api.service.test_start_calls+api.service.abort_calls;
+        const bool stale=name.find("stale")!=std::string::npos;
+        const bool storage=name.find("storage_failure")!=std::string::npos;
+        const bool valid=name=="session_bound" || name=="test_start_bound" || name=="abort_empty_body";
+        if(stale) assert(request.status=="409 Conflict" && mutations==0 && api.notifications==0);
+        else if(storage) {
+            assert(request.status==(name=="session_storage_failure" ? "503 Service Unavailable" : "500 Internal Server Error"));
+            assert(mutations==1 && api.notifications==0);
+        } else if(valid) assert(request.status=="200 OK" && mutations==1 && api.notifications==1);
+        else assert(request.status=="400 Bad Request" && mutations==0 && api.notifications==0);
+        assert(api.service.ticks==1);
+        std::cout << "PASS " << name << '\n'; return 0;
+    }
     std::string body=R"({"testId":"POWER-LIMIT-001","state":"passed","evidenceSource":"instrument_measurement","measuredValue":0,"unit":"mW","note":"bench"})";
     cJSON* json=cJSON_Parse(body.c_str()); assert(json);
     bool reject=true;
-    if(name=="missing_measurement") cJSON_DeleteItemFromObjectCaseSensitive(json,"measuredValue");
+    bool conflict=false;
+    if(name.rfind("binding_",0)==0) {
+        cJSON_AddStringToObject(json,"certificationId",name=="binding_stale_session" ? "old" : "cert-bound");
+        cJSON_AddNumberToObject(json,"testStartedMs",name=="binding_old_start" ? 1233 : name=="binding_fractional_start" ? 1234.5 : 1234);
+        cJSON_AddNumberToObject(json,"testAttempt",name=="binding_old_attempt" ? 1 : name=="binding_invalid_attempt" ? 256 : 2);
+        if(name=="binding_missing_start") cJSON_DeleteItemFromObjectCaseSensitive(json,"testStartedMs");
+        else if(name=="binding_missing_session") cJSON_DeleteItemFromObjectCaseSensitive(json,"certificationId");
+        else if(name=="binding_current") reject=false;
+        else if(name=="binding_stale_session" || name=="binding_old_start" || name=="binding_old_attempt") conflict=true;
+        else assert(name=="binding_fractional_start" || name=="binding_invalid_attempt");
+    } else if(name=="missing_measurement") cJSON_DeleteItemFromObjectCaseSensitive(json,"measuredValue");
     else if(name=="non_numeric_measurement") cJSON_ReplaceItemInObjectCaseSensitive(json,"measuredValue",cJSON_CreateString("0"));
     else if(name=="wrong_state") cJSON_ReplaceItemInObjectCaseSensitive(json,"state",cJSON_CreateString("oops"));
     else if(name=="nonterminal_state") cJSON_ReplaceItemInObjectCaseSensitive(json,"state",cJSON_CreateString("running"));
@@ -116,7 +165,13 @@ int main(int argc,char** argv) {
     else if(name=="external_automatic") {
         cJSON_ReplaceItemInObjectCaseSensitive(json,"testId",cJSON_CreateString("BOOT-001"));
         cJSON_ReplaceItemInObjectCaseSensitive(json,"evidenceSource",cJSON_CreateString("automatic"));
-    } else if(name=="wrong_unit") cJSON_ReplaceItemInObjectCaseSensitive(json,"unit",cJSON_CreateString("V"));
+    } else if(name=="automatic_observation") {
+        cJSON_ReplaceItemInObjectCaseSensitive(json,"testId",cJSON_CreateString("BOOT-001"));
+        cJSON_ReplaceItemInObjectCaseSensitive(json,"evidenceSource",cJSON_CreateString("operator_observation"));
+    } else if(name=="long_note") cJSON_ReplaceItemInObjectCaseSensitive(json,"note",cJSON_CreateString(std::string(96,'x').c_str()));
+    else if(name=="utf8_note_at_limit") { reject=false; cJSON_ReplaceItemInObjectCaseSensitive(json,"note",cJSON_CreateString((std::string(93,'x')+"é").c_str())); }
+    else if(name=="utf8_note_over_limit") cJSON_ReplaceItemInObjectCaseSensitive(json,"note",cJSON_CreateString((std::string(94,'x')+"é").c_str()));
+    else if(name=="wrong_unit") cJSON_ReplaceItemInObjectCaseSensitive(json,"unit",cJSON_CreateString("V"));
     else if(name=="valid_zero_measurement") reject=false;
     else if(name=="result_storage_failure") { api.service.result_error=ESP_ERR_NO_MEM; reject=false; }
     else if(name=="abort_storage_failure") { api.service.abort_error=ESP_FAIL; }
@@ -128,6 +183,7 @@ int main(int argc,char** argv) {
     if(name=="float_overflow" || name=="double_overflow")
         request.input=std::string(R"({"testId":"POWER-LIMIT-001","state":"passed","evidenceSource":"instrument_measurement","measuredValue":)")+
             (name=="float_overflow" ? "1e50" : "1e400")+R"(,"unit":"mW","note":"bench"})";
+    request.content_len=request.input.size();
     if(name.rfind("abort_",0)==0) {
         assert(post_certification_abort(&request)==ESP_OK);
         assert(api.service.abort_calls==1);
@@ -154,6 +210,8 @@ int main(int argc,char** argv) {
         assert(post_certification_test_result(&request)==ESP_OK);
         if(name=="result_storage_failure") {
             assert(request.status=="503 Service Unavailable" && api.service.result_calls==1 && api.notifications==0);
+        } else if(conflict) {
+            assert(request.status=="409 Conflict" && api.service.result_calls==0 && api.notifications==0);
         } else if(reject) {
             assert(request.status=="400 Bad Request" && api.service.result_calls==0 && api.notifications==0);
         } else {
@@ -171,7 +229,7 @@ def main():
     cc=shutil.which(os.environ.get("CC","cc"))
     if not cxx or not cc: raise SystemExit("Host C/C++ compilers are required")
     source=(ROOT/"components/factory/FactoryApi.cpp").read_text()
-    start=source.index("static esp_err_t post_certification_test_result(")
+    start=source.index("static bool certification_binding_matches(")
     end=source.index("static esp_err_t get_certification_report(",start)
     harness=HARNESS.replace("__HANDLERS__",source[start:end])
     worker_start=source.index("void FactoryApi::ws_broadcast_work(")
@@ -197,7 +255,14 @@ def main():
                "wrong_source","external_automatic","wrong_unit","float_overflow","double_overflow",
                "valid_zero_measurement","result_storage_failure","abort_storage_failure",
                "abort_pending","abort_completed","abort_queue_rejected",
-               "dispatch_no_clients","dispatch_non_ws","dispatch_ws","dispatch_no_service","dispatch_queue_failure")
+               "dispatch_no_clients","dispatch_non_ws","dispatch_ws","dispatch_no_service","dispatch_queue_failure",
+               "automatic_observation","long_note","utf8_note_at_limit","utf8_note_over_limit",
+               "binding_stale_session","binding_old_start","binding_old_attempt","binding_current",
+               "binding_fractional_start","binding_invalid_attempt","binding_missing_start","binding_missing_session",
+               "session_invalid_json","session_not_object","session_invalid_profile","session_invalid_serial",
+               "session_oversize_serial","session_stale_binding","session_bound","session_storage_failure",
+               "test_start_stale_binding","test_start_bound","test_start_storage_failure","abort_stale_session","abort_empty_body")
+        cases=sys.argv[1:] or cases
         failures=[]
         env={**os.environ,"ASAN_OPTIONS":"detect_leaks=0:halt_on_error=1",
              "UBSAN_OPTIONS":"halt_on_error=1:print_stacktrace=1"}

@@ -651,33 +651,59 @@ void FactoryRunner::apply_command(const FactoryCommand& command,
         }
         case FactoryCommandType::ConfirmSession: {
             xSemaphoreTake(status_mutex_, portMAX_DELAY);
-            if (status_.session.session_id == command.session_id) {
-                status_.session.finished_ms = current_ms;
-                status_.session.state = command.session_passed ? FactoryTestState::Passed : FactoryTestState::Failed;
-                strncpy(status_.session.notes, command.session_notes, sizeof(status_.session.notes) - 1);
-                status_.session.notes[sizeof(status_.session.notes) - 1] = '\0';
-
-                // Record into validation report
-                const uint8_t ch = status_.session.channel;
-                if (status_.session.kind == FactoryTestKind::AddressableChannel && ch < 8) {
-                    validation_report_.addressable[ch] = { .tested = true, .passed = command.session_passed, .timestamp_ms = current_ms };
-                } else if (status_.session.kind == FactoryTestKind::PwmChannel && ch >= 8 && ch < 16) {
-                    validation_report_.pwm[ch - 8] = { .tested = true, .passed = command.session_passed, .timestamp_ms = current_ms };
-                } else if (status_.session.kind == FactoryTestKind::CombinedOutputs) {
-                    validation_report_.combined = { .tested = true, .passed = command.session_passed, .timestamp_ms = current_ms };
-                } else if (status_.session.kind == FactoryTestKind::SafetyGate) {
-                    validation_report_.safety_gate = { .tested = true, .passed = command.session_passed, .timestamp_ms = current_ms };
-                } else if (status_.session.kind == FactoryTestKind::BurnIn) {
-                    validation_report_.burn_in = { .tested = true, .passed = command.session_passed, .timestamp_ms = current_ms };
-                    validation_report_.burn_in_duration_s = (current_ms - status_.session.started_ms) / 1000;
+            const bool owns_active_session = command.session_id != 0 &&
+                status_.session.session_id == command.session_id &&
+                (status_.session.state == FactoryTestState::Preparing ||
+                 status_.session.state == FactoryTestState::Running ||
+                 status_.session.state == FactoryTestState::WaitingForOperator);
+            if (!owns_active_session) {
+                xSemaphoreGive(status_mutex_);
+                if (command.command_id != 0 && pending_command_id_ == command.command_id) {
+                    if (journal_) journal_->failed(command.command_id, ESP_ERR_INVALID_STATE);
+                    pending_command_id_ = 0;
                 }
+                if (status_callback_) status_callback_();
+                return;
+            }
+            stream_active_ = false;
+            status_.auto_loop = false;
+            xSemaphoreGive(status_mutex_);
+            direct_test_active_ = false;
+
+            // Stop every producer before releasing output ownership. Publish
+            // terminal acknowledgment only after the hardware operation returns.
+            const esp_err_t result = blackout();
+            const bool passed = command.session_passed && result == ESP_OK;
+            const uint32_t finished_ms = now_ms();
+            xSemaphoreTake(status_mutex_, portMAX_DELAY);
+            status_.session.finished_ms = finished_ms;
+            status_.session.state = passed ? FactoryTestState::Passed : FactoryTestState::Failed;
+            status_.session.error_code = result;
+            status_.session.operator_confirmation_required = false;
+            strncpy(status_.session.notes, command.session_notes, sizeof(status_.session.notes) - 1);
+            status_.session.notes[sizeof(status_.session.notes) - 1] = '\0';
+
+            const uint8_t ch = status_.session.channel;
+            if (status_.session.kind == FactoryTestKind::AddressableChannel && ch < 8) {
+                validation_report_.addressable[ch] = { .tested = true, .passed = passed, .timestamp_ms = finished_ms };
+            } else if (status_.session.kind == FactoryTestKind::PwmChannel && ch >= 8 && ch < 16) {
+                validation_report_.pwm[ch - 8] = { .tested = true, .passed = passed, .timestamp_ms = finished_ms };
+            } else if (status_.session.kind == FactoryTestKind::CombinedOutputs) {
+                validation_report_.combined = { .tested = true, .passed = passed, .timestamp_ms = finished_ms };
+            } else if (status_.session.kind == FactoryTestKind::SafetyGate) {
+                validation_report_.safety_gate = { .tested = true, .passed = passed, .timestamp_ms = finished_ms };
+            } else if (status_.session.kind == FactoryTestKind::BurnIn) {
+                validation_report_.burn_in = { .tested = true, .passed = passed, .timestamp_ms = finished_ms };
+                validation_report_.burn_in_duration_s = (finished_ms - status_.session.started_ms) / 1000;
             }
             xSemaphoreGive(status_mutex_);
 
-            blackout();
-
-            if (pending_command_id_ != 0 && journal_) {
-                journal_->applied(pending_command_id_);
+            if (pending_command_id_ != 0) {
+                if (journal_) {
+                    if (result != ESP_OK) journal_->failed(pending_command_id_, result);
+                    else if (pending_command_id_ == command.command_id) journal_->applied(pending_command_id_);
+                    else journal_->superseded(pending_command_id_);
+                }
                 pending_command_id_ = 0;
             }
             if (status_callback_) status_callback_();

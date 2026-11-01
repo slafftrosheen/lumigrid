@@ -29,6 +29,11 @@ constexpr uint8_t kMode1AutoInc = (1u << 5);
 constexpr uint8_t kMode1Sleep   = (1u << 4);
 constexpr uint8_t kMode1Restart = (1u << 7);
 constexpr uint8_t kMode2OutDrv  = (1u << 2);
+// RESTART self-clears; all other MODE1 bits are stable configuration. Require
+// the internal oscillator, auto-increment and no shared I2C call addresses.
+constexpr uint8_t kMode1ConfigMask = 0x7F;
+// MODE2: non-inverted, latch on STOP, totem-pole, drive LOW while /OE is HIGH.
+constexpr uint8_t kMode2ConfigMask = 0x1F;
 constexpr uint8_t kPrescaleFor1kHz = 5;
 
 static_assert(kPrescaleFor1kHz >= 3, "PCA9685 prescale below datasheet minimum");
@@ -273,7 +278,7 @@ bool Pca9685Driver::is_outputs_enabled() {
 }
 
 bool Pca9685Driver::recovery_required() const {
-    return recovery_required_ || output_gate_error() != ESP_OK;
+    return recovery_required_ || register_mismatch_ || output_gate_error() != ESP_OK;
 }
 
 PcaFaultKind Pca9685Driver::last_fault_kind() const {
@@ -411,19 +416,29 @@ esp_err_t Pca9685Driver::verify_chip() {
     const esp_err_t r3 = (r2 == ESP_OK) ? read_register(kRegPrescale, pre) : r2;
 
     if (r1 != ESP_OK || r2 != ESP_OK || r3 != ESP_OK ||
-        (m1 & kMode1Sleep) != 0 ||
-        (m1 & kMode1AutoInc) == 0 ||
-        (m2 & kMode2OutDrv) == 0 ||
+        (m1 & kMode1ConfigMask) != kMode1AutoInc ||
+        (m2 & kMode2ConfigMask) != kMode2OutDrv ||
         pre != kPrescaleFor1kHz) {
-        ESP_LOGE(TAG, "PCA9685 verification failed (m1=0x%02X sleep_clr=%d autoinc=%d, m2=0x%02X outdrv=%d, pre=%u exp=%u)",
-                 m1, (m1 & kMode1Sleep) == 0, (m1 & kMode1AutoInc) != 0,
-                 m2, (m2 & kMode2OutDrv) != 0, pre, kPrescaleFor1kHz);
+        initialized_ = false;
+        zero_confirmed_ = false;
+        valid_frame_confirmed_ = false;
+        recovery_required_ = true;
+        if (r1 == ESP_OK && r2 == ESP_OK && r3 == ESP_OK) {
+            register_mismatch_ = true;
+            last_error_ = ESP_ERR_INVALID_RESPONSE;
+            last_fault_kind_ = PcaFaultKind::RegisterVerificationFailed;
+        }
+        disable_pwm_outputs();
+        ESP_LOGE(TAG, "PCA9685 verification failed (m1=0x%02X mask=0x%02X expected=0x%02X, m2=0x%02X mask=0x%02X expected=0x%02X, pre=%u exp=%u)",
+                 m1, kMode1ConfigMask, kMode1AutoInc,
+                 m2, kMode2ConfigMask, kMode2OutDrv, pre, kPrescaleFor1kHz);
         return ESP_ERR_INVALID_RESPONSE;
     }
 
     mode1_ = m1;
     mode2_ = m2;
     prescale_ = pre;
+    register_mismatch_ = false;
     return ESP_OK;
 }
 
@@ -588,6 +603,15 @@ esp_err_t Pca9685Driver::clear() {
 }
 
 esp_err_t Pca9685Driver::commit() {
+    // A known polarity/clock/inhibit mismatch invalidates the meaning of the
+    // PWM bytes. Even an acknowledged zero write cannot confirm dark output.
+    if (register_mismatch_) {
+        disable_pwm_outputs();
+        zero_confirmed_ = false;
+        valid_frame_confirmed_ = false;
+        last_error_ = ESP_ERR_INVALID_STATE;
+        return ESP_ERR_INVALID_STATE;
+    }
     if (!transport().is_bus_initialized()) {
         disable_pwm_outputs();
         zero_confirmed_ = false;

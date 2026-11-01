@@ -14,6 +14,12 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 
 STUBS = {
+    "esp_random.h": r'''
+#pragma once
+#include <cstdint>
+inline uint32_t fake_random=0x10305070;
+inline uint32_t esp_random() { return ++fake_random; }
+''',
     "esp_app_desc.h": r'''
 #pragma once
 #include <cstdint>
@@ -91,14 +97,15 @@ class JobManager;
 class FactoryRunner { public:
     static constexpr uint8_t kBurnInDefaultBrightness=32;
     FactoryStatus value{}; int aborts=0, generic_aborts=0, burn_stops=0;
-    bool accept_abort=true, accept_start=false;
+    bool accept_abort=true, accept_start=false, accept_confirm=true;
+    int confirmations=0;
     uint32_t aborted_session=0, proposed_session=99;
     FactoryStatus status() const { return value; }
     FactoryValidationReport validation_report() const { return {}; }
     bool start_test_session(FactoryTestKind, uint8_t, uint32_t, uint8_t,
         uint32_t* id, FactorySessionOwner, const char*) { if(id) *id=proposed_session; return accept_start; }
     bool start_burn_in_job(JobManager*, uint32_t, uint8_t, uint32_t*) { return false; }
-    bool confirm_test_session(uint32_t, bool, const char*) { return true; }
+    bool confirm_test_session(uint32_t, bool, const char*) { ++confirmations; return accept_confirm; }
     bool abort() { ++aborts; ++generic_aborts; return accept_abort; }
     bool abort_test_session(uint32_t id=0) { ++aborts; aborted_session=id; return accept_abort; }
     bool stop_burn_in_job() { ++aborts; ++burn_stops; return accept_abort; }
@@ -204,6 +211,7 @@ int main(int argc, char** argv) {
     } else if(name=="instrument_evidence" || name=="nan_measurement" || name=="infinite_measurement" ||
               name=="wrong_units" || name=="missing_units" || name=="explicit_failure") {
         seed(service);
+        assert(service.start_test("POWER-LIMIT-001")==ESP_OK);
         const auto source=name=="instrument_evidence" ? EvidenceSource::Automatic : EvidenceSource::InstrumentMeasurement;
         const float value=name=="nan_measurement" ? std::numeric_limits<float>::quiet_NaN() :
             name=="infinite_measurement" ? std::numeric_limits<float>::infinity() : 1000.0f;
@@ -226,10 +234,11 @@ int main(int argc, char** argv) {
         assert(service.start_session(CertificationProfile::Development,"test")==ESP_FAIL);
         assert(service.session().state==CertificationState::NotStarted);
     } else if(name=="save_failure_not_passed") {
-        seed(service,"BOOT-001");
+        seed(service);
+        assert(service.start_test("POWER-LIMIT-001")==ESP_OK);
         save_error=ESP_ERR_NO_MEM;
-        assert(service.record_result("BOOT-001",CertificationTestState::Passed,
-            EvidenceSource::Automatic,0,"","observed")==ESP_ERR_NO_MEM);
+        assert(service.record_result("POWER-LIMIT-001",CertificationTestState::Passed,
+            EvidenceSource::InstrumentMeasurement,0,"mW","observed")==ESP_ERR_NO_MEM);
         assert(service.session().state==CertificationState::Incomplete);
         assert(service.is_stale() && std::strcmp(service.stale_reason(),"persistence_failed")==0);
     } else if(name=="unimplemented_probes_blocked") {
@@ -368,6 +377,141 @@ int main(int argc, char** argv) {
         std::strcpy(service.current_test_,"POWER-LIMIT-001");
         assert(service.abort()==ESP_OK && !service.cancellation_pending());
         assert(runner.aborts==0 && service.current_running_test()[0]=='\0');
+    } else if(name=="confirmation_queue_rejected" || name=="confirmation_waits_for_stop" ||
+              name=="confirmation_blackout_failed" || name=="confirmation_abort" || name=="confirmation_storage_failed" ||
+              name=="confirmation_invalidated") {
+        service.store_.init(); FactoryRunner runner; service.runner_=&runner; runner.accept_start=true;
+        assert(service.start_session(CertificationProfile::ProductionUnit,"bench")==ESP_OK);
+        for(size_t i=0;i<service.record().result_count;++i)
+            service.store_.current_record().results[i].state=CertificationTestState::Passed;
+        assert(service.start_test("ADDR-A1")==ESP_OK);
+        runner.value.session.owner=FactorySessionOwner::Certification;
+        runner.value.session.session_id=runner.proposed_session;
+        std::strcpy(runner.value.session.certification_test_id,"ADDR-A1");
+        runner.value.session.state=FactoryTestState::WaitingForOperator;
+        runner.value.outputs_enabled=true; runner.value.test_active=true;
+        service.tick(1000);
+        assert(service.get_test_result("ADDR-A1")->state==CertificationTestState::WaitingForOperator);
+        runner.accept_confirm=name!="confirmation_queue_rejected";
+        if(name=="confirmation_storage_failed") save_error=ESP_ERR_NO_MEM;
+        const int result=service.record_result("ADDR-A1",CertificationTestState::Passed,
+            EvidenceSource::OperatorObservation,0,"","Method: visual; Notes: observed");
+        assert(runner.confirmations==1);
+        if(!runner.accept_confirm) {
+            assert(result==ESP_ERR_INVALID_STATE && !service.confirmation_pending());
+            assert(service.get_test_result("ADDR-A1")->state==CertificationTestState::WaitingForOperator);
+            assert(service.get_test_result("ADDR-A1")->note[0]=='\0');
+        } else if(name=="confirmation_storage_failed") {
+            assert(result==ESP_ERR_NO_MEM && !service.confirmation_pending() && service.cancellation_pending());
+            assert(service.session().state==CertificationState::Incomplete && service.is_stale());
+            assert(service.get_test_result("ADDR-A1")->state!=CertificationTestState::Passed);
+        } else {
+            assert(result==ESP_OK && service.confirmation_pending());
+            assert(service.session().state==CertificationState::InProgress);
+            // This is also the durable record: reboot cannot load a premature pass.
+            assert(service.get_test_result("ADDR-A1")->state==CertificationTestState::Running);
+            assert(service.get_test_result("ADDR-A1")->completed_ms==0);
+            assert(service.start_session(CertificationProfile::Development,"next")==ESP_ERR_INVALID_STATE);
+            assert(service.start_test("BOOT-001")==ESP_ERR_INVALID_STATE);
+            assert(service.record_result("ADDR-A1",CertificationTestState::Passed,
+                EvidenceSource::OperatorObservation,0,"","duplicate")==ESP_ERR_INVALID_STATE);
+            if(name=="confirmation_abort" || name=="confirmation_invalidated") {
+                if(name=="confirmation_invalidated") {
+                    DeviceConfig cfg;
+                    service.check_invalidation(cfg,"different-board",service.identity_.fw_version);
+                    assert(service.session().state==CertificationState::Invalidated && service.is_stale());
+                    service.tick(1500);
+                } else assert(service.abort()==ESP_OK);
+                assert(!service.confirmation_pending() && service.cancellation_pending());
+                assert(runner.aborted_session==runner.proposed_session && runner.generic_aborts==0);
+                runner.value.session.state=name=="confirmation_invalidated" ? FactoryTestState::Passed : FactoryTestState::Aborted;
+            } else {
+                runner.value.session.state=FactoryTestState::Passed;
+                service.tick(2000); assert(service.confirmation_pending());
+                runner.value.outputs_enabled=false;
+                service.tick(2001); assert(service.confirmation_pending());
+                runner.value.test_active=false; ++runner.value.session.session_id;
+                service.tick(2002); assert(service.confirmation_pending());
+                --runner.value.session.session_id;
+                if(name=="confirmation_blackout_failed") {
+                    runner.value.session.state=FactoryTestState::Failed;
+                    runner.value.session.error_code=ESP_FAIL;
+                }
+            }
+            runner.value.outputs_enabled=false; runner.value.test_active=false;
+            service.tick(3000);
+            assert(!service.confirmation_pending() && !service.cancellation_pending());
+            assert(service.current_running_test()[0]=='\0' && service.current_factory_session_id_==0);
+            const auto expected=name=="confirmation_invalidated" ? CertificationState::Invalidated :
+                name=="confirmation_abort" ? CertificationState::Incomplete :
+                name=="confirmation_blackout_failed" ? CertificationState::Failed : CertificationState::Passed;
+            assert(service.session().state==expected);
+            if(name!="confirmation_abort")
+                assert(std::strcmp(service.get_test_result("ADDR-A1")->note,"Method: visual; Notes: observed")==0);
+            if(name=="confirmation_blackout_failed") assert(service.get_test_result("ADDR-A1")->error_code==ESP_FAIL);
+            if(name=="confirmation_invalidated") assert(service.get_test_result("ADDR-A1")->state==CertificationTestState::Blocked);
+        }
+    } else if(name=="unstarted_evidence_rejected" || name=="automatic_observation_rejected" ||
+              name=="physical_missing_runner_rejected") {
+        const bool automatic=name=="automatic_observation_rejected";
+        const bool physical=name=="physical_missing_runner_rejected";
+        const char* id=automatic ? "BOOT-001" : physical ? "ADDR-A1" : "POWER-LIMIT-001";
+        seed(service,id);
+        if(automatic || physical) {
+            std::strcpy(service.current_test_,id);
+            service.store_.current_record().results[0].state=CertificationTestState::WaitingForOperator;
+        }
+        const auto source=automatic || physical ? EvidenceSource::OperatorObservation : EvidenceSource::InstrumentMeasurement;
+        assert(service.record_result(id,CertificationTestState::Passed,source,0,"mW","observed")!=ESP_OK);
+        assert(service.get_test_result(id)->state!=CertificationTestState::Passed);
+    } else if(name=="duplicate_evidence_rejected" || name=="retry_clears_evidence" ||
+              name=="wrong_active_test_rejected" || name=="long_note_rejected" || name=="attempt_limit_rejected") {
+        service.store_.init();
+        assert(service.start_session(CertificationProfile::Development,"bench")==ESP_OK);
+        const char* id="POWER-LIMIT-001";
+        if(name=="attempt_limit_rejected") {
+            service.store_.current_record().results[service.find_result_index(id)].attempts=UINT8_MAX;
+            assert(service.start_test(id)==ESP_ERR_INVALID_STATE);
+            assert(service.current_running_test()[0]=='\0');
+        } else if(name=="wrong_active_test_rejected") {
+            assert(service.start_test("BOOT-OUTPUT-SAFE")==ESP_OK);
+            assert(service.record_result(id,CertificationTestState::Passed,EvidenceSource::InstrumentMeasurement,0,"mW","observed")==ESP_ERR_INVALID_STATE);
+            assert(std::strcmp(service.current_running_test(),"BOOT-OUTPUT-SAFE")==0);
+        } else {
+            assert(service.start_test(id)==ESP_OK);
+            const std::string note=name=="long_note_rejected" ? std::string(96,'x') : "first attempt evidence";
+            const auto state=name=="retry_clears_evidence" ? CertificationTestState::Failed : CertificationTestState::Passed;
+            const int result=service.record_result(id,state,EvidenceSource::InstrumentMeasurement,123,"mW",note.c_str());
+            if(name=="long_note_rejected") {
+                assert(result==ESP_ERR_INVALID_ARG);
+                assert(service.get_test_result(id)->state==CertificationTestState::WaitingForOperator);
+            } else {
+                assert(result==ESP_OK && service.is_in_progress());
+                if(name=="duplicate_evidence_rejected") {
+                    assert(service.record_result(id,CertificationTestState::Passed,EvidenceSource::InstrumentMeasurement,0,"mW","late duplicate")==ESP_ERR_INVALID_STATE);
+                    assert(service.get_test_result(id)->measured_value==123);
+                } else {
+                    assert(service.start_test(id)==ESP_OK);
+                    const auto* retry=service.get_test_result(id);
+                    assert(retry->state==CertificationTestState::WaitingForOperator && retry->attempts==2);
+                    assert(retry->note[0]=='\0' && retry->measured_value==0 && retry->completed_ms==0);
+                    assert(retry->evidence_source==EvidenceSource::InstrumentMeasurement && std::strcmp(retry->unit,"mW")==0);
+                }
+            }
+        }
+    } else if(name=="serial_too_long_rejected" || name=="serial_whitespace_rejected") {
+        service.store_.init();
+        const std::string serial=name=="serial_too_long_rejected" ? std::string(32,'x') : " \t ";
+        assert(service.start_session(CertificationProfile::ProductionUnit,serial.c_str())==ESP_ERR_INVALID_ARG);
+        assert(service.session().state==CertificationState::NotStarted);
+    } else if(name=="session_id_unique_same_uptime") {
+        service.store_.init();
+        assert(service.start_session(CertificationProfile::Development,"bench")==ESP_OK);
+        const std::string first=service.session().identity.certification_id;
+        assert(service.abort()==ESP_OK);
+        assert(service.start_session(CertificationProfile::Development,"bench")==ESP_OK);
+        assert(first!=service.session().identity.certification_id);
+        assert(std::strlen(service.session().identity.certification_id)<sizeof(CertificationIdentity{}.certification_id));
     } else if(name=="report_image_identity") {
         seed(service,"BOOT-001");
         cJSON* report=service.generate_report_json(); assert(report);
@@ -411,7 +555,12 @@ def main():
                "abort_burn_in_rejected","persistence_burn_in_pending","persistence_burn_in_rejected",
                "cancellation_terminal_failure","abort_physical_pending","abort_physical_rejected",
                "timeout_physical_rejected","abort_does_not_stop_unowned_output",
-               "physical_terminal_before_blackout","physical_start_rejected","rejected_start_preserves_owned_session")
+               "physical_terminal_before_blackout","physical_start_rejected","rejected_start_preserves_owned_session",
+               "unstarted_evidence_rejected","automatic_observation_rejected","physical_missing_runner_rejected",
+               "duplicate_evidence_rejected","retry_clears_evidence","wrong_active_test_rejected","long_note_rejected",
+               "attempt_limit_rejected","serial_too_long_rejected","serial_whitespace_rejected","session_id_unique_same_uptime",
+               "confirmation_queue_rejected","confirmation_waits_for_stop","confirmation_blackout_failed",
+               "confirmation_abort","confirmation_storage_failed","confirmation_invalidated")
         cases=sys.argv[1:] or cases
         env={**os.environ,"ASAN_OPTIONS":"detect_leaks=0:halt_on_error=1",
              "UBSAN_OPTIONS":"halt_on_error=1:print_stacktrace=1"}

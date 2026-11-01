@@ -22,4 +22,8 @@ TimelineStepPosition evaluate_timeline_track(
 
 uint32_t get_track_total_beats(const SequencerTrack& track);
 
+/// Exact whole beats without truncating the beat period or overflowing elapsed*bpm.
+/// Zero BPM retains the legacy default of 120 BPM.
+uint64_t timeline_elapsed_beats(uint64_t elapsed_ms, uint16_t bpm);
+
 } // namespace lg

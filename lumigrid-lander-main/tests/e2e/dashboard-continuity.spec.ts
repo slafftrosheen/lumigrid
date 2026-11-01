@@ -513,3 +513,153 @@ test('Timeline Studio clears a failed new-node document and reloads conflicts on
   expect(calls.filter(call => call.ip === b && call.path === '/api/v1/sequence' && call.method === 'GET')).toHaveLength(3);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
+
+async function liveFixture(page: Page, options: {
+  configUnavailableB?: () => boolean;
+  manual?: (route: Route, ip: string, method: string, body: any, putNumber: number) => Promise<boolean>;
+} = {}) {
+  const channelConfig = Array.from({ length: 16 }, (_, index) => ({
+    index, port: index < 8 ? `A${index + 1}` : `P${index - 7}`,
+    kind: index < 8 ? 'addressable' : 'pwm', hardwareId: index % 8,
+    name: '', enabled: true, configured: index !== 7, pixelCount: index < 8 ? 30 : 0,
+  }));
+  const snapshots = new Map<string, any>([[a, runtime(a)], [b, runtime(b)]]);
+  let sequence = 1;
+  let puts = 0;
+  const result = await fixture(page, async (route, ip, path) => {
+    const method = route.request().method();
+    if (method === 'OPTIONS') { await route.fulfill({ status: 204, headers }); return true; }
+    if (path === '/api/v1/config') {
+      if (ip === b && options.configUnavailableB?.()) await route.fulfill({ status: 503, json: { error: 'config_read_unavailable' }, headers });
+      else await route.fulfill({ json: { schema: 5, checksum: 11, deviceName: `Node ${ip}`,
+        limits: { maxChannels: 16 }, channels: channelConfig, groups: [], physicalOutputs: [], fixtures: [] }, headers });
+      return true;
+    }
+    if (path === '/api/v1/status') { await route.fulfill({ json: snapshots.get(ip), headers }); return true; }
+    if (path === '/api/v1/manual') {
+      const body = method === 'PUT' ? route.request().postDataJSON() : null;
+      if (method === 'PUT') ++puts;
+      if (await options.manual?.(route, ip, method, body, puts)) return true;
+      const response = method === 'DELETE' ? { released: true } : { accepted: true, leaseMs: 15000,
+        channelMask: body.channels.reduce((mask: number, channel: { index: number }) => mask | (1 << channel.index), 0) };
+      await route.fulfill({ json: response, headers }); return true;
+    }
+    if (path === '/api/v1/presets') {
+      await route.fulfill({ json: method === 'PUT' ? { saved: true, checksum: 42 } : [], headers }); return true;
+    }
+    return false;
+  });
+  return { ...result, publish: (ip: string, mask = 0) => {
+    const next = { ...runtime(ip), streamSeq: ++sequence, generatedAtMs: 12000 + sequence * 1000,
+      runtime: { ...runtime(ip).runtime, controlOwner: mask ? 'ManualOverride' : 'ScenePlayback' },
+      manual: { active: mask !== 0, channelMask: mask, leaseRemainingMs: mask ? 14000 : 0 },
+      channels: channelConfig.map(channel => ({ ...channel, owner: (mask & (1 << channel.index)) ? 'ManualOverride' : 'ScenePlayback', fault: false })) };
+    snapshots.set(ip, next);
+    for (const stream of result.streams.filter(stream => stream.ip === ip)) stream.send(JSON.stringify(next));
+  } };
+}
+
+test('Live Desk mobile maps sixteen ports, supports touch selection, and exposes release failure', async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  let rejectRelease = true;
+  const { calls, publish } = await liveFixture(page, { manual: async (route, _ip, method) => {
+    if (method !== 'DELETE' || !rejectRelease) return false;
+    await route.fulfill({ status: 403, json: { error: 'release_denied' }, headers }); return true;
+  } });
+  await page.goto('/dashboard/live');
+  await expect(page.locator('.live-port-a')).toHaveCount(8);
+  await expect(page.locator('.live-port-p')).toHaveCount(8);
+  await expect(page.locator('.live-port-a').nth(7)).toBeDisabled();
+  await expect(page.locator('.live-port-p').nth(7)).toBeEnabled();
+  await page.getByRole('button', { name: 'Select multiple', exact: true }).click();
+  await page.locator('.live-port-p').nth(7).click();
+  await expect(page.locator('.live-port-a').first()).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('.live-port-p').nth(7)).toHaveAttribute('aria-pressed', 'true');
+  await page.getByRole('button', { name: '25%', exact: true }).click();
+  expect(calls.filter(call => call.path === '/api/v1/manual')).toHaveLength(0);
+  await page.getByRole('button', { name: 'Take Manual Control', exact: true }).click();
+  await expect(page.locator('.live-telemetry-row')).toContainText('Lease accepted · awaiting status');
+  const submission = calls.find(call => call.path === '/api/v1/manual' && call.method === 'PUT');
+  expect(submission?.body.channels.map((channel: any) => channel.index)).toEqual([0, 15]);
+  expect(submission?.body.channels[1]).toEqual({ index: 15, pwm: 1024 });
+  publish(a, 0x8001);
+  await expect(page.locator('.live-telemetry-row')).toContainText('Lease confirmed');
+  await page.screenshot({ path: testInfo.outputPath('live-mobile.png'), fullPage: true });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.getByRole('button', { name: 'Release Manual', exact: true }).click();
+  await expect(page.getByRole('alert')).toContainText('Release not confirmed');
+  await expect(page.getByRole('button', { name: 'Retry release', exact: true })).toBeVisible();
+  await expect(page.locator('.live-toast-bar')).not.toContainText('release acknowledged');
+  rejectRelease = false;
+  await page.getByRole('button', { name: 'Retry release', exact: true }).click();
+  await expect(page.locator('.live-toast-bar')).toContainText('Manual release acknowledged');
+  await expect(page.locator('.live-telemetry-row')).toContainText('Standby');
+});
+
+test('Live Desk keeps newer acquisition drafts and captures only the accepted look', async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 1440, height: 1100 });
+  const errors: string[] = []; page.on('pageerror', error => errors.push(error.message));
+  let release!: () => void; const gate = new Promise<void>(resolve => { release = resolve; });
+  let requested!: () => void; const started = new Promise<void>(resolve => { requested = resolve; });
+  const { calls, publish } = await liveFixture(page, { manual: async (_route, _ip, method, _body, putNumber) => {
+    if (method === 'PUT' && putNumber === 1) { requested(); await gate; }
+    return false;
+  } });
+  await page.goto('/dashboard/live');
+  await expect(page.getByRole('button', { name: 'Take Manual Control', exact: true })).toBeEnabled();
+  await page.getByRole('button', { name: 'Take Manual Control', exact: true }).click(); await started;
+  await expect(page.getByRole('button', { name: 'Cancel request', exact: true })).toBeVisible();
+  const red = page.getByLabel('R', { exact: true }); await red.fill('7'); await red.blur();
+  release();
+  await expect(page.getByRole('button', { name: 'Apply draft', exact: true })).toBeVisible();
+  publish(a, 1);
+  await expect(red).toHaveValue('7');
+  await page.getByRole('button', { name: 'Save as Scene', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Save Live Desk as Scene', exact: true });
+  await expect(dialog.getByLabel('Scene Name', { exact: true })).toBeFocused();
+  await dialog.getByLabel('Scene Name', { exact: true }).fill('Accepted look');
+  await dialog.getByRole('button', { name: 'Capture & Save', exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  const scene = calls.find(call => call.path === '/api/v1/presets' && call.method === 'PUT');
+  expect(scene?.body.channels[0].layers[0].primaryColor.r).toBe(255);
+  expect(scene?.body.expectedSceneChecksum).toBe(0);
+  await page.getByRole('button', { name: 'Apply draft', exact: true }).click();
+  await expect(page.locator('.live-request-feedback').filter({ hasText: 'Manual values accepted.' })).toBeVisible();
+  expect(calls.filter(call => call.path === '/api/v1/manual' && call.method === 'PUT').at(-1)?.body.channels[0].r).toBe(7);
+  await expect(red).toHaveValue('7');
+  await page.evaluate(() => {
+    for (const element of document.querySelectorAll('*')) if (element.scrollTop) element.scrollTop = 0;
+  });
+  await page.screenshot({ path: testInfo.outputPath('live-desktop.png') });
+  expect(errors).toEqual([]);
+});
+
+test('Live Desk node switching cancels old continuations and orders cleanup before reacquisition', async ({ page }) => {
+  let release!: () => void; const gate = new Promise<void>(resolve => { release = resolve; });
+  let requested!: () => void; const started = new Promise<void>(resolve => { requested = resolve; });
+  const { calls, publish } = await liveFixture(page, { configUnavailableB: () => true,
+    manual: async (_route, _ip, method, _body, putNumber) => {
+      if (method === 'PUT' && putNumber === 2) { requested(); await gate; }
+      return false;
+    } });
+  await page.goto('/dashboard/live');
+  await page.getByRole('button', { name: 'Take Manual Control', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Release Manual', exact: true })).toBeVisible(); publish(a, 1);
+  await page.getByLabel('R', { exact: true }).fill('33'); await started;
+  await page.locator('.node-select').selectOption(b);
+  await expect(page.getByRole('alert')).toContainText('Channel configuration unavailable');
+  await expect(page.getByRole('button', { name: 'Take Manual Control', exact: true })).toBeDisabled();
+  await expect(page.locator('.live-port-a').first()).toBeDisabled();
+  expect(calls.some(call => call.ip === b && call.path === '/api/v1/manual')).toBe(false);
+  await page.locator('.node-select').selectOption(a);
+  await expect(page.getByLabel('R', { exact: true })).toHaveValue('255');
+  await page.getByRole('button', { name: 'Take Manual Control', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Cancel request', exact: true })).toBeVisible();
+  expect(calls.filter(call => call.path === '/api/v1/manual').map(call => call.method)).toEqual(['PUT', 'PUT']);
+  release();
+  await expect(page.getByRole('button', { name: 'Release Manual', exact: true })).toBeVisible();
+  expect(calls.filter(call => call.path === '/api/v1/manual').map(call => `${call.method}:${call.ip}`)).toEqual([
+    `PUT:${a}`, `PUT:${a}`, `DELETE:${a}`, `PUT:${a}`,
+  ]);
+  await expect(page.getByLabel('R', { exact: true })).toHaveValue('255');
+});

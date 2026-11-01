@@ -57,6 +57,9 @@ HEADERS["freertos/queue.h"] = r'''
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--case", action="append", default=[])
+    parser.add_argument("--runner-source", type=Path,
+                        default=ROOT / "components/factory/FactoryRunner.cpp",
+                        help="Alternative FactoryRunner source for regression comparison")
     args = parser.parse_args()
     compiler = shutil.which(os.environ.get("CXX", "g++"))
     if not compiler:
@@ -78,15 +81,19 @@ def main():
         sources = ["test/factory_jobs_test.cpp", "components/board/BoardOutputSafety.cpp"]
         sources += [f"components/output/{name}.cpp" for name in
                     ("Pca9685Driver", "ParallelRmtDriver", "AddressableDriver", "OutputController")]
-        sources += ["components/signage/ControlSourceManager.cpp", "components/factory/FactoryRunner.cpp",
+        sources += ["components/signage/ControlSourceManager.cpp",
                     "components/factory/FactoryEffects.cpp", "components/control/JobManager.cpp", "components/control/CommandJournal.cpp"]
         command += [str(ROOT / source) for source in sources]
+        command += [str(args.runner_source)]
         subprocess.run([*command, "-o", str(executable)], check=True)
         env = {**os.environ, "ASAN_OPTIONS": "detect_leaks=0:halt_on_error=1",
                "UBSAN_OPTIONS": "halt_on_error=1:print_stacktrace=1"}
         cases = args.case or ["cancel_waits_for_blackout", "cancel_queue_failure_retains_owner", "start_queue_failure_finishes_job",
                               "stop_repeated_restart", "cancel_blackout_failure_is_failed", "abort_before_pending_job_keeps_job",
-                              "stale_abort_does_not_cancel_new_session", "stop_waiting_api_callers"]
+                              "stale_abort_does_not_cancel_new_session", "stop_waiting_api_callers",
+                              "confirm_waits_for_blackout", "confirm_stops_all_producers",
+                              "confirm_blackout_failure_is_failed", "stale_confirmation_preserves_active_session",
+                              "duplicate_confirmation_rejected", "empty_confirmation_rejected"]
         failures = []
         for case in cases:
             result = subprocess.run([str(executable), case], env=env, capture_output=True, text=True, timeout=10)

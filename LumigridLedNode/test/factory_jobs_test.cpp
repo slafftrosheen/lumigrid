@@ -39,6 +39,24 @@ struct FactoryFixture {
         require(output.controller.try_commit() == ESP_OK, "burn-in output could not commit");
         return id;
     }
+    uint32_t start_physical() {
+        uint32_t id = 0;
+        require(runner.start_test_session(FactoryTestKind::PwmChannel, 8, 10000, 32, &id),
+                "physical session was rejected");
+        consume();
+        output.controller.pwm().set(0, 1000);
+        require(output.controller.try_commit() == ESP_OK, "physical output could not commit");
+        return id;
+    }
+    uint32_t queue_confirmation(uint32_t session, bool passed = true) {
+        FactoryCommand command;
+        command.type = FactoryCommandType::ConfirmSession;
+        command.session_id = session;
+        command.session_passed = passed;
+        command.command_id = journal.accept(CommandDomain::Factory);
+        require(runner.enqueue(command), "confirmation was not queued");
+        return command.command_id;
+    }
     void fill_queue() {
         FactoryCommand command;
         command.type = FactoryCommandType::SelectEffect;
@@ -158,6 +176,121 @@ void factory_case(const std::string& name) {
         require(f.journal.get(command.command_id, receipt) && receipt.state == CommandState::Failed &&
                 receipt.error_code == ESP_ERR_INVALID_STATE && f.runner.pending_command_id_ == 0,
                 "stale abort left a pending or applied command receipt");
+    } else if (name == "confirm_waits_for_blackout") {
+        FactoryFixture f;
+        const uint32_t session = f.start_physical();
+        const uint32_t command = f.queue_confirmation(session);
+        f.output.pca.frame_hook = [&] {
+            const auto state = f.runner.status();
+            require(state.session.state == FactoryTestState::Running && state.session.finished_ms == 0,
+                    "confirmation became terminal before hardware blackout returned");
+            require(!f.runner.validation_report().pwm[0].tested,
+                    "validation report passed before hardware blackout returned");
+            CommandReceipt receipt{};
+            require(f.journal.get(command, receipt) && receipt.state == CommandState::Applying,
+                    "confirmation command completed before hardware blackout returned");
+        };
+        f.consume();
+        const auto state = f.runner.status();
+        require(state.session.state == FactoryTestState::Passed && state.session.error_code == ESP_OK &&
+                !state.outputs_enabled && !state.test_active,
+                "successful confirmation did not acknowledge stopped output");
+        require(f.runner.validation_report().pwm[0].tested && f.runner.validation_report().pwm[0].passed,
+                "successful confirmation was not reflected in validation report");
+        CommandReceipt receipt{};
+        require(f.journal.get(command, receipt) && receipt.state == CommandState::Applied,
+                "successful confirmation did not apply its receipt");
+        require_disabled("confirmed session left physical PWM enabled");
+    } else if (name == "confirm_stops_all_producers") {
+        for (unsigned producer = 0; producer < 3; ++producer) {
+            FactoryFixture f;
+            const uint32_t session = f.start_physical();
+            if (producer == 1) {
+                FactoryCommand stream;
+                stream.type = FactoryCommandType::StreamFrame;
+                stream.stream.lane_rgb[0][0] = 100;
+                require(f.runner.enqueue(stream), "stream was rejected");
+                f.consume();
+            } else if (producer == 2) {
+                require(f.runner.set_auto_loop(true), "auto loop was rejected");
+                f.consume();
+            }
+            f.queue_confirmation(session); f.consume();
+            require(!f.runner.direct_test_active_ && !f.runner.stream_active_ && !f.runner.status().auto_loop,
+                    "confirmed session retained a producer that could re-energize output next tick");
+            require_disabled("confirmed producer left physical PWM enabled");
+        }
+    } else if (name == "confirm_blackout_failure_is_failed") {
+        FactoryFixture f;
+        const uint32_t session = f.start_physical();
+        const uint32_t command = f.queue_confirmation(session);
+        f.output.pca.fail_frames = 8;
+        f.consume();
+        const auto state = f.runner.status();
+        require(state.session.state == FactoryTestState::Failed && state.session.error_code == ESP_ERR_TIMEOUT,
+                "failed confirmation blackout was published as a passed session");
+        require(f.runner.validation_report().pwm[0].tested && !f.runner.validation_report().pwm[0].passed,
+                "failed confirmation blackout left a passing validation report");
+        CommandReceipt receipt{};
+        require(f.journal.get(command, receipt) && receipt.state == CommandState::Failed &&
+                receipt.error_code == ESP_ERR_TIMEOUT && f.runner.pending_command_id_ == 0,
+                "failed confirmation blackout was reported as an applied command");
+        require(!f.runner.direct_test_active_ && !state.outputs_enabled && !state.test_active,
+                "failed confirmation retained a live producer");
+        require_disabled("failed confirmation did not retain the physical safety gate");
+    } else if (name == "stale_confirmation_preserves_active_session") {
+        FactoryFixture f;
+        const uint32_t old_session = f.start_physical();
+        const uint32_t current_session = f.start_physical();
+        const unsigned frames = f.output.pca.frames;
+        const uint32_t command = f.queue_confirmation(old_session);
+        f.consume();
+        require(f.runner.session().session_id == current_session &&
+                f.runner.session().state == FactoryTestState::Running && f.runner.direct_test_active_,
+                "stale confirmation changed the active session");
+        require(f.output.pca.frames == frames && Pca9685Driver::is_outputs_enabled(),
+                "stale confirmation blacked out a newer physical test");
+        require(!f.runner.validation_report().pwm[0].tested,
+                "stale confirmation changed the current validation report");
+        CommandReceipt receipt{};
+        require(f.journal.get(command, receipt) && receipt.state == CommandState::Failed &&
+                receipt.error_code == ESP_ERR_INVALID_STATE && f.runner.pending_command_id_ == 0,
+                "stale confirmation left an applied or pending receipt");
+
+        const uint32_t pending = f.journal.accept(CommandDomain::Factory);
+        f.journal.applying(pending); f.runner.pending_command_id_ = pending;
+        require(f.runner.confirm_test_session(old_session, true), "untracked stale confirmation did not queue");
+        f.consume();
+        require(f.journal.get(pending, receipt) && receipt.state == CommandState::Applying &&
+                f.runner.pending_command_id_ == pending && f.output.pca.frames == frames,
+                "untracked stale confirmation completed another command or touched outputs");
+    } else if (name == "duplicate_confirmation_rejected") {
+        FactoryFixture f;
+        const uint32_t session = f.start_physical();
+        const uint32_t first = f.queue_confirmation(session, false);
+        f.consume();
+        CommandReceipt receipt{};
+        require(f.journal.get(first, receipt) && receipt.state == CommandState::Applied &&
+                f.runner.session().state == FactoryTestState::Failed && f.runner.session().error_code == ESP_OK,
+                "an operator-reported failure was confused with command failure");
+        const unsigned frames = f.output.pca.frames;
+        const uint32_t duplicate = f.queue_confirmation(session, true);
+        f.consume();
+        require(f.runner.session().state == FactoryTestState::Failed && !f.runner.validation_report().pwm[0].passed &&
+                f.output.pca.frames == frames,
+                "duplicate confirmation overwrote completed evidence or repeated blackout");
+        require(f.journal.get(duplicate, receipt) && receipt.state == CommandState::Failed &&
+                receipt.error_code == ESP_ERR_INVALID_STATE, "duplicate confirmation was applied");
+    } else if (name == "empty_confirmation_rejected") {
+        FactoryFixture f;
+        const unsigned frames = f.output.pca.frames;
+        const uint32_t command = f.queue_confirmation(0);
+        f.consume();
+        require(f.runner.session().state == FactoryTestState::Idle && f.output.pca.frames == frames,
+                "an empty session was confirmed or caused a blackout");
+        CommandReceipt receipt{};
+        require(f.journal.get(command, receipt) && receipt.state == CommandState::Failed &&
+                receipt.error_code == ESP_ERR_INVALID_STATE, "empty confirmation was applied");
     } else if (name == "stop_waiting_api_callers") {
         FactoryFixture f;
         const auto status_mutex = f.runner.status_mutex_;

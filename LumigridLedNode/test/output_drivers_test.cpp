@@ -50,6 +50,7 @@ struct PcaTransport final : IPcaTransport {
     esp_err_t init_error = ESP_OK;
     esp_err_t recovery_error = ESP_OK;
     unsigned fail_frames = 0;
+    uint8_t stuck_mode2_bits = 0;
     std::array<uint8_t, 256> registers{};
     std::array<uint16_t, Pca9685Driver::kChannels> duties{};
     unsigned frames = 0;
@@ -63,7 +64,11 @@ struct PcaTransport final : IPcaTransport {
         if (!live) return ESP_ERR_INVALID_STATE;
         require(length >= 2 && size_t(data[0]) + length - 1 <= registers.size(), "invalid PCA register packet");
         if (data[0] == 0x06 && fail_frames) { --fail_frames; return ESP_ERR_TIMEOUT; }
+        // EXTCLK cannot be cleared by writing MODE1 (datasheet table 5).
+        const uint8_t external_clock = registers[0] & 0x40;
         std::copy(data + 1, data + length, registers.begin() + data[0]);
+        if (data[0] == 0) registers[0] |= external_clock;
+        if (data[0] == 1) registers[1] |= stuck_mode2_bits;
         if (data[0] == 0x06) {
             require(length == 1 + duties.size() * 4, "PWM frame omitted a channel");
             ++frames;
@@ -242,6 +247,63 @@ void pca_fault_latch() {
     pca.set(0, 600);
     require(pca.commit() == ESP_OK && pca.enable_outputs() == ESP_OK, "PWM did not resume after verified recovery");
     pca.disable_outputs();
+}
+
+void pca_recovery_mode_validation() {
+    const std::pair<uint8_t, uint8_t> corruptions[] = {
+        {0, 0x01}, {0, 0x02}, {0, 0x04}, {0, 0x08}, // Shared I2C addresses.
+        {1, 0x01}, {1, 0x02}, {1, 0x03},             // /OE HIGH output state.
+        {1, 0x08}, {1, 0x10},                       // ACK latching, inverted PWM.
+    };
+    for (const auto& [reg, bits] : corruptions) {
+        PcaTransport transport;
+        Pca9685Driver pca(&transport);
+        require(pca.init() == ESP_OK, "mode fixture initialization failed");
+        require(pca.set(0, 1500) == ESP_OK && pca.commit() == ESP_OK && pca.enable_outputs() == ESP_OK,
+                "mode fixture could not establish active PWM");
+        transport.registers[reg] |= bits;
+        require(pca.verify_chip() == ESP_ERR_INVALID_RESPONSE && pca.recovery_required() &&
+                !pca.zero_confirmed() && !pca.diagnostics().healthy &&
+                pca.last_fault_kind() == PcaFaultKind::RegisterVerificationFailed,
+                "unsafe PCA mode readback was accepted as healthy");
+        require_disabled("register mismatch did not request /OE HIGH");
+        const unsigned writes = transport.frames;
+        require(pca.clear() == ESP_ERR_INVALID_STATE && !pca.zero_confirmed() && transport.frames == writes &&
+                pca.enable_outputs() == ESP_ERR_INVALID_STATE,
+                "known invalid mode was bypassed by an acknowledged zero frame");
+        require(pca.recover() == ESP_OK && !pca.recovery_required() && pca.zero_confirmed() &&
+                (transport.registers[0] & 0x7f) == 0x20 && (transport.registers[1] & 0x1f) == 0x04,
+                "recovery did not repair and verify all intended PCA mode bits");
+        require_disabled("mode repair enabled PWM before a fresh controller commit");
+        transport.registers[0] &= 0x7f; // A completed RESTART self-clears.
+        require(pca.verify_chip() == ESP_OK, "self-cleared RESTART was mistaken for corruption");
+    }
+}
+
+void pca_unrecoverable_mode() {
+    for (bool external_clock : {false, true}) {
+        PcaTransport transport;
+        Pca9685Driver pca(&transport);
+        require(pca.init() == ESP_OK, "unrecoverable-mode fixture initialization failed");
+        if (external_clock) transport.registers[0] |= 0x40;
+        else {
+            transport.stuck_mode2_bits = 0x01;
+            transport.registers[1] |= 0x01;
+        }
+        require(pca.recover() != ESP_OK && pca.recovery_required() && !pca.diagnostics().healthy &&
+                !pca.diagnostics().initialized && !pca.zero_confirmed(),
+                "unrepairable PCA register mode was announced as recovered");
+        require(pca.clear() == ESP_ERR_INVALID_STATE && pca.enable_outputs() == ESP_ERR_INVALID_STATE,
+                "unrepairable mode regained output readiness without verified registers");
+        require_disabled("unrepairable mode did not retain /OE HIGH");
+        require(pca.init() != ESP_OK && pca.recovery_required(),
+                "full initialization accepted a persistent incompatible register mode");
+        // Represent removal of the hardware fault/power-cycle, then explicit init.
+        transport.registers[0] = 0;
+        transport.stuck_mode2_bits = 0;
+        require(pca.init() == ESP_OK && !pca.recovery_required() && pca.zero_confirmed(),
+                "verified initialization could not clear the known-register mismatch latch");
+    }
 }
 
 void pca_failed_recovery() {
@@ -1047,6 +1109,8 @@ const Test tests[] = {
     {"controller_new_estop_during_clear", controller_new_estop_during_clear},
     {"pca_nonzero_enable", pca_nonzero_enable},
     {"pca_fault_latch", pca_fault_latch},
+    {"pca_recovery_mode_validation", pca_recovery_mode_validation},
+    {"pca_unrecoverable_mode", pca_unrecoverable_mode},
     {"pca_failed_recovery", pca_failed_recovery},
     {"pca_gate_failure", pca_gate_failure},
     {"pca_recovery_retains_new_gate_fault", pca_recovery_retains_new_gate_fault},

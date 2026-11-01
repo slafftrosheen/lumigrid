@@ -2,21 +2,16 @@
   import { onMount, onDestroy } from 'svelte';
   import OperatorDialog from '$lib/components/dashboard/OperatorDialog.svelte';
   import {
-    putManualState,
-    releaseManualState,
     captureLiveDeskToScene,
     expandChannelMask,
     buildManualSnapshot,
-    channelsToMask,
     type ManualChannelValue,
-    type ManualAddressableValue,
-    type ManualPwmValue,
     type ManualDeskChannel,
   } from '$lib/api/manual';
   import { getDeviceConfig, type DeviceConfig, type ChannelGroup } from '$lib/api/config';
-  import { getPresets, savePreset, MAX_PRESETS, type ScenePreset } from '$lib/api/scenes';
-  import { getSelectedNodeIp } from '$lib/auth/storage';
-  import { nodeStore } from '$lib/state/nodeStore';
+  import { getPresets, savePreset, MAX_PRESETS, MAX_SCENE_NAME_BYTES, getUtf8ByteLength } from '$lib/api/scenes';
+  import { nodeAuthStore } from '$lib/auth/nodeAuth';
+  import { nodeStore, captureNodeOperation } from '$lib/state/nodeStore';
   import { ManualSession, type ManualSessionSnapshot, type ManualSessionState } from '$lib/live/manualSession';
 
   interface ChannelDeskState {
@@ -24,6 +19,7 @@
     name: string;
     kind: 'addressable' | 'pwm';
     enabled: boolean;
+    configured: boolean;
     // Addressable
     r: number;
     g: number;
@@ -36,26 +32,37 @@
   let nodeIp = $state('');
   let config = $state<DeviceConfig | null>(null);
   let loadingConfig = $state(true);
+  let configLoaded = $state(false);
+  let configError = $state('');
+  let clock = $state(Date.now());
   let toast = $state('');
   let toastTimeout: ReturnType<typeof setTimeout> | null = null;
 
   // Selected channels (UI selection — may differ from controlled)
-  let selectedIndices = $state<number[]>([0]);
+  let selectedIndices = $state<number[]>([]);
+  let multiSelect = $state(false);
 
   // Desk channel values (16 channels)
-  let channels = $state<ChannelDeskState[]>(
-    Array.from({ length: 16 }, (_, i) => ({
+  function createDeskChannels(): ChannelDeskState[] {
+    return Array.from({ length: 16 }, (_, i) => ({
       index: i,
       name: i < 8 ? `A${i + 1}` : `P${i - 7}`,
       kind: i < 8 ? 'addressable' : 'pwm',
-      enabled: true,
+      enabled: false,
+      configured: false,
       r: 255,
       g: 255,
       b: 255,
       brightness: 255,
       pwm: 0,
-    }))
-  );
+    }));
+  }
+  let channels = $state<ChannelDeskState[]>(createDeskChannels());
+  let disposed = false;
+  let workspaceGeneration = 0;
+  let configRequest = 0;
+  let workspaceOwner: ReturnType<typeof captureNodeOperation> | null = null;
+  let workspaceSession: ReturnType<typeof nodeAuthStore.getSession> = null;
 
   // ── Manual Session State Machine ─────────────────────────────────────────
   let sessionState = $state<ManualSessionState>('idle');
@@ -63,17 +70,26 @@
   let sessionRequestedMask = $state(0);
   let leaseRemainingSec = $state(0);
   let sessionErrorMessage = $state<string | null>(null);
+  let leaseConfirmed = $state(false);
+  let sessionSending = $state(false);
+  let acceptedValues = $state<ManualChannelValue[]>([]);
+  let releaseUnconfirmed = $state(false);
 
   const session = new ManualSession((snap: ManualSessionSnapshot) => {
+    if (disposed) return;
     sessionState = snap.state;
     controlledIndices = snap.controlledIndices;
     sessionRequestedMask = snap.requestedMask;
     leaseRemainingSec = snap.leaseRemainingSec;
     sessionErrorMessage = snap.errorMessage;
-  });
+    leaseConfirmed = snap.confirmed;
+    sessionSending = snap.sending;
+    acceptedValues = snap.acceptedValues;
+    releaseUnconfirmed = snap.releaseUnconfirmed;
+  }, captureNodeOperation);
 
   let isManualActive = $derived(sessionState === 'active');
-  let isSessionBusy = $derived(sessionState === 'acquiring' || sessionState === 'releasing');
+  let isSessionBusy = $derived(sessionState === 'acquiring' || sessionState === 'updating' || sessionState === 'releasing');
   let isSessionLostOrError = $derived(sessionState === 'lost' || sessionState === 'error');
 
   // Whether UI selection differs from controlled set (for Update Targets visibility)
@@ -101,12 +117,17 @@
   let sceneNameInput = $state('Live Look');
   let savingScene = $state(false);
   let saveSceneError = $state('');
+  let saveCapture: { owner: ReturnType<typeof captureWorkspaceOperation>; values: ManualChannelValue[] } | null = null;
 
   // Live telemetry from nodeStore
   let liveStatus = $derived($nodeStore.status);
-  let liveHealth = $derived($nodeStore.health);
-  let isConnected = $derived($nodeStore.connection === 'connected');
-  let dominantOwner = $derived(liveStatus?.controlOwner ?? 'Idle');
+  let snapshot = $derived($nodeStore.snapshot);
+  let isConnected = $derived(snapshot !== null && $nodeStore.route === nodeIp &&
+    clock - $nodeStore.lastSnapshotAt <= 10000 &&
+    ($nodeStore.connection === 'online' || $nodeStore.connection === 'degraded'));
+  let dominantOwner = $derived(liveStatus?.controlOwner ?? 'Unavailable');
+  let powerEstimate = $derived(snapshot?.output.power);
+  let draftPending = $derived(JSON.stringify(buildManualSnapshot(channels, controlledIndices)) !== JSON.stringify(acceptedValues));
 
   // Per-channel owners from telemetry
   let channelOwners = $derived.by(() => {
@@ -120,9 +141,15 @@
   });
 
   // Watch telemetry for manual status — delegate to session (server-authoritative)
+  let lastManualSnapshot: typeof snapshot = null;
   $effect(() => {
-    if (liveStatus?.manual) {
-      session.onTelemetry(liveStatus.manual);
+    if (snapshot && snapshot !== lastManualSnapshot && isConnected) {
+      lastManualSnapshot = snapshot;
+      session.onTelemetry(snapshot.manual);
+    }
+    if (!isConnected && (isManualActive || sessionState === 'acquiring' || sessionState === 'updating')) {
+      clearPendingSend();
+      session.cancel('Fresh node status is unavailable.');
     }
   });
 
@@ -146,7 +173,7 @@
   let channelOwnershipDetail = $derived.by(() => {
     const details = new Map<number, { armed: boolean; outputOwner: string }>();
     for (const idx of selectedIndices) {
-      const owner = channelOwners.get(idx) ?? 'Idle';
+      const owner = channelOwners.get(idx) ?? 'Unavailable';
       const armed = controlledIndices.includes(idx);
       details.set(idx, { armed, outputOwner: owner });
     }
@@ -186,34 +213,66 @@
   });
 
   function showToast(msg: string) {
+    const owner = captureWorkspaceOperation();
     toast = msg;
     if (toastTimeout) clearTimeout(toastTimeout);
     toastTimeout = setTimeout(() => {
-      toast = '';
+      if (owner.isCurrent()) toast = '';
     }, 4000);
   }
 
-  async function loadConfig(ip: string) {
-    if (!ip) {
-      loadingConfig = false;
-      return;
-    }
-    loadingConfig = true;
-    try {
-      config = await getDeviceConfig(ip);
-      if (config?.channels) {
-        for (let i = 0; i < 16 && i < config.channels.length; i++) {
-          const cfg = config.channels[i];
-          channels[i].enabled = cfg.enabled;
-          if (cfg.name && cfg.name.trim()) {
-            channels[i].name = cfg.name.trim();
-          }
-        }
+  function captureWorkspaceOperation() {
+    const owner = captureNodeOperation(nodeIp);
+    const generation = workspaceGeneration;
+    return { ip: owner.ip, isCurrent: () => !disposed && generation === workspaceGeneration && owner.isCurrent() };
+  }
+
+  function applyChannelConfiguration(next: DeviceConfig) {
+    if (!Array.isArray(next.channels) || next.channels.length !== 16) throw new Error('Expected saved configuration for all 16 physical channels.');
+    const mapped = createDeskChannels().map((channel, index) => ({ ...channels[index], enabled: false, configured: false }));
+    const seen = new Set<number>();
+    for (const [position, cfg] of next.channels.entries()) {
+      const metadata = cfg as typeof cfg & { index?: number };
+      const port = /^([AP])([1-8])$/.exec(cfg.port || '');
+      const portIndex = port ? Number(port[2]) - 1 + (port[1] === 'P' ? 8 : 0) : undefined;
+      const index = metadata.index ?? portIndex ?? position;
+      if (!Number.isInteger(index) || index < 0 || index > 15 || seen.has(index) ||
+          (portIndex !== undefined && portIndex !== index) ||
+          (cfg.kind !== undefined && cfg.kind !== (index < 8 ? 'addressable' : 'pwm'))) {
+        throw new Error('Channel configuration has an ambiguous physical-port mapping.');
       }
-    } catch {
-      // Configuration fallback
+      seen.add(index);
+      mapped[index] = { ...mapped[index], configured: cfg.configured === true,
+        enabled: cfg.enabled === true && cfg.configured === true,
+        name: cfg.name?.trim() || (index < 8 ? `A${index + 1}` : `P${index - 7}`) };
+    }
+    channels = mapped;
+    selectedIndices = selectedIndices.filter(index => channels[index]?.enabled);
+    if (!selectedIndices.length) {
+      const first = channels.find(channel => channel.enabled);
+      selectedIndices = first ? [first.index] : [];
+    }
+  }
+
+  async function loadConfig(ip = nodeIp) {
+    if (!ip || ip !== nodeIp) return;
+    const owner = captureWorkspaceOperation();
+    const request = ++configRequest;
+    const isCurrent = () => owner.isCurrent() && request === configRequest;
+    loadingConfig = true;
+    configLoaded = false;
+    configError = '';
+    channels = channels.map(channel => ({ ...channel, enabled: false }));
+    try {
+      const next = await getDeviceConfig(owner.ip);
+      if (!isCurrent()) return;
+      applyChannelConfiguration(next);
+      config = next;
+      configLoaded = true;
+    } catch (error) {
+      if (isCurrent()) configError = error instanceof Error ? error.message : 'Saved channel configuration is unavailable.';
     } finally {
-      loadingConfig = false;
+      if (isCurrent()) loadingConfig = false;
     }
   }
 
@@ -228,19 +287,9 @@
   }
 
   async function sendManualSnapshot() {
-    if (!nodeIp || !isManualActive) return;
-    const now = Date.now();
-    lastSendTimestamp = now;
-
-    try {
-      const payload = buildControlledSnapshot();
-      if (payload.length === 0) return;
-      await putManualState(nodeIp, payload, 15_000);
-      // Lease countdown is updated from telemetry, not locally
-    } catch (e) {
-      // Heartbeat handles fail-closed; throttled edits log but don't kill session
-      console.warn('Manual state dispatch failed', e);
-    }
+    if (!nodeIp || !isManualActive || !isConnected || !configLoaded) return false;
+    lastSendTimestamp = Date.now();
+    return session.sendValues(channels);
   }
 
   /**
@@ -267,20 +316,26 @@
 
   function commitImmediateSend() {
     if (!isManualActive) return;
+    clearPendingSend();
+    return sendManualSnapshot();
+  }
+
+  function clearPendingSend() {
     if (sendThrottleTimer) {
       clearTimeout(sendThrottleTimer);
       sendThrottleTimer = null;
     }
-    sendManualSnapshot();
   }
 
   // ── Lifecycle Controls ────────────────────────────────────────────────────────
 
   async function takeManualControl() {
-    if (!nodeIp) return;
+    if (!nodeIp || !isConnected || !configLoaded || isSessionBusy) return;
+    const owner = captureWorkspaceOperation();
     const ok = await session.acquire(nodeIp, channels as ManualDeskChannel[], selectedIndices);
+    if (!owner.isCurrent()) return;
     if (ok) {
-      showToast(`Manual control active · ${controlledLabels}`);
+      showToast(`Manual lease accepted · ${controlledLabels}`);
     } else if (sessionErrorMessage) {
       showToast(sessionErrorMessage);
     }
@@ -288,15 +343,25 @@
 
   async function releaseControl() {
     if (!nodeIp) return;
-    await session.release(nodeIp);
-    showToast('Manual control released to Scene');
+    const owner = captureWorkspaceOperation();
+    clearPendingSend();
+    const released = await session.release(owner.ip);
+    if (owner.isCurrent() && released) showToast('Manual release acknowledged by the node.');
+  }
+
+  function cancelControl() {
+    clearPendingSend();
+    session.cancel('Manual request canceled.');
   }
 
   async function updateTargets() {
-    if (!nodeIp) return;
+    if (!nodeIp || !isConnected || !configLoaded || isSessionBusy) return;
+    const owner = captureWorkspaceOperation();
+    clearPendingSend();
     const ok = await session.updateTargets(nodeIp, channels as ManualDeskChannel[], selectedIndices);
+    if (!owner.isCurrent()) return;
     if (ok) {
-      showToast(`Targets updated · ${controlledLabels}`);
+      showToast(`Manual targets accepted · ${controlledLabels}`);
     } else if (sessionErrorMessage) {
       showToast(sessionErrorMessage);
     }
@@ -315,7 +380,7 @@
       }
     }
     commitImmediateSend();
-    showToast('Selected channels blacked out');
+    showToast(isManualActive ? 'Zero levels queued for controlled channels. Other selections remain draft-only.' : 'Selected draft levels set to zero.');
   }
 
   // ── Target Selection ──────────────────────────────────────────────────────────
@@ -327,9 +392,7 @@
       return;
     }
     if (selectedIndices.includes(index)) {
-      if (selectedIndices.length > 1) {
-        selectedIndices = selectedIndices.filter(i => i !== index);
-      }
+      selectedIndices = selectedIndices.filter(i => i !== index);
     } else {
       selectedIndices = [...selectedIndices, index];
     }
@@ -410,6 +473,8 @@
   // ── Capture as Scene ──────────────────────────────────────────────────────────
 
   function openSaveSceneDialog() {
+    if (!isManualActive || sessionSending || !acceptedValues.length || !isConnected) return;
+    saveCapture = { owner: captureWorkspaceOperation(), values: acceptedValues.map(value => ({ ...value })) };
     saveSceneError = '';
     const nowTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     sceneNameInput = `Live Look ${nowTime}`;
@@ -417,12 +482,19 @@
   }
 
   async function handleConfirmSaveScene(name: string) {
-    if (!nodeIp) return;
+    const capture = saveCapture;
+    if (!capture?.owner.isCurrent() || savingScene) return;
+    const trimmedName = name.trim();
+    if (!trimmedName || getUtf8ByteLength(trimmedName) > MAX_SCENE_NAME_BYTES) {
+      saveSceneError = `Enter a scene name of 1–${MAX_SCENE_NAME_BYTES} UTF-8 bytes.`;
+      return;
+    }
     savingScene = true;
     saveSceneError = '';
 
     try {
-      const presets = await getPresets(nodeIp);
+      const presets = await getPresets(capture.owner.ip);
+      if (!capture.owner.isCurrent()) return;
       // Find lowest free slot index 0..31
       const usedIndices = new Set(presets.map(p => p.index));
       let freeSlot = -1;
@@ -439,30 +511,57 @@
         return;
       }
 
-      const activeManuals = buildControlledSnapshot();
-      const newPreset = captureLiveDeskToScene(freeSlot, name.trim() || `Live Look ${freeSlot}`, activeManuals);
+      const newPreset = captureLiveDeskToScene(freeSlot, trimmedName, capture.values);
 
-      await savePreset(nodeIp, newPreset);
+      const result = await savePreset(capture.owner.ip, { ...newPreset, expectedSceneChecksum: 0 });
+      if (!capture.owner.isCurrent()) return;
+      if (result.saved !== true) throw new Error('The node did not confirm saving the scene.');
       saveDialogOpen = false;
-      showToast(`Saved as Scene ${freeSlot}: "${newPreset.name}"`);
+      showToast(`Saved as Scene ${freeSlot + 1}: "${newPreset.name}"`);
     } catch (e) {
-      saveSceneError = 'Failed to save scene: ' + (e instanceof Error ? e.message : String(e));
+      if (capture.owner.isCurrent()) saveSceneError = 'Failed to save scene: ' + (e instanceof Error ? e.message : String(e));
     } finally {
-      savingScene = false;
+      if (capture.owner.isCurrent()) savingScene = false;
     }
   }
 
   // ── Lifecycle Hooks ───────────────────────────────────────────────────────────
 
-  onMount(() => {
-    nodeIp = getSelectedNodeIp();
-    if (nodeIp) {
-      loadConfig(nodeIp);
+  function syncFocusedNode(ip: string) {
+    const auth = nodeAuthStore.getSession(ip);
+    const changedOwner = ip !== nodeIp || auth !== workspaceSession;
+    if (!changedOwner && workspaceOwner?.isCurrent()) return;
+    clearPendingSend();
+    session.destroy(nodeIp);
+    ++workspaceGeneration; ++configRequest;
+    nodeIp = ip;
+    workspaceSession = auth;
+    workspaceOwner = captureNodeOperation(ip);
+    saveDialogOpen = savingScene = false;
+    saveCapture = null;
+    toast = saveSceneError = configError = '';
+    if (toastTimeout) clearTimeout(toastTimeout);
+    configLoaded = false;
+    lastManualSnapshot = null;
+    if (changedOwner || !ip) {
+      config = null; channels = createDeskChannels(); selectedIndices = []; multiSelect = false;
     }
+    if (ip) void loadConfig(ip);
+    else loadingConfig = false;
+  }
+
+  onMount(() => {
+    disposed = false;
+    const unsubscribe = nodeStore.subscribe(state => syncFocusedNode(state.route || ''));
+    const timer = setInterval(() => { clock = Date.now(); syncFocusedNode($nodeStore.route || ''); }, 1000);
+    return () => { unsubscribe(); clearInterval(timer); };
   });
 
   onDestroy(() => {
-    if (sendThrottleTimer) clearTimeout(sendThrottleTimer);
+    disposed = true;
+    ++workspaceGeneration; ++configRequest;
+    clearPendingSend();
+    if (toastTimeout) clearTimeout(toastTimeout);
     session.destroy(nodeIp);
   });
 
@@ -482,7 +581,7 @@
 <div class="live-root">
   <!-- Toast message -->
   {#if toast}
-    <div class="live-toast-bar">
+    <div class="live-toast-bar" role="status">
       <span>{toast}</span>
     </div>
   {/if}
@@ -494,10 +593,10 @@
         <h1 class="live-title">Live Desk</h1>
         <span class="live-connection-badge" class:connected={isConnected}>
           <span class="live-status-dot"></span>
-          {isConnected ? (nodeIp || 'Connected') : 'Disconnected'}
+          {isConnected ? nodeIp : nodeIp ? `Status unavailable · ${nodeIp}` : 'No node selected'}
         </span>
       </div>
-      <p class="live-subtitle">Transient channel-scoped lighting desk & live arbitration control</p>
+      <p class="live-subtitle">8 addressable + 8 PWM outputs · Edit a draft, then take manual control of its selected channels.</p>
     </div>
 
     <!-- Status Cards Bar -->
@@ -505,7 +604,7 @@
       <div class="live-telemetry-item">
         <span class="live-telemetry-label">Arbitration Owner</span>
         <span class="live-telemetry-val" class:manual-source={dominantOwner === 'ManualOverride'}>
-          {dominantOwner}
+          {dominantOwner}{snapshot && !isConnected ? ' · last received' : ''}
         </span>
       </div>
 
@@ -513,11 +612,13 @@
         <span class="live-telemetry-label">Manual Session</span>
         <span class="live-telemetry-val" class:live-active={isManualActive} class:live-lost={isSessionLostOrError}>
           {#if sessionState === 'active'}
-            Active ({leaseRemainingSec}s)
+            {leaseConfirmed ? 'Lease confirmed' : 'Lease accepted · awaiting status'} ({leaseRemainingSec}s)
           {:else if sessionState === 'acquiring'}
             Acquiring…
           {:else if sessionState === 'releasing'}
             Releasing…
+          {:else if sessionState === 'updating'}
+            Updating targets…
           {:else if sessionState === 'lost'}
             Lost
           {:else if sessionState === 'error'}
@@ -537,16 +638,14 @@
         </div>
       {/if}
 
-      {#if liveHealth?.output?.current_power_mw != null || liveStatus?.powerMw != null}
-        <div class="live-telemetry-item">
-          <span class="live-telemetry-label">Power Draw</span>
-          <span class="live-telemetry-val">
-            {(((liveHealth?.output?.current_power_mw ?? liveStatus?.powerMw ?? 0)) / 1000).toFixed(1)} W
-          </span>
-        </div>
-      {/if}
+      <div class="live-telemetry-item">
+        <span class="live-telemetry-label">Estimated power</span>
+        <span class="live-telemetry-val">{powerEstimate ? `${(powerEstimate.estimatedLimitedMw / 1000).toFixed(1)} W` : 'Unavailable'}</span>
+        {#if powerEstimate && !powerEstimate.estimateComplete}<span class="live-telemetry-label">Incomplete estimate</span>{/if}
+        {#if powerEstimate && !isConnected}<span class="live-telemetry-label">Last received</span>{/if}
+      </div>
 
-      {#if liveHealth?.output?.fault}
+      {#if snapshot?.output.fault}
         <div class="live-telemetry-item live-fault-item">
           <span class="live-telemetry-label">Output Fault</span>
           <span class="live-telemetry-val">FAULT DETECTED</span>
@@ -554,6 +653,28 @@
       {/if}
     </div>
   </header>
+
+  {#if loadingConfig}
+    <p class="live-request-feedback" role="status">Loading saved channel configuration…</p>
+  {:else if configError}
+    <div class="live-preemption-alert danger" role="alert">
+      <p class="live-alert-text">Channel configuration unavailable: {configError} Draft values are kept; manual control is disabled.</p>
+      <button type="button" class="live-action-btn" onclick={() => loadConfig()}>Retry configuration</button>
+    </div>
+  {:else if !nodeIp}
+    <p class="live-request-feedback" role="status">Select a node to load its physical channels.</p>
+  {/if}
+  {#if nodeIp && !isConnected}
+    <p class="live-request-feedback" role="status">Fresh node status is required for manual control. Draft values remain in this browser.</p>
+  {/if}
+  {#if isManualActive}
+    <div class="live-request-feedback" role="status">
+      {#if sessionSending}Submitting manual values…
+      {:else if draftPending}Newer draft values are not yet accepted for the controlled channels.
+        <button type="button" class="live-action-btn" disabled={!isConnected} onclick={commitImmediateSend}>Apply draft</button>
+      {:else}Manual values accepted. Actual output follows the channel owner shown below.{/if}
+    </div>
+  {/if}
 
   <!-- Preemption Alert -->
   {#if preemptionWarning}
@@ -565,7 +686,7 @@
 
   <!-- Session Lost/Error Banner -->
   {#if isSessionLostOrError && sessionErrorMessage}
-    <div class="live-preemption-alert danger">
+    <div class="live-preemption-alert danger" role="alert">
       <span class="live-alert-icon">⚡</span>
       <p class="live-alert-text">{sessionErrorMessage}</p>
     </div>
@@ -579,7 +700,7 @@
           type="button"
           class="live-action-btn live-btn-take"
           onclick={takeManualControl}
-          disabled={!isConnected || isSessionBusy}
+          disabled={!isConnected || !configLoaded || isSessionBusy || selectedIndices.length === 0}
         >
           {sessionState === 'lost' || sessionState === 'error' ? 'Re-acquire Control' : 'Take Manual Control'}
         </button>
@@ -589,7 +710,7 @@
           class="live-action-btn live-btn-release"
           onclick={releaseControl}
         >
-          Release to Scene
+          Release Manual
         </button>
 
         {#if selectionDiffersFromControlled}
@@ -597,6 +718,7 @@
             type="button"
             class="live-action-btn live-btn-update-targets"
             onclick={updateTargets}
+            disabled={!isConnected || sessionSending}
           >
             Update Targets
           </button>
@@ -607,8 +729,15 @@
           class="live-action-btn live-btn-take"
           disabled
         >
-          {sessionState === 'acquiring' ? 'Acquiring…' : 'Releasing…'}
+          {sessionState === 'acquiring' ? 'Acquiring…' : sessionState === 'updating' ? 'Updating targets…' : 'Releasing…'}
         </button>
+        {#if sessionState !== 'releasing'}
+          <button type="button" class="live-action-btn live-btn-release" onclick={cancelControl}>Cancel request</button>
+        {/if}
+      {/if}
+
+      {#if releaseUnconfirmed}
+        <button type="button" class="live-action-btn live-btn-release" disabled={isSessionBusy} onclick={releaseControl}>Retry release</button>
       {/if}
 
       <button
@@ -617,7 +746,7 @@
         onclick={blackoutSelected}
         disabled={selectedIndices.length === 0}
       >
-        Blackout Selected
+        Zero Selected
       </button>
     </div>
 
@@ -626,7 +755,7 @@
         type="button"
         class="live-action-btn live-btn-capture"
         onclick={openSaveSceneDialog}
-        disabled={!isConnected}
+        disabled={!isConnected || !isManualActive || sessionSending || acceptedValues.length === 0}
       >
         Save as Scene
       </button>
@@ -645,10 +774,12 @@
     <!-- Groups Row -->
     <div class="live-groups-bar">
       <span class="live-groups-label">GROUPS:</span>
+      <button type="button" class="live-group-chip" class:active={multiSelect} aria-pressed={multiSelect} onclick={() => { multiSelect = !multiSelect; }}>Select multiple</button>
       <button
         type="button"
         class="live-group-chip"
         onclick={selectAllAddressable}
+        disabled={!configLoaded || !channels.some(channel => channel.index < 8 && channel.enabled)}
       >
         All Addressable (A1–A8)
       </button>
@@ -656,6 +787,7 @@
         type="button"
         class="live-group-chip"
         onclick={selectAllPwm}
+        disabled={!configLoaded || !channels.some(channel => channel.index >= 8 && channel.enabled)}
       >
         All PWM (P1–P8)
       </button>
@@ -667,6 +799,7 @@
               type="button"
               class="live-group-chip"
               onclick={() => selectGroup(grp)}
+              disabled={!configLoaded}
             >
               {grp.name || `Group ${gIdx + 1}`}
             </button>
@@ -674,6 +807,11 @@
         {/each}
       {/if}
     </div>
+    {#if selectionDiffersFromControlled}
+      <p class="live-request-feedback">Selection differs from the active lease. Update Targets to change which channels this desk controls.</p>
+    {:else if !isManualActive}
+      <p class="live-request-feedback">Values are browser drafts until you take control. Use Select multiple, or Shift/Ctrl/Command-click ports.</p>
+    {/if}
 
     <!-- Physical Channel Buttons Grid -->
     <div class="live-channels-matrix">
@@ -692,7 +830,9 @@
               class:controlled={isCtrl}
               class:disabled={!ch.enabled}
               disabled={!ch.enabled}
-              onclick={(e) => toggleChannel(ch.index, e.shiftKey || e.ctrlKey || e.metaKey)}
+              aria-pressed={isSel}
+              title={ch.enabled ? ch.name : configLoaded ? 'Disabled or unconfigured output' : 'Channel configuration unavailable'}
+              onclick={(e) => toggleChannel(ch.index, multiSelect || e.shiftKey || e.ctrlKey || e.metaKey)}
             >
               <span class="live-port-id">A{ch.index + 1}</span>
               <span class="live-port-name">{ch.name !== `A${ch.index + 1}` ? ch.name : ''}</span>
@@ -721,7 +861,9 @@
               class:controlled={isCtrl}
               class:disabled={!ch.enabled}
               disabled={!ch.enabled}
-              onclick={(e) => toggleChannel(ch.index, e.shiftKey || e.ctrlKey || e.metaKey)}
+              aria-pressed={isSel}
+              title={ch.enabled ? ch.name : configLoaded ? 'Disabled or unconfigured output' : 'Channel configuration unavailable'}
+              onclick={(e) => toggleChannel(ch.index, multiSelect || e.shiftKey || e.ctrlKey || e.metaKey)}
             >
               <span class="live-port-id">P{ch.index - 7}</span>
               <span class="live-port-name">{ch.name !== `P${ch.index - 7}` ? ch.name : ''}</span>
@@ -923,7 +1065,7 @@
   <OperatorDialog
     open={saveDialogOpen}
     title="Save Live Desk as Scene"
-    description={saveSceneError || "Capture active Live Desk manual values into a new stored Scene preset."}
+    description={saveSceneError || "Save the accepted desk values captured when this dialog opened. Live output still follows its current owner."}
     tone={saveSceneError ? 'danger' : 'neutral'}
     inputLabel="Scene Name"
     inputPlaceholder="e.g. Primetime Accent"
@@ -1378,6 +1520,8 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
+    flex-wrap: wrap;
+    gap: 0.75rem;
     border-bottom: 1px solid #27272a;
     padding-bottom: 0.75rem;
   }
@@ -1385,6 +1529,7 @@
   .live-panel-title-group {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 0.6rem;
   }
 
@@ -1465,19 +1610,23 @@
   }
 
   .live-rgb-inputs-wrap {
-    display: flex;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    width: 100%;
+    max-width: 20rem;
     align-items: center;
-    gap: 0.6rem;
+    gap: 0.5rem;
   }
 
   .live-rgb-field {
     display: flex;
     align-items: center;
+    min-width: 0;
     background: #09090b;
     border: 1px solid #3f3f46;
     border-radius: 4px;
-    padding: 0.2rem 0.5rem;
-    gap: 0.4rem;
+    padding: 0.2rem 0.4rem;
+    gap: 0.25rem;
   }
 
   .live-rgb-label {
@@ -1488,7 +1637,9 @@
   }
 
   .live-num-input {
-    width: 48px;
+    width: 100%;
+    min-width: 0;
+    padding: 0.35rem 0.15rem;
     background: transparent;
     border: none;
     color: #fafafa;
@@ -1499,6 +1650,16 @@
 
   .live-num-input:focus {
     outline: none;
+  }
+
+  .live-rgb-field:focus-within {
+    outline: 2px solid var(--dash-accent);
+    outline-offset: 2px;
+  }
+
+  @media (max-width: 600px) {
+    .live-panel-header { align-items: flex-start; }
+    .live-panel-scope { flex-basis: 100%; }
   }
 
   /* Palette Swatches */
@@ -1636,4 +1797,8 @@
     white-space: nowrap;
     border: 0;
   }
+  .live-request-feedback { color: var(--dash-muted); font-size: .85rem; line-height: 1.5; margin: 0; }
+  .live-group-chip[aria-pressed="true"] { border-color: var(--dash-accent); color: var(--dash-text); background: var(--dash-surface); }
+  .live-action-btn:disabled, .live-group-chip:disabled { opacity: .5; cursor: not-allowed; }
+  button:focus-visible { outline: 2px solid var(--dash-accent); outline-offset: 2px; }
 </style>

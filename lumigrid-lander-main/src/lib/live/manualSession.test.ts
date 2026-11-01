@@ -7,6 +7,7 @@ import {
 import type { ManualDeskChannel } from '$lib/api/manual';
 import * as transport from '$lib/api/transport';
 import { ApiError } from '$lib/api/transport';
+import { nodeAuthStore } from '$lib/auth/nodeAuth';
 
 function makeChannels(): ManualDeskChannel[] {
   const channels: ManualDeskChannel[] = [];
@@ -297,7 +298,7 @@ describe('ManualSession state machine', () => {
   });
 
   it('updating targets with empty set triggers clean release', async () => {
-    vi.spyOn(transport, 'apiJson').mockResolvedValue({
+    vi.spyOn(transport, 'apiJson').mockImplementation(async (_ip, _path, options) => options?.method === 'DELETE' ? { released: true } : {
       accepted: true,
       channelMask: 0x0001,
       leaseMs: 15000,
@@ -408,7 +409,7 @@ describe('ManualSession state machine', () => {
   });
 
   it('notifies subscribers via callback on state transitions', async () => {
-    vi.spyOn(transport, 'apiJson').mockResolvedValue({
+    vi.spyOn(transport, 'apiJson').mockImplementation(async (_ip, _path, options) => options?.method === 'DELETE' ? { released: true } : {
       accepted: true,
       channelMask: 0x0001,
       leaseMs: 15000,
@@ -454,5 +455,238 @@ describe('classifyError helper', () => {
   it('classifies network disconnect errors', () => {
     const err = new TypeError('Failed to fetch');
     expect(classifyError(err).kind).toBe('disconnected');
+  });
+});
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+
+async function settle() { for (let i = 0; i < 12; i++) await Promise.resolve(); }
+
+function receipt(options: transport.ApiFetchOptions | undefined, leaseMs = 15000) {
+  if (options?.method === 'DELETE') return { released: true };
+  const channels = JSON.parse(String(options?.body)).channels as { index: number }[];
+  return { accepted: true, channelMask: channels.reduce((mask, value) => mask | (1 << value.index), 0), leaseMs };
+}
+
+describe('ManualSession asynchronous ownership and write ordering', () => {
+  beforeEach(() => { vi.restoreAllMocks(); vi.useFakeTimers(); });
+  afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); });
+
+  it('does not revive a destroyed pending acquisition and queues cleanup before a new node', async () => {
+    const pending = deferred<any>();
+    const calls: string[] = [];
+    vi.spyOn(transport, 'apiJson').mockImplementation(async (ip, _path, options) => {
+      calls.push(`${options?.method}:${ip}`);
+      if (calls.length === 1) return pending.promise;
+      return receipt(options);
+    });
+    let ip = 'node-a'; let epoch = 0;
+    const session = new ManualSession(undefined, target => {
+      const generation = epoch;
+      return { ip: target, isCurrent: () => target === ip && epoch === generation };
+    });
+    const acquireA = session.acquire(ip, makeChannels(), [0]); await settle();
+    ip = 'node-b'; ++epoch; session.destroy('node-a');
+    const acquireB = session.acquire(ip, makeChannels(), [8]);
+    await settle();
+    expect(calls).toEqual(['PUT:node-a']); // Wait for the sent PUT before DELETE/new acquisition.
+    pending.resolve({ accepted: true, channelMask: 1, leaseMs: 15000 });
+    expect(await acquireA).toBe(false); expect(await acquireB).toBe(true);
+    expect(calls).toEqual(['PUT:node-a', 'DELETE:node-a', 'PUT:node-b']);
+    expect(session.controlledIndices).toEqual([8]);
+    session.destroy(ip); await settle();
+  });
+
+  it('skips old-session cleanup instead of sending DELETE with replacement credentials', async () => {
+    let auth: any = { sessionToken: 'old' };
+    vi.spyOn(nodeAuthStore, 'getSession').mockImplementation(() => auth);
+    const pending = deferred<any>();
+    const api = vi.spyOn(transport, 'apiJson').mockImplementation(async (_ip, _path, options) => options?.method === 'PUT' ? pending.promise : { released: true });
+    const session = new ManualSession();
+    const acquisition = session.acquire('node-a', makeChannels(), [0]); await settle();
+    auth = { sessionToken: 'new' }; session.destroy('node-a');
+    pending.resolve({ accepted: true, channelMask: 1, leaseMs: 15000 }); await acquisition; await settle();
+    expect(session.state).toBe('idle');
+    expect(api.mock.calls.filter(call => call[2]?.method === 'DELETE')).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(6000);
+    expect(api).toHaveBeenCalledTimes(1);
+  });
+
+  it('ignores a late heartbeat failure after cancellation and re-acquisition at the same address', async () => {
+    const heartbeat = deferred<any>(); let puts = 0;
+    const api = vi.spyOn(transport, 'apiJson').mockImplementation(async (_ip, _path, options) => {
+      if (options?.method === 'PUT' && ++puts === 2) return heartbeat.promise;
+      return receipt(options);
+    });
+    const session = new ManualSession();
+    await session.acquire('node-a', makeChannels(), [0]);
+    await vi.advanceTimersByTimeAsync(5000);
+    session.destroy('node-a');
+    const next = session.acquire('node-a', makeChannels(), [8]);
+    heartbeat.reject(new Error('Old connection lost')); await next; await settle();
+    expect(session.state).toBe('active');
+    expect(session.controlledIndices).toEqual([8]);
+    expect(api.mock.calls.filter(call => call[2]?.method === 'DELETE')).toHaveLength(1);
+    session.destroy('node-a'); await settle();
+  });
+
+  it('coalesces newer edits and never overlaps them with a heartbeat', async () => {
+    const firstEdit = deferred<any>(); let puts = 0;
+    const api = vi.spyOn(transport, 'apiJson').mockImplementation(async (_ip, _path, options) => {
+      if (options?.method === 'PUT' && ++puts === 2) return firstEdit.promise;
+      return receipt(options);
+    });
+    const session = new ManualSession(); const channels = makeChannels();
+    await session.acquire('node-a', channels, [0]);
+    channels[0].r = 1; const send = session.sendValues(channels); await settle();
+    channels[0].r = 2; void session.sendValues(channels);
+    channels[0].r = 3; void session.sendValues(channels);
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(puts).toBe(2);
+    firstEdit.resolve({ accepted: true, channelMask: 1, leaseMs: 15000 }); await send;
+    const values = api.mock.calls.filter(call => call[2]?.method === 'PUT').map(call => JSON.parse(String(call[2]?.body)).channels[0].r);
+    expect(values).toEqual([255, 1, 3]);
+    expect(session.snapshot().acceptedValues[0]).toMatchObject({ r: 3 });
+    expect(session.snapshot().sending).toBe(false);
+    session.destroy('node-a'); await settle();
+  });
+
+  it('renews only accepted values while newer browser draft values remain unsent', async () => {
+    const api = vi.spyOn(transport, 'apiJson').mockImplementation(async (_ip, _path, options) => receipt(options));
+    const channels = makeChannels(); const session = new ManualSession();
+    await session.acquire('node-a', channels, [0]);
+    channels[0].r = 9; // A draft edit made outside the active-send workflow.
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(JSON.parse(String(api.mock.calls[1][2]?.body)).channels[0].r).toBe(255);
+    session.destroy('node-a'); await settle();
+  });
+
+  it('keeps target changes busy until their own queued replacement is acknowledged', async () => {
+    const edit = deferred<any>(); const targets = deferred<any>(); let puts = 0;
+    const api = vi.spyOn(transport, 'apiJson').mockImplementation(async (_ip, _path, options) => {
+      if (options?.method === 'PUT') { ++puts; if (puts === 2) return edit.promise; if (puts === 3) return targets.promise; }
+      return receipt(options);
+    });
+    const session = new ManualSession(); const channels = makeChannels();
+    await session.acquire('node-a', channels, [0]);
+    channels[0].r = 10; const sending = session.sendValues(channels); await settle();
+    const updating = session.updateTargets('node-a', channels, [8]);
+    edit.resolve({ accepted: true, channelMask: 1, leaseMs: 15000 }); await sending; await settle();
+    expect(session.state).toBe('updating');
+    expect(session.snapshot().sending).toBe(true);
+    expect(JSON.parse(String(api.mock.calls[2][2]?.body)).channels.map((ch: any) => ch.index)).toEqual([8]);
+    targets.resolve({ accepted: true, channelMask: 256, leaseMs: 15000 }); await updating;
+    expect(session.state).toBe('active'); expect(session.controlledIndices).toEqual([8]);
+    session.destroy('node-a'); await settle();
+  });
+
+  it('cancels in-flight edits before release, rejects an invalid release receipt, and supports retry', async () => {
+    const edit = deferred<any>(); let puts = 0; let deletes = 0;
+    const api = vi.spyOn(transport, 'apiJson').mockImplementation(async (_ip, _path, options) => {
+      if (options?.method === 'PUT' && ++puts === 2) return edit.promise;
+      if (options?.method === 'DELETE' && ++deletes === 1) return { released: false };
+      return receipt(options);
+    });
+    const session = new ManualSession(); const channels = makeChannels();
+    await session.acquire('node-a', channels, [0]);
+    channels[0].r = 3; const sending = session.sendValues(channels); await settle();
+    channels[0].r = 4; void session.sendValues(channels);
+    const releasing = session.release('node-a');
+    edit.resolve({ accepted: true, channelMask: 1, leaseMs: 15000 }); await sending;
+    expect(await releasing).toBe(false);
+    expect(session.state).toBe('error'); expect(session.snapshot().releaseUnconfirmed).toBe(true);
+    expect(session.errorMessage).toMatch(/Release not confirmed/);
+    expect(puts).toBe(2);
+    expect(await session.release('node-a')).toBe(true);
+    expect(session.state).toBe('idle'); expect(session.snapshot().releaseUnconfirmed).toBe(false);
+    expect(api.mock.calls.map(call => call[2]?.method)).toEqual(['PUT', 'PUT', 'DELETE', 'DELETE']);
+  });
+
+  it('uses the returned lease duration and validates every renewal mask', async () => {
+    let puts = 0;
+    const api = vi.spyOn(transport, 'apiJson').mockImplementation(async (_ip, _path, options) => {
+      if (options?.method === 'PUT' && ++puts > 1) return { accepted: true, channelMask: 256, leaseMs: 6000 };
+      return receipt(options, 6000);
+    });
+    const session = new ManualSession(); await session.acquire('node-a', makeChannels(), [0]);
+    expect(session.leaseRemainingSec).toBe(6);
+    await vi.advanceTimersByTimeAsync(1999); expect(puts).toBe(1);
+    await vi.advanceTimersByTimeAsync(1); expect(puts).toBe(2);
+    expect(session.state).toBe('error'); expect(session.errorMessage).toMatch(/mask mismatch/);
+    expect(api.mock.calls.filter(call => call[2]?.method === 'DELETE')).toHaveLength(1);
+  });
+
+  it('marks only matching telemetry as lease confirmation and stops when another mask appears', async () => {
+    const api = vi.spyOn(transport, 'apiJson').mockImplementation(async (_ip, _path, options) => receipt(options));
+    const session = new ManualSession(); await session.acquire('node-a', makeChannels(), [0]);
+    expect(session.snapshot().confirmed).toBe(false);
+    session.onTelemetry({ active: true, channelMask: 1, leaseRemainingMs: 12000 });
+    expect(session.snapshot().confirmed).toBe(true);
+    session.onTelemetry({ active: true, channelMask: 256, leaseRemainingMs: 12000 });
+    expect(session.state).toBe('lost'); expect(session.errorMessage).toMatch(/targets changed/);
+    await vi.advanceTimersByTimeAsync(10000);
+    expect(api).toHaveBeenCalledTimes(1); // Do not DELETE or renew a different operator's frame.
+  });
+
+  it('fails closed on a denied live edit instead of silently continuing heartbeat', async () => {
+    let puts = 0;
+    const api = vi.spyOn(transport, 'apiJson').mockImplementation(async (_ip, _path, options) => {
+      if (options?.method === 'PUT' && ++puts === 2) return { accepted: false, channelMask: 1, leaseMs: 15000 };
+      return receipt(options);
+    });
+    const session = new ManualSession(); const channels = makeChannels(); await session.acquire('node-a', channels, [0]);
+    channels[0].r = 1; expect(await session.sendValues(channels)).toBe(false);
+    expect(session.state).toBe('error'); expect(session.errorMessage).toMatch(/rejected/);
+    await vi.advanceTimersByTimeAsync(10000);
+    expect(puts).toBe(2); expect(api.mock.calls.filter(call => call[2]?.method === 'DELETE')).toHaveLength(1);
+  });
+
+  it.each(['negative receipt', 'HTTP failure'])('exposes failed cancellation cleanup (%s) and permits an owned retry', async failure => {
+    const pending = deferred<any>(); let deletes = 0;
+    const api = vi.spyOn(transport, 'apiJson').mockImplementation(async (_ip, _path, options) => {
+      if (options?.method === 'PUT') return pending.promise;
+      if (++deletes === 1) {
+        if (failure === 'HTTP failure') throw new ApiError(403, '/api/v1/manual', 'node-a', 'Denied');
+        return { released: false };
+      }
+      return { released: true };
+    });
+    const session = new ManualSession();
+    const acquisition = session.acquire('node-a', makeChannels(), [0]); await settle();
+    session.cancel('Manual request canceled.');
+    expect(session.errorMessage).toMatch(/Release confirmation pending/);
+    expect(session.snapshot().releaseUnconfirmed).toBe(false);
+    pending.resolve({ accepted: true, channelMask: 1, leaseMs: 15000 });
+    expect(await acquisition).toBe(false); await settle();
+    expect(session.state).toBe('lost');
+    expect(session.errorMessage).toMatch(/Release not confirmed/);
+    expect(session.snapshot().releaseUnconfirmed).toBe(true);
+    await vi.advanceTimersByTimeAsync(10000);
+    expect(api.mock.calls.filter(call => call[2]?.method === 'PUT')).toHaveLength(1);
+    expect(await session.release('node-a')).toBe(true);
+    expect(session.state).toBe('idle');
+    expect(session.snapshot().releaseUnconfirmed).toBe(false);
+  });
+
+  it('does not publish an old cleanup failure into a newer acquisition', async () => {
+    const cleanup = deferred<any>(); let deletes = 0;
+    vi.spyOn(transport, 'apiJson').mockImplementation(async (_ip, _path, options) => {
+      if (options?.method === 'DELETE' && ++deletes === 1) return cleanup.promise;
+      return receipt(options);
+    });
+    const session = new ManualSession(); await session.acquire('node-a', makeChannels(), [0]);
+    session.cancel('Manual request canceled.'); await settle();
+    const acquisition = session.acquire('node-a', makeChannels(), [8]);
+    cleanup.resolve({ released: false }); await acquisition; await settle();
+    expect(session.state).toBe('active');
+    expect(session.controlledIndices).toEqual([8]);
+    expect(session.errorMessage).toBeNull();
+    expect(session.snapshot().releaseUnconfirmed).toBe(false);
+    session.destroy('node-a'); await settle();
   });
 });

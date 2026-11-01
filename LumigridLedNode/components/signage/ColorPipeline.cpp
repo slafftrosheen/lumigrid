@@ -10,6 +10,15 @@ inline uint8_t scale8(uint8_t value, uint8_t scale) {
     return static_cast<uint8_t>((uint16_t(value) * scale) / 255);
 }
 
+uint16_t scale_pwm_input(uint16_t explicit_duty, uint8_t color_level, uint8_t brightness) {
+    // A color-derived level is 8-bit; promote it before applying the same
+    // brightness and gamma path as an explicit 12-bit PWM command.
+    const uint32_t duty = explicit_duty > 0
+        ? std::min<uint32_t>(explicit_duty, 4095u)
+        : uint32_t(color_level) * 4095u / 255u;
+    return static_cast<uint16_t>(duty * brightness / 255u);
+}
+
 } // namespace
 
 uint8_t ColorPipeline::gamma8_lut_[256] = {};
@@ -53,6 +62,20 @@ void ColorPipeline::set_gamma(uint8_t gamma_x10) {
 
 uint8_t ColorPipeline::get_gamma() {
     return current_gamma_x10_;
+}
+
+uint16_t ColorPipeline::apply_pwm_gamma(uint16_t duty) {
+    // Linear gamma must preserve every input duty, including levels below 16.
+    if (current_gamma_x10_ == 0 || current_gamma_x10_ == 10) return duty;
+    const uint32_t position = uint32_t(duty) * 255u;
+    const uint16_t index = position / 4095u;
+    if (index >= 255) return gamma12_lut_[255];
+    const uint32_t fraction = position % 4095u;
+    const uint32_t low = gamma12_lut_[index];
+    const uint32_t delta = gamma12_lut_[index + 1] - low;
+    // Interpolate the existing LUT instead of truncating a 12-bit fade to 256
+    // steps. No per-frame floating point or larger lookup table is required.
+    return static_cast<uint16_t>(low + (delta * fraction + 2047u) / 4095u);
 }
 
 LightValue ColorPipeline::rgb_to_rgbw(uint8_t r, uint8_t g, uint8_t b) {
@@ -129,19 +152,9 @@ void ColorPipeline::to_pwm(
         // maximum of any colour component in the rendered pixel, or the explicit
         // PWM duty word from a live DMX single-channel frame.
         // single_pwm_in == 0 means no explicit override — derive from pixel colour.
-        const uint32_t raw = (single_pwm_in > 0)
-            ? single_pwm_in
-            : static_cast<uint32_t>(std::max({input.r, input.g, input.b, input.w}));
-        // Scale by effective brightness (0–255 range, then map to 12-bit).
-        uint32_t duty = (raw <= 4095u)
-            ? (raw * effective_brightness) / 255u
-            : (static_cast<uint32_t>(effective_brightness) * 4095u) / 255u;
-        if (fixture.gamma_correction) {
-            // Map 12-bit duty back to 8-bit index for the 12-bit gamma LUT.
-            const uint8_t b8 = static_cast<uint8_t>((duty * 255u) / 4095u);
-            duty = gamma12_lut_[b8];
-        }
-        out_duties[0] = static_cast<uint16_t>(duty);
+        const uint16_t duty = scale_pwm_input(single_pwm_in,
+            std::max({input.r, input.g, input.b, input.w}), effective_brightness);
+        out_duties[0] = fixture.gamma_correction ? apply_pwm_gamma(duty) : duty;
     } else {
         // PWM_RGB or PWM_RGBW
         LightValue c = input;
@@ -223,7 +236,7 @@ uint16_t ColorPipeline::to_pwm(
 
     const uint8_t effective_brightness = scale8(global_brightness, channel.max_brightness);
 
-    uint32_t derived = 0;
+    uint8_t derived = 0;
     switch (channel.dmx_mode) {
         // Legacy compound-PWM compatibility only. New channel configs use mode 0.
         case 2: derived = input.r; break;
@@ -231,22 +244,12 @@ uint16_t ColorPipeline::to_pwm(
         case 4: derived = input.b; break;
         case 5: derived = input.w; break;
         default:
-            derived = static_cast<uint32_t>(std::max({input.r, input.g, input.b, input.w}));
+            derived = std::max({input.r, input.g, input.b, input.w});
             break;
     }
 
-    const uint32_t raw = (single_pwm_in > 0) ? single_pwm_in : derived;
-
-    uint32_t duty = (raw <= 4095u)
-        ? (raw * effective_brightness) / 255u
-        : (static_cast<uint32_t>(effective_brightness) * 4095u) / 255u;
-
-    if (channel.gamma_correction) {
-        const uint8_t b8 = static_cast<uint8_t>((duty * 255u) / 4095u);
-        duty = gamma12_lut_[b8];
-    }
-
-    return static_cast<uint16_t>(std::min<uint32_t>(duty, 4095u));
+    const uint16_t duty = scale_pwm_input(single_pwm_in, derived, effective_brightness);
+    return channel.gamma_correction ? apply_pwm_gamma(duty) : duty;
 }
 
 } // namespace lg
