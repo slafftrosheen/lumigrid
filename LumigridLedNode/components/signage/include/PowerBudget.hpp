@@ -4,34 +4,11 @@
 #include "RenderTypes.hpp"
 #include "SignageTypes.hpp"
 #include "PowerConfigLimits.hpp"
+#include "PowerModel.hpp"
 
 namespace lg {
 
 constexpr uint16_t kDefaultPowerRampMs = 750;
-
-/// Conservative estimated electrical model per pixel type.
-///
-/// NOTE (Safety / Architecture Disclaimer):
-/// Power limiting is an estimated software brightness limiter.
-/// It does not replace correctly sized PSU, wiring, fuses,
-/// MOSFET ratings or branch protection.
-struct PixelPowerModel {
-    uint16_t idle_mw = 5;
-    uint16_t max_rgb_mw = 295;
-    uint16_t max_rgbw_mw = 380;
-};
-
-/// Per-supply domain diagnostics
-struct SupplyDomainDiagnostics {
-    uint8_t id = 0;
-    bool enabled = false;
-    uint32_t voltage_mv = 0;
-    uint32_t rated_current_ma = 0;
-    uint64_t usable_power_mw = 0;
-    uint64_t estimated_load_mw = 0;
-    uint16_t channel_mask = 0;
-    uint32_t throttle_events = 0;
-};
 
 /// Power transient diagnostics structure (LG-HW-004 & LG-HW-005)
 struct PowerTransientDiagnostics {
@@ -40,6 +17,8 @@ struct PowerTransientDiagnostics {
 
     PowerMilliwatts requested_power_mw = 0;
     PowerMilliwatts limited_power_mw = 0;
+    PowerMilliwatts limit_mw = 0;
+    uint32_t throttling_events = 0;
 
     PowerMilliwatts previous_limited_power_mw = 0;
     PowerMilliwatts max_observed_step_mw = 0;
@@ -82,13 +61,13 @@ public:
     /// independent supply-domain limits, soft-start, bounded power-step limiting,
     /// and global budget clamping in-place.
     /// Recalculates final modeled consumption from actual post-scaled output values.
-    /// Returns estimated mW before global clamping (requested).
+    /// Returns estimated mW before any power limiting (requested).
     PowerMilliwatts enforce(RenderFrame& frame, const DeviceConfig& cfg, uint32_t current_ms);
 
     /// Total count of frames where output was scaled due to local or global limits.
     uint32_t throttling_events() const { return throttling_events_; }
 
-    /// Estimated requested power consumption in mW (before global limiting/soft-start).
+    /// Estimated requested power consumption in mW (before any limiting/soft-start).
     PowerMilliwatts requested_power_mw() const { return requested_power_mw_; }
 
     /// Estimated limited power consumption in mW (after global limiting/soft-start).
@@ -111,9 +90,14 @@ public:
     uint32_t power_step_clamps() const { return power_step_clamps_; }
     uint16_t ramp_ms() const { return ramp_ms_; }
 
-    PowerTransientDiagnostics diagnostics() const;
+    /// Base transient control on the last confirmed physical command, not a
+    /// rendered frame that may have been skipped, rejected or further limited.
+    void observe_output_power(PowerMilliwatts mw) { previous_limited_power_mw_ = mw; }
 
-    static constexpr PixelPowerModel kPixelModel{5, 295, 380};
+    PowerTransientDiagnostics diagnostics() const;
+    OutputPowerRequest output_request() const { return output_request_; }
+
+    static constexpr PixelPowerModel kPixelModel = power_model::kPixel;
 
 private:
     PowerMilliwatts limit_mw_ = 0;
@@ -125,6 +109,7 @@ private:
     uint32_t throttling_events_ = 0;
     PowerMilliwatts requested_power_mw_ = 0;
     PowerMilliwatts limited_power_mw_ = 0;
+    OutputPowerRequest output_request_{};
     bool     estimate_complete_ = true;
     PowerEstimateState model_state_ = PowerEstimateState::Complete;
     uint16_t unmodeled_channel_mask_ = 0;

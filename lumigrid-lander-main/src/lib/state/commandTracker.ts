@@ -40,6 +40,7 @@ export interface PendingCommand {
 }
 
 export interface NodeStatusSnapshot {
+  node?: { id: string };
   schema?: number;
   seq?: number;
   streamSeq?: number;
@@ -110,7 +111,7 @@ export class CommandTracker {
   /**
    * Observes a live snapshot received from WebSocket and reconciles pending commands.
    */
-  observe(snapshot: NodeStatusSnapshot): void {
+  observe(snapshot: NodeStatusSnapshot, originIp?: string): void {
     if (!snapshot) return;
 
     // Resolve applied generation from Schema 3 (snapshot.scene.appliedGeneration)
@@ -124,6 +125,8 @@ export class CommandTracker {
     const job = snapshot.job !== undefined ? snapshot.job : snapshot.state?.job;
 
     for (const cmd of this.pending.values()) {
+      if (cmd.nodeIp && cmd.nodeIp !== originIp) continue;
+      if (cmd.nodeId && cmd.nodeId !== (snapshot.node?.id ?? snapshot.nodeId)) continue;
       if (cmd.state === 'applied' || cmd.state === 'failed' || cmd.state === 'rejected' || cmd.state === 'superseded') {
         continue;
       }
@@ -201,9 +204,14 @@ export class CommandTracker {
     });
   }
 
-  clear(): void {
+  clear(reason = 'Command confirmation was cancelled'): void {
     for (const cmd of this.pending.values()) {
       if (cmd.timer) clearTimeout(cmd.timer);
+      if (cmd.state === 'accepted' || cmd.state === 'applying') {
+        cmd.state = 'superseded';
+        cmd.error = reason;
+        cmd.reject?.(new Error(reason));
+      }
     }
     this.pending.clear();
   }

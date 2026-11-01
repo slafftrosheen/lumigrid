@@ -59,6 +59,10 @@ The GitHub firmware workflow is the canonical packaging command sequence. It use
 - Source and artifact SHA-256 inventories, tool versions, image/partition validation and the factory linked-stack report.
 - Explicit `hardware_validation: NOT_RUN` and `compliance_assessment: NOT_PERFORMED` labels.
 
+Candidate packaging validates the complete bootloader and application images for both environments: ESP32 chip identity, the production flash header, segment boundaries, checksum padding, the payload XOR checksum and the appended SHA-256 digest. It records the successful image checks in each build's `image_integrity` field. Truncated/corrupt images, a missing digest and unexpected trailing data fail before publication. This contract covers the unsigned, unpadded output of the pinned build; signed or padded image formats need an explicitly reviewed packaging policy. The appended digest detects corruption and does not authenticate the producer or enable secure boot; see [Espressif's image-format reference](https://docs.espressif.com/projects/esptool/en/release-v4/esp32/advanced-topics/firmware-image-format.html).
+
+The final artifact records and staged copies must match the exact bytes accepted by image, partition and merged-layout validation. A binary replaced during packaging is rejected, including a structurally valid replacement; it cannot acquire a fresh success hash without repeating validation.
+
 The manifest records current matching source inputs and successful packaging checks; it is not cryptographic proof of the compilation process. Build with a clean checkout, retain the build log and do not modify inputs during a release build. Use the factory binary for normal operation. The test image contains diagnostic/development flags and is not the product image.
 
 The merged image is intended for fresh installation. It includes erased padding across NVS/OTA metadata. For an existing board, preserve its configuration using the appropriate [flash migration or application-only OTA procedure](FLASH_LAYOUT.md).

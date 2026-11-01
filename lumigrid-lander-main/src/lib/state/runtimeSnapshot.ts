@@ -26,6 +26,13 @@ export interface OutputFrameMetrics {
 export interface OutputState {
   enabled: boolean;
   powerMw: number;
+  /** Optional on older firmware. These are model estimates, not measurements. */
+  power?: {
+    estimatedRequestedMw: number;
+    estimatedLimitedMw: number;
+    estimateComplete: boolean;
+    limitMw: number;
+  };
   state: 'healthy' | 'armed' | 'fault' | 'estop' | string;
   fault: boolean;
   faultCount: number;

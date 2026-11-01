@@ -66,42 +66,57 @@ export function getNodeWsUrl(address: string, path = '/ws'): string {
   return `ws://${clean}${cleanPath}`;
 }
 
-export async function apiFetch(
+async function consumeNodeResponse<T>(
   ip: string,
   path: string,
-  options: ApiFetchOptions = {},
-  timeoutMs = 8000,
-): Promise<Response> {
+  options: ApiFetchOptions,
+  timeoutMs: number,
+  consume: (response: Response, signal: AbortSignal) => Promise<T>,
+): Promise<T> {
   const base = getNodeHttpBase(ip);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const abort = () => controller.abort(options.signal?.reason);
+  options.signal?.addEventListener('abort', abort, { once: true });
+  if (options.signal?.aborted) abort();
 
   const reqHeaders = authHeaders(ip, options.headers, options.apiKey);
+  const session = nodeAuthStore.getSession(ip);
 
   try {
     const response = await fetch(`${base}${path}`, {
       ...options,
       headers: reqHeaders,
       signal: controller.signal,
+    }).catch((err: unknown) => {
+      if (isBrowserHttpsContext() && err instanceof TypeError && !controller.signal.aborted) {
+        throw new TransportBlockedError(ip);
+      }
+      throw err;
     });
 
     // On 401: clear only the affected node's browser session
-    if (response.status === 401) {
+    if (response.status === 401 && session && nodeAuthStore.getSession(ip) === session &&
+        reqHeaders.get('Authorization') === `Bearer ${session.sessionToken}`) {
       nodeAuthStore.clearSession(ip);
     }
 
-    return response;
-  } catch (err: unknown) {
-    // If running in HTTPS and fetch failed, detect mixed-content browser restriction
-    if (isBrowserHttpsContext()) {
-      if (err instanceof TypeError && !controller.signal.aborted) {
-        throw new TransportBlockedError(ip);
-      }
-    }
-    throw err;
+    // The JSON caller owns the controller until the body is fully consumed.
+    return await consume(response, controller.signal);
   } finally {
     clearTimeout(timer);
+    options.signal?.removeEventListener('abort', abort);
   }
+}
+
+/** Raw callers receive headers and retain responsibility for consuming the body. */
+export function apiFetch(
+  ip: string,
+  path: string,
+  options: ApiFetchOptions = {},
+  timeoutMs = 8000,
+): Promise<Response> {
+  return consumeNodeResponse(ip, path, options, timeoutMs, async response => response);
 }
 
 export class ApiError extends Error {
@@ -123,26 +138,36 @@ export async function apiJson<T>(
   options: ApiFetchOptions = {},
   timeoutMs = 8000,
 ): Promise<T> {
-  let response: Response;
+  const session = nodeAuthStore.getSession(ip);
+  // Explicit automation credentials are independent of the dashboard session.
+  const ownsSession = !options.apiKey && !new Headers(options.headers).has('X-API-Key');
+  const assertCurrent = (signal: AbortSignal) => {
+    if (signal.aborted || (ownsSession && nodeAuthStore.getSession(ip) !== session)) {
+      throw new DOMException('Node session changed or request was cancelled', 'AbortError');
+    }
+  };
   try {
-    response = await apiFetch(ip, path, options, timeoutMs);
+    return await consumeNodeResponse(ip, path, options, timeoutMs, async (response, signal) => {
+      if (!response.ok) {
+        let detail = response.statusText;
+        try {
+          const body = await response.json() as { error?: string };
+          if (body?.error) {
+            detail = response.statusText ? `${response.statusText}: ${body.error}` : body.error;
+          }
+        } catch {
+          // Keep HTTP status text when the node returns a non-JSON error body.
+        }
+        throw new ApiError(response.status, path, ip, detail);
+      }
+      const value = await response.json() as T;
+      assertCurrent(signal);
+      return value;
+    });
   } catch (error: unknown) {
+    if (error instanceof ApiError || isTransportBlockedError(error) ||
+        (error instanceof Error && error.name === 'AbortError')) throw error;
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`[${ip}] ${path} → ${message}`);
   }
-
-  if (!response.ok) {
-    let detail = response.statusText;
-    try {
-      const body = await response.clone().json() as { error?: string };
-      if (body?.error) {
-        detail = response.statusText ? `${response.statusText}: ${body.error}` : body.error;
-      }
-    } catch {
-      // Keep HTTP status text when the node returns a non-JSON error body.
-    }
-    throw new ApiError(response.status, path, ip, detail);
-  }
-
-  return await response.json() as T;
 }

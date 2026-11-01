@@ -169,7 +169,7 @@ jobs:
           cd lumigrid-lander-main
           npm run test:embedded
           npm run check
-          npm run test:unit -- src/lib/auth/storage.test.ts src/lib/auth/nodeAuth.test.ts src/lib/api/transport.test.ts src/lib/api/integration.test.ts src/lib/server/documentation.test.ts
+          npm run test:unit -- src/lib/auth/storage.test.ts src/lib/auth/nodeAuth.test.ts src/lib/api/transport.test.ts src/lib/api/integration.test.ts src/lib/server/documentation.test.ts src/lib/state/nodeStore.test.ts src/lib/state/nodeOwnership.test.ts src/lib/state/runtimeSnapshot.test.ts src/lib/state/commandTracker.test.ts src/lib/state/scenePageOwnership.test.ts src/lib/cues/editorStore.test.ts src/lib/cues/document.test.ts src/lib/api/cues.test.ts src/routes/dashboard/cues/cues.test.ts src/lib/components/dashboard/NetworkConfigCard.test.ts
           npm run build
 
       - name: Web Build Success Status

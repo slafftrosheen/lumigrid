@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -48,6 +49,10 @@ def fingerprint(path, allow_empty=False):
     data = path.read_bytes()
     if not data and not allow_empty:
         raise ValueError(f"Required input is empty: {path}")
+    return content_fingerprint(data)
+
+
+def content_fingerprint(data):
     return {"bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
 
 
@@ -119,11 +124,52 @@ def validate_flash_config(sdkconfig, generated):
 
 
 def validate_image(data, name):
+    """Check the complete unsigned, unpadded image emitted by the pinned build.
+
+    ESP32 format: 24-byte header, length-prefixed segments, XOR checksum in
+    the last byte of a 16-byte block, then the image's appended SHA-256.
+    This detects corruption; neither the checksum nor the digest authenticates
+    a producer or establishes that these bytes were compiled from this source.
+    See esptool release-v4/esp32/advanced-topics/firmware-image-format.html.
+    """
     # ESP32 image headers encode DIO=2, 8 MB=3, 40 MHz=0.
     if len(data) < 24 or data[0] != 0xe9:
         raise ValueError(f"Invalid ESP32 image header: {name}")
     if data[2] != 2 or data[3] != 0x30:
         raise ValueError(f"{name} must declare DIO, 40 MHz, 8 MB flash")
+    if struct.unpack_from('<H', data, 12)[0] != 0:
+        raise ValueError(f"{name}: image targets a different chip")
+    if not 1 <= data[1] <= 16:
+        raise ValueError(f"{name}: invalid image segment count")
+    if data[23] != 1:
+        raise ValueError(f"{name}: the pinned build requires an appended SHA-256 digest")
+
+    cursor = 24
+    checksum = 0xef
+    for index in range(data[1]):
+        if cursor + 8 > len(data):
+            raise ValueError(f"{name}: truncated segment {index} header")
+        _, length = struct.unpack_from('<II', data, cursor)
+        cursor += 8
+        if length % 4 or cursor + length > len(data):
+            raise ValueError(f"{name}: invalid or truncated segment {index} data")
+        for byte in memoryview(data)[cursor:cursor + length]:
+            checksum ^= byte
+        cursor += length
+
+    checksum_offset = cursor | 15
+    digest_offset = checksum_offset + 1
+    if len(data) != digest_offset + 32:
+        raise ValueError(f"{name}: truncated image footer or unsupported trailing data")
+    if any(data[cursor:checksum_offset]):
+        raise ValueError(f"{name}: nonzero image checksum padding")
+    if data[checksum_offset] != checksum:
+        raise ValueError(f"{name}: image payload checksum mismatch")
+    digest = hashlib.sha256(data[:digest_offset]).digest()
+    if data[digest_offset:] != digest:
+        raise ValueError(f"{name}: appended image SHA-256 mismatch")
+    return {"segment_count": data[1], "payload_checksum": f"{checksum:02x}",
+            "appended_sha256": digest.hex(), "integrity": "VERIFIED"}
 
 
 def validate_merged(merged, inputs):
@@ -165,6 +211,7 @@ def package_candidate(repo_root, node_root, build_root, core_dir, merged, output
             node_root / "components/factory/include/dashboard_assets.hpp"):
         raise ValueError("Generated embedded dashboard headers disagree")
     builds = {}
+    validated_records = {}
     stack_report = None
     tool_packages = {"platform": platform["version"]}
     for name in ("factory", "test"):
@@ -199,24 +246,31 @@ def package_candidate(repo_root, node_root, build_root, core_dir, merged, output
             tool_packages[key] = value
         binary_paths = {"bootloader.bin": build / "bootloader.bin",
                         "partitions.bin": build / "partitions.bin", "firmware.bin": build / "firmware.bin"}
-        for filename in ("bootloader.bin", "firmware.bin"):
-            validate_image(binary_paths[filename].read_bytes(), f"{name}/{filename}")
-        health = size_health(binary_paths["firmware.bin"].stat().st_size, parts["factory"][3])
+        binary_data = {filename: path.read_bytes() for filename, path in binary_paths.items()}
+        for filename, data in binary_data.items():
+            validated_records[f"{name}/{filename}"] = content_fingerprint(data)
+        image_integrity = {
+            filename: validate_image(binary_data[filename], f"{name}/{filename}")
+            for filename in ("bootloader.bin", "firmware.bin")
+        }
+        health = size_health(len(binary_data["firmware.bin"]), parts["factory"][3])
         if health == "FAIL":
             raise ValueError(f"{name}: firmware exceeds existing 85% slot budget")
         with tempfile.TemporaryDirectory() as tmp:
             expected_table = Path(tmp) / "partitions.bin"
             run([sys.executable, idf_path / "components/partition_table/gen_esp32part.py", "-q",
                  "--offset", "0x8000", "--flash-size", "8MB", parts_path, expected_table])
-            if expected_table.read_bytes() != binary_paths["partitions.bin"].read_bytes():
+            if expected_table.read_bytes() != binary_data["partitions.bin"]:
                 raise ValueError(f"{name}: built partition binary differs from production layout")
         if name == "factory":
             stack_report = run([sys.executable, node_root / "scripts/verify_boot_stack.py",
                                 "--objdump", objdump, "--elf", build / "firmware.elf"])
-            validate_merged(merged.read_bytes(), {
-                0x1000: binary_paths["bootloader.bin"].read_bytes(),
-                0x8000: binary_paths["partitions.bin"].read_bytes(),
-                parts["factory"][2]: binary_paths["firmware.bin"].read_bytes(),
+            merged_data = merged.read_bytes()
+            validated_records["merged_firmware.bin"] = content_fingerprint(merged_data)
+            validate_merged(merged_data, {
+                0x1000: binary_data["bootloader.bin"],
+                0x8000: binary_data["partitions.bin"],
+                parts["factory"][2]: binary_data["firmware.bin"],
             })
         for filename, path in {**binary_paths, "firmware.elf": build / "firmware.elf",
                                "sdkconfig": effective_config, "sdkconfig.json": generated_config,
@@ -227,13 +281,17 @@ def package_candidate(repo_root, node_root, build_root, core_dir, merged, output
                         "idf_revision": description["git_revision"],
                         "production_candidate": name == "factory",
                         "build_flags": env.get("build_flags", ""),
-                        "slot_budget_status": health, "flash_config": FLASH_CONFIG}
+                        "slot_budget_status": health, "flash_config": FLASH_CONFIG,
+                        "image_integrity": image_integrity}
     esptool = core_dir / "packages/tool-esptoolpy/esptool.py"
     tool_packages.update({"python": sys.version.split()[0], "platformio": version("platformio"),
                           "node": run(["node", "--version"]),
                           "npm": run(["npm", "--version"]).splitlines()[-1],
                           "esptool": run([sys.executable, esptool, "version"]).splitlines()[-1]})
     records = {name: fingerprint(path) for name, path in artifacts.items()}
+    for name, checked_record in validated_records.items():
+        if records[name] != checked_record:
+            raise ValueError(f"Validated build artifact changed before packaging: {name}")
     if source_snapshot(repo_root, node_root) != source:
         raise ValueError("Source changed while packaging; rebuild before producing a candidate")
     manifest = {

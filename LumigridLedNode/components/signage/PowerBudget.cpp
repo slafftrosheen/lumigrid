@@ -32,6 +32,8 @@ PowerTransientDiagnostics PowerBudget::diagnostics() const {
     d.ramp_events = soft_start_events_;
     d.requested_power_mw = requested_power_mw_;
     d.limited_power_mw = limited_power_mw_;
+    d.limit_mw = limit_mw_;
+    d.throttling_events = throttling_events_;
     d.previous_limited_power_mw = previous_limited_power_mw_;
     d.max_observed_step_mw = max_observed_step_mw_;
     d.power_step_clamps = power_step_clamps_;
@@ -57,318 +59,153 @@ PowerTransientDiagnostics PowerBudget::diagnostics() const {
     return d;
 }
 
+namespace {
+power_model::Load frame_channel_load(const ChannelFrame& frame, const DeviceConfig& cfg, uint8_t ch) {
+    power_model::Load load;
+    const auto& channel = cfg.channels[ch];
+    if (!channel.enabled) return load;
+    if (channel_hardware(ch).kind == ChannelKind::Addressable) {
+        const uint16_t count = std::min<uint16_t>(channel.pixel_count, MAX_PIXELS);
+        load.idle = power_model::units(uint64_t(count) * power_model::kPixel.idle_mw);
+        const bool rgbw = channel.addressable_type == AddressableType::SK6812;
+        for (uint16_t p = 0; p < count; ++p) {
+            const auto& value = frame.pixels[p];
+            load.active += power_model::pixel_active(value.r, value.g, value.b, rgbw ? value.w : 0);
+        }
+    } else {
+        load.active = power_model::pwm_active(frame.pwm, power_model::pwm_rating(cfg, ch));
+    }
+    return load;
+}
+
+void scale_frame_channel(ChannelFrame& frame, const ChannelConfig& cfg, uint8_t ch, uint16_t scale) {
+    const bool addressable = channel_hardware(ch).kind == ChannelKind::Addressable;
+    const uint16_t count = addressable ? std::min<uint16_t>(cfg.pixel_count, MAX_PIXELS) : 1;
+    for (uint16_t p = 0; p < count; ++p) {
+        auto& value = frame.pixels[p];
+        value.r = static_cast<uint8_t>((uint16_t(value.r) * scale) / power_model::kFullScale);
+        value.g = static_cast<uint8_t>((uint16_t(value.g) * scale) / power_model::kFullScale);
+        value.b = static_cast<uint8_t>((uint16_t(value.b) * scale) / power_model::kFullScale);
+        value.w = static_cast<uint8_t>((uint16_t(value.w) * scale) / power_model::kFullScale);
+    }
+    if (!addressable) {
+        frame.pwm = static_cast<uint16_t>((uint32_t(std::min<uint16_t>(frame.pwm, 4095)) * scale) /
+                                          power_model::kFullScale);
+    }
+}
+} // namespace
+
 PowerMilliwatts PowerBudget::enforce(RenderFrame& frame, const DeviceConfig& cfg, uint32_t current_ms) {
-    // Determine frame period in ms
     uint32_t frame_period_ms = 20;
-    if (last_enforce_ms_ > 0 && current_ms > last_enforce_ms_) {
+    if (last_enforce_ms_ != 0) {
         frame_period_ms = std::min<uint32_t>(current_ms - last_enforce_ms_, 100);
     }
     last_enforce_ms_ = current_ms;
 
-    // 1. Calculate soft-start factor
-    uint8_t ss_factor = 255;
-    if (soft_start_enabled_) {
-        uint32_t ms_since_enable = (current_ms >= enable_ms_) ? (current_ms - enable_ms_) : 0;
-        ss_factor = soft_start_factor(ms_since_enable);
-    }
-
-    uint64_t total_idle_mw = 0;
-    uint64_t total_active_mw = 0;
-    bool throttled = false;
-
-    estimate_complete_ = true;
-    model_state_ = PowerEstimateState::Complete;
+    power_model::Load channels[kChannelCount]{};
+    power_model::Load requested;
+    uint16_t enabled_mask = 0;
     unmodeled_channel_mask_ = 0;
-
-    // Per-channel estimated consumption trackers before scaling
-    uint64_t ch_idle_mw[kChannelCount] = {};
-    uint64_t ch_active_mw[kChannelCount] = {};
-
-    // 2. Per-channel power calculation and local channel limit enforcement
     for (uint8_t ch = 0; ch < kChannelCount; ++ch) {
-        const ChannelConfig& ccfg = cfg.channels[ch];
-        if (!ccfg.enabled) continue;
-
-        const auto hw = channel_hardware(ch);
-        ChannelFrame& cf = frame.channels[ch];
-
-        uint64_t channel_idle_mw = 0;
-        uint64_t channel_active_mw = 0;
-
-        if (hw.kind == ChannelKind::Addressable) {
-            uint16_t pcount = std::min<uint16_t>(ccfg.pixel_count, MAX_PIXELS);
-            channel_idle_mw = uint64_t(pcount) * kPixelModel.idle_mw;
-            const bool is_rgbw = (ccfg.addressable_type == AddressableType::SK6812);
-            for (uint16_t p = 0; p < pcount; ++p) {
-                const LightValue& lv = cf.pixels[p];
-                if (is_rgbw) {
-                    uint64_t sum = uint64_t(lv.r) + lv.g + lv.b + lv.w;
-                    channel_active_mw += (sum * kPixelModel.max_rgbw_mw) / 1020ULL;
-                } else {
-                    uint64_t sum = uint64_t(lv.r) + lv.g + lv.b;
-                    channel_active_mw += (sum * kPixelModel.max_rgb_mw) / 765ULL;
-                }
-            }
-
-            // Enforce local channel limit if configured
-            const uint32_t local_limit = ccfg.channel_limit_mw;
-            if (local_limit > 0) {
-                uint64_t channel_total = channel_idle_mw + channel_active_mw;
-                if (channel_total > local_limit) {
-                    throttled = true;
-                    if (local_limit <= channel_idle_mw) {
-                        for (uint16_t p = 0; p < pcount; ++p) {
-                            cf.pixels[p] = {0, 0, 0, 0};
-                        }
-                        channel_active_mw = 0;
-                    } else if (channel_active_mw > 0) {
-                        uint64_t allowed_active = local_limit - channel_idle_mw;
-                        uint8_t local_scale = static_cast<uint8_t>((allowed_active * 255ULL) / channel_active_mw);
-                        for (uint16_t p = 0; p < pcount; ++p) {
-                            LightValue& lv = cf.pixels[p];
-                            lv.r = static_cast<uint8_t>((uint16_t(lv.r) * local_scale) / 255);
-                            lv.g = static_cast<uint8_t>((uint16_t(lv.g) * local_scale) / 255);
-                            lv.b = static_cast<uint8_t>((uint16_t(lv.b) * local_scale) / 255);
-                            lv.w = static_cast<uint8_t>((uint16_t(lv.w) * local_scale) / 255);
-                        }
-                        channel_active_mw = (channel_active_mw * local_scale) / 255ULL;
-                    }
-                }
-            }
-        } else {
-            // PWM channels: modelled based on rated_full_power_mw (HW-005.8/9)
-            // An unconfigured PWM load cannot silently equal zero (HW-005.9)
-            if (ccfg.rated_full_power_mw > 0) {
-                channel_active_mw = (uint64_t(cf.pwm) * ccfg.rated_full_power_mw) / 4095ULL;
-            } else {
-                channel_active_mw = 0;
-                estimate_complete_ = false;
-                model_state_ = PowerEstimateState::Partial;
-                unmodeled_channel_mask_ |= static_cast<uint16_t>(1U << ch);
-            }
-
-            // Enforce local channel limit if configured
-            const uint32_t local_limit = ccfg.channel_limit_mw;
-            if (local_limit > 0 && channel_active_mw > local_limit && channel_active_mw > 0) {
-                throttled = true;
-                channel_throttle_events_++;
-                uint8_t local_scale = static_cast<uint8_t>((uint64_t(local_limit) * 255ULL) / channel_active_mw);
-                cf.pwm = static_cast<uint16_t>((uint32_t(cf.pwm) * local_scale) / 255);
-                LightValue& lv = cf.pixels[0];
-                lv.r = static_cast<uint8_t>((uint16_t(lv.r) * local_scale) / 255);
-                lv.g = static_cast<uint8_t>((uint16_t(lv.g) * local_scale) / 255);
-                lv.b = static_cast<uint8_t>((uint16_t(lv.b) * local_scale) / 255);
-                lv.w = static_cast<uint8_t>((uint16_t(lv.w) * local_scale) / 255);
-                channel_active_mw = (channel_active_mw * local_scale) / 255ULL;
-            }
+        if (!cfg.channels[ch].enabled) continue;
+        enabled_mask |= static_cast<uint16_t>(1u << ch);
+        channels[ch] = frame_channel_load(frame.channels[ch], cfg, ch);
+        requested += channels[ch];
+        if (channel_hardware(ch).kind != ChannelKind::Addressable && power_model::pwm_rating(cfg, ch) == 0) {
+            unmodeled_channel_mask_ |= static_cast<uint16_t>(1u << ch);
         }
-
-        ch_idle_mw[ch] = channel_idle_mw;
-        ch_active_mw[ch] = channel_active_mw;
-
-        total_idle_mw += channel_idle_mw;
-        total_active_mw += channel_active_mw;
     }
+    requested_power_mw_ = power_model::reported_mw(requested.total());
+    output_request_ = {};
+    output_request_.requested_mw = requested_power_mw_;
+    estimate_complete_ = unmodeled_channel_mask_ == 0;
+    model_state_ = power_model::model_state(enabled_mask, unmodeled_channel_mask_);
+    if (!estimate_complete_) ++unknown_load_warnings_;
 
-    for (uint8_t s = 0; s < kMaxPowerSupplies; ++s) {
-        last_supplies_[s] = cfg.power_supplies[s];
-    }
-
-    if (unmodeled_channel_mask_ != 0) {
-        unknown_load_warnings_++;
-        // If all enabled channels are unmodeled, state is Unknown
-        bool any_modeled = false;
+    // Scale only active demand. Re-estimate the quantized channel values after
+    // each stage so a later domain/global limit never uses fictitious capacity.
+    auto scale_channel = [&](uint8_t ch, uint16_t scale) {
+        if (!cfg.channels[ch].enabled || scale == power_model::kFullScale) return;
+        scale_frame_channel(frame.channels[ch], cfg.channels[ch], ch, scale);
+        channels[ch] = frame_channel_load(frame.channels[ch], cfg, ch);
+    };
+    auto domain_load = [&](uint16_t mask) {
+        power_model::Load load;
         for (uint8_t ch = 0; ch < kChannelCount; ++ch) {
-            if (cfg.channels[ch].enabled && (unmodeled_channel_mask_ & (1U << ch)) == 0) {
-                any_modeled = true;
-                break;
-            }
+            if ((mask & (1u << ch)) != 0) load += channels[ch];
         }
-        model_state_ = any_modeled ? PowerEstimateState::Partial : PowerEstimateState::Unknown;
-    }
+        return load;
+    };
 
-    const uint64_t total_mw = total_idle_mw + total_active_mw;
-    requested_power_mw_ = static_cast<PowerMilliwatts>(std::min<uint64_t>(total_mw, UINT32_MAX));
-
-    // 3. Enforce independent external power-supply domains (LG-HW-005.6)
-    for (uint8_t s = 0; s < kMaxPowerSupplies; ++s) {
-        const auto& psu = cfg.power_supplies[s];
-        if (!psu.enabled || psu.channel_mask == 0) {
-            supply_last_load_mw_[s] = 0;
-            continue;
-        }
-
-        uint64_t supply_idle_mw = 0;
-        uint64_t supply_active_mw = 0;
-
-        for (uint8_t ch = 0; ch < kChannelCount; ++ch) {
-            if ((psu.channel_mask & (1U << ch)) != 0 && cfg.channels[ch].enabled) {
-                supply_idle_mw += ch_idle_mw[ch];
-                supply_active_mw += ch_active_mw[ch];
-            }
-        }
-
-        const uint64_t supply_total_mw = supply_idle_mw + supply_active_mw;
-        supply_last_load_mw_[s] = supply_total_mw;
-        const uint64_t usable_capacity_mw = psu.usable_power_mw();
-
-        if (usable_capacity_mw > 0 && supply_total_mw > usable_capacity_mw) {
+    bool throttled = false;
+    for (uint8_t ch = 0; ch < kChannelCount; ++ch) {
+        const uint16_t scale = power_model::scale_for_limit(channels[ch], power_model::channel_limit(cfg, ch));
+        if (scale < power_model::kFullScale) {
             throttled = true;
-            supply_throttle_events_[s]++;
+            ++channel_throttle_events_;
+            output_request_.limited_channel_mask |= static_cast<uint16_t>(1u << ch);
+            scale_channel(ch, scale);
+        }
+    }
 
-            uint8_t supply_scale = 0;
-            if (usable_capacity_mw > supply_idle_mw && supply_active_mw > 0) {
-                uint64_t allowed_active = usable_capacity_mw - supply_idle_mw;
-                supply_scale = static_cast<uint8_t>((allowed_active * 255ULL) / supply_active_mw);
-            }
-
-            // Scale ONLY the channels assigned to this supply domain
+    for (uint8_t supply = 0; supply < kMaxPowerSupplies; ++supply) {
+        const auto& psu = cfg.power_supplies[supply];
+        last_supplies_[supply] = psu;
+        if (!psu.enabled || psu.channel_mask == 0) continue;
+        // Zero capacity also extinguishes unknown-rated PWM; an incomplete
+        // model must not turn an explicit zero-capacity domain into free power.
+        const uint64_t capacity = psu.usable_power_mw();
+        const uint16_t scale = capacity == 0 ? 0 : power_model::scale_for_units(
+            domain_load(psu.channel_mask), power_model::units(capacity));
+        if (scale < power_model::kFullScale) {
+            throttled = true;
+            ++supply_throttle_events_[supply];
+            output_request_.limited_supply_mask |= static_cast<uint8_t>(1u << supply);
             for (uint8_t ch = 0; ch < kChannelCount; ++ch) {
-                if ((psu.channel_mask & (1U << ch)) != 0 && cfg.channels[ch].enabled) {
-                    const auto hw = channel_hardware(ch);
-                    ChannelFrame& cf = frame.channels[ch];
-
-                    if (hw.kind == ChannelKind::Addressable) {
-                        uint16_t pcount = std::min<uint16_t>(cfg.channels[ch].pixel_count, MAX_PIXELS);
-                        for (uint16_t p = 0; p < pcount; ++p) {
-                            LightValue& lv = cf.pixels[p];
-                            lv.r = static_cast<uint8_t>((uint16_t(lv.r) * supply_scale) / 255);
-                            lv.g = static_cast<uint8_t>((uint16_t(lv.g) * supply_scale) / 255);
-                            lv.b = static_cast<uint8_t>((uint16_t(lv.b) * supply_scale) / 255);
-                            lv.w = static_cast<uint8_t>((uint16_t(lv.w) * supply_scale) / 255);
-                        }
-                    } else {
-                        cf.pwm = static_cast<uint16_t>((uint32_t(cf.pwm) * supply_scale) / 255);
-                        LightValue& lv = cf.pixels[0];
-                        lv.r = static_cast<uint8_t>((uint16_t(lv.r) * supply_scale) / 255);
-                        lv.g = static_cast<uint8_t>((uint16_t(lv.g) * supply_scale) / 255);
-                        lv.b = static_cast<uint8_t>((uint16_t(lv.b) * supply_scale) / 255);
-                        lv.w = static_cast<uint8_t>((uint16_t(lv.w) * supply_scale) / 255);
-                    }
-                    ch_active_mw[ch] = (ch_active_mw[ch] * supply_scale) / 255ULL;
-                }
+                if ((psu.channel_mask & (1u << ch)) != 0) scale_channel(ch, scale);
             }
         }
     }
 
-    // Recalculate total_active_mw after supply domain scaling
-    total_active_mw = 0;
-    for (uint8_t ch = 0; ch < kChannelCount; ++ch) {
-        if (cfg.channels[ch].enabled) {
-            total_active_mw += ch_active_mw[ch];
-        }
-    }
+    const power_model::Load post_supply = domain_load(UINT16_MAX);
+    const uint16_t budget_scale = power_model::scale_for_limit(post_supply, limit_mw_);
+    if (budget_scale < power_model::kFullScale) throttled = true;
+    const uint16_t start_scale = (uint16_t(soft_start_factor(current_ms - enable_ms_)) *
+                                 power_model::kFullScale) / 255;
+    uint16_t final_scale = static_cast<uint16_t>((uint32_t(start_scale) * budget_scale) /
+                                               power_model::kFullScale);
 
-    // 4. Determine if global budget scaling is needed
-    uint8_t power_scale = 255;
-    const uint64_t post_supply_total_mw = total_idle_mw + total_active_mw;
-    if (limit_mw_ > 0 && post_supply_total_mw > limit_mw_) {
-        throttled = true;
-        if (total_active_mw > 0) {
-            uint64_t available_active_mw = (limit_mw_ > total_idle_mw) ? (limit_mw_ - total_idle_mw) : 0;
-            power_scale = static_cast<uint8_t>((available_active_mw * 255ULL) / total_active_mw);
-        } else {
-            power_scale = 0;
-        }
-    }
-
-    // Baseline combined scale (soft-start * global limit)
-    uint16_t combined_scale = (uint16_t(ss_factor) * power_scale) / 255;
-    uint16_t final_scale = combined_scale;
-
-    // 5. Bounded power-step control (LG-HW-004 §18/§19)
+    // Preserve the existing bounded rise policy, including when the optional
+    // enable ramp is disabled. Fixed idle cannot be extinguished by software.
     if (limit_mw_ > 0 && ramp_ms_ > 0) {
-        const uint64_t max_step_mw = std::max<uint64_t>(1, (uint64_t(limit_mw_) * frame_period_ms) / ramp_ms_);
-        const uint64_t candidate_active_mw = (total_active_mw * combined_scale) / 255ULL;
-        const uint64_t candidate_total_mw = total_idle_mw + candidate_active_mw;
-
-        if (candidate_total_mw > previous_limited_power_mw_ + max_step_mw) {
-            const uint64_t max_allowed_total_mw = previous_limited_power_mw_ + max_step_mw;
-            power_step_clamps_++;
+        const uint64_t step_mw = std::max<uint64_t>(1, (uint64_t(limit_mw_) * frame_period_ms) / ramp_ms_);
+        const uint64_t allowed = power_model::units(uint64_t(previous_limited_power_mw_) + step_mw);
+        const uint16_t step_scale = power_model::scale_for_units(post_supply, allowed);
+        if (step_scale < final_scale) {
+            final_scale = step_scale;
+            ++power_step_clamps_;
             throttled = true;
-
-            const uint64_t allowed_active_mw = (max_allowed_total_mw > total_idle_mw) ? (max_allowed_total_mw - total_idle_mw) : 0;
-            const uint16_t step_scale = (total_active_mw > 0) ? static_cast<uint16_t>((allowed_active_mw * 255ULL) / total_active_mw) : 0;
-            final_scale = std::min<uint16_t>(combined_scale, step_scale);
         }
     }
-
-    if (throttled) {
-        throttling_events_++;
+    if (throttled) ++throttling_events_;
+    output_request_.throttled = throttled;
+    if (final_scale < power_model::kFullScale) {
+        for (uint8_t ch = 0; ch < kChannelCount; ++ch) scale_channel(ch, final_scale);
     }
 
-    // 6. Apply final scale globally across all active channels (preserving relative ratios)
-    if (final_scale < 255) {
-        for (uint8_t ch = 0; ch < kChannelCount; ++ch) {
-            const ChannelConfig& ccfg = cfg.channels[ch];
-            if (!ccfg.enabled) continue;
-
-            const auto hw = channel_hardware(ch);
-            ChannelFrame& cf = frame.channels[ch];
-
-            if (hw.kind == ChannelKind::Addressable) {
-                uint16_t pcount = std::min<uint16_t>(ccfg.pixel_count, MAX_PIXELS);
-                for (uint16_t p = 0; p < pcount; ++p) {
-                    LightValue& lv = cf.pixels[p];
-                    lv.r = static_cast<uint8_t>((uint16_t(lv.r) * final_scale) / 255);
-                    lv.g = static_cast<uint8_t>((uint16_t(lv.g) * final_scale) / 255);
-                    lv.b = static_cast<uint8_t>((uint16_t(lv.b) * final_scale) / 255);
-                    lv.w = static_cast<uint8_t>((uint16_t(lv.w) * final_scale) / 255);
-                }
-            } else {
-                cf.pwm = static_cast<uint16_t>((uint32_t(cf.pwm) * final_scale) / 255);
-                LightValue& lv = cf.pixels[0];
-                lv.r = static_cast<uint8_t>((uint16_t(lv.r) * final_scale) / 255);
-                lv.g = static_cast<uint8_t>((uint16_t(lv.g) * final_scale) / 255);
-                lv.b = static_cast<uint8_t>((uint16_t(lv.b) * final_scale) / 255);
-                lv.w = static_cast<uint8_t>((uint16_t(lv.w) * final_scale) / 255);
-            }
-        }
+    const power_model::Load limited = domain_load(UINT16_MAX);
+    limited_power_mw_ = power_model::reported_mw(limited.total());
+    for (uint8_t supply = 0; supply < kMaxPowerSupplies; ++supply) {
+        const auto& psu = cfg.power_supplies[supply];
+        supply_last_load_mw_[supply] = psu.enabled
+            ? power_model::milliwatts(domain_load(psu.channel_mask).total()) : 0;
     }
 
-    // 7. HW-005.13: Recalculate modeled consumption from final actual output values
-    uint64_t actual_post_idle_mw = 0;
-    uint64_t actual_post_active_mw = 0;
-    for (uint8_t ch = 0; ch < kChannelCount; ++ch) {
-        const ChannelConfig& ccfg = cfg.channels[ch];
-        if (!ccfg.enabled) continue;
-
-        const auto hw = channel_hardware(ch);
-        const ChannelFrame& cf = frame.channels[ch];
-
-        if (hw.kind == ChannelKind::Addressable) {
-            uint16_t pcount = std::min<uint16_t>(ccfg.pixel_count, MAX_PIXELS);
-            actual_post_idle_mw += uint64_t(pcount) * kPixelModel.idle_mw;
-            const bool is_rgbw = (ccfg.addressable_type == AddressableType::SK6812);
-            for (uint16_t p = 0; p < pcount; ++p) {
-                const LightValue& lv = cf.pixels[p];
-                if (is_rgbw) {
-                    uint64_t sum = uint64_t(lv.r) + lv.g + lv.b + lv.w;
-                    actual_post_active_mw += (sum * kPixelModel.max_rgbw_mw) / 1020ULL;
-                } else {
-                    uint64_t sum = uint64_t(lv.r) + lv.g + lv.b;
-                    actual_post_active_mw += (sum * kPixelModel.max_rgb_mw) / 765ULL;
-                }
-            }
-        } else {
-            if (ccfg.rated_full_power_mw > 0) {
-                actual_post_active_mw += (uint64_t(cf.pwm) * ccfg.rated_full_power_mw) / 4095ULL;
-            }
-        }
-    }
-
-    limited_power_mw_ = static_cast<PowerMilliwatts>(
-        std::min<uint64_t>(actual_post_idle_mw + actual_post_active_mw, UINT32_MAX));
-
-    // 8. Track power step delta
-    const PowerMilliwatts step_mw = (limited_power_mw_ > previous_limited_power_mw_) ?
-                                    (limited_power_mw_ - previous_limited_power_mw_) : 0;
-    if (step_mw > max_observed_step_mw_) {
-        max_observed_step_mw_ = step_mw;
-    }
+    const PowerMilliwatts step_mw = limited_power_mw_ > previous_limited_power_mw_
+        ? limited_power_mw_ - previous_limited_power_mw_ : 0;
+    max_observed_step_mw_ = std::max(max_observed_step_mw_, step_mw);
     previous_limited_power_mw_ = limited_power_mw_;
-
-    return static_cast<PowerMilliwatts>(std::min<uint64_t>(total_mw, UINT32_MAX));
+    return requested_power_mw_;
 }
 
 } // namespace lg

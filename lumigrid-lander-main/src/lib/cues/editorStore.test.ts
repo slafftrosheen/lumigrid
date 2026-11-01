@@ -47,6 +47,26 @@ describe('cue editor store (LG-034 §82 H..N, §84 AE/AF)', () => {
     expect(s.persisted?.checksum).toBe(777);
   });
 
+  it('commits the submitted copy while preserving edits made during a save', () => {
+    cueEditorStore.load(makeDoc());
+    cueEditorStore.updateWorking((doc) => ({ ...doc, name: 'Submitted' }));
+    const submitted = get(cueEditorStore).working!;
+    cueEditorStore.updateWorking((doc) => ({
+      ...doc,
+      name: 'Still editing',
+      cues: doc.cues.map((cue) => ({ ...cue, holdMs: 6000 })),
+    }));
+    cueEditorStore.commitSave({ ...submitted, checksum: 900 }, submitted);
+    const s = get(cueEditorStore);
+    expect(s.persisted?.name).toBe('Submitted');
+    expect(s.working?.name).toBe('Still editing');
+    expect(s.working?.cues[0].holdMs).toBe(6000);
+    expect(s.persisted?.cues[0].holdMs).toBe(submitted.cues[0].holdMs);
+    expect(s.persisted?.checksum).toBe(900);
+    expect(s.working?.checksum).toBe(900);
+    expect(isDirty(s)).toBe(true);
+  });
+
   it('conflict set/clear flows', () => {
     cueEditorStore.load(makeDoc());
     cueEditorStore.updateWorking((doc) => ({ ...doc, name: 'Draft' }));
@@ -65,6 +85,7 @@ describe('cue editor store (LG-034 §82 H..N, §84 AE/AF)', () => {
     const s = get(cueEditorStore);
     expect(s.persisted).toBeNull();
     expect(s.working?.index).toBe(3);
+    expect(isDirty(s)).toBe(true);
   });
 });
 

@@ -422,9 +422,11 @@ FrameResult LightingRuntime::render_frame(uint32_t current_ms) {
         return FrameResult::EstopBlackout;
     }
 
+    const auto confirmed_power = controller_.power_diagnostics();
     uint32_t render_scene_generation = 0;
     if (!mutex_ || xSemaphoreTake(mutex_, pdMS_TO_TICKS(5)) != pdTRUE) return FrameResult::NoOutput;
     if (shutting_down_.load(std::memory_order_acquire)) { xSemaphoreGive(mutex_); return FrameResult::NoOutput; }
+    power_budget_.observe_output_power(confirmed_power.command_confirmed ? confirmed_power.limited_power_mw : 0);
     if (live_pending_dirty_) { (*live_active_) = (*live_pending_); live_pending_dirty_ = false; }
     current_render_scene_ = scene_manager_.process_frame(current_ms);
     current_local_cfg_ = device_cfg_;
@@ -555,6 +557,7 @@ FrameResult LightingRuntime::render_frame(uint32_t current_ms) {
         }
     }
     power_budget_.enforce(render_frame, local_cfg, current_ms);
+    const OutputPowerRequest power_request = power_budget_.output_request();
     xSemaphoreGive(mutex_);
     OutputState state = output_state_.load(std::memory_order_acquire);
     FrameResult frame_result = FrameResult::NoOutput;
@@ -566,7 +569,7 @@ FrameResult LightingRuntime::render_frame(uint32_t current_ms) {
         bool frame_committed = false;
         ControlSource dominant = source_manager_.current_owner();
         if (dominant != ControlSource::Factory && dominant != ControlSource::EStop) {
-            const esp_err_t sched_err = OutputScheduler::schedule(render_frame, local_cfg, controller_);
+            const esp_err_t sched_err = OutputScheduler::schedule(render_frame, local_cfg, controller_, &power_request);
             if (sched_err != ESP_OK) {
                 report_output_fault(sched_err);
                 if (preview_cb_) {
@@ -743,6 +746,32 @@ DeviceConfig LightingRuntime::get_config_snapshot() const {
     cfg = device_cfg_;
     xSemaphoreGive(mutex_);
     return cfg;
+}
+
+PowerTransientDiagnostics LightingRuntime::power_diagnostics() const {
+    PowerTransientDiagnostics snapshot{};
+    if (mutex_) {
+        xSemaphoreTake(mutex_, portMAX_DELAY);
+        snapshot = power_budget_.diagnostics();
+        xSemaphoreGive(mutex_);
+    }
+    // Output callbacks can enter the lighting runtime while holding the output
+    // lock. Acquire these locks separately, never in the opposite nested order.
+    const auto output = controller_.power_diagnostics();
+    snapshot.requested_power_mw = output.requested_power_mw;
+    snapshot.limited_power_mw = output.limited_power_mw;
+    snapshot.previous_limited_power_mw = output.previous_limited_power_mw;
+    snapshot.max_observed_step_mw = output.max_observed_step_mw;
+    snapshot.limit_mw = output.limit_mw;
+    snapshot.throttling_events = output.throttling_events;
+    snapshot.channel_throttle_events = output.channel_throttle_events;
+    snapshot.estimate_complete = output.command_confirmed && output.estimate_complete;
+    snapshot.model_state = output.command_confirmed ? output.model_state : PowerEstimateState::Unknown;
+    snapshot.unmodeled_channel_mask = output.unmodeled_channel_mask;
+    for (uint8_t supply = 0; supply < kMaxPowerSupplies; ++supply) {
+        snapshot.supply_domains[supply] = output.supply_domains[supply];
+    }
+    return snapshot;
 }
 
 void LightingRuntime::inject_live_data(uint8_t zone_idx, uint8_t layer_idx, const BrandColor& color, uint8_t opacity) {

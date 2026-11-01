@@ -76,7 +76,6 @@ describe('unified dashboard node live state and lifecycle', () => {
     for (const ip of testIps) {
       nodeAuthStore.setSession({
         address: ip,
-        nodeId: `node-${ip.replace(/\./g, '-')}`,
         role: 'operator',
         sessionToken: `tok-${ip}`,
         expiresAt: Date.now() + 3600000,
@@ -377,6 +376,7 @@ describe('unified dashboard node live state and lifecycle', () => {
     });
 
     it('preserves existing health snapshot and populates healthError on poll failure', async () => {
+      await connect('192.168.1.50');
       const mockHealth = {
         schema_version: 1,
         system: { uptime_s: 100, free_heap: 50000, min_free_heap: 40000, reset_reason: 1, fps: 60 },

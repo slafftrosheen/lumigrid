@@ -102,7 +102,6 @@ describe('LG-031 Frontend RuntimeSnapshot and Cutover Tests', () => {
     for (const ip of testIps) {
       nodeAuthStore.setSession({
         address: ip,
-        nodeId: `node-${ip.replace(/\./g, '-')}`,
         role: 'operator',
         sessionToken: `tok-${ip}`,
         expiresAt: Date.now() + 3600000,
@@ -209,6 +208,15 @@ describe('LG-031 Frontend RuntimeSnapshot and Cutover Tests', () => {
   });
 
   // B. Schema 2 explicitly normalizes through compatibility adapter
+  it('preserves incomplete power estimates above a configured ceiling without clamping', () => {
+    const power = { estimatedRequestedMw: 1200, estimatedLimitedMw: 800, estimateComplete: false, limitMw: 500 };
+    const raw = { schema: 3, node: { id: 'power-node' }, runtime: { brightness: 0 },
+      output: { enabled: false, powerMw: 800, power }, scene: {}, channels: [] };
+    expect(normalizeRuntimeSnapshot(raw).output.power).toEqual(power);
+    expect(normalizeRuntimeSnapshot({ ...raw, output: { ...raw.output, power: undefined } }).output.power).toBeUndefined();
+    expect(normalizeRuntimeSnapshot({ ...raw, output: { ...raw.output, power: { ...power, estimateComplete: 'true' } } }).output.power).toBeUndefined();
+  });
+
   it('explicitly normalizes Schema 2 into RuntimeSnapshotV3', () => {
     const rawSchema2 = {
       schema: 2,
@@ -463,13 +471,13 @@ describe('LG-031 Frontend RuntimeSnapshot and Cutover Tests', () => {
     // Unrelated job 99 completes
     commandTracker.observe({
       job: { jobId: 99, type: 'restore', state: 'completed', progress: 100, startedMs: 0, error: null },
-    });
+    }, '192.168.1.50');
     expect(commandTracker.get(100)?.state).toBe('accepted');
 
     // Matching jobId 50 completes
     commandTracker.observe({
       job: { jobId: 50, type: 'ota', state: 'completed', progress: 100, startedMs: 0, error: null },
-    });
+    }, '192.168.1.50');
     expect(commandTracker.get(100)?.state).toBe('applied');
   });
 

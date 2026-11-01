@@ -48,19 +48,20 @@
     createDefaultSceneMotion,
     createDefaultTrack,
     getSceneMotion,
-    type SceneMotionConfig,
     type AutomationTrackConfig,
   } from '$lib/api/sceneMotion';
 
   import { getChannels, type HardwareChannel } from '$lib/api/channels';
-  import { getSelectedNodeIp } from '$lib/auth/storage';
-  import { nodeStore, commandTracker } from '$lib/state/nodeStore';
+  import { nodeStore, commandTracker, captureNodeOperation } from '$lib/state/nodeStore';
+  import { nodeAuthStore } from '$lib/auth/nodeAuth';
 
   // ── Global Node & State Tracking ──────────────────────────────────────────────
   let nodeIp = $state('');
   let loading = $state(true);
   let saving = $state(false);
   let activating = $state(false);
+  let libraryLoaded = $state(false);
+  let documentLoading = $state(false);
   let error = $state('');
   let toast = $state('');
 
@@ -135,15 +136,40 @@
 
   // ── Generation-Guarded Async Loading ──────────────────────────────────────────
   let loadGen = 0;
+  let selectionGen = 0;
+  let disposed = false;
+  let libraryRequest = 0;
+  let workspaceOwner: ReturnType<typeof captureNodeOperation> | null = null;
+  let workspaceSession: ReturnType<typeof nodeAuthStore.getSession> = null;
+  let workspaceBound = false;
+  let toastTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function captureWorkspaceOperation() {
+    const owner = captureNodeOperation(nodeIp);
+    const generation = loadGen;
+    return { ip: owner.ip, isCurrent: () => !disposed && generation === loadGen && owner.isCurrent() };
+  }
+
+  function captureSceneOperation() {
+    const owner = captureWorkspaceOperation();
+    const selection = selectionGen;
+    return { ip: owner.ip, isCurrent: () => selection === selectionGen && owner.isCurrent() };
+  }
 
   async function loadData(targetIp: string, gen: number) {
+    const owner = captureWorkspaceOperation();
+    if (!owner.isCurrent() || owner.ip !== targetIp) return;
+    const request = ++libraryRequest;
+    const selection = selectionGen;
+    const isCurrent = () => request === libraryRequest && gen === loadGen && owner.isCurrent();
     loading = true;
+    libraryLoaded = false;
     error = '';
     showApplyChangesBanner = false;
     showConflictModal = false;
 
     try {
-      const nodeId = snapshot?.node?.id || targetIp;
+      const nodeId = snapshot?.node?.id && snapshot.node.id !== 'unknown' ? snapshot.node.id : targetIp;
       const cacheKey = `${nodeId}`;
 
       const [p, e, pals, chList] = await Promise.all([
@@ -151,26 +177,27 @@
         // Refresh on entry so an upgraded or downgraded node owns its catalogue.
         getEffectsCached(targetIp, cacheKey, true),
         getPalettesCached(targetIp, cacheKey, true),
-        getChannels(targetIp).catch(() => [] as HardwareChannel[]),
+        getChannels(targetIp),
       ]);
 
-      if (gen !== loadGen) return;
+      if (!isCurrent()) return;
 
       presets = p;
       effects = e;
       palettes = pals;
       hwChannels = chList;
+      libraryLoaded = true;
 
-      if (presets.length > 0 && selectedIdx === null) {
-        await selectScene(presets[0].index);
-      } else if (selectedIdx !== null) {
-        await selectScene(selectedIdx);
+      // Metadata refreshes and reconnects must not replace a local draft.
+      if (!workingDocument && selection === selectionGen) {
+        const target = selectedIdx ?? presets[0]?.index;
+        if (target !== undefined) await selectScene(target);
       }
     } catch (e) {
-      if (gen !== loadGen) return;
+      if (!isCurrent()) return;
       error = e instanceof Error ? e.message : String(e);
     } finally {
-      if (gen === loadGen) {
+      if (isCurrent()) {
         loading = false;
       }
     }
@@ -203,50 +230,53 @@
     pendingAction = null;
   }
 
-  async function selectScene(idx: number) {
-    selectedIdx = idx;
+  async function selectScene(idx: number, refresh = false) {
+    if (!nodeIp || !libraryLoaded) return;
+    ++selectionGen;
+    const owner = captureSceneOperation();
+    if (!owner.isCurrent()) return;
+    const previousDraft = workingDocument ? structuredClone($state.snapshot(workingDocument)) : null;
+    documentLoading = true;
+    saving = false;
+    activating = false;
     error = '';
     showApplyChangesBanner = false;
     showConflictModal = false;
 
-    let sceneObj = presets.find(p => p.index === idx);
-    if (!sceneObj && nodeIp) {
-      try {
-        sceneObj = await getPreset(nodeIp, idx);
-      } catch {
-        sceneObj = createDefaultPreset(idx);
+    try {
+      const sceneObj = refresh ? await getPreset(owner.ip, idx) :
+        presets.find(p => p.index === idx) ?? await getPreset(owner.ip, idx);
+      if (!owner.isCurrent()) return;
+      const motionObj = await getSceneMotion(owner.ip, idx);
+      if (!owner.isCurrent()) return;
+      if (isSceneDocumentDirty(workingDocument, previousDraft)) {
+        error = 'Scene selection cancelled because the current draft changed while loading.';
+        return;
       }
+      const doc: SceneDocument = {
+        scene: clonePreset($state.snapshot(sceneObj)),
+        motion: structuredClone(motionObj),
+        sceneChecksum: sceneObj.checksum,
+        motionChecksum: motionObj.checksum,
+      };
+      selectedIdx = idx;
+      persistedDocument = structuredClone(doc);
+      workingDocument = structuredClone(doc);
+      if (refresh) presets = presets.map(preset => preset.index === idx ? clonePreset($state.snapshot(sceneObj)) : preset);
+      selectedChannelIndices = [0];
+    } catch (e) {
+      if (owner.isCurrent()) error = `Could not load scene: ${e instanceof Error ? e.message : String(e)}`;
+    } finally {
+      if (owner.isCurrent()) documentLoading = false;
     }
-    if (!sceneObj) {
-      sceneObj = createDefaultPreset(idx);
-    }
-
-    let motionObj: SceneMotionConfig;
-    if (nodeIp) {
-      try {
-        motionObj = await getSceneMotion(nodeIp, idx);
-      } catch {
-        motionObj = createDefaultSceneMotion(idx);
-      }
-    } else {
-      motionObj = createDefaultSceneMotion(idx);
-    }
-
-    const doc: SceneDocument = {
-      scene: clonePreset(sceneObj),
-      motion: structuredClone(motionObj),
-      sceneChecksum: sceneObj.checksum,
-      motionChecksum: motionObj.checksum,
-    };
-
-    persistedDocument = structuredClone(doc);
-    workingDocument = structuredClone(doc);
-    selectedChannelIndices = [0];
   }
 
   // ── Save & Activate Flows ─────────────────────────────────────────────────────
   async function saveDocument(activateAfter = false) {
-    if (!workingDocument || !nodeIp || saving) return;
+    if (!workingDocument || !nodeIp || saving || documentLoading || !libraryLoaded) return;
+    const owner = captureSceneOperation();
+    if (!owner.isCurrent()) return;
+    const submitted = structuredClone($state.snapshot(workingDocument));
 
     // Validate Scene Name UTF-8 Bytes
     const nameBytes = getUtf8ByteLength(workingDocument.scene.name.trim());
@@ -259,16 +289,17 @@
     error = '';
 
     try {
-      const res = await saveSceneDocument(nodeIp, workingDocument, {
+      const res = await saveSceneDocument(owner.ip, submitted, {
         expectedSceneChecksum: persistedDocument?.sceneChecksum,
         expectedMotionChecksum: persistedDocument?.motionChecksum,
         catalog: { effects, palettes },
       });
+      if (!owner.isCurrent() || !workingDocument) return;
 
       // Update persisted state with server checksums
-      const updatedScene = clonePreset(workingDocument.scene);
+      const updatedScene = clonePreset(submitted.scene);
       updatedScene.checksum = res.checksum;
-      const updatedMotion = structuredClone(workingDocument.motion);
+      const updatedMotion = structuredClone(submitted.motion);
       updatedMotion.checksum = res.motionChecksum;
 
       const newPersisted: SceneDocument = {
@@ -281,6 +312,8 @@
       persistedDocument = structuredClone(newPersisted);
       workingDocument.sceneChecksum = res.checksum;
       workingDocument.motionChecksum = res.motionChecksum;
+      workingDocument.scene.checksum = res.checksum;
+      workingDocument.motion.checksum = res.motionChecksum;
 
       // Update local presets library list
       const existing = presets.findIndex(p => p.index === updatedScene.index);
@@ -303,54 +336,52 @@
         await doActivate(updatedScene.index);
       }
     } catch (e: any) {
+      if (!owner.isCurrent()) return;
       if (e?.status === 409 || e?.message?.includes('conflict') || e?.error === 'scene_conflict') {
         showConflictModal = true;
       } else {
         error = e?.message || String(e);
       }
     } finally {
-      saving = false;
+      if (owner.isCurrent()) saving = false;
     }
   }
 
   async function doActivate(idx: number) {
-    if (isFollower || activating || !nodeIp) return;
+    if (isFollower || activating || !nodeIp || !libraryLoaded || documentLoading) return;
+    const owner = captureSceneOperation();
+    if (!owner.isCurrent()) return;
     activating = true;
     error = '';
     showApplyChangesBanner = false;
 
     try {
-      const result = await activatePreset(nodeIp, idx);
+      const result = await activatePreset(owner.ip, idx);
+      if (!owner.isCurrent()) return;
       const cmdId = result.commandId ?? Date.now();
       commandTracker.register({
         id: cmdId,
         domain: 'scene',
-        nodeIp,
+        nodeIp: owner.ip,
         generation: result.generation,
       });
       await commandTracker.waitFor(cmdId, 5000);
+      if (!owner.isCurrent()) return;
       toastMsg(`Scene ${(idx + 1).toString().padStart(2, '0')} activated on node`);
     } catch (e: any) {
-      error = e instanceof Error ? e.message : String(e);
+      if (owner.isCurrent()) error = e instanceof Error ? e.message : String(e);
     } finally {
-      activating = false;
+      if (owner.isCurrent()) activating = false;
     }
   }
 
-  function reloadNodeVersion() {
-    showConflictModal = false;
-    if (selectedIdx !== null) {
-      selectScene(selectedIdx);
-    }
+  async function reloadNodeVersion() {
+    if (selectedIdx !== null && !saving && !documentLoading) await selectScene(selectedIdx, true);
   }
 
   function keepDraft() {
     showConflictModal = false;
-    // Strip expected checksums so next save can force-overwrite if operator chooses
-    if (persistedDocument) {
-      persistedDocument.sceneChecksum = undefined;
-      persistedDocument.motionChecksum = undefined;
-    }
+    // Keeping browser edits does not authorize overwriting a newer node version.
   }
 
   // ── New Scene & Duplication Flows ─────────────────────────────────────────────
@@ -368,6 +399,7 @@
   });
 
   function openNewSceneModal() {
+    if (!libraryLoaded || documentLoading || !captureWorkspaceOperation().isCurrent()) return;
     requestNavigation(() => {
       newSceneSlot = freeSlots.length > 0 ? freeSlots[0] : null;
       newSceneMode = 'blank';
@@ -376,17 +408,19 @@
   }
 
   function confirmNewScene() {
-    if (newSceneSlot === null) return;
+    if (newSceneSlot === null || !libraryLoaded || !captureWorkspaceOperation().isCurrent()) return;
+    ++selectionGen;
+    documentLoading = saving = activating = false;
     const target = newSceneSlot;
     showNewSceneModal = false;
 
     if (newSceneMode === 'duplicate' && workingDocument) {
-      const dupScene = clonePreset(workingDocument.scene);
+      const dupScene = clonePreset($state.snapshot(workingDocument.scene));
       dupScene.index = target;
       dupScene.name = `${dupScene.name} (copy)`.slice(0, 23);
       delete dupScene.checksum;
 
-      const dupMotion = structuredClone(workingDocument.motion);
+      const dupMotion = structuredClone($state.snapshot(workingDocument.motion));
       dupMotion.index = target;
       delete dupMotion.checksum;
 
@@ -417,8 +451,15 @@
   let deleteReferences = $state<SceneReferences | null>(null);
   let checkingReferences = $state(false);
   let deletingScene = $state(false);
+  let deleteOwner: ReturnType<typeof captureWorkspaceOperation> | null = null;
+  let deleteRequest = 0;
 
   async function openDeleteModal(idx: number) {
+    const owner = captureWorkspaceOperation();
+    if (!owner.isCurrent() || !libraryLoaded) return;
+    deleteOwner = owner;
+    const request = ++deleteRequest;
+    const isCurrent = () => owner.isCurrent() && request === deleteRequest && deleteTargetIdx === idx;
     deleteTargetIdx = idx;
     checkingReferences = true;
     deleteReferences = null;
@@ -426,11 +467,12 @@
 
     if (nodeIp) {
       try {
-        deleteReferences = await getSceneReferences(nodeIp, idx);
-      } catch {
-        deleteReferences = null;
+        const refs = await getSceneReferences(owner.ip, idx);
+        if (isCurrent()) deleteReferences = refs;
+      } catch (e) {
+        if (isCurrent()) error = `Could not read scene dependencies: ${e instanceof Error ? e.message : String(e)}`;
       } finally {
-        checkingReferences = false;
+        if (isCurrent()) checkingReferences = false;
       }
     } else {
       checkingReferences = false;
@@ -449,27 +491,42 @@
   });
 
   async function confirmDeleteScene() {
-    if (deleteTargetIdx === null || deletingScene || !nodeIp) return;
+    if (deleteTargetIdx === null || deletingScene || !nodeIp || !deleteReferences ||
+        checkingReferences || isSceneBlockedFromDelete || !deleteOwner?.isCurrent()) return;
+    const owner = deleteOwner;
+    const selection = captureSceneOperation();
+    const previousDraft = workingDocument ? structuredClone($state.snapshot(workingDocument)) : null;
+    const request = deleteRequest;
+    const isCurrent = () => owner.isCurrent() && request === deleteRequest;
     deletingScene = true;
     const idx = deleteTargetIdx;
 
     try {
-      await deletePreset(nodeIp, idx);
+      await deletePreset(owner.ip, idx);
+      if (!isCurrent()) return;
       presets = presets.filter(p => p.index !== idx);
-      if (selectedIdx === idx) {
+      if (selectedIdx === idx && selection.isCurrent() && !isSceneDocumentDirty(workingDocument, previousDraft)) {
         workingDocument = null;
         persistedDocument = null;
         selectedIdx = presets.length > 0 ? presets[0].index : null;
         if (selectedIdx !== null) {
           await selectScene(selectedIdx);
+          if (!isCurrent()) return;
         }
+      } else if (selectedIdx === idx && selection.isCurrent() && workingDocument) {
+        // Deletion has completed, but edits made during the request remain recoverable.
+        persistedDocument = null;
+        delete workingDocument.sceneChecksum;
+        delete workingDocument.motionChecksum;
+        delete workingDocument.scene.checksum;
+        delete workingDocument.motion.checksum;
       }
       toastMsg(`Deleted Scene ${(idx + 1).toString().padStart(2, '0')}`);
       showDeleteModal = false;
     } catch (e: any) {
-      error = e?.message || String(e);
+      if (isCurrent()) error = e?.message || String(e);
     } finally {
-      deletingScene = false;
+      if (isCurrent()) deletingScene = false;
     }
   }
 
@@ -499,14 +556,20 @@
     const input = e.target as HTMLInputElement;
     if (!input.files || input.files.length === 0) return;
     const file = input.files[0];
+    const owner = captureSceneOperation();
+    if (!owner.isCurrent() || !libraryLoaded) { input.value = ''; return; }
     try {
       const text = await file.text();
+      if (!owner.isCurrent()) return;
       const valRes = validateImportedSceneDocument(text, { effects, palettes });
       if (valRes.valid === false) {
         error = `Cannot import scene: ${valRes.error}`;
         return;
       }
       requestNavigation(() => {
+        if (!owner.isCurrent()) return;
+        ++selectionGen;
+        documentLoading = saving = activating = false;
         // Load into working document as unsaved draft for operator to choose slot and save
         const slot = selectedIdx ?? (freeSlots.length > 0 ? freeSlots[0] : 0);
         valRes.document.scene.index = slot;
@@ -516,10 +579,11 @@
 
         workingDocument = valRes.document;
         persistedDocument = null;
+        selectedIdx = slot;
         toastMsg(`Imported “${workingDocument.scene.name}” as unsaved draft in Slot ${(slot + 1).toString().padStart(2, '0')}`);
       });
     } catch (err: any) {
-      error = `Import failed: ${err?.message || String(err)}`;
+      if (owner.isCurrent()) error = `Import failed: ${err?.message || String(err)}`;
     } finally {
       input.value = '';
     }
@@ -577,7 +641,7 @@
     if (!editScene) return;
     const ch = activeChannels[activeInspectorChannel];
     if (ch) {
-      channelClipboard = structuredClone(ch);
+      channelClipboard = structuredClone($state.snapshot(ch));
       toastMsg(`Copied ${getChannelLabel(activeInspectorChannel)} to clipboard`);
     }
   }
@@ -601,7 +665,7 @@
     if (!editScene) return;
     const ch = activeChannels[activeInspectorChannel];
     if (ch && ch.layers[lIdx]) {
-      layerClipboard = structuredClone(ch.layers[lIdx]);
+      layerClipboard = structuredClone($state.snapshot(ch.layers[lIdx]));
       toastMsg(`Copied Layer ${lIdx + 1} to clipboard`);
     }
   }
@@ -618,7 +682,7 @@
   }
 
   function normalizeLayerForChannel(src: SceneLayer, isPwm: boolean): SceneLayer {
-    const clone = structuredClone(src);
+    const clone = structuredClone($state.snapshot(src));
     if (isPwm) {
       // Normalization through PWM dimmer semantics:
       // derive intensity from max RGB component, set grayscale R=G=B
@@ -695,7 +759,36 @@
   }
 
   // ── Lifecycle & Invariant Guards ──────────────────────────────────────────────
+  function syncFocusedNode(targetIp: string) {
+    const session = nodeAuthStore.getSession(targetIp);
+    const changedOwner = !workspaceBound || targetIp !== nodeIp || session !== workspaceSession;
+    if (!changedOwner && workspaceOwner?.isCurrent()) return;
+    workspaceBound = true;
+    nodeIp = targetIp;
+    workspaceSession = session;
+    loadGen++;
+    selectionGen++;
+    workspaceOwner = nodeIp ? captureNodeOperation(nodeIp) : null;
+    documentLoading = saving = activating = deletingScene = checkingReferences = false;
+    showApplyChangesBanner = showConflictModal = showUnsavedModal = showNewSceneModal = showDeleteModal = false;
+    pendingAction = null;
+    deleteOwner = null; ++deleteRequest;
+    deleteTargetIdx = null; deleteReferences = null;
+    toast = error = '';
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = null;
+    if (changedOwner || !nodeIp) {
+      presets = []; effects = []; palettes = []; hwChannels = [];
+      workingDocument = persistedDocument = null;
+      selectedIdx = null;
+      libraryLoaded = false;
+    }
+    if (nodeIp) void loadData(nodeIp, loadGen);
+    else loading = false;
+  }
+
   onMount(() => {
+    disposed = false;
     // Unload protection for browser tab closing/reload when dirty
     const handleBeforeUnload = (e: BeforeUnloadEvent) => {
       if (isDirty) {
@@ -705,24 +798,12 @@
     };
     window.addEventListener('beforeunload', handleBeforeUnload);
 
-    const unsub = nodeStore.subscribe(state => {
-      const targetIp = state.nodeIp || getSelectedNodeIp();
-      if (targetIp !== nodeIp) {
-        nodeIp = targetIp;
-        loadGen++;
-        if (nodeIp) {
-          loadData(nodeIp, loadGen);
-        } else {
-          presets = [];
-          workingDocument = null;
-          persistedDocument = null;
-          selectedIdx = null;
-          loading = false;
-        }
-      }
-    });
+    const unsub = nodeStore.subscribe(state => syncFocusedNode(state.route || ''));
 
     return () => {
+      disposed = true;
+      ++loadGen; ++selectionGen; ++deleteRequest;
+      if (toastTimer) clearTimeout(toastTimer);
       window.removeEventListener('beforeunload', handleBeforeUnload);
       unsub();
     };
@@ -730,8 +811,10 @@
 
   function toastMsg(msg: string) {
     toast = msg;
-    setTimeout(() => {
-      if (toast === msg) toast = '';
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => {
+      toast = '';
+      toastTimer = null;
     }, 3000);
   }
 </script>
@@ -768,13 +851,18 @@
           <span class="lib-count">{presets.length}/{MAX_PRESETS}</span>
         </div>
         <div class="lib-header-actions">
-          <button class="btn-import" onclick={triggerImportClick} title="Import single scene">Import</button>
-          <button class="btn-primary btn-sm" onclick={openNewSceneModal} title="Create new scene">+ New Scene</button>
+          <button class="btn-import" onclick={triggerImportClick} disabled={!libraryLoaded || documentLoading} title="Import single scene">Import</button>
+          <button class="btn-primary btn-sm" onclick={openNewSceneModal} disabled={!libraryLoaded || documentLoading} title="Create new scene">+ New Scene</button>
         </div>
       </div>
 
       <div class="lib-list">
-        {#if presets.length === 0}
+        {#if !libraryLoaded}
+          <div class="empty-library-hint">
+            <p>Scene library unavailable. Load the saved library before creating or saving scenes.</p>
+            <button class="btn-primary btn-sm" onclick={() => loadData(nodeIp, loadGen)} disabled={!nodeIp}>Retry</button>
+          </div>
+        {:else if presets.length === 0}
           <div class="empty-library-hint">
             <p>No occupied scenes.</p>
             <button class="btn-primary btn-sm" onclick={openNewSceneModal}>Create First Scene</button>
@@ -788,7 +876,7 @@
               class:selected={isPresetSelected}
               class:active={isPresetActive}
               onclick={() => requestNavigation(() => selectScene(preset.index))}
-              onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') selectScene(preset.index); }}
+              onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); requestNavigation(() => selectScene(preset.index)); } }}
               role="button"
               tabindex="0"
               aria-pressed={isPresetSelected}
@@ -825,6 +913,7 @@
     <!-- 2. SCENE WORKSPACE & EDITING CANVAS                                   -->
     <!-- ═══════════════════════════════════════════════════════════════════════ -->
     <main class="editor">
+      {#if documentLoading}<p role="status">Loading selected scene…</p>{/if}
       <!-- Sync Follower Banner -->
       {#if isFollower}
         <div class="sync-follower-banner" role="alert">
@@ -861,7 +950,7 @@
             <p>The running hardware output still uses the previously activated version.</p>
           </div>
           {#if !isFollower}
-            <button class="btn-apply-changes" onclick={() => doActivate(editScene!.index)}>
+            <button class="btn-apply-changes" onclick={() => doActivate(editScene!.index)} disabled={documentLoading || !libraryLoaded}>
               Apply Changes
             </button>
           {/if}
@@ -908,7 +997,7 @@
               <button
                 class="btn-primary"
                 onclick={() => saveDocument(true)}
-                disabled={saving || activating || isFollower}
+                disabled={saving || activating || isFollower || documentLoading || !libraryLoaded}
                 title="Save document and immediately activate live"
               >
                 {saving ? 'Saving...' : activating ? 'Activating...' : 'Save & Activate'}
@@ -916,7 +1005,7 @@
               <button
                 class="btn-secondary"
                 onclick={() => saveDocument(false)}
-                disabled={saving}
+                disabled={saving || documentLoading || !libraryLoaded}
                 title="Save document to node NVS storage only"
               >
                 Save
@@ -925,7 +1014,7 @@
               <button
                 class="btn-primary"
                 onclick={() => doActivate(editScene.index)}
-                disabled={activating || isFollower || isActive}
+                disabled={activating || isFollower || isActive || documentLoading || !libraryLoaded}
                 title="Activate saved version on live hardware"
               >
                 {activating ? 'Activating...' : isActive ? 'Live Active' : 'Activate'}
@@ -933,7 +1022,7 @@
               <button
                 class="btn-secondary"
                 onclick={() => saveDocument(false)}
-                disabled={saving}
+                disabled={saving || documentLoading || !libraryLoaded}
                 title="Save changes to NVS"
               >
                 Save
@@ -1389,6 +1478,7 @@
 <!-- 1. New Scene Free Slot Selector Dialog (Requirement 13) -->
 {#if showNewSceneModal}
   <OperatorDialog
+    open
     title="Create New Scene"
     onClose={() => (showNewSceneModal = false)}
   >
@@ -1424,8 +1514,8 @@
       </div>
 
       <div class="modal-actions-right">
-        <button class="btn-secondary" onclick={() => (showNewSceneModal = false)}>Cancel</button>
-        <button class="btn-primary" onclick={confirmNewScene} disabled={newSceneSlot === null}>
+        <button type="button" data-dialog-cancel class="btn-secondary" onclick={() => (showNewSceneModal = false)}>Cancel</button>
+        <button type="button" class="btn-primary" onclick={confirmNewScene} disabled={newSceneSlot === null}>
           Create Scene
         </button>
       </div>
@@ -1436,6 +1526,8 @@
 <!-- 2. Delete Scene Confirmation Dialog with Dependency Guard (Requirement 34, 35, 36) -->
 {#if showDeleteModal && deleteTargetIdx !== null}
   <OperatorDialog
+    open
+    busy={deletingScene}
     title={`Delete Scene ${(deleteTargetIdx + 1).toString().padStart(2, '0')}?`}
     onClose={() => (showDeleteModal = false)}
   >
@@ -1444,6 +1536,10 @@
         <div class="loading-refs">
           <div class="spinner-sm"></div>
           <p>Evaluating scene dependencies...</p>
+        </div>
+      {:else if !deleteReferences}
+        <div class="blocked-delete-box" role="alert">
+          <p>Scene dependencies could not be loaded. Close and retry before deleting.</p>
         </div>
       {:else if isSceneBlockedFromDelete}
         <div class="blocked-delete-box" role="alert">
@@ -1468,21 +1564,22 @@
           </ul>
           <p class="resolve-hint">Please resolve or reassign these references before deleting.</p>
         </div>
-        <div class="modal-actions-right">
-          <button class="btn-secondary" onclick={() => (showDeleteModal = false)}>Close</button>
-        </div>
       {:else}
         <p class="delete-confirm-text">
           Are you sure you want to delete <strong>“{presets.find(p => p.index === deleteTargetIdx)?.name || `Scene ${deleteTargetIdx + 1}`}”</strong>?
           This will permanently remove both Scene and Motion data from the node.
         </p>
-        <div class="modal-actions-right">
-          <button class="btn-secondary" onclick={() => (showDeleteModal = false)}>Cancel</button>
-          <button class="btn-danger" onclick={confirmDeleteScene} disabled={deletingScene}>
+      {/if}
+      <div class="modal-actions-right">
+        <button type="button" data-dialog-cancel class="btn-secondary" onclick={() => (showDeleteModal = false)} disabled={deletingScene}>
+          {!checkingReferences && (!deleteReferences || isSceneBlockedFromDelete) ? 'Close' : 'Cancel'}
+        </button>
+        {#if !checkingReferences && deleteReferences && !isSceneBlockedFromDelete}
+          <button type="button" class="btn-danger" onclick={confirmDeleteScene} disabled={deletingScene}>
             {deletingScene ? 'Deleting...' : 'Delete Scene'}
           </button>
-        </div>
-      {/if}
+        {/if}
+      </div>
     </div>
   </OperatorDialog>
 {/if}
@@ -1490,14 +1587,15 @@
 <!-- 3. Unsaved Changes Navigation Modal (Requirement 40) -->
 {#if showUnsavedModal}
   <OperatorDialog
+    open
     title="Unsaved Scene Changes"
     onClose={cancelDiscard}
   >
     <div class="modal-body-pad">
       <p>You have unsaved changes in the current scene document. If you proceed, these changes will be discarded.</p>
       <div class="modal-actions-right">
-        <button class="btn-secondary" onclick={cancelDiscard}>Stay on Scene</button>
-        <button class="btn-danger" onclick={confirmDiscard}>Discard Changes</button>
+        <button type="button" data-dialog-cancel class="btn-secondary" onclick={cancelDiscard}>Stay on Scene</button>
+        <button type="button" class="btn-danger" onclick={confirmDiscard}>Discard Changes</button>
       </div>
     </div>
   </OperatorDialog>

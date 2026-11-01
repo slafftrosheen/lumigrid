@@ -123,6 +123,81 @@ describe('dashboard API transport', () => {
       .rejects.toThrow('HTTP 404 Not Found: preset not found');
   });
 
+  it('does not let an old 401 clear a replacement session on the same address', async () => {
+    const setSession = (token: string) => nodeAuthStore.setSession({
+      address: 'node.local', role: 'admin', sessionToken: token, expiresAt: Date.now() + 60000,
+    });
+    setSession('old');
+    let resolve!: (response: Response) => void;
+    vi.mocked(fetch).mockReturnValue(new Promise(done => { resolve = done; }));
+    const pending = apiJson('node.local', '/api/v1/config');
+    setSession('new');
+    resolve(new Response('{"error":"expired session"}', { status: 401 }));
+    await expect(pending).rejects.toThrow('HTTP 401');
+    expect(nodeAuthStore.getSession('node.local')?.sessionToken).toBe('new');
+  });
+
+  it('discards a successful response body completed under an obsolete session', async () => {
+    const setSession = (token: string) => nodeAuthStore.setSession({
+      address: 'node.local', role: 'admin', sessionToken: token, expiresAt: Date.now() + 60000,
+    });
+    setSession('old');
+    let resolve!: (body: unknown) => void;
+    const response = new Response();
+    vi.spyOn(response, 'json').mockReturnValue(new Promise(done => { resolve = done; }));
+    vi.mocked(fetch).mockResolvedValue(response);
+    const pending = apiJson('node.local', '/api/v1/config');
+    await Promise.resolve();
+    await Promise.resolve();
+    setSession('new');
+    resolve({ saved: true });
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+  });
+
+  it('honors a caller cancellation instead of replacing its signal', async () => {
+    const controller = new AbortController();
+    vi.mocked(fetch).mockImplementation(async (_url, options) => {
+      expect(options?.signal?.aborted).toBe(true);
+      throw new DOMException('Cancelled', 'AbortError');
+    });
+    controller.abort();
+    await expect(apiJson('node.local', '/api/v1/health', { signal: controller.signal }))
+      .rejects.toMatchObject({ name: 'AbortError' });
+  });
+
+  it.each(['timeout', 'caller abort'] as const)('cancels a stalled JSON body on %s after headers arrived', async (cause) => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    let bodyStarted!: () => void;
+    const started = new Promise<void>(resolve => { bodyStarted = resolve; });
+    let fetchSignal!: AbortSignal;
+    vi.mocked(fetch).mockImplementation(async (_url, options) => {
+      fetchSignal = options!.signal!;
+      const stream = new ReadableStream<Uint8Array>({
+        start(body) {
+          body.enqueue(new TextEncoder().encode('{"partial":'));
+          fetchSignal.addEventListener('abort', () => {
+            body.error(new DOMException('Body cancelled', 'AbortError'));
+          }, { once: true });
+        },
+        pull() { bodyStarted(); },
+      });
+      return new Response(stream, { status: 200 });
+    });
+    try {
+      const pending = apiJson('node.local', '/api/v1/health', { signal: controller.signal }, 100);
+      const rejected = expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+      await started;
+      await Promise.resolve();
+      if (cause === 'timeout') await vi.advanceTimersByTimeAsync(101);
+      else controller.abort();
+      await rejected;
+      expect(fetchSignal.aborted).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('handles 422 Unprocessable Entity responses', async () => {
     vi.mocked(fetch).mockResolvedValue(
       new Response(JSON.stringify({ error: 'invalid parameters' }), {

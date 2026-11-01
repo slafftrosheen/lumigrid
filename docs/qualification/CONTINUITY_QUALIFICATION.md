@@ -17,13 +17,15 @@ Build and verification results are revision-specific; see the dated change repor
 | all_16_outputs | Connector-by-connector mapping and behavior for A1–A8 and P1–P8 with supported loads |
 | combined_outputs_and_network | Simultaneous output operation and network/API load; record selected effects, loads, timing captures, resets and memory minima |
 | network_loss_and_reconnect | Leader loss, stale and conflicting reports, reconnection, content mismatch and group selection; retain both nodes' logs |
-| sync_shutdown_and_recovery | On the actual PCB, repeat sync disable/enable, role/token changes and network rebind under simultaneous output load; retain timeout/retry behavior, worker counts, output captures, heap and stack minima. Demonstrate no replacement worker or dependency teardown before the old worker acknowledges exit. Lose the leader during cue/timeline playback in Auto mode: local leadership must wait for remote cue/scheduler release; rejected release must remain visible and retry before takeover. |
+| sync_shutdown_and_recovery | On the actual PCB, repeat sync disable/enable, role/token changes and network rebind under simultaneous output load; retain timeout/retry behavior, worker counts, output captures, heap and stack minima. Demonstrate no replacement worker or dependency teardown before the old worker acknowledges exit. Lose the leader during cue/timeline playback in Auto mode: local leadership must wait for remote cue/scheduler release; rejected release must remain visible and retry before takeover. Repeat with a preferred replacement leader and a rebooted leader reusing scene/timeline generation values. A failed release must retain the previous source and must not acknowledge or apply the replacement packet. |
 | ota_and_rollback | Valid update, interruption and rollback on the intended layout; preserve configuration and image identity |
 | configuration_power_loss | Interrupted save/restore and recovery; do not erase the only backup during the test |
 | thermal_endurance | Actual current and temperature observations with duration, ambient conditions and agreed limits; firmware does not invent temperature sensor data |
 | installation_limits_review | Approved supply/voltage/load/wiring/enclosure/antenna constraints for the exact assembly |
 
 Set test limits and durations with the responsible engineer/lab and include those decisions in the evidence. Software-estimated power is not a current or temperature measurement. A software blackout is not a physical disconnection of strip power.
+
+For power-limit acceptance, compare actual driver commands and measured supply current with the shared model in [Configuration](../CONFIGURATION.md). Include mixed RGB/RGBW/PWM loads, channel/supply/global ceilings, soft start, and a supply derated to zero usable capacity. Confirm that a ceiling below addressable idle extinguishes active demand while retaining the idle estimate. Inject output and blackout failures: last-confirmed estimates must be marked incomplete until recovery. Unknown PWM ratings cannot establish compliance with a positive power budget.
 
 ## Running the completeness preflight
 

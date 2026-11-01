@@ -8,7 +8,8 @@ namespace lg {
 esp_err_t OutputScheduler::schedule(
     const RenderFrame& frame,
     const DeviceConfig& device_cfg,
-    OutputController& controller
+    OutputController& controller,
+    const OutputPowerRequest* power_request
 ) {
     // ── Pass 1: Validate configured channels ──
     for (uint8_t ch = 0; ch < kChannelCount; ++ch) {
@@ -50,7 +51,7 @@ esp_err_t OutputScheduler::schedule(
         }
     }
 
-    return tx.commit();
+    return tx.commit(power_request);
 }
 
 } // namespace lg

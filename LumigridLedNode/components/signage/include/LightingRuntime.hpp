@@ -203,6 +203,9 @@ public:
 
     PowerBudget& power_budget() { return power_budget_; }
     const PowerBudget& power_budget() const { return power_budget_; }
+    /// Copies renderer counters and confirmed final-output estimates without
+    /// holding the lighting and output mutexes together.
+    PowerTransientDiagnostics power_diagnostics() const;
     float get_fps() const { return frame_metrics_.committed_fps; }
     FrameTimingMetrics frame_timing_metrics() const { return frame_metrics_; }
     static FrameBudgetEstimate preflight_frame_budget(const DeviceConfig& cfg);

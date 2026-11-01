@@ -4,6 +4,7 @@
 #include "AddressableDriver.hpp"
 #include "Pca9685Driver.hpp"
 #include "SignageTypes.hpp"
+#include "PowerModel.hpp"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -48,7 +49,7 @@ public:
     AddressableDriver& pixels();
     Pca9685Driver& pwm();
 
-    esp_err_t commit();
+    esp_err_t commit(const OutputPowerRequest* power_request = nullptr);
     esp_err_t abort();
     bool is_active() const { return active_; }
 
@@ -162,7 +163,7 @@ public:
     esp_err_t try_commit();
 
     /// Commit while caller already holds lock()
-    esp_err_t try_commit_locked();
+    esp_err_t try_commit_locked(const OutputPowerRequest* power_request = nullptr);
 
     /// Begin a controlled RAII transaction (Batch 8 Item 8)
     OutputTransaction begin_transaction() {
@@ -214,6 +215,7 @@ public:
     BlackoutResult last_blackout_result() const { return last_blackout_result_; }
 
     OutputCommitMetrics commit_metrics() const { return commit_metrics_; }
+    OutputPowerDiagnostics power_diagnostics() const;
 
     AddressableDriver& pixels() { return pixels_; }
     const AddressableDriver& pixels() const { return pixels_; }
@@ -235,7 +237,10 @@ public:
     friend class OutputTransaction;
 
 private:
-    void enforce_power_guard_locked();
+    OutputPowerDiagnostics enforce_power_guard_locked(const OutputPowerRequest* request = nullptr);
+    power_model::Load channel_power_locked(uint8_t ch) const;
+    OutputPowerDiagnostics capture_power_locked() const;
+    void publish_power_locked(OutputPowerDiagnostics snapshot, bool confirmed);
     BlackoutResult blackout_locked();
 
     DeviceConfig power_cfg_{};
@@ -273,6 +278,7 @@ private:
 
     BlackoutResult last_blackout_result_{};
     OutputCommitMetrics commit_metrics_{};
+    OutputPowerDiagnostics power_diagnostics_{};
 
 #if defined(CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS) && CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS
 public:

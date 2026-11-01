@@ -47,7 +47,8 @@ const store = writable<CueEditorState>(initial);
 
 /** True when the working draft differs from the persisted node version. */
 export function isDirty(state: CueEditorState): boolean {
-  if (!state.persisted || !state.working) return false;
+  if (!state.working) return false;
+  if (!state.persisted) return true;
   return !cueListsEqual(state.persisted, state.working);
 }
 
@@ -125,15 +126,20 @@ export const cueEditorStore = {
     store.update((s) => ({ ...s, conflict: null }));
   },
 
-  /** Authoritative save success: persisted becomes the saved document (§38). */
-  commitSave(saved: CueListDocument) {
-    store.update((s) => ({
-      ...s,
-      persisted: cloneDoc(saved),
-      working: cloneDoc(saved),
-      conflict: null,
-      error: null,
-    }));
+  /** Commit the submitted version without discarding edits made during the save. */
+  commitSave(saved: CueListDocument, submitted?: CueListDocument) {
+    store.update((s) => {
+      const newerDraft = submitted && s.working && !cueListsEqual(s.working, submitted);
+      return {
+        ...s,
+        persisted: cloneDoc(saved),
+        working: newerDraft && s.working
+          ? { ...cloneDoc(s.working), checksum: saved.checksum }
+          : cloneDoc(saved),
+        conflict: null,
+        error: null,
+      };
+    });
   },
 
   /** Keep my draft after a conflict, but record the node's checksum. */

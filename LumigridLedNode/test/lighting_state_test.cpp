@@ -10,6 +10,7 @@
 #include "ManualControlTypes.hpp"
 #include "ControlSourceManager.hpp"
 #include "ColorPipeline.hpp"
+#include "OutputScheduler.hpp"
 // Drive one frame without a host background rendering task. Access control is
 // relaxed only in this test translation unit; implementation remains unmodified.
 #define private public
@@ -59,8 +60,250 @@ struct LightingFixture {
     FrameResult render() { return runtime->render_frame(static_cast<uint32_t>(host_now_us.load() / 1000)); }
 };
 
+void power_shared_model() {
+    ControllerFixture f;
+    auto cfg = config(3, 1, 1);
+    cfg.channels[8].rated_full_power_mw = 4095;
+    f.start(cfg);
+    PowerBudget budget;
+    auto frame = std::make_unique<RenderFrame>();
+    frame->channels[0].pixels[0] = {255, 255, 255, 255}; // RGB wire ignores W.
+    frame->channels[1].pixels[0] = {255, 255, 255, 255};
+    frame->channels[8].pwm = 2048;
+    require(budget.enforce(*frame, cfg, 1000) == 4208, "RGB/RGBW/PWM models disagree with conservative guard assumptions");
+    const auto request = budget.output_request();
+    require(OutputScheduler::schedule(*frame, cfg, f.controller, &request) == ESP_OK, "shared-model frame failed");
+    const auto output = f.controller.power_diagnostics();
+    require(output.command_confirmed && output.estimate_complete && output.limited_power_mw == 4208 &&
+            output.requested_power_mw == 4208, "unlimited emitted power differs from renderer model");
+    require(f.rmt.channels[0].frame == std::vector<uint8_t>({255, 255, 255}) &&
+            f.rmt.channels[1].frame == std::vector<uint8_t>({255, 255, 255, 255}) && f.pca.duties[0] == 2048,
+            "unlimited model changed output bytes");
+
+    // Preserve fractional demand until the final report: 10 mW idle plus
+    // 295/255 mW red and 1000/4095 mW PWM rounds upward to 12 mW.
+    cfg.channels[8].rated_full_power_mw = 1000;
+    f.controller.set_power_config(cfg);
+    *frame = RenderFrame{};
+    frame->channels[0].pixels[0] = {1, 0, 0, 0};
+    frame->channels[8].pwm = 1;
+    require(budget.enforce(*frame, cfg, 1020) == 12, "small loads were rounded away before aggregation");
+    require(OutputScheduler::schedule(*frame, cfg, f.controller) == ESP_OK &&
+            f.controller.power_diagnostics().limited_power_mw == 12, "fractional final guard model differs");
+
+    cfg.channels[8].rated_full_power_mw = 0;
+    cfg.channels[8].max_milliwatts = 999999; // Canonical v4 zero remains unknown.
+    f.controller.set_power_config(cfg);
+    budget.enforce(*frame, cfg, 1040);
+    require(OutputScheduler::schedule(*frame, cfg, f.controller) == ESP_OK, "unknown-rated PWM frame failed");
+    require(!budget.estimate_complete() && !f.controller.power_diagnostics().estimate_complete &&
+            f.controller.power_diagnostics().unmodeled_channel_mask == (1u << 8), "unknown PWM rating silently became modeled");
+}
+
+void power_idle_floors() {
+    for (unsigned tier = 0; tier < 3; ++tier) {
+        for (uint32_t ceiling : {19u, 20u, 21u}) {
+            ControllerFixture f;
+            auto cfg = config(1, 0, 4); // Fixed 20 mW idle, 1180 mW active red.
+            if (tier == 0) cfg.channels[0].channel_limit_mw = ceiling;
+            if (tier == 1) {
+                auto& psu = cfg.power_supplies[0];
+                psu.enabled = true; psu.channel_mask = 1;
+                psu.voltage_mv = ceiling * 1000; psu.rated_current_ma = 1;
+                psu.usable_capacity_permille = 1000;
+            }
+            if (tier == 2) cfg.max_power_mw = ceiling;
+            f.start(cfg);
+            // Exercise the independent final guard with an unbudgeted source.
+            f.controller.pixels().fill(0, 255, 0, 0);
+            require(f.controller.try_commit() == ESP_OK, "tiny-budget guard rejected the output transaction");
+            require(std::all_of(f.rmt.channels[0].frame.begin(), f.rmt.channels[0].frame.end(),
+                                [](uint8_t byte) { return byte == 0; }), "fixed idle was scaled and left active demand above the ceiling");
+            auto output = f.controller.power_diagnostics();
+            require(output.requested_power_mw == 1200 && output.limited_power_mw == 20 && output.idle_power_mw == 20,
+                    "guard replaced the non-dimmable idle floor with the configured limit");
+
+            PowerBudget budget;
+            budget.set_limit_mw(cfg.max_power_mw);
+            auto frame = std::make_unique<RenderFrame>();
+            for (unsigned p = 0; p < 4; ++p) frame->channels[0].pixels[p] = {255, 0, 0, 0};
+            require(budget.enforce(*frame, cfg, 1000) == 1200 && budget.limited_power_mw() == 20,
+                    "renderer lost requested demand or scaled away fixed idle");
+            const auto request = budget.output_request();
+            require(OutputScheduler::schedule(*frame, cfg, f.controller, &request) == ESP_OK,
+                    "renderer/guard idle-floor frame failed");
+            output = f.controller.power_diagnostics();
+            require(output.limited_power_mw == 20 && output.throttling_events == 2,
+                    "shared renderer/guard limiting was counted twice or misreported");
+            if (tier == 1) require(output.supply_domains[0].estimated_load_mw == 20,
+                                   "supply report hid an impossible idle floor");
+            require(f.controller.blackout() == ESP_OK && f.controller.power_diagnostics().command_confirmed &&
+                    f.controller.power_diagnostics().limited_power_mw == 20,
+                    "impossible power limit blocked blackout or fabricated zero consumption");
+        }
+    }
+}
+
+void power_limit_chain() {
+    ControllerFixture f;
+    auto cfg = config(3, 1, 1);
+    cfg.channels[0].channel_limit_mw = 500;
+    cfg.channels[8].rated_full_power_mw = 4095;
+    cfg.max_power_mw = 1200;
+    auto& shared = cfg.power_supplies[0];
+    shared.enabled = true; shared.channel_mask = 1u | (1u << 8);
+    shared.voltage_mv = 5000; shared.rated_current_ma = 200; shared.usable_capacity_permille = 1000;
+    auto& independent = cfg.power_supplies[1];
+    independent.enabled = true; independent.channel_mask = 2;
+    independent.voltage_mv = 5000; independent.rated_current_ma = 140; independent.usable_capacity_permille = 1000;
+    f.start(cfg);
+    auto frame = std::make_unique<RenderFrame>();
+    frame->channels[0].pixels[0] = {255, 255, 255, 0};
+    frame->channels[1].pixels[0] = {255, 0, 0, 255};
+    frame->channels[8].pwm = 4095;
+    PowerBudget budget;
+    budget.set_limit_mw(1200);
+    budget.observe_output_power(1200); // Steady-state budget, no enable transient.
+    require(budget.enforce(*frame, cfg, 1000) == 5665, "requested demand was captured after a local clamp");
+    require(frame->channels[0].pixels[0].r == 21 && frame->channels[1].pixels[0].r == 182 &&
+            frame->channels[1].pixels[0].w == 182 && frame->channels[8].pwm == 628,
+            "local/domain/global chain used stale or scaled-idle accounting");
+    const auto renderer = budget.diagnostics();
+    require(renderer.limited_power_mw == 1193 && renderer.supply_domains[0].estimated_load_mw == 706 &&
+            renderer.supply_domains[1].estimated_load_mw == 487, "renderer supply loads were sampled before final scaling");
+    const auto request = budget.output_request();
+    require(OutputScheduler::schedule(*frame, cfg, f.controller, &request) == ESP_OK, "chained power frame failed");
+    require(f.rmt.channels[0].frame == std::vector<uint8_t>({21, 21, 21}) &&
+            f.rmt.channels[1].frame == std::vector<uint8_t>({0, 182, 0, 182}) && f.pca.duties[0] == 628,
+            "final guard dimmed an already valid quantized frame again");
+    const auto output = f.controller.power_diagnostics();
+    require(output.requested_power_mw == 5665 && output.limited_power_mw == 1193 &&
+            output.supply_domains[0].estimated_load_mw == 706 && output.supply_domains[1].estimated_load_mw == 487,
+            "final output report differs from emitted mixed-channel commands");
+    require(output.throttling_events == 1 && output.channel_throttle_events == 1 &&
+            output.supply_domains[0].throttle_events == 1 && output.supply_domains[1].throttle_events == 0,
+            "renderer and final guard duplicated or lost limiting events");
+}
+
+void power_zero_supply() {
+    for (bool rounded_zero : {false, true}) {
+        ControllerFixture f;
+        auto cfg = config(3, 1, 1);
+        cfg.channels[8].rated_full_power_mw = 1000;
+        auto& psu = cfg.power_supplies[0];
+        psu.enabled = true; psu.channel_mask = 1u | (1u << 8);
+        psu.voltage_mv = rounded_zero ? 3000 : 5000;
+        psu.rated_current_ma = rounded_zero ? 1 : 200;
+        psu.usable_capacity_permille = rounded_zero ? 1 : 0;
+        require(psu.usable_power_mw() == 0, "zero-capacity fixture is not zero");
+        f.start(cfg);
+        f.controller.pixels().fill(0, 255, 0, 0);
+        f.controller.pixels().fill(1, 255, 0, 0);
+        f.controller.pwm().set(0, 4095);
+        require(f.controller.try_commit() == ESP_OK, "zero-capacity final guard failed");
+        require(f.rmt.channels[0].frame == std::vector<uint8_t>({0, 0, 0}) && f.pca.duties[0] == 0 &&
+                f.rmt.channels[1].frame == std::vector<uint8_t>({0, 255, 0, 0}),
+                "zero usable supply acted as unlimited or dimmed an unrelated channel");
+        auto output = f.controller.power_diagnostics();
+        require(output.requested_power_mw == 1600 && output.limited_power_mw == 305 &&
+                output.supply_domains[0].estimated_load_mw == 5, "zero-capacity report erased fixed idle");
+
+        PowerBudget budget;
+        auto frame = std::make_unique<RenderFrame>();
+        frame->channels[0].pixels[0] = frame->channels[1].pixels[0] = {255, 0, 0, 0};
+        frame->channels[8].pwm = 4095;
+        require(budget.enforce(*frame, cfg, 1000) == 1600 && budget.limited_power_mw() == 305 &&
+                frame->channels[0].pixels[0].r == 0 && frame->channels[8].pwm == 0 &&
+                frame->channels[1].pixels[0].r == 255, "renderer zero-capacity policy differs from final guard");
+        const auto request = budget.output_request();
+        require(OutputScheduler::schedule(*frame, cfg, f.controller, &request) == ESP_OK,
+                "zero-capacity renderer/guard frame failed");
+        output = f.controller.power_diagnostics();
+        require(output.limited_power_mw == 305 && output.supply_domains[0].estimated_load_mw == 5 &&
+                output.supply_domains[0].throttle_events == 2, "zero-capacity final report or event merge differs");
+    }
+    ControllerFixture unknown;
+    auto cfg = config(0, 1);
+    auto& psu = cfg.power_supplies[0];
+    psu.enabled = true; psu.channel_mask = 1u << 8;
+    psu.voltage_mv = 5000; psu.rated_current_ma = 200; psu.usable_capacity_permille = 0;
+    unknown.start(cfg);
+    unknown.controller.pwm().set(0, 4095);
+    require(unknown.controller.try_commit() == ESP_OK && unknown.pca.duties[0] == 0 &&
+            !unknown.controller.power_diagnostics().estimate_complete,
+            "unmodeled PWM escaped the explicit zero-capacity domain");
+    PowerBudget budget;
+    auto frame = std::make_unique<RenderFrame>();
+    frame->channels[8].pwm = 4095;
+    budget.enforce(*frame, cfg, 1000);
+    require(frame->channels[8].pwm == 0 && !budget.estimate_complete(),
+            "renderer treated unmodeled zero-capacity demand as free power");
+}
+
+void power_post_guard_snapshot() {
+    LightingFixture f(1, 0);
+    auto physical_cfg = stored_config;
+    physical_cfg.max_power_mw = 500;
+    f.output.controller.set_power_config(physical_cfg); // Final guard is authoritative during hot apply.
+    ManualOverrideFrame manual{};
+    manual.channels[0].active = true;
+    manual.channels[0].color = {255, 0, 0, 0};
+    manual.channels[0].brightness = 255;
+    require(f.runtime->submit_manual_override(manual), "power snapshot manual frame rejected");
+    bool callback_checked = false;
+    f.output.controller.set_commit_observer([&](esp_err_t err) {
+        require(err == ESP_OK, "guarded snapshot commit failed");
+        const auto snapshot = f.runtime->power_diagnostics(); // Output lock is held, lighting lock must be free.
+        require(snapshot.limited_power_mw == 497 && snapshot.requested_power_mw == 1200,
+                "commit callback saw a pre-guard or uncommitted power estimate");
+        callback_checked = true;
+    });
+    require(f.render() == FrameResult::Committed && callback_checked, "guarded runtime frame failed");
+    require(f.output.rmt.channels[0].frame[1] == 103 && f.runtime->current_render_frame_.channels[0].pixels[0].r == 255,
+            "power telemetry confused emitted brightness with the renderer preview");
+    const auto output = f.runtime->power_diagnostics();
+    require(output.estimate_complete && output.limit_mw == 500 && output.limited_power_mw == 497 &&
+            output.throttling_events == 1, "runtime snapshot ignored final guard limiting");
+    require(f.output.controller.blackout() == ESP_OK, "snapshot blackout failed");
+    const auto black = f.runtime->power_diagnostics();
+    require(black.estimate_complete && black.requested_power_mw == 20 && black.limited_power_mw == 20,
+            "blackout retained the bright renderer estimate or erased the idle floor");
+}
+
+void power_failed_commit_snapshot() {
+    LightingFixture f(0, 1);
+    auto cfg = stored_config;
+    cfg.channels[8].rated_full_power_mw = 1000;
+    f.output.controller.set_power_config(cfg);
+    f.output.controller.pwm().set(0, 1000);
+    require(f.output.controller.try_commit() == ESP_OK && f.runtime->power_diagnostics().limited_power_mw == 245,
+            "could not establish a confirmed power estimate");
+    require(f.output.controller.recover_pca() == ESP_OK && f.runtime->power_diagnostics().estimate_complete &&
+            f.runtime->power_diagnostics().limited_power_mw == 0,
+            "successful PCA recovery retained a stale nonzero PWM estimate");
+    f.output.controller.pwm().set(0, 1000);
+    require(f.output.controller.try_commit() == ESP_OK, "could not restore the prior command after recovery");
+    f.output.controller.pwm().set(0, 3000);
+    f.output.pca.fail_frames = 3; // New command, controller blackout, and runtime fault-observer blackout fail.
+    require(f.output.controller.try_commit() != ESP_OK, "injected commit/blackout failure was accepted");
+    const auto failed = f.runtime->power_diagnostics();
+    require(!failed.estimate_complete && failed.model_state == PowerEstimateState::Unknown &&
+            failed.limited_power_mw == 245 && failed.requested_power_mw == 245,
+            "failed hardware I/O published a new successful power estimate");
+    require(f.output.controller.recover_pca() == ESP_OK && f.output.controller.blackout() == ESP_OK,
+            "power snapshot recovery failed");
+    require(f.runtime->power_diagnostics().estimate_complete && f.runtime->power_diagnostics().limited_power_mw == 0,
+            "confirmed PWM blackout did not restore a valid zero estimate");
+}
+
 void lighting_case(const std::string& name) {
-    if (name == "stop_repeated_restart") {
+    if (name == "power_shared_model") power_shared_model();
+    else if (name == "power_idle_floors") power_idle_floors();
+    else if (name == "power_limit_chain") power_limit_chain();
+    else if (name == "power_zero_supply") power_zero_supply();
+    else if (name == "power_post_guard_snapshot") power_post_guard_snapshot();
+    else if (name == "power_failed_commit_snapshot") power_failed_commit_snapshot();
+    else if (name == "stop_repeated_restart") {
         LightingFixture f;
         f.runtime->stop();
         f.runtime->stop();

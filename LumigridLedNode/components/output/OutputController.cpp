@@ -352,6 +352,7 @@ esp_err_t OutputController::reconfigure_on_output_core(const DeviceConfig& cfg) 
     }
 
     // Step 4: Gate PCA /OE
+    power_diagnostics_.command_confirmed = false;
     const esp_err_t inhibit_err = Pca9685Driver::disable_outputs();
     if (inhibit_err != ESP_OK) {
         // Preserve the old topology and stop accepting light. An emergency
@@ -430,6 +431,7 @@ esp_err_t OutputController::reconfigure_on_output_core(const DeviceConfig& cfg) 
         output_enabled_.store(true, std::memory_order_release);
     }
     power_cfg_ = cfg;
+    publish_power_locked(capture_power_locked(), true);
 
     const uint32_t reconfig_dur_us = static_cast<uint32_t>(esp_timer_get_time() - t_start);
     uint32_t prev_rec = reconfigure_max_us_.load(std::memory_order_relaxed);
@@ -465,6 +467,7 @@ BlackoutResult OutputController::blackout_locked() {
     res.addressable_confirmed = (a_res.result == ESP_OK);
     res.pwm_confirmed = (p_err == ESP_OK);
     last_blackout_result_ = res;
+    publish_power_locked(capture_power_locked(), res.addressable_confirmed && res.pwm_confirmed);
     return res;
 }
 
@@ -545,6 +548,8 @@ esp_err_t OutputController::recover_pca_on_output_core() {
         return ESP_ERR_INVALID_STATE;
     }
     lock();
+    const bool output_was_confirmed = power_diagnostics_.command_confirmed;
+    power_diagnostics_.command_confirmed = false;
     Pca9685Driver::disable_outputs();
     esp_err_t err = pwm_.recover();
     if (err != ESP_OK) {
@@ -557,6 +562,9 @@ esp_err_t OutputController::recover_pca_on_output_core() {
         if (last_fault_domain_.load(std::memory_order_relaxed) == OutputFaultDomain::PcaI2c) {
             last_fault_domain_.store(OutputFaultDomain::None, std::memory_order_release);
         }
+        // Recovery confirms zero PWM. It cannot independently confirm a
+        // previously uncertain addressable frame, so retain that uncertainty.
+        if (output_was_confirmed) publish_power_locked(capture_power_locked(), true);
     }
     unlock();
     return err;
@@ -611,9 +619,9 @@ Pca9685Driver& OutputTransaction::pwm() {
     return controller_.pwm();
 }
 
-esp_err_t OutputTransaction::commit() {
+esp_err_t OutputTransaction::commit(const OutputPowerRequest* power_request) {
     if (!active_) return ESP_ERR_INVALID_STATE;
-    esp_err_t err = controller_.try_commit_locked();
+    esp_err_t err = controller_.try_commit_locked(power_request);
     controller_.unlock();
     active_ = false;
     return err;
@@ -627,7 +635,7 @@ esp_err_t OutputTransaction::abort() {
     return b_res;
 }
 
-esp_err_t OutputController::try_commit_locked() {
+esp_err_t OutputController::try_commit_locked(const OutputPowerRequest* power_request) {
     commit_metrics_.attempted++;
 
 #if defined(CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS) && CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS
@@ -672,7 +680,7 @@ esp_err_t OutputController::try_commit_locked() {
     }
 
     // HW-005.11: Common last-stage power guard before physical commit
-    enforce_power_guard_locked();
+    OutputPowerDiagnostics staged_power = enforce_power_guard_locked(power_request);
 
     const int64_t t_total_start = esp_timer_get_time();
 
@@ -758,6 +766,7 @@ esp_err_t OutputController::try_commit_locked() {
             last_fault_domain_.store(OutputFaultDomain::None, std::memory_order_release);
         }
         commit_metrics_.successful++;
+        publish_power_locked(staged_power, true);
     }
 
     if (commit_observer_) {
@@ -767,126 +776,167 @@ esp_err_t OutputController::try_commit_locked() {
     return final_err;
 }
 
-void OutputController::enforce_power_guard_locked() {
-    uint64_t ch_mw[kChannelCount] = {};
-    uint64_t total_mw = 0;
-    const bool legacy_power_fields = power_cfg_.schema_version < 4;
-
-    for (uint8_t lane = 0; lane < AddressableDriver::kLanes; ++lane) {
-        if (!pixels_.configured(lane)) continue;
-        const uint16_t pcount = pixels_.configured_pixels(lane);
-        const bool rgbw = pixels_.has_white(lane);
-        const uint8_t* wire = pixels_.wire_data(lane);
-        if (!wire || pcount == 0) continue;
-
-        const uint8_t pr = pixels_.rmt().pos_r(lane);
-        const uint8_t pg = pixels_.rmt().pos_g(lane);
-        const uint8_t pb = pixels_.rmt().pos_b(lane);
-        const uint8_t pw = pixels_.rmt().pos_w(lane);
-        const uint32_t bpp = rgbw ? 4u : 3u;
-
-        uint64_t lane_idle = static_cast<uint64_t>(pcount) * 5u; // 5 mW idle
-        uint64_t lane_active = 0;
-
-        for (uint16_t px = 0; px < pcount; ++px) {
-            const size_t offset = static_cast<size_t>(px) * bpp;
-            const uint8_t r = wire[offset + pr];
-            const uint8_t g = wire[offset + pg];
-            const uint8_t b = wire[offset + pb];
-            const uint8_t w = rgbw ? wire[offset + pw] : 0;
-
-            const uint64_t sum_rgb = static_cast<uint64_t>(r) + g + b;
-            const uint64_t sum_w = static_cast<uint64_t>(w);
-            const uint64_t px_mw = ((sum_rgb * 295u) + (sum_w * 380u)) / 255u;
-            lane_active += px_mw;
+power_model::Load OutputController::channel_power_locked(uint8_t ch) const {
+    power_model::Load load;
+    if (ch < AddressableDriver::kLanes) {
+        if (!pixels_.configured(ch)) return load;
+        const uint16_t count = pixels_.configured_pixels(ch);
+        const uint8_t* wire = pixels_.wire_data(ch);
+        if (!wire || count == 0) return load;
+        load.idle = power_model::units(uint64_t(count) * power_model::kPixel.idle_mw);
+        const bool rgbw = pixels_.has_white(ch);
+        const uint8_t r = pixels_.rmt().pos_r(ch), g = pixels_.rmt().pos_g(ch);
+        const uint8_t b = pixels_.rmt().pos_b(ch), w = pixels_.rmt().pos_w(ch);
+        const size_t stride = rgbw ? 4 : 3;
+        for (uint16_t pixel = 0; pixel < count; ++pixel) {
+            const uint8_t* value = wire + pixel * stride;
+            load.active += power_model::pixel_active(value[r], value[g], value[b], rgbw ? value[w] : 0);
         }
-
-        ch_mw[lane] = lane_idle + lane_active;
-        total_mw += ch_mw[lane];
+    } else if (power_cfg_.channels[ch].enabled && pwm_available_.load(std::memory_order_acquire)) {
+        load.active = power_model::pwm_active(pwm_.values()[ch - 8], power_model::pwm_rating(power_cfg_, ch));
     }
+    return load;
+}
 
-    if (pwm_available_.load(std::memory_order_acquire)) {
-        const auto& pwm_vals = pwm_.values();
-        for (uint8_t ch = 8; ch < kChannelCount; ++ch) {
-            const auto& ccfg = power_cfg_.channels[ch];
-            if (!ccfg.enabled) {
-                pwm_.set(ch - 8, 0);
-                continue;
-            }
-            const uint16_t duty = pwm_vals[ch - 8];
-            const uint32_t rated = legacy_power_fields && ccfg.rated_full_power_mw == 0
-                ? ccfg.max_milliwatts : ccfg.rated_full_power_mw;
-            if (duty > 0 && rated > 0) {
-                const uint64_t pwm_mw = (static_cast<uint64_t>(duty) * rated) / 4095u;
-                ch_mw[ch] = pwm_mw;
-                total_mw += pwm_mw;
-            }
-        }
-    }
-
-    // 2. Local channel limit enforcement
+OutputPowerDiagnostics OutputController::capture_power_locked() const {
+    OutputPowerDiagnostics snapshot;
+    snapshot.limit_mw = power_cfg_.max_power_mw;
+    snapshot.throttling_events = power_diagnostics_.throttling_events;
+    snapshot.channel_throttle_events = power_diagnostics_.channel_throttle_events;
+    power_model::Load channels[kChannelCount]{};
+    power_model::Load total;
+    uint16_t enabled_mask = 0;
     for (uint8_t ch = 0; ch < kChannelCount; ++ch) {
-        const auto& ccfg = power_cfg_.channels[ch];
-        // Schema v4 zero is intentional (unlimited/unknown). Migration populates
-        // canonical fields once; a stale legacy value must not revive a limit.
-        const uint32_t ch_limit = legacy_power_fields && ccfg.channel_limit_mw == 0
-            ? ccfg.max_milliwatts : ccfg.channel_limit_mw;
-        if (ch_limit > 0 && ch_mw[ch] > ch_limit) {
-            const uint16_t scale_256 = static_cast<uint16_t>((static_cast<uint64_t>(ch_limit) * 256u) / ch_mw[ch]);
-            if (ch < 8) {
-                pixels_.scale_lane(ch, scale_256);
-            } else if (pwm_available_.load(std::memory_order_acquire)) {
-                pwm_.set(ch - 8, static_cast<uint16_t>((static_cast<uint32_t>(pwm_.values()[ch - 8]) * scale_256) / 256u));
+        channels[ch] = channel_power_locked(ch);
+        total += channels[ch];
+        if ((ch < 8 && pixels_.configured(ch)) || (ch >= 8 && power_cfg_.channels[ch].enabled)) {
+            enabled_mask |= static_cast<uint16_t>(1u << ch);
+            if (ch >= 8 && (power_model::pwm_rating(power_cfg_, ch) == 0 || !is_pwm_available())) {
+                snapshot.unmodeled_channel_mask |= static_cast<uint16_t>(1u << ch);
             }
-            ch_mw[ch] = ch_limit;
         }
     }
-
-    // 3. Supply domain budgeting
-    for (uint8_t s = 0; s < kMaxPowerSupplies; ++s) {
-        const auto& psu = power_cfg_.power_supplies[s];
-        if (!psu.enabled) continue;
-        const uint64_t usable_mw = psu.usable_power_mw();
-        if (usable_mw == 0) continue;
-
-        uint64_t domain_load_mw = 0;
-        for (uint8_t ch = 0; ch < kChannelCount; ++ch) {
-            if ((psu.channel_mask & (1u << ch)) != 0) {
-                domain_load_mw += ch_mw[ch];
-            }
-        }
-
-        if (domain_load_mw > usable_mw) {
-            const uint16_t d_scale = static_cast<uint16_t>((usable_mw * 256u) / domain_load_mw);
+    snapshot.requested_power_mw = snapshot.limited_power_mw = power_model::reported_mw(total.total());
+    snapshot.idle_power_mw = power_model::reported_mw(total.idle);
+    snapshot.estimate_complete = snapshot.unmodeled_channel_mask == 0;
+    snapshot.model_state = power_model::model_state(enabled_mask, snapshot.unmodeled_channel_mask);
+    for (uint8_t supply = 0; supply < kMaxPowerSupplies; ++supply) {
+        const auto& psu = power_cfg_.power_supplies[supply];
+        auto& domain = snapshot.supply_domains[supply];
+        domain.id = supply;
+        domain.enabled = psu.enabled;
+        domain.voltage_mv = psu.voltage_mv;
+        domain.rated_current_ma = psu.rated_current_ma;
+        domain.usable_power_mw = psu.usable_power_mw();
+        domain.channel_mask = psu.channel_mask;
+        domain.throttle_events = power_diagnostics_.supply_domains[supply].throttle_events;
+        power_model::Load load;
+        if (psu.enabled) {
             for (uint8_t ch = 0; ch < kChannelCount; ++ch) {
-                if ((psu.channel_mask & (1u << ch)) != 0) {
-                    if (ch < 8) {
-                        pixels_.scale_lane(ch, d_scale);
-                    } else if (pwm_available_.load(std::memory_order_acquire)) {
-                        pwm_.set(ch - 8, static_cast<uint16_t>((static_cast<uint32_t>(pwm_.values()[ch - 8]) * d_scale) / 256u));
-                    }
-                    ch_mw[ch] = (ch_mw[ch] * d_scale) / 256u;
-                }
+                if ((psu.channel_mask & (1u << ch)) != 0) load += channels[ch];
             }
         }
+        domain.estimated_load_mw = power_model::milliwatts(load.total());
     }
+    return snapshot;
+}
 
-    // 4. Global budget clamping
-    total_mw = 0;
+void OutputController::publish_power_locked(OutputPowerDiagnostics snapshot, bool confirmed) {
+    if (!confirmed) {
+        // Partial I/O and an unconfirmed blackout cannot establish a new output
+        // estimate. Preserve the last known command and mark its status unknown.
+        power_diagnostics_.command_confirmed = false;
+        return;
+    }
+    snapshot.command_confirmed = true;
+    snapshot.previous_limited_power_mw = power_diagnostics_.limited_power_mw;
+    const PowerMilliwatts step = snapshot.limited_power_mw > snapshot.previous_limited_power_mw
+        ? snapshot.limited_power_mw - snapshot.previous_limited_power_mw : 0;
+    snapshot.max_observed_step_mw = std::max(power_diagnostics_.max_observed_step_mw, step);
+    power_diagnostics_ = snapshot;
+}
+
+OutputPowerDiagnostics OutputController::power_diagnostics() const {
+    auto* self = const_cast<OutputController*>(this);
+    self->lock();
+    OutputPowerDiagnostics snapshot = power_diagnostics_;
+    self->unlock();
+    return snapshot;
+}
+
+OutputPowerDiagnostics OutputController::enforce_power_guard_locked(const OutputPowerRequest* request) {
+    power_model::Load channels[kChannelCount]{};
+    power_model::Load requested;
     for (uint8_t ch = 0; ch < kChannelCount; ++ch) {
-        total_mw += ch_mw[ch];
+        if (ch >= 8 && !power_cfg_.channels[ch].enabled) pwm_.set(ch - 8, 0);
+        channels[ch] = channel_power_locked(ch);
+        requested += channels[ch];
     }
-
-    if (power_cfg_.max_power_mw > 0 && total_mw > power_cfg_.max_power_mw) {
-        const uint16_t g_scale = static_cast<uint16_t>((static_cast<uint64_t>(power_cfg_.max_power_mw) * 256u) / total_mw);
+    auto scale_channel = [&](uint8_t ch, uint16_t scale) {
+        if (scale == power_model::kFullScale) return;
+        if (ch < 8) {
+            pixels_.scale_lane(ch, scale);
+        } else if (is_pwm_available()) {
+            pwm_.set(ch - 8, static_cast<uint16_t>((uint32_t(pwm_.values()[ch - 8]) * scale) /
+                                                  power_model::kFullScale));
+        }
+        channels[ch] = channel_power_locked(ch);
+    };
+    auto domain_load = [&](uint16_t mask) {
+        power_model::Load load;
         for (uint8_t ch = 0; ch < kChannelCount; ++ch) {
-            if (ch < 8) {
-                pixels_.scale_lane(ch, g_scale);
-            } else if (pwm_available_.load(std::memory_order_acquire)) {
-                pwm_.set(ch - 8, static_cast<uint16_t>((static_cast<uint32_t>(pwm_.values()[ch - 8]) * g_scale) / 256u));
+            if ((mask & (1u << ch)) != 0) load += channels[ch];
+        }
+        return load;
+    };
+
+    uint16_t channel_throttles = 0;
+    uint16_t supply_throttles = 0;
+    bool throttled = false;
+    for (uint8_t ch = 0; ch < kChannelCount; ++ch) {
+        const uint16_t scale = power_model::scale_for_limit(channels[ch], power_model::channel_limit(power_cfg_, ch));
+        if (scale < power_model::kFullScale) {
+            throttled = true;
+            channel_throttles |= static_cast<uint16_t>(1u << ch);
+            scale_channel(ch, scale);
+        }
+    }
+    for (uint8_t supply = 0; supply < kMaxPowerSupplies; ++supply) {
+        const auto& psu = power_cfg_.power_supplies[supply];
+        if (!psu.enabled || psu.channel_mask == 0) continue;
+        const uint64_t capacity = psu.usable_power_mw();
+        const uint16_t scale = capacity == 0 ? 0 : power_model::scale_for_units(
+            domain_load(psu.channel_mask), power_model::units(capacity));
+        if (scale < power_model::kFullScale) {
+            throttled = true;
+            supply_throttles |= static_cast<uint16_t>(1u << supply);
+            for (uint8_t ch = 0; ch < kChannelCount; ++ch) {
+                if ((psu.channel_mask & (1u << ch)) != 0) scale_channel(ch, scale);
             }
         }
     }
+    const uint16_t global_scale = power_model::scale_for_limit(domain_load(UINT16_MAX), power_cfg_.max_power_mw);
+    if (global_scale < power_model::kFullScale) {
+        throttled = true;
+        for (uint8_t ch = 0; ch < kChannelCount; ++ch) scale_channel(ch, global_scale);
+    }
+
+    OutputPowerDiagnostics snapshot = capture_power_locked();
+    snapshot.requested_power_mw = power_model::reported_mw(requested.total());
+    if (request) {
+        snapshot.requested_power_mw = std::max(snapshot.requested_power_mw, request->requested_mw);
+        throttled = throttled || request->throttled;
+        channel_throttles |= request->limited_channel_mask;
+        supply_throttles |= request->limited_supply_mask;
+    }
+    if (throttled) ++snapshot.throttling_events;
+    for (uint8_t ch = 0; ch < kChannelCount; ++ch) {
+        if ((channel_throttles & (1u << ch)) != 0) ++snapshot.channel_throttle_events;
+    }
+    for (uint8_t supply = 0; supply < kMaxPowerSupplies; ++supply) {
+        if ((supply_throttles & (1u << supply)) != 0) ++snapshot.supply_domains[supply].throttle_events;
+    }
+    return snapshot;
 }
 
 esp_err_t OutputController::try_commit() {

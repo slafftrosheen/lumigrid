@@ -99,8 +99,9 @@ describe('dashboard contract integration tests', () => {
     const snap = getNodeLiveSnapshot();
     expect(snap.ip).toBe('');
     expect(['idle', 'disconnected']).toContain(snap.connection);
-    expect(snap.status).toBeDefined();
-    expect(snap.status?.effect).toBe('');
+    expect(snap.snapshot).toBeNull();
+    expect(snap.status).toBeNull();
+    expect(snap.lastSnapshotAt).toBe(0);
   });
 
   it('dashboard loads with saved node and initializes fleet state', () => {

@@ -22,6 +22,9 @@ CASES = [
  'auto_loss_releases_before_leading','auto_cleanup_failure_blocks_promotion',
  'worker_timeout_retries_remote_cleanup','worker_packet_at_zero_still_expires',
  'auto_first_election_preserves_local_transport','expired_peer_slots_recycled','live_peer_slots_preserved',
+ 'preferred_timeline_leader_releases','preferred_cue_leader_releases',
+ 'stale_leader_releases_before_reacquire','stale_changed_leader_releases',
+ 'rejected_leader_handover_retries','current_leader_replay_does_not_release',
 ]
 def main():
  parser=argparse.ArgumentParser(description=__doc__)

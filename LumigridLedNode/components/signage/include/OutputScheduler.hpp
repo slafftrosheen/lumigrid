@@ -12,7 +12,8 @@ public:
     static esp_err_t schedule(
         const RenderFrame& frame,
         const DeviceConfig& device_cfg,
-        OutputController& controller
+        OutputController& controller,
+        const OutputPowerRequest* power_request = nullptr
     );
 };
 

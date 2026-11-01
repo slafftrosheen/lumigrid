@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Host regressions for firmware candidate provenance and flash integrity."""
 import hashlib
+from functools import reduce
 import json
+from operator import xor
 from pathlib import Path
+import struct
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -14,16 +17,74 @@ from firmware_release_manifest import (
 
 
 def image(payload=b"firmware", flash_size=3):
-    # ESP32 image header: magic, segments, DIO, 8 MB/40 MHz.
-    return bytes((0xe9, 1, 2, flash_size << 4)) + bytes(20) + payload
+    # A complete one-segment ESP32 fixture, including the XOR checksum and
+    # appended digest. The fixture format was cross-checked with esptool 4.5.1.
+    payload = payload.ljust((len(payload) + 3) // 4 * 4, b'\0')
+    header = bytes((0xe9, 1, 2, flash_size << 4)) + bytes(19) + b'\x01'
+    body = header + struct.pack('<II', 0x3ffb0000, len(payload)) + payload
+    body += bytes(15 - len(body) % 16) + bytes([reduce(xor, payload, 0xef)])
+    return body + hashlib.sha256(body).digest()
 
 
 class ReleaseManifestTests(unittest.TestCase):
     def test_image_requires_production_flash_header(self):
-        validate_image(image(), "firmware.bin")
+        result = validate_image(image(), "firmware.bin")
+        self.assertEqual(result['integrity'], 'VERIFIED')
+        self.assertEqual(result['segment_count'], 1)
         for data in (image(flash_size=2), image()[:12], b"bad!" + image()[4:]):
             with self.subTest(data=data[:4]), self.assertRaises(ValueError):
                 validate_image(data, "firmware.bin")
+
+    def test_image_rejects_truncation_at_every_boundary(self):
+        data = image()
+        for length in range(len(data)):
+            with self.subTest(length=length), self.assertRaises(ValueError):
+                validate_image(data[:length], "firmware.bin")
+
+    def test_image_detects_payload_corruption_even_with_a_recalculated_digest(self):
+        data = bytearray(image())
+        data[32] ^= 1
+        data[-32:] = hashlib.sha256(data[:-32]).digest()
+        with self.assertRaisesRegex(ValueError, 'payload checksum mismatch'):
+            validate_image(data, "firmware.bin")
+
+    def test_image_digest_detects_damage_that_preserves_xor_checksum(self):
+        data = bytearray(image())
+        data[32] ^= 1
+        data[33] ^= 1
+        with self.assertRaisesRegex(ValueError, 'SHA-256 mismatch'):
+            validate_image(data, "firmware.bin")
+
+    def test_image_rejects_changed_digest_and_header(self):
+        for offset in (4, -1):
+            data = bytearray(image())
+            data[offset] ^= 1
+            with self.subTest(offset=offset), self.assertRaisesRegex(ValueError, 'SHA-256 mismatch'):
+                validate_image(data, "firmware.bin")
+
+    def test_image_rejects_wrong_chip_even_when_digest_matches(self):
+        data = bytearray(image())
+        struct.pack_into('<H', data, 12, 9)
+        data[-32:] = hashlib.sha256(data[:-32]).digest()
+        with self.assertRaisesRegex(ValueError, 'different chip'):
+            validate_image(data, "firmware.bin")
+
+    def test_image_rejects_bad_counts_lengths_and_digest_flags(self):
+        for offset, value in ((1, 0), (1, 17), (23, 0), (23, 2), (28, 7), (31, 255)):
+            data = bytearray(image())
+            data[offset] = value
+            with self.subTest(offset=offset, value=value), self.assertRaises(ValueError):
+                validate_image(data, "firmware.bin")
+
+    def test_image_rejects_trailing_content_and_nonzero_padding(self):
+        for suffix in (b'\x00', b'\xff', b'signature-without-a-verified-policy'):
+            with self.subTest(suffix=suffix), self.assertRaisesRegex(ValueError, 'trailing data'):
+                validate_image(image() + suffix, "firmware.bin")
+        data = bytearray(image())
+        data[40] = 1
+        data[-32:] = hashlib.sha256(data[:-32]).digest()
+        with self.assertRaisesRegex(ValueError, 'nonzero image checksum padding'):
+            validate_image(data, "firmware.bin")
 
     def test_merged_image_matches_all_inputs_and_erased_gaps(self):
         inputs = {0x1000: image(b"boot"), 0x8000: b"partitions", 0x10000: image()}
@@ -185,6 +246,7 @@ class CandidatePackagingTests(unittest.TestCase):
         self.assertEqual(manifest["compliance_assessment"], "NOT_PERFORMED")
         self.assertTrue(manifest["source"]["dirty"])
         self.assertFalse(manifest["builds"]["test"]["production_candidate"])
+        self.assertEqual(manifest["builds"]["factory"]["image_integrity"]["firmware.bin"]["integrity"], "VERIFIED")
         self.assertTrue((self.output / "manifest.json").is_file())
         for name, record in manifest["artifacts"].items():
             data = (self.output / name).read_bytes()
@@ -201,6 +263,50 @@ class CandidatePackagingTests(unittest.TestCase):
         with self.assertRaises(FileNotFoundError):
             self.package()
         self.assertFalse(self.output.exists())
+
+    def test_corrupt_factory_or_test_images_cannot_publish_a_manifest(self):
+        for environment in ('factory', 'test'):
+            for filename in ('bootloader.bin', 'firmware.bin'):
+                path = self.build / environment / filename
+                original = path.read_bytes()
+                damaged = bytearray(original)
+                damaged[-1] ^= 1
+                path.write_bytes(damaged)
+                try:
+                    with self.subTest(environment=environment, filename=filename), self.assertRaisesRegex(ValueError, 'SHA-256 mismatch'):
+                        self.package()
+                    self.assertFalse(self.output.exists())
+                finally:
+                    path.write_bytes(original)
+
+    def test_changed_validated_bytes_cannot_acquire_a_new_success_fingerprint(self):
+        valid_replacement = image(b'other structurally valid image')
+        corrupted_image = bytearray(image())
+        corrupted_image[-1] ^= 1
+        changes = (
+            (self.build / 'test/firmware.bin', bytes(corrupted_image)),
+            (self.build / 'test/firmware.bin', valid_replacement),
+            (self.build / 'factory/bootloader.bin', valid_replacement),
+            (self.build / 'test/partitions.bin', b'changed partitions'),
+            (self.merged, b'changed merged image'),
+        )
+        original_run = self.fake_run
+        for path, replacement in changes:
+            original = path.read_bytes()
+
+            def replace_after_validation(command, cwd=None):
+                if command[-1] == 'version' and 'esptool.py' in str(command[-2]):
+                    path.write_bytes(replacement)
+                return original_run(command, cwd)
+
+            self.fake_run = replace_after_validation
+            try:
+                with self.subTest(path=path, replacement=replacement[:8]), self.assertRaisesRegex(ValueError, 'Validated build artifact changed'):
+                    self.package()
+                self.assertFalse(self.output.exists())
+            finally:
+                path.write_bytes(original)
+                self.fake_run = original_run
 
 
 if __name__ == "__main__":

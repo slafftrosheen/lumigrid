@@ -150,7 +150,7 @@ export async function getNodeInfo(ip: string): Promise<PublicNodeInfo> {
 export async function getStatus(ip: string): Promise<RuntimeSnapshotV3> {
   const raw = await apiJson<unknown>(ip, '/api/v1/status');
   const snap = normalizeRuntimeSnapshot(raw);
-  if (snap && snap.node && snap.node.id) {
+  if (snap?.node?.id && snap.node.id !== 'unknown') {
     nodeAuthStore.bindNodeId(ip, snap.node.id);
   }
   return snap;

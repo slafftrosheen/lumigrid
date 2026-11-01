@@ -37,6 +37,28 @@
   let liveState = $state(getNodeLiveSnapshot());
   let navListEl = $state<HTMLUListElement | null>(null);
   let mobileMoreOpen = $state(false);
+  let selectionEpoch = 0;
+  let authRequest = 0;
+  let recoveryRequest = 0;
+  let credentialsRequest = 0;
+  let disposed = false;
+  let clock = $state(Date.now());
+  let statusFresh = $derived(liveState.snapshot !== null && clock - liveState.lastSnapshotAt <= 10000 &&
+    (liveState.connection === 'online' || liveState.connection === 'degraded'));
+  let streamOpen = $derived(liveState.connection === 'online' || liveState.connection === 'degraded');
+  let connectionLabel = $derived(streamOpen
+    ? (statusFresh ? 'Live' : liveState.snapshot ? 'Stale' : 'Waiting')
+    : liveState.connection === 'connecting' ? 'Connecting'
+    : liveState.connection === 'auth-required' ? 'Sign in'
+    : liveState.connection === 'transport-blocked' ? 'Blocked' : 'Offline');
+  let connectionClass = $derived(streamOpen ? (statusFresh ? 'online' : 'degraded') : liveState.connection);
+
+  function captureSelection(ip = nodeIp) {
+    const epoch = selectionEpoch;
+    const session = nodeAuthStore.getSession(ip);
+    return () => !disposed && epoch === selectionEpoch && ip === nodeIp &&
+      nodeAuthStore.getSession(ip) === session;
+  }
 
   // Per-node authoritative session state
   let currentSession = $state<NodeAuthSession | null>(null);
@@ -68,8 +90,11 @@
       recoveryStatus = null;
       return;
     }
+    const isCurrent = captureSelection(ip);
+    const request = ++recoveryRequest;
     try {
-      recoveryStatus = await getRecoveryStatus(ip);
+      const status = await getRecoveryStatus(ip);
+      if (isCurrent() && request === recoveryRequest) recoveryStatus = status;
     } catch {
       // Node offline or unreachable
     }
@@ -104,14 +129,18 @@
   }
 
   async function checkNodeAuth(ip: string) {
+    const request = ++authRequest;
+    const isCurrent = captureSelection(ip);
     if (!ip) {
       authStatus = null;
       authStatusError = '';
+      authLoading = false;
       return;
     }
     const existing = nodeAuthStore.getSession(ip);
     if (existing) {
       currentSession = existing;
+      authLoading = false;
       return;
     }
     currentSession = null;
@@ -119,17 +148,21 @@
     authStatusError = '';
     authError = '';
     try {
-      authStatus = await getAuthStatus(ip);
+      const status = await getAuthStatus(ip);
+      if (isCurrent() && request === authRequest) authStatus = status;
     } catch (err) {
+      if (!isCurrent() || request !== authRequest) return;
       authStatusError = err instanceof Error ? err.message : String(err);
       authStatus = null;
     } finally {
-      authLoading = false;
+      if (isCurrent() && request === authRequest) authLoading = false;
     }
   }
 
   async function submitBootstrap() {
-    if (!nodeIp) return;
+    if (!nodeIp || authSubmitting) return;
+    const ip = nodeIp;
+    let isCurrent = captureSelection(ip);
     const key = bootstrapKeyInput;
     if (key.length < 16 || key.length > 64) {
       authError = 'Administrator key must be between 16 and 64 characters';
@@ -142,36 +175,43 @@
     authSubmitting = true;
     authError = '';
     try {
-      const res = await bootstrapAuth(nodeIp, key);
+      const res = await bootstrapAuth(ip, key);
+      if (!isCurrent()) return;
       nodeAuthStore.setSession({
-        address: nodeIp,
+        address: ip,
         nodeId: liveState.nodeId || '',
         role: res.role,
         sessionToken: res.sessionToken,
         expiresAt: Date.now() + res.expiresIn * 1000,
       });
+      isCurrent = captureSelection(ip);
       bootstrapKeyInput = '';
       confirmAdminKey = '';
       generatedAdminKey = false;
       showFirstInstallWizard = true;
-      await connect(nodeIp);
-      await pollRecovery(nodeIp);
+      await connect(ip);
+      if (isCurrent()) await pollRecovery(ip);
     } catch (err) {
+      if (!isCurrent()) return;
       authError = 'Unable to secure the node. Check your connection and retry. If the key was already saved, sign in with your new Admin Access Key.';
       try {
-        authStatus = await getAuthStatus(nodeIp);
+        const status = await getAuthStatus(ip);
+        if (!isCurrent()) return;
+        authStatus = status;
         if (authStatus.provisioned) {
           bootstrapKeyInput = confirmAdminKey = '';
           generatedAdminKey = false;
         }
       } catch { /* Keep the current setup screen while the node is unreachable. */ }
     } finally {
-      authSubmitting = false;
+      if (isCurrent()) authSubmitting = false;
     }
   }
 
   async function submitLogin() {
-    if (!nodeIp) return;
+    if (!nodeIp || authSubmitting) return;
+    const ip = nodeIp;
+    let isCurrent = captureSelection(ip);
     const key = loginKeyInput;
     if (!key) {
       authError = 'Please enter your access key';
@@ -180,39 +220,44 @@
     authSubmitting = true;
     authError = '';
     try {
-      const res = await createSession(nodeIp, key);
+      const res = await createSession(ip, key);
+      if (!isCurrent()) return;
       if (res.setupRequired) {
         loginKeyInput = '';
-        authStatus = await getAuthStatus(nodeIp);
+        const status = await getAuthStatus(ip);
+        if (isCurrent()) authStatus = status;
         return;
       }
       nodeAuthStore.setSession({
-        address: nodeIp,
+        address: ip,
         nodeId: liveState.nodeId || '',
         role: res.role,
         sessionToken: res.sessionToken,
         expiresAt: Date.now() + res.expiresIn * 1000,
       });
+      isCurrent = captureSelection(ip);
       loginKeyInput = '';
-      await connect(nodeIp);
-      await pollRecovery(nodeIp);
+      await connect(ip);
+      if (isCurrent()) await pollRecovery(ip);
     } catch (err) {
+      if (!isCurrent()) return;
       const msg = err instanceof Error ? err.message : String(err);
       authError = msg.includes('401') || msg.includes('invalid') ? 'Invalid credentials' : msg;
       loginKeyInput = '';
     } finally {
-      authSubmitting = false;
+      if (isCurrent()) authSubmitting = false;
     }
   }
 
   async function signOutNode() {
+    const ip = nodeIp;
+    // Capture the old token before removing it locally; completion owns no UI.
+    const deletion = ip ? deleteSession(ip).catch(() => {}) : Promise.resolve();
     disconnect();
-    if (nodeIp) {
-      await deleteSession(nodeIp).catch(() => {});
-      nodeAuthStore.clearSession(nodeIp);
-    }
+    if (ip) nodeAuthStore.clearSession(ip);
     currentSession = null;
-    if (nodeIp) checkNodeAuth(nodeIp);
+    if (ip) checkNodeAuth(ip);
+    await deletion;
   }
 
   async function openAccessControl() {
@@ -223,17 +268,26 @@
     credsSuccess = '';
     newKeyInput = '';
     keyCopied = false;
+    const ip = nodeIp;
+    const ownsSelection = captureSelection(ip);
+    const request = ++credentialsRequest;
+    const isCurrent = () => ownsSelection() && showAccessControl && request === credentialsRequest;
     try {
-      credsStatus = await getCredentialsStatus(nodeIp);
+      const status = await getCredentialsStatus(ip);
+      if (isCurrent()) credsStatus = status;
     } catch (err) {
+      if (!isCurrent()) return;
       credsError = err instanceof Error ? err.message : String(err);
     } finally {
-      credsLoading = false;
+      if (isCurrent()) credsLoading = false;
     }
   }
 
   async function handleRotateKey() {
-    if (!nodeIp || !newKeyInput.trim()) return;
+    if (!nodeIp || !newKeyInput.trim() || credsLoading) return;
+    const ip = nodeIp;
+    const role = rotateRole;
+    const isCurrent = captureSelection(ip);
     const key = newKeyInput;
     if (key.length < 16 || key.length > 64) {
       credsError = 'Access key must be between 16 and 64 characters';
@@ -243,40 +297,49 @@
     credsError = '';
     credsSuccess = '';
     try {
-      await rotateCredential(nodeIp, rotateRole, key);
-      credsSuccess = `Successfully rotated ${rotateRole} key.`;
+      await rotateCredential(ip, role, key);
+      if (!isCurrent()) return;
+      credsSuccess = `Successfully rotated ${role} key.`;
       newKeyInput = '';
       keyCopied = false;
-      if (rotateRole === 'admin') {
+      if (role === 'admin') {
         // Admin rotation invalidates all sessions; require re-login
         setTimeout(() => {
+          if (!isCurrent()) return;
           showAccessControl = false;
-          nodeAuthStore.clearSession(nodeIp);
-          checkNodeAuth(nodeIp);
+          nodeAuthStore.clearSession(ip);
+          checkNodeAuth(ip);
         }, 1500);
       } else {
-        credsStatus = await getCredentialsStatus(nodeIp);
+        const status = await getCredentialsStatus(ip);
+        if (isCurrent()) credsStatus = status;
       }
     } catch (err) {
+      if (!isCurrent()) return;
       credsError = err instanceof Error ? err.message : String(err);
     } finally {
-      credsLoading = false;
+      if (isCurrent()) credsLoading = false;
     }
   }
 
   async function handleDisableRole(role: 'installer' | 'operator') {
-    if (!nodeIp) return;
+    if (!nodeIp || credsLoading) return;
+    const ip = nodeIp;
+    const isCurrent = captureSelection(ip);
     credsLoading = true;
     credsError = '';
     credsSuccess = '';
     try {
-      await disableCredential(nodeIp, role);
+      await disableCredential(ip, role);
+      if (!isCurrent()) return;
       credsSuccess = `Disabled ${role} credential.`;
-      credsStatus = await getCredentialsStatus(nodeIp);
+      const status = await getCredentialsStatus(ip);
+      if (isCurrent()) credsStatus = status;
     } catch (err) {
+      if (!isCurrent()) return;
       credsError = err instanceof Error ? err.message : String(err);
     } finally {
-      credsLoading = false;
+      if (isCurrent()) credsLoading = false;
     }
   }
 
@@ -293,28 +356,43 @@
     const stored = getSelectedNodeIp();
 
     if (stored !== nodeIp) {
-      nodeIp = stored;
-      selectLiveNode(stored);
-      checkNodeAuth(stored);
+      selectNode(stored);
       return;
     }
 
     if (nodeIp && !nodeList.some(node => node.ip === nodeIp)) {
       const fallback = nodeList[0]?.ip ?? '';
-      nodeIp = fallback;
-      selectLiveNode(fallback);
-      checkNodeAuth(fallback);
+      selectNode(fallback);
     }
   }
 
-  function selectNode(ip: string) {
+  function adoptSelection(ip: string) {
+    if (nodeIp === ip) return;
+    selectionEpoch++;
     nodeIp = ip;
+    currentSession = nodeAuthStore.getSession(ip);
+    authStatus = null;
+    authStatusError = authError = '';
+    authLoading = authSubmitting = false;
+    loginKeyInput = bootstrapKeyInput = confirmAdminKey = '';
+    generatedAdminKey = false;
+    recoveryStatus = null;
+    showFirstInstallWizard = false;
+    showAccessControl = false;
+    credsStatus = null;
+    credsLoading = false;
+    credsError = credsSuccess = newKeyInput = '';
+  }
+
+  function selectNode(ip: string) {
+    adoptSelection(ip);
     selectLiveNode(ip);
     checkNodeAuth(ip);
     pollRecovery(ip);
   }
 
   onMount(() => {
+    disposed = false;
     nodeIp = getSelectedNodeIp();
     nodeList = getSavedNodes();
 
@@ -325,8 +403,16 @@
     }
 
     const unsubAuth = nodeAuthStore.subscribe(() => {
+      const session = nodeAuthStore.getSession(nodeIp);
+      if (session !== currentSession) {
+        selectionEpoch++;
+        authSubmitting = credsLoading = false;
+        showAccessControl = false;
+        credsStatus = null;
+        credsError = credsSuccess = newKeyInput = '';
+      }
       if (nodeIp) {
-        currentSession = nodeAuthStore.getSession(nodeIp);
+        currentSession = session;
       } else {
         currentSession = null;
       }
@@ -334,6 +420,12 @@
 
     const unsubLive = getNodeLiveState().subscribe(val => {
       liveState = val;
+      const ip = val.route || '';
+      if (ip !== nodeIp) {
+        adoptSelection(ip);
+        checkNodeAuth(ip);
+        pollRecovery(ip);
+      }
     });
 
     const onRegistryChanged = () => refreshNodeList();
@@ -343,9 +435,13 @@
     const recInterval = setInterval(() => {
       if (nodeIp) pollRecovery(nodeIp);
     }, 10000);
+    const freshnessInterval = setInterval(() => { clock = Date.now(); }, 1000);
 
     return () => {
+      disposed = true;
+      selectionEpoch++;
       clearInterval(recInterval);
+      clearInterval(freshnessInterval);
       unsubAuth();
       unsubLive();
       window.removeEventListener(NODE_REGISTRY_CHANGED_EVENT, onRegistryChanged);
@@ -512,9 +608,9 @@
       <div class="nav-label-row">
         <p class="nav-label">ACTIVE NODE</p>
         {#if nodeIp}
-          <span class="status-indicator {liveState.connection}" title={liveState.connection}>
+          <span class="status-indicator {connectionClass}" title={connectionLabel}>
             <span class="status-dot"></span>
-            <span class="status-text">{liveState.connection === 'connected' ? 'Live' : liveState.connection === 'connecting' ? 'Connecting' : 'Offline'}</span>
+            <span class="status-text">{connectionLabel}</span>
           </span>
         {/if}
       </div>
@@ -526,7 +622,7 @@
           </option>
         {/each}
       </select>
-      {#if nodeIp && liveState.connection === 'connected'}
+      {#if nodeIp && statusFresh}
         <div class="node-live-telemetry">
           {#if liveState.health}
             <span class="telemetry-pill" class:fault={liveState.health.output.fault} title="Output state">
@@ -590,9 +686,9 @@
         </option>
       {/each}
     </select>
-    <span class="mobile-status {liveState.connection}" title={liveState.connection}>
+    <span class="mobile-status {connectionClass}" title={connectionLabel}>
       <span class="status-dot"></span>
-      <span>{liveState.connection === 'connected' ? 'Live' : liveState.connection === 'connecting' ? '…' : 'Off'}</span>
+      <span>{connectionLabel}</span>
     </span>
     <button class="mobile-lock" onclick={signOutNode} title="Sign out" aria-label="Sign out">⌁</button>
   </div>
@@ -913,8 +1009,8 @@
     background-image: none;
     -webkit-background-clip: initial;
     background-clip: initial;
-    -webkit-text-fill-color: currentColor;
-    color: inherit;
+    -webkit-text-fill-color: var(--dash-text) !important;
+    color: var(--dash-text);
     animation: none;
   }
   :global(.dash-root button),
@@ -1433,8 +1529,9 @@
     border-radius: 50%;
     background: #8e8e93;
   }
-  .status-indicator.connected .status-dot { background: #30d158; box-shadow: 0 0 6px rgba(48,209,88,.6); }
-  .status-indicator.connected .status-text { color: #30d158; }
+  .status-indicator.online .status-dot { background: var(--dash-ok); box-shadow: 0 0 6px rgba(48,209,88,.6); }
+  .status-indicator.online .status-text { color: var(--dash-ok); }
+  .status-indicator.degraded .status-text { color: var(--dash-warm); }
   .status-indicator.connecting .status-dot { background: var(--dash-warm); }
   .status-indicator.connecting .status-text { color: var(--dash-warm); }
   .status-indicator.disconnected .status-dot { background: #8e8e93; }
@@ -1535,7 +1632,8 @@
       font-size: .65rem;
       font-weight: 700;
     }
-    .mobile-status.connected { color: var(--dash-ok); }
+    .mobile-status.online { color: var(--dash-ok); }
+    .mobile-status.degraded { color: var(--dash-warm); }
     .mobile-status.connecting { color: var(--dash-warm); }
     .mobile-lock {
       width: 34px;

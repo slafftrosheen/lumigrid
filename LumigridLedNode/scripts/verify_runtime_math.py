@@ -129,19 +129,19 @@ def test_gamma_alignment():
 
 def test_multitier_power():
     # 200 pixels @ 5mW idle = 1000mW quiescent
-    # All pixels full white: active = 200 * 295mW = 59000mW
-    # Total unconstrained = 60000mW (60W)
+    # Conservative full RGB white: active = 200 * 3 * 295mW = 177000mW
+    # Total unconstrained = 178000mW (178W), with fixed idle retained.
     num_pixels = 200
     idle_mw = num_pixels * 5
-    active_mw = num_pixels * 295
+    active_mw = num_pixels * 3 * 295
     total_mw = idle_mw + active_mw
-    assert total_mw == 60000
+    assert total_mw == 178000
 
     # Test Local Fixture Clamp: Limit fixture to 15000mW (15W)
     fixture_limit = 15000
     allowed_active = fixture_limit - idle_mw  # 14000mW
-    local_scale = (allowed_active * 255) // active_mw
-    new_active = (active_mw * local_scale) // 255
+    local_scale = (allowed_active * 256) // active_mw
+    new_active = (active_mw * local_scale) // 256
     fixture_total = idle_mw + new_active
     assert fixture_total <= fixture_limit
     print(f"[PASS] Local fixture power clamp: {total_mw}mW -> {fixture_total}mW (limit: {fixture_limit}mW)")
@@ -149,9 +149,9 @@ def test_multitier_power():
     # Test Global Limit Clamp with soft-start:
     global_limit = 10000  # 10W global limit
     available_active = global_limit - idle_mw  # 9000mW
-    global_scale = (available_active * 255) // new_active
-    final_scale = (global_scale * 128) // 255  # 50% soft-start ramp
-    final_active = (new_active * final_scale) // 255
+    global_scale = (available_active * 256) // new_active
+    final_scale = (global_scale * 128) // 256  # 50% soft-start ramp
+    final_active = (new_active * final_scale) // 256
     final_total = idle_mw + final_active
     assert final_total <= global_limit
     print(f"[PASS] Global limit + soft-start: clamped to {final_total}mW (budget: {global_limit}mW)")

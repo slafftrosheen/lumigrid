@@ -40,6 +40,7 @@ describe('CommandTracker', () => {
     tracker.observe({
       schema: 2,
       seq: 1,
+      nodeId: 'lg-test',
       state: {
         scene: {
           appliedGeneration: 14,
@@ -53,6 +54,7 @@ describe('CommandTracker', () => {
     tracker.observe({
       schema: 2,
       seq: 2,
+      nodeId: 'lg-test',
       state: {
         scene: {
           appliedGeneration: 15,
@@ -81,6 +83,25 @@ describe('CommandTracker', () => {
 
     const result = await waitPromise;
     expect(result.state).toBe('applied');
+  });
+
+  it('does not confirm another node with the same generation or job ID', () => {
+    tracker.register({ id: 300, domain: 'scene', nodeIp: 'node-a', nodeId: 'a', generation: 5 });
+    tracker.observe({ node: { id: 'b' }, scene: { appliedGeneration: 5 } }, 'node-b');
+    tracker.observe({ node: { id: 'b' }, scene: { appliedGeneration: 5 } }, 'node-a');
+    expect(tracker.get(300)?.state).toBe('accepted');
+    tracker.observe({ node: { id: 'a' }, scene: { appliedGeneration: 5 } }, 'node-a');
+    expect(tracker.get(300)?.state).toBe('applied');
+  });
+
+  it('settles pending confirmation when selection or credentials invalidate it', async () => {
+    const cmd = tracker.register({ id: 301, domain: 'scene', nodeIp: 'node-a', generation: 5 });
+    const waiting = tracker.waitFor(301);
+    const rejected = expect(waiting).rejects.toThrow('session changed');
+    tracker.clear('Node session changed');
+    await rejected;
+    tracker.observe({ scene: { appliedGeneration: 5 } }, 'node-a');
+    expect(cmd.state).toBe('superseded');
   });
 
   it('times out if appliedGeneration is never received', async () => {

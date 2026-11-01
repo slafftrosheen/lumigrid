@@ -7629,13 +7629,14 @@ bool test_lg029_node_backed_authentication() {
             assert(diag.limited_power_mw <= 10000);
 
             // Recalculate power manually from the scaled frame
-            uint64_t actual_post_mw = 50 * 5; // idle
+            uint64_t actual_post_numerator = 50 * 5 * 255; // fixed idle, then exact active fractions
             for (int p = 0; p < 50; ++p) {
                 uint64_t sum_rgb = static_cast<uint64_t>(frame.channels[0].pixels[p].r) +
                                    frame.channels[0].pixels[p].g +
                                    frame.channels[0].pixels[p].b;
-                actual_post_mw += (sum_rgb * 295u) / 255u;
+                actual_post_numerator += sum_rgb * 295u;
             }
+            const uint64_t actual_post_mw = (actual_post_numerator + 254u) / 255u;
             assert(diag.limited_power_mw == actual_post_mw);
         }
 

@@ -13,7 +13,7 @@ import {
   updateNodeLastSeen,
   recordDiscoveredNode,
 } from '../auth/storage';
-import { nodeAuthStore } from '../auth/nodeAuth';
+import { nodeAuthStore, type NodeAuthSession } from '../auth/nodeAuth';
 import { createWsTicket } from '../api/auth';
 import { getHealth, getStatus, type HealthSnapshot } from '../api/node';
 import { getNodeWsUrl, isTransportBlockedError } from '../api/transport';
@@ -260,28 +260,7 @@ const initial: NodeLiveState = {
   role: 'unknown',
   lastSeen: 0,
   lastMessageAt: 0,
-  status: {
-    effect: '',
-    brightness: 0,
-    outputsEnabled: true,
-    testActive: false,
-    autoLoop: false,
-    activePreset: 0,
-    appliedGeneration: 0,
-    requestedGeneration: 0,
-    sceneApplyPending: false,
-    transitioning: false,
-    controlOwner: 'ScenePlayback',
-    powerMw: 0,
-    fault: false,
-    faultCount: 0,
-    seq: 0,
-    nodeId: '',
-    uptimeMs: 0,
-    protocol: {},
-    channels: [],
-    manual: { active: false, channelMask: 0, leaseRemainingMs: 0 },
-  },
+  status: null,
   pixels: new Uint8Array(BUF_SIZE),
   frameCount: 0,
 };
@@ -312,6 +291,37 @@ let healthPollTimer: ReturnType<typeof setInterval> | null = null;
 let reconnectAttempt = 0;
 let manualClose = false;
 let lastSeq = 0;
+let connectionGeneration = 0;
+let connectionSession: NodeAuthSession | null = null;
+let ticketPending = false;
+let snapshotRevision = 0;
+let healthRequestId = 0;
+
+/** Capture both selection and credentials, including a switch away and back. */
+export function captureNodeOperation(ip = latestState.route || '') {
+  const generation = connectionGeneration;
+  const session = nodeAuthStore.getSession(ip);
+  return {
+    ip,
+    isCurrent: () => generation === connectionGeneration &&
+      latestState.route === ip && nodeAuthStore.getSession(ip) === session,
+  };
+}
+
+function clearNodeTelemetry() {
+  snapshotRevision++;
+  healthRequestId++;
+  lastSeq = 0;
+  lastFleetUpdate = 0;
+  const pixels = new Uint8Array(BUF_SIZE);
+  nodePixelStore.set(pixels);
+  nodeFrameCount.set(0);
+  publish({
+    nodeId: null, snapshot: null, health: null, healthError: '', healthUpdatedAt: 0,
+    lastSnapshotAt: 0, lastStreamSeq: 0, lastSeen: 0, lastMessageAt: 0,
+    pixels, frameCount: 0,
+  });
+}
 
 function getStoredRole(ip = latestState.route || latestState.nodeIp || getSelectedNodeIp()): NodeRole {
   if (!ip) return 'unknown';
@@ -338,7 +348,6 @@ function publish(patch: Partial<NodeLiveState>) {
     if (msgVal !== undefined) {
       next.lastMessageAt = msgVal;
       next.lastSeen = msgVal;
-      next.lastSnapshotAt = msgVal;
     }
     if (patch.snapshot !== undefined) {
       next.status = projectLegacyStatus(patch.snapshot);
@@ -378,13 +387,18 @@ function scheduleReconnect() {
 
 export async function refreshHealth(nodeIp = latestState.route || latestState.nodeIp || getSelectedNodeIp()): Promise<HealthSnapshot | null> {
   const ip = nodeIp.trim();
-  if (!ip) return null;
+  if (!ip || ip !== latestState.route) return null;
+  const owner = captureNodeOperation(ip);
+  const requestId = ++healthRequestId;
+  const isCurrent = () => owner.isCurrent() && requestId === healthRequestId;
   try {
     const health = await getHealth(ip);
+    if (!isCurrent()) return null;
     publish({ health, healthError: '', healthUpdatedAt: Date.now() });
     recordFleetPresence(ip);
     return health;
   } catch (err) {
+    if (!isCurrent()) return null;
     if (isTransportBlockedError(err)) {
       publish({
         connection: 'transport-blocked',
@@ -393,7 +407,8 @@ export async function refreshHealth(nodeIp = latestState.route || latestState.no
       return null;
     }
     const healthError = err instanceof Error ? err.message : String(err);
-    publish({ healthError, healthUpdatedAt: Date.now() });
+    // The timestamp describes the last successful observation, not this failure.
+    publish({ healthError });
     return null;
   }
 }
@@ -403,18 +418,23 @@ export async function refreshHealth(nodeIp = latestState.route || latestState.no
  * Requirement 15: populates nodeStore deterministically before WS opens.
  */
 export async function recoverStateViaHttp(ip: string): Promise<RuntimeSnapshotV3 | null> {
+  if (!ip || ip !== latestState.route) return null;
+  const owner = captureNodeOperation(ip);
+  const revision = snapshotRevision;
   try {
     const snapshot = await getStatus(ip);
-    if (!snapshot) return null;
+    if (!snapshot || !owner.isCurrent() || revision !== snapshotRevision) return null;
 
-    if (snapshot.node && snapshot.node.id) {
+    if (snapshot.node?.id && snapshot.node.id !== 'unknown') {
       nodeAuthStore.bindNodeId(ip, snapshot.node.id);
       try {
         recordDiscoveredNode({ id: snapshot.node.id, address: ip, name: snapshot.node.id }, 'sync');
       } catch {}
     }
 
-    commandTracker.observe(snapshot as any);
+    if (!owner.isCurrent()) return null;
+    snapshotRevision++;
+    commandTracker.observe(snapshot, ip);
 
     publish({
       nodeId: snapshot.node.id,
@@ -427,6 +447,7 @@ export async function recoverStateViaHttp(ip: string): Promise<RuntimeSnapshotV3
     });
     return snapshot;
   } catch (err) {
+    if (!owner.isCurrent()) return null;
     if (isTransportBlockedError(err)) {
       publish({
         connection: 'transport-blocked',
@@ -442,32 +463,39 @@ export async function connect(nodeIp = getSelectedNodeIp()): Promise<void> {
 
   const ip = nodeIp.trim();
   if (!ip) {
+    disconnect();
     setSelectedNodeIp('');
-    if (socket) {
-      const ws = socket;
-      socket = null;
-      ws.close();
-    }
+    clearNodeTelemetry();
+    connectionSession = null;
     publish({ route: '', nodeIp: '', ip: '', connection: 'idle', error: null, snapshot: null });
     return;
   }
   setSelectedNodeIp(ip);
 
-  // If already connected/connecting to the exact same IP, return early
+  const session = nodeAuthStore.getSession(ip);
+  // A pending ticket is part of the connection, including before a socket exists.
   if (
-    socket &&
     latestState.route === ip &&
-    (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)
+    connectionSession === session && !manualClose &&
+    (ticketPending || (socket && (socket.readyState === 1 || socket.readyState === 0)))
   ) {
     return;
   }
 
-  // If switching to a different node, close existing socket and clear reconnect timer
-  if (socket && latestState.route !== ip) {
+  const changedOwner = latestState.route !== ip || connectionSession !== session;
+  connectionGeneration++;
+  ticketPending = false;
+  if (socket) {
     const ws = socket;
     socket = null;
     ws.close();
   }
+
+  if (changedOwner) {
+    commandTracker.clear('Node selection or session changed before confirmation');
+    clearNodeTelemetry();
+  }
+  connectionSession = session;
 
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
@@ -508,13 +536,17 @@ export async function connect(nodeIp = getSelectedNodeIp()): Promise<void> {
     authenticated: currentUnlocked,
     error: null,
   });
+  const owner = captureNodeOperation(ip);
+  const isCurrent = () => !manualClose && owner.isCurrent();
 
   // Requirement 15: Initial HTTP status fetch before connecting WebSocket
   recoverStateViaHttp(ip).catch(() => {});
 
   try {
+    ticketPending = true;
     const { ticket } = await createWsTicket(ip);
-    if (manualClose || latestState.route !== ip) return;
+    if (!isCurrent()) return;
+    ticketPending = false;
 
     const wsUrl = getNodeWsUrl(ip);
     const ws = new WebSocket(wsUrl, [`lumigrid-ticket.${ticket}`]);
@@ -522,7 +554,7 @@ export async function connect(nodeIp = getSelectedNodeIp()): Promise<void> {
     ws.binaryType = 'arraybuffer';
 
     ws.onopen = () => {
-      if (socket !== ws) return;
+      if (socket !== ws || !isCurrent()) return;
       reconnectAttempt = 0;
       const openRole = getStoredRole(ip);
       const openUnlocked = isStoredAuthed(ip);
@@ -540,14 +572,14 @@ export async function connect(nodeIp = getSelectedNodeIp()): Promise<void> {
 
       if (healthPollTimer) clearInterval(healthPollTimer);
       healthPollTimer = setInterval(() => {
-        if (socket && socket.readyState === WebSocket.OPEN) {
+        if (socket === ws && ws.readyState === 1 && isCurrent()) {
           refreshHealth(ip).catch(() => {});
         }
       }, 10000);
     };
 
     ws.onclose = () => {
-      if (socket !== ws) return;
+      if (socket !== ws || !isCurrent()) return;
       socket = null;
       if (healthPollTimer) {
         clearInterval(healthPollTimer);
@@ -558,12 +590,12 @@ export async function connect(nodeIp = getSelectedNodeIp()): Promise<void> {
     };
 
     ws.onerror = () => {
-      if (socket !== ws) return;
+      if (socket !== ws || !isCurrent()) return;
       publish({ connection: 'offline', error: 'WebSocket connection error' });
     };
 
     ws.onmessage = (event) => {
-      if (socket !== ws) return;
+      if (socket !== ws || !isCurrent()) return;
       const now = Date.now();
 
       // Binary Pixel Frame: isolated high-frequency rendering path (Requirement 32)
@@ -614,11 +646,11 @@ export async function connect(nodeIp = getSelectedNodeIp()): Promise<void> {
           // Requirement 7 & 16: Stream sequence gap tracking
           const streamSeq = snapshot.streamSeq;
           let connStatus: NodeConnection = latestState.connection;
+          let gapDetected = false;
           if (streamSeq > 0) {
             if (lastSeq > 0 && streamSeq > lastSeq + 1) {
               connStatus = 'degraded';
-              // Gap detected: recover state via HTTP
-              recoverStateViaHttp(latestState.route || ip).catch(() => {});
+              gapDetected = true;
             } else if (connStatus === 'degraded') {
               connStatus = 'online';
             }
@@ -626,7 +658,7 @@ export async function connect(nodeIp = getSelectedNodeIp()): Promise<void> {
           }
 
           // Requirement 0.2: Bind authenticated node ID
-          if (snapshot.node && snapshot.node.id) {
+          if (snapshot.node?.id && snapshot.node.id !== 'unknown') {
             nodeAuthStore.bindNodeId(ip, snapshot.node.id);
             try {
               recordDiscoveredNode({ id: snapshot.node.id, address: ip, name: snapshot.node.id }, 'sync');
@@ -634,7 +666,9 @@ export async function connect(nodeIp = getSelectedNodeIp()): Promise<void> {
           }
 
           // Inform CommandTracker
-          commandTracker.observe(snapshot as any);
+          if (!isCurrent()) return;
+          snapshotRevision++;
+          commandTracker.observe(snapshot, ip);
 
           publish({
             nodeId: snapshot.node.id,
@@ -647,6 +681,10 @@ export async function connect(nodeIp = getSelectedNodeIp()): Promise<void> {
             error: null,
           });
 
+          // Start after publishing this frame so only a later stream frame can
+          // invalidate recovery, rather than the gap-detecting frame itself.
+          if (gapDetected) recoverStateViaHttp(ip).catch(() => {});
+
           recordFleetPresence(latestState.route || ip);
         } catch {
           // Defensive: ignore malformed frames
@@ -654,7 +692,8 @@ export async function connect(nodeIp = getSelectedNodeIp()): Promise<void> {
       }
     };
   } catch (err: unknown) {
-    if (manualClose || latestState.route !== ip) return;
+    if (!isCurrent()) return;
+    ticketPending = false;
 
     if (isTransportBlockedError(err)) {
       publish({
@@ -685,6 +724,8 @@ export async function connect(nodeIp = getSelectedNodeIp()): Promise<void> {
 
 export function disconnect(): void {
   manualClose = true;
+  connectionGeneration++;
+  ticketPending = false;
   lastSeq = 0;
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
@@ -713,12 +754,7 @@ export const nodeStore = state;
 export function selectNode(ip: string): void {
   const target = (ip || '').trim();
   setSelectedNodeIp(target);
-  if (!target) {
-    disconnect();
-    publish({ route: '', nodeIp: '', ip: '', connection: 'idle', snapshot: null });
-  } else {
-    connect(target);
-  }
+  void connect(target);
 }
 
 export function getNodeLiveState() {
@@ -739,6 +775,7 @@ export function _resetForTesting(): void {
   manualClose = false;
   reconnectAttempt = 0;
   lastSeq = 0;
+  connectionSession = null;
   commandTracker.clear();
   state.set({ ...initial, pixels: new Uint8Array(BUF_SIZE) });
   nodePixelStore.set(new Uint8Array(BUF_SIZE));
@@ -751,6 +788,11 @@ if (typeof window !== 'undefined') {
     if (!currentIp) return;
     const hasSession = nodeAuthStore.hasValidSession(currentIp);
     const role = getStoredRole(currentIp);
+    const currentSession = nodeAuthStore.getSession(currentIp);
+    if (currentSession !== connectionSession) {
+      connect(currentIp);
+      return;
+    }
     if (
       hasSession &&
       (latestState.connection === 'offline' ||

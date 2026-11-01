@@ -570,13 +570,33 @@ bool NodeSync::handle_heartbeat(
     bool accepted = false;
 
     portENTER_CRITICAL(&status_mutex_);
+    if (!running_) {
+        portEXIT_CRITICAL(&status_mutex_);
+        return false;
+    }
     const bool master_stale = master_address_ == 0 ||
         elapsed_ms(now, last_packet_ms_) > kPeerTimeoutMs;
     const bool preferred_auto_master =
         configured_role_ == NodeRole::Auto &&
         std::memcmp(packet.sender_mac, master_mac_, sizeof(master_mac_)) < 0;
+    const bool select_master = master_stale || preferred_auto_master;
+    const bool release_previous_master = select_master && master_address_ != 0;
+    portEXIT_CRITICAL(&status_mutex_);
 
-    if (master_stale || preferred_auto_master) {
+    // Generations are local to a leader, so a replacement (including a reboot
+    // at the same address) can reuse the old timeline/cue generation. Release
+    // that ownership before accepting its packets. On rejection, preserve the
+    // old source, sequence and snapshot; do not discipline the clock or ACK.
+    if (release_previous_master && !release_remote_transport()) return false;
+
+    portENTER_CRITICAL(&status_mutex_);
+    // Only this worker changes the source while running. stop() waits for its
+    // exit, but can request cancellation while the release callback is entered.
+    if (!running_) {
+        portEXIT_CRITICAL(&status_mutex_);
+        return false;
+    }
+    if (select_master) {
         master_address_ = sender.sin_addr.s_addr;
         std::memcpy(master_mac_, packet.sender_mac, sizeof(master_mac_));
         has_sequence_ = false;

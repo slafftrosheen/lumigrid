@@ -6,7 +6,7 @@
    * stopCue, …). Telemetry comes from the focused nodeStore RuntimeSnapshot.
    * /api/v1/cue-list remains the document persistence API.
    */
-  import { onMount } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
   import { beforeNavigate, goto } from '$app/navigation';
   import { get } from 'svelte/store';
   import OperatorDialog from '$lib/components/dashboard/OperatorDialog.svelte';
@@ -56,16 +56,16 @@
     setCueCrossfade,
   } from '$lib/api/showTransport';
   import { getPresets, type ScenePreset } from '$lib/api/node';
-  import { nodeStore, commandTracker } from '$lib/state/nodeStore';
-  import { getSelectedNodeIp } from '$lib/auth/storage';
+  import { nodeStore, commandTracker, captureNodeOperation } from '$lib/state/nodeStore';
+  import { nodeAuthStore } from '$lib/auth/nodeAuth';
 
   let loading = $state(true);
-  let saving = $state(false);
   let deleting = $state(false);
   let error = $state('');
   let toast = $state('');
   let cueLists = $state<CueListSummary[]>([]);
   let presets = $state<ScenePreset[]>([]);
+  let libraryReady = $state(false);
 
   // Dialog state
   let deleteDialogOpen = $state(false);
@@ -88,17 +88,17 @@
     error: string | null;
   } | null>(null);
 
-  editor.subscribe((value) => {
+  const unsubscribeEditor = editor.subscribe((value) => {
     editorSnapshot = value;
   });
 
   let working = $derived(editorSnapshot?.working ?? null);
   let dirty = $derived(editorSnapshot ? isDirty(editorSnapshot) : false);
   let selectedCue = $derived(editorSnapshot?.selectedCue ?? null);
+  let saving = $derived(editorSnapshot?.saving ?? false);
 
   // Focused node subscription (§63) — reactive to node switches like Scenes/Timeline.
   let nodeIp = $state('');
-  let focusedIp = $derived($nodeStore.route ?? '');
   let connection = $derived($nodeStore.connection);
   let connectionOk = $derived(connection === 'online' || connection === 'degraded');
 
@@ -153,32 +153,77 @@
     working ? validateCueList(working, (idx) => presets.some((p) => p.index === idx)) : null
   );
   let canSave = $derived(
-    Boolean(working && nodeIp && !saving && blockingIssues && !hasBlockingIssues(blockingIssues))
+    Boolean(working && nodeIp && libraryReady && !saving && !deleting && blockingIssues && !hasBlockingIssues(blockingIssues))
   );
+
+  type NodeOperation = ReturnType<typeof captureNodeOperation>;
+  let mounted = false;
+  let nodeOwner = $state.raw<NodeOperation | null>(null);
+  let nodeSession: ReturnType<typeof nodeAuthStore.getSession> = null;
+  let selectionGeneration = 0;
+  let libraryGeneration = 0;
+  let loadingGeneration = 0;
+  let toastTimer: ReturnType<typeof setTimeout> | null = null;
+  let deleteTarget: { owner: NodeOperation; index: number } | null = null;
+
+  function capturePageOperation(): NodeOperation {
+    const owner = captureNodeOperation(nodeIp);
+    return { ip: owner.ip, isCurrent: () => mounted && owner.isCurrent() };
+  }
+
+  function captureEditorOperation(owner = capturePageOperation()): NodeOperation {
+    const selection = selectionGeneration;
+    return { ip: owner.ip, isCurrent: () => owner.isCurrent() && selection === selectionGeneration };
+  }
+
+  function beginSelection() {
+    selectionGeneration++;
+    editor.setSaving(false);
+    deleting = false;
+    deleteDialogOpen = false;
+    deleteTarget = null;
+  }
+
+  function openDraft(doc: CueListDocument) {
+    beginSelection();
+    editor.openDraft(doc);
+  }
 
   function toastMsg(msg: string) {
     toast = msg;
-    setTimeout(() => {
-      if (toast === msg) toast = '';
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => {
+      toast = '';
+      toastTimer = null;
     }, 3000);
   }
 
   // ── Data loading ──
 
-  async function loadData(keepSelection = true) {
-    if (!nodeIp) {
+  async function loadData(keepSelection = true, owner = capturePageOperation()) {
+    if (!owner.isCurrent()) return;
+    if (!owner.ip) {
       loading = false;
       return;
     }
+    const request = ++libraryGeneration;
+    const load = ++loadingGeneration;
+    const selection = selectionGeneration;
+    const isCurrent = () => owner.isCurrent() && request === libraryGeneration;
     loading = true;
     error = '';
     try {
       const [lists, pres] = await Promise.all([
-        getCueLists(nodeIp).catch(() => [] as CueListSummary[]),
-        getPresets(nodeIp).catch(() => [] as ScenePreset[]),
+        getCueLists(owner.ip),
+        getPresets(owner.ip),
       ]);
+      if (!isCurrent()) return;
       cueLists = lists;
       presets = pres;
+      libraryReady = true;
+
+      // A refresh must not replace a draft, or a selection made while loading.
+      if (selection !== selectionGeneration || (keepSelection && working)) return;
 
       const wanted = keepSelection ? editorSnapshot?.listIndex : null;
       const target =
@@ -189,35 +234,49 @@
             : null;
 
       if (target !== null) {
-        await selectList(target);
+        await doSelectList(target, owner);
       } else if (!working) {
         // Show an empty draft instead of auto-saving a default list (§45).
-        editor.openDraft(createDefaultCueList(freeSlots[0] ?? 0, 'New Cue List', presets[0]?.index ?? 0));
+        openDraft(createDefaultCueList(freeSlots[0] ?? 0, 'New Cue List', pres[0]?.index ?? 0));
       }
     } catch (e: unknown) {
+      if (!isCurrent()) return;
       error = e instanceof Error ? e.message : String(e);
     } finally {
-      loading = false;
+      if (owner.isCurrent() && load === loadingGeneration) loading = false;
     }
   }
 
   async function selectList(index: number) {
-    if (!nodeIp) return;
+    const node = capturePageOperation();
+    const owner = captureEditorOperation(node);
+    if (!owner.ip || !owner.isCurrent()) return;
     if (editorSnapshot && isDirty(editorSnapshot)) {
-      pendingNav = () => void doSelectList(index);
+      pendingNav = () => {
+        if (owner.isCurrent()) void doSelectList(index, node);
+      };
       navGuardOpen = true;
       return;
     }
-    await doSelectList(index);
+    await doSelectList(index, node);
   }
 
-  async function doSelectList(index: number) {
-    if (!nodeIp) return;
+  async function doSelectList(index: number, node = capturePageOperation()) {
+    if (!node.ip || !node.isCurrent()) return;
+    beginSelection();
+    const owner = captureEditorOperation(node);
+    const draft = get(editor).working;
+    error = '';
     try {
-      const doc = toDocument(await getCueList(nodeIp, index));
+      const doc = toDocument(await getCueList(owner.ip, index));
+      if (!owner.isCurrent() || get(editor).working !== draft) return;
+      // Actions started against the previous visible document while this read
+      // was pending must not commit into the newly installed selection.
+      beginSelection();
       editor.load(doc);
-    } catch {
-      editor.openDraft(createDefaultCueList(index, `Cue List ${index + 1}`, presets[0]?.index ?? 0));
+    } catch (e: unknown) {
+      if (!owner.isCurrent()) return;
+      error = e instanceof Error ? e.message : String(e);
     }
   }
 
@@ -301,29 +360,45 @@
 
   // ── Save / run workflow (§39/§40) ──
 
-  async function persistDraft(): Promise<boolean> {
-    if (!working || !nodeIp) return false;
+  async function persistDraft(owner = captureEditorOperation()): Promise<CueListDocument | null> {
+    if (!working || !owner.ip || !owner.isCurrent() || saving) return null;
+    const submitted = { ...working, cues: working.cues.map((cue) => ({ ...cue })) };
+    const expected = editorSnapshot?.persisted?.checksum ?? null;
     editor.setSaving(true);
+    editor.setError(null);
     try {
-      const expected = editorSnapshot?.persisted?.checksum ?? null;
-      const res = await saveCueList(nodeIp, working, expected);
+      const res = await saveCueList(owner.ip, submitted, expected);
+      if (!owner.isCurrent()) return null;
+      if (!res.saved) throw new Error('The node did not save the cue list');
       if (res.commandId) {
-        commandTracker.register({ id: res.commandId, domain: 'cue', nodeIp });
+        commandTracker.register({ id: res.commandId, domain: 'cue', nodeIp: owner.ip });
       }
       // §38: only clear dirty after receiving the authoritative checksum.
-      editor.commitSave({ ...working, checksum: res.checksum ?? working.checksum });
-      cueLists = await getCueLists(nodeIp).catch(() => cueLists);
-      return true;
+      const saved = { ...submitted, checksum: res.checksum ?? submitted.checksum };
+      editor.commitSave(saved, submitted);
+      const request = ++libraryGeneration;
+      try {
+        const lists = await getCueLists(owner.ip);
+        if (!owner.isCurrent()) return null;
+        if (request === libraryGeneration) cueLists = lists;
+      } catch (e: unknown) {
+        if (!owner.isCurrent()) return null;
+        if (request === libraryGeneration) {
+          error = `Cue list saved, but the library could not be refreshed: ${e instanceof Error ? e.message : e}`;
+        }
+      }
+      return saved;
     } catch (e: unknown) {
+      if (!owner.isCurrent()) return null;
       if (e instanceof CueListConflictError) {
         editor.setConflict(e.currentChecksum);
       } else {
         editor.setError(e instanceof Error ? e.message : String(e));
         toastMsg(`Save failed: ${e instanceof Error ? e.message : e}`);
       }
-      return false;
+      return null;
     } finally {
-      editor.setSaving(false);
+      if (owner.isCurrent()) editor.setSaving(false);
     }
   }
 
@@ -333,81 +408,99 @@
 
   /** Primary action for dirty lists (§40): SAVE & RUN / SAVE & RESTART. */
   async function saveAndRun() {
-    if (!await persistDraft()) return;
-    await runShow();
+    const owner = captureEditorOperation();
+    if (isFollower) return;
+    const saved = await persistDraft(owner);
+    if (!saved || !owner.isCurrent() || isFollower) return;
+    await startSavedList(owner, saved.index, `Running “${saved.name}”`);
+  }
+
+  async function startSavedList(owner: NodeOperation, index: number, label: string) {
+    if (!owner.ip || !owner.isCurrent() || isFollower) return;
+    try {
+      const res = await startCueList(owner.ip, index, 0);
+      if (!owner.isCurrent()) return;
+      if (res.commandId) {
+        commandTracker.register({ id: res.commandId, domain: 'cue', nodeIp: owner.ip });
+      }
+      toastMsg(label);
+    } catch (e: unknown) {
+      if (!owner.isCurrent()) return;
+      toastMsg(`Run failed: ${e instanceof Error ? e.message : e}`);
+    }
   }
 
   async function runShow() {
-    if (!nodeIp || !working) return;
-    try {
-      const res = await startCueList(nodeIp, working.index, 0);
-      if (res.commandId) {
-        commandTracker.register({ id: res.commandId, domain: 'cue', nodeIp });
-      }
-      toastMsg(`Running “${working.name}”`);
-    } catch (e: unknown) {
-      toastMsg(`Run failed: ${e instanceof Error ? e.message : e}`);
-    }
+    if (!working) return;
+    await startSavedList(captureEditorOperation(), working.index, `Running “${working.name}”`);
   }
 
   /** RUN SAVED VERSION (§40 secondary): never persists the browser draft. */
   async function runSavedVersion() {
-    if (!nodeIp || !working) return;
-    try {
-      const res = await startCueList(nodeIp, working.index, 0);
-      if (res.commandId) {
-        commandTracker.register({ id: res.commandId, domain: 'cue', nodeIp });
-      }
-      toastMsg('Running saved version');
-    } catch (e: unknown) {
-      toastMsg(`Run failed: ${e instanceof Error ? e.message : e}`);
-    }
+    if (!editorSnapshot?.persisted) return;
+    await startSavedList(captureEditorOperation(), editorSnapshot.persisted.index, 'Running saved version');
   }
 
   /** RESTART with the newest saved version (§13/§K). */
   async function restartShow() {
-    if (!nodeIp) return;
+    const owner = capturePageOperation();
+    if (!owner.ip || !owner.isCurrent() || isFollower) return;
     const listIdx = runtimeListIndex ?? working?.index ?? 0;
     try {
-      const res = await restartCueList(nodeIp, listIdx, 0);
+      const res = await restartCueList(owner.ip, listIdx, 0);
+      if (!owner.isCurrent()) return;
       if (res.commandId) {
-        commandTracker.register({ id: res.commandId, domain: 'cue', nodeIp });
+        commandTracker.register({ id: res.commandId, domain: 'cue', nodeIp: owner.ip });
       }
       toastMsg('Restarted with saved version');
     } catch (e: unknown) {
+      if (!owner.isCurrent()) return;
       toastMsg(`Restart failed: ${e instanceof Error ? e.message : e}`);
     }
   }
 
   // ── Transport (canonical /show/control only) ──
 
-  async function transportAction(fn: (ip: string) => Promise<unknown>, label: string) {
-    if (!nodeIp || isFollower) return;
+  async function transportAction(fn: (ip: string) => Promise<{ commandId?: number }>, label: string) {
+    const owner = capturePageOperation();
+    if (!owner.ip || !owner.isCurrent() || isFollower) return;
     try {
-      await fn(nodeIp);
+      const res = await fn(owner.ip);
+      if (!owner.isCurrent()) return;
+      if (res.commandId) {
+        commandTracker.register({ id: res.commandId, domain: 'cue', nodeIp: owner.ip });
+      }
       toastMsg(label);
     } catch (e: unknown) {
+      if (!owner.isCurrent()) return;
       // Transport failures surface; follower/authority errors are real errors (§16).
       toastMsg(`${label} failed: ${e instanceof Error ? e.message : e}`);
     }
   }
 
-  async function sendCrossfade(unit: number) {
-    if (!nodeIp) return;
-    const res = await setCueCrossfade(nodeIp, unit);
-    if (res.commandId) {
-      commandTracker.register({ id: res.commandId, domain: 'cue', nodeIp });
+  async function sendCrossfade(unit: number, owner = capturePageOperation()) {
+    if (!owner.ip || !owner.isCurrent() || isFollower) return;
+    try {
+      const res = await setCueCrossfade(owner.ip, unit);
+      if (!owner.isCurrent()) return;
+      if (res.commandId) {
+        commandTracker.register({ id: res.commandId, domain: 'cue', nodeIp: owner.ip });
+      }
+    } catch (e: unknown) {
+      if (owner.isCurrent()) throw e;
     }
   }
 
   async function jumpToSelected() {
     if (!nodeIp || selectedCue === null) return;
-    await transportAction((ip) => jumpCue(ip, selectedCue), `Jumped to cue ${selectedCue + 1}`);
+    const index = selectedCue;
+    await transportAction((ip) => jumpCue(ip, index), `Jumped to cue ${index + 1}`);
   }
 
   // ── New / duplicate / delete / import / export ──
 
   function openNewSlotChooser() {
+    if (!libraryReady) return;
     if (freeSlots.length === 0) {
       toastMsg(`All ${MAX_CUE_LISTS} cue list slots are in use`);
       return;
@@ -418,11 +511,11 @@
   function createInSlot(index: number) {
     newSlotChooserOpen = false;
     // Browser draft only — no node write until explicit save (§45).
-    editor.openDraft(createDefaultCueList(index, `Cue List ${index + 1}`, presets[0]?.index ?? 0));
+    openDraft(createDefaultCueList(index, `Cue List ${index + 1}`, presets[0]?.index ?? 0));
   }
 
   function duplicateCurrentList() {
-    if (!working || !editorSnapshot) return;
+    if (!working || !editorSnapshot || !libraryReady) return;
     const dup = (
       editorSnapshot.persisted ?? working
     );
@@ -442,38 +535,55 @@
         `${dup.name || `Cue List ${dup.index + 1}`} copy`.slice(0, 31),
       cues: dup.cues.map((c) => ({ ...c })),
     };
-    editor.openDraft(draft);
+    openDraft(draft);
     toastMsg('Duplicate created — save to persist');
   }
 
   function requestDeleteList() {
-    if (!working) return;
+    if (!working || !editorSnapshot?.persisted) return;
+    deleteTarget = { owner: captureEditorOperation(), index: working.index };
     deleteDialogOpen = true;
   }
 
   async function confirmDeleteList() {
-    if (!nodeIp || !working || deleting) return;
+    const target = deleteTarget;
+    if (!target || !target.owner.ip || !target.owner.isCurrent() || deleting || saving) return;
+    const owner = target.owner;
+    const node = capturePageOperation();
     deleting = true;
     try {
-      await deleteCueList(nodeIp, working.index);
+      const result = await deleteCueList(owner.ip, target.index);
+      if (!owner.isCurrent()) return;
+      if (!result.deleted) throw new Error('The node did not delete the cue list');
       toastMsg('Cue list deleted');
       deleteDialogOpen = false;
-      cueLists = await getCueLists(nodeIp).catch(() => cueLists);
-      if (cueLists.length > 0) {
-        await doSelectList(cueLists[0].index);
+      cueLists = cueLists.filter((list) => list.index !== target.index);
+      // Keep the browser copy recoverable if the following read fails.
+      if (working) editor.openDraft({ ...working, checksum: null, cues: working.cues.map((cue) => ({ ...cue })) });
+      const draft = get(editor).working;
+      const request = ++libraryGeneration;
+      const lists = await getCueLists(owner.ip);
+      if (!owner.isCurrent() || request !== libraryGeneration) return;
+      cueLists = lists;
+      if (get(editor).working !== draft) return;
+      deleting = false;
+      if (lists.length > 0) {
+        await doSelectList(lists[0].index, node);
       } else {
-        editor.openDraft(createDefaultCueList(0, 'New Cue List', presets[0]?.index ?? 0));
+        openDraft(createDefaultCueList(0, 'New Cue List', presets[0]?.index ?? 0));
       }
     } catch (e: unknown) {
+      if (!owner.isCurrent()) return;
       // 409 cue_list_in_use surfaces references from the node (§41).
       const message = e instanceof Error ? e.message : String(e);
       if (message.includes('cue_list_in_use')) {
         toastMsg('Cannot delete: list is running or referenced by a schedule');
       } else {
-        toastMsg(`Delete failed: ${message}`);
+        error = message;
+        toastMsg(`${deleteDialogOpen ? 'Delete' : 'Library refresh'} failed: ${message}`);
       }
     } finally {
-      deleting = false;
+      if (owner.isCurrent()) deleting = false;
     }
   }
 
@@ -490,21 +600,51 @@
   }
 
   async function onImportFile(event: Event) {
+    const owner = captureEditorOperation();
+    const draft = get(editor).working;
+    const slot = freeSlots[0];
     const input = event.target as HTMLInputElement;
     const file = input.files?.[0];
     input.value = '';
-    if (!file) return;
+    if (!file || !owner.ip || !owner.isCurrent() || !libraryReady) return;
+    if (slot === undefined) {
+      toastMsg(`All ${MAX_CUE_LISTS} cue list slots are in use`);
+      return;
+    }
     try {
       const json: unknown = JSON.parse(await file.text());
-      const result: ImportResult = importCueList(json, freeSlots[0] ?? 0);
+      if (!owner.isCurrent() || get(editor).working !== draft) return;
+      const result: ImportResult = importCueList(json, slot);
       if (result.ok === false) {
         toastMsg(`Import failed: ${result.error}`);
         return;
       }
-      editor.openDraft(result.doc);
+      openDraft(result.doc);
       toastMsg('Imported as unsaved draft');
     } catch {
+      if (!owner.isCurrent()) return;
       toastMsg('Import failed: invalid JSON');
+    }
+  }
+
+  async function reloadNodeVersion() {
+    const owner = captureEditorOperation();
+    if (!working || !owner.ip || !owner.isCurrent() || saving) return;
+    const index = working.index;
+    const draft = get(editor).working;
+    editor.setSaving(true);
+    try {
+      const doc = toDocument(await getCueList(owner.ip, index));
+      if (!owner.isCurrent() || get(editor).working !== draft) return;
+      beginSelection();
+      editor.reloadNodeVersion(doc);
+      toastMsg('Loaded node version');
+    } catch (e: unknown) {
+      if (!owner.isCurrent()) return;
+      editor.setError(e instanceof Error ? e.message : String(e));
+      toastMsg('Failed to reload node version');
+    } finally {
+      if (owner.isCurrent()) editor.setSaving(false);
     }
   }
 
@@ -537,6 +677,7 @@
       editor.load(editorSnapshot.persisted);
     } else {
       editor.reset();
+      if (nodeIp) editor.bindNode(nodeIp);
     }
     nav?.();
   }
@@ -560,19 +701,48 @@
     (working?.cues ?? []).map((c) => ({ fadeMs: c.fadeMs, holdMs: c.holdMs }))
   );
 
+  // A session can change at the same address. Every connection generation also
+  // invalidates in-flight work, while reconnects preserve this node's draft.
+  function syncFocusedNode(ip: string) {
+    const session = nodeAuthStore.getSession(ip);
+    const changedOwner = ip !== nodeIp || session !== nodeSession;
+    if (!changedOwner && nodeOwner?.isCurrent()) return;
+    nodeIp = ip;
+    nodeSession = session;
+    nodeOwner = capturePageOperation();
+    libraryGeneration++;
+    loadingGeneration++;
+    beginSelection();
+    error = '';
+    toast = '';
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = null;
+    newSlotChooserOpen = false;
+    navGuardOpen = false;
+    pendingNav = null;
+    if (changedOwner || !ip) {
+      cueLists = [];
+      presets = [];
+      libraryReady = false;
+      editor.reset();
+      if (ip) editor.bindNode(ip);
+    }
+    if (ip) void loadData(!changedOwner);
+    else loading = false;
+  }
+
   onMount(() => {
-    nodeIp = getSelectedNodeIp();
-    editor.bindNode(nodeIp || 'none');
-    loadData();
+    mounted = true;
+    return nodeStore.subscribe((state) => syncFocusedNode(state.route ?? ''));
   });
 
-  // React to focused node changes (§63): reload when the dashboard switches node.
-  $effect(() => {
-    if (focusedIp && nodeIp && focusedIp !== nodeIp) {
-      nodeIp = focusedIp;
-      editor.bindNode(focusedIp);
-      loadData(false);
-    }
+  onDestroy(() => {
+    mounted = false;
+    selectionGeneration++;
+    libraryGeneration++;
+    loadingGeneration++;
+    unsubscribeEditor();
+    if (toastTimer) clearTimeout(toastTimer);
   });
 </script>
 
@@ -608,6 +778,15 @@
       <p>Loading cue workspace…</p>
     </div>
   {:else}
+    {#if error || editorSnapshot?.error}
+      <div class="issue-box" role="alert">
+        <p>{error || editorSnapshot?.error}</p>
+        {#if error}
+          <button class="cbtn" onclick={() => loadData()}>Retry</button>
+        {/if}
+        <button class="cbtn" onclick={() => { error = ''; editor.setError(null); }}>Dismiss</button>
+      </div>
+    {/if}
     {#if isFollower}
       <div class="sync-follower-banner" role="alert">
         <span class="banner-icon">ℹ</span>
@@ -646,7 +825,9 @@
       onrestart={restartShow}
     />
 
-    {#if manualModeActive}
+    {#if manualModeActive && nodeOwner}
+      {#key nodeOwner}
+      {@const owner = nodeOwner}
       <div class="cue-surface tbar-surface">
         <ManualCueTBar
           {manualFadeQ15}
@@ -655,10 +836,11 @@
           currentIndex={currentCueIdx}
           nextIndex={nextCueIdx}
           disabled={isFollower}
-          oncrossfade={sendCrossfade}
-          onerror={(msg) => toastMsg(msg)}
+          oncrossfade={(unit) => sendCrossfade(unit, owner)}
+          onerror={(msg) => { if (owner.isCurrent()) toastMsg(msg); }}
         />
       </div>
+      {/key}
     {/if}
 
     <div class="studio-grid">
@@ -683,16 +865,18 @@
               onselect={() => selectList(cl.index)}
             />
           {/each}
-          {#if cueLists.length === 0}
+          {#if cueLists.length === 0 && libraryReady}
             <p class="library-empty">No saved cue lists yet.</p>
+          {:else if !libraryReady}
+            <p class="library-empty">Cue lists could not be loaded.</p>
           {/if}
         </div>
 
         <div class="library-actions">
-          <button class="cbtn cbtn-primary" onclick={openNewSlotChooser}>+ New Cue List</button>
-          <button class="cbtn" onclick={duplicateCurrentList} disabled={!working}>Duplicate</button>
+          <button class="cbtn cbtn-primary" onclick={openNewSlotChooser} disabled={!libraryReady}>+ New Cue List</button>
+          <button class="cbtn" onclick={duplicateCurrentList} disabled={!working || !libraryReady}>Duplicate</button>
           <button class="cbtn" onclick={onExport} disabled={!working}>Export</button>
-          <button class="cbtn" onclick={onImportClick}>Import</button>
+          <button class="cbtn" onclick={onImportClick} disabled={!libraryReady}>Import</button>
         </div>
       </aside>
 
@@ -727,14 +911,14 @@
               <button class="cbtn btn-run" disabled={!canSave || isFollower} onclick={saveAndRun}>
                 {running && runtimeListIndex === working.index ? 'SAVE & RESTART' : 'SAVE & RUN'}
               </button>
-              <button class="cbtn" disabled={isFollower} onclick={runSavedVersion} title="Run the node's saved version without saving this draft">
+              <button class="cbtn" disabled={isFollower || !editorSnapshot?.persisted} onclick={runSavedVersion} title="Run the node's saved version without saving this draft">
                 RUN SAVED VERSION
               </button>
             {:else}
               <button class="cbtn btn-run" disabled={isFollower} onclick={runShow}>▶ RUN</button>
             {/if}
             <div class="toolbar-spacer"></div>
-            <button class="cbtn btn-danger" onclick={requestDeleteList}>Delete</button>
+            <button class="cbtn btn-danger" onclick={requestDeleteList} disabled={!editorSnapshot?.persisted || saving}>Delete</button>
           </div>
 
           <CueTimelineRibbon cues={ribbonCues} currentCue={running && runtimeListIndex === working.index ? currentCueIdx : null} />
@@ -881,18 +1065,7 @@
   open={editorSnapshot?.conflict !== null && editorSnapshot?.conflict !== undefined}
   currentChecksum={editorSnapshot?.conflict?.currentChecksum ?? null}
   busy={saving}
-  onreload={async () => {
-    editor.clearConflict();
-    if (nodeIp && working) {
-      try {
-        const doc = toDocument(await getCueList(nodeIp, working.index));
-        editor.reloadNodeVersion(doc);
-        toastMsg('Loaded node version');
-      } catch {
-        toastMsg('Failed to reload node version');
-      }
-    }
-  }}
+  onreload={reloadNodeVersion}
   onkeep={() => editor.keepDraft()}
 />
 

@@ -1015,8 +1015,9 @@ void RuntimeHealthSnapshot::collect(FactoryApi* api) {
         output.runtime_estop = sig->is_estop_active();
         output.control_source = static_cast<int>(sig->current_control_source());
         output.live_objects = sig->active_live_objects();
-        output.current_power_mw = sig->power_budget().current_power_mw();
-        output.throttling_events = sig->power_budget().throttling_events();
+        const auto power = sig->power_diagnostics();
+        output.current_power_mw = power.limited_power_mw;
+        output.throttling_events = power.throttling_events;
         system.fps = sig->get_fps();
         output.active_preset = sig->active_scene_index();
         output.watchdog_fallback = sig->is_fallback_active();
@@ -1387,7 +1388,7 @@ esp_err_t get_diagnostics_output(httpd_req_t* request) {
 
     // Power Transient Diagnostics & Activation Timing (LG-HW-004)
     if (api_ptr && api_ptr->signage()) {
-        const auto pwr_trans = api_ptr->signage()->power_budget().diagnostics();
+        const auto pwr_trans = api_ptr->signage()->power_diagnostics();
         cJSON* pwr_obj = cJSON_CreateObject();
         cJSON_AddNumberToObject(pwr_obj, "requestedPowerMw", pwr_trans.requested_power_mw);
         cJSON_AddNumberToObject(pwr_obj, "limitedPowerMw", pwr_trans.limited_power_mw);
@@ -4753,7 +4754,7 @@ esp_err_t post_config_validate(httpd_req_t* request) {
     // HW-005.16: Preflight diagnostics and warnings
     bool any_pwm_incomplete = false;
     for (uint8_t ch = 8; ch < 16; ++ch) {
-        if (candidate_cfg.channels[ch].enabled && candidate_cfg.channels[ch].rated_full_power_mw == 0 && candidate_cfg.channels[ch].max_milliwatts == 0) {
+        if (candidate_cfg.channels[ch].enabled && power_model::pwm_rating(candidate_cfg, ch) == 0) {
             any_pwm_incomplete = true;
             break;
         }
@@ -4769,13 +4770,14 @@ esp_err_t post_config_validate(httpd_req_t* request) {
         for (uint8_t ch = 0; ch < 16; ++ch) {
             if ((psu.channel_mask & (1u << ch)) != 0 && candidate_cfg.channels[ch].enabled) {
                 if (ch < 8) {
-                    supply_chan_sum += static_cast<uint64_t>(candidate_cfg.channels[ch].pixel_count) * 295u;
+                    supply_chan_sum += static_cast<uint64_t>(candidate_cfg.channels[ch].pixel_count) *
+                        power_model::full_pixel_mw(candidate_cfg.channels[ch].addressable_type == AddressableType::SK6812);
                 } else {
-                    supply_chan_sum += candidate_cfg.channels[ch].rated_full_power_mw > 0 ? candidate_cfg.channels[ch].rated_full_power_mw : candidate_cfg.channels[ch].max_milliwatts;
+                    supply_chan_sum += power_model::pwm_rating(candidate_cfg, ch);
                 }
             }
         }
-        if (psu.usable_power_mw() > 0 && supply_chan_sum > psu.usable_power_mw()) {
+        if (supply_chan_sum > psu.usable_power_mw()) {
             cJSON_AddItemToArray(warnings, cJSON_CreateString("supply_capacity_exceeded"));
             break;
         }

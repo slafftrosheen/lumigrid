@@ -32,7 +32,9 @@ using TaskHandle_t=HostTask*;
 namespace host {
 inline thread_local int critical_depth=0;
 inline thread_local TaskHandle_t current=nullptr;
-inline std::atomic<int> create_count{0},socket_count{0},shutdown_count{0},delete_count{0};
+inline std::atomic<int> create_count{0},socket_count{0},shutdown_count{0},delete_count{0},send_count{0};
+// Set before start and keep immutable until the worker has joined.
+inline std::function<int(void*,size_t,sockaddr*,socklen_t*)> recv_hook;
 inline std::mutex tasks_mutex;
 inline std::vector<std::unique_ptr<HostTask>> tasks;
 inline void check(bool ok,const char* msg){if(!ok){std::fprintf(stderr,"ASSERT %s\n",msg);std::exit(1);}}
@@ -97,5 +99,8 @@ inline int host_setsockopt(int,int,int,const void*,socklen_t){return 0;}
 inline int host_bind(int,const sockaddr*,socklen_t){return 0;}
 inline int host_close(int){return 0;}
 inline int host_shutdown(int,int){++host::shutdown_count;return 0;}
-inline int host_recvfrom(int,void*,size_t,int,sockaddr*,socklen_t*){std::this_thread::sleep_for(std::chrono::milliseconds(1));return -1;}
-inline int host_sendto(int,const void*,size_t len,int,const sockaddr*,socklen_t){return static_cast<int>(len);}
+inline int host_recvfrom(int,void* data,size_t len,int,sockaddr* from,socklen_t* slen){
+ if(host::recv_hook)return host::recv_hook(data,len,from,slen);
+ std::this_thread::sleep_for(std::chrono::milliseconds(1));return -1;
+}
+inline int host_sendto(int,const void*,size_t len,int,const sockaddr*,socklen_t){++host::send_count;return static_cast<int>(len);}

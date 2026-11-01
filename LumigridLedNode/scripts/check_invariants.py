@@ -618,7 +618,7 @@ if "kMaxGlobalPowerMw" not in factory_api_cpp:
     errors.append("FactoryApi.cpp: must use kMaxGlobalPowerMw (LG-HW-005)")
 
 out_ctrl_cpp = (NODE_DIR / "components" / "output" / "OutputController.cpp").read_text(encoding="utf-8")
-if "enforce_power_guard_locked()" not in out_ctrl_cpp:
+if "enforce_power_guard_locked(power_request)" not in out_ctrl_cpp:
     errors.append("OutputController.cpp: must enforce last-stage power guard before physical commit (LG-HW-005)")
 
 if "PowerEstimateState" not in power_budget_hpp:

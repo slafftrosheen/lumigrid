@@ -24,6 +24,8 @@
     nodePixelStore,
     connect,
     refreshHealth,
+    recoverStateViaHttp,
+    captureNodeOperation,
     reconnect as reconnectNode,
     LANES,
     PIXELS_PER_LANE,
@@ -50,6 +52,25 @@
   let actionLoading = $state(false);
   let localBri = $state(128);
   let isAdmin = $state(false);
+  let clock = $state(Date.now());
+  let clockTimer: ReturnType<typeof setInterval> | null = null;
+  let brightnessTimer: ReturnType<typeof setTimeout> | null = null;
+  let brightnessDirty = $state(false);
+  let pendingBrightness = $state<number | null>(null);
+  let brightnessSnapshot: NodeLiveState['snapshot'] = null;
+  let viewOwner = captureNodeOperation('');
+  let disposed = false;
+  let discoveryRequest = 0;
+  let hasStatus = $derived(liveState.snapshot !== null);
+  let statusFresh = $derived(hasStatus && clock - liveState.lastSnapshotAt <= 10000 &&
+    (liveState.connection === 'online' || liveState.connection === 'degraded'));
+  let healthFresh = $derived(liveState.health !== null && !liveState.healthError &&
+    clock - liveState.healthUpdatedAt <= 20000 && statusFresh);
+  let powerEstimate = $derived(liveState.snapshot?.output.power);
+  let estimatedPowerMw = $derived(powerEstimate?.estimatedLimitedMw ?? liveState.health?.output.current_power_mw);
+  let connectionLabel = $derived(liveState.connection === 'online'
+    ? (hasStatus ? (statusFresh ? 'LIVE' : 'STATUS STALE') : 'WAITING FOR STATUS')
+    : liveState.connection.toUpperCase().replaceAll('-', ' '));
 
   // Fleet management states
   let activeTab = $state<'node' | 'fleet'>('node');
@@ -70,6 +91,7 @@
   //   otherwise -> "LumiGrid-Factory" (first boot / factory state)
   const apSsid = $derived.by(() => {
     const name = deviceConfig?.deviceName;
+    if (!deviceConfig) return 'Unavailable';
     if (name && name.trim().length > 0 && name.trim() !== 'lumigrid') {
       return `LumiGrid-${name.trim()}`;
     }
@@ -77,9 +99,10 @@
   });
 
   function toast(msg: string) {
+    const owner = captureNodeOperation(nodeIp);
     actionToast = msg;
     setTimeout(() => {
-      if (actionToast === msg) actionToast = '';
+      if (!disposed && owner.isCurrent() && actionToast === msg) actionToast = '';
     }, 3000);
   }
 
@@ -110,38 +133,69 @@
 
   async function handleBlackout() {
     if (!nodeIp || actionLoading) return;
+    const owner = captureNodeOperation(nodeIp);
     actionLoading = true;
     try {
-      await postFactoryAbort(nodeIp);
+      await postFactoryAbort(owner.ip);
+      if (disposed || !owner.isCurrent()) return;
       toast('Blackout requested. Waiting for node status.');
-      refreshHealth().catch(() => {});
+      refreshHealth(owner.ip).catch(() => {});
+      recoverStateViaHttp(owner.ip).catch(() => {});
     } catch (e) {
-      toast(`Blackout failed: ${e}`);
+      if (!disposed && owner.isCurrent()) toast(`Blackout not confirmed: ${e}`);
+    } finally {
+      if (!disposed && owner.isCurrent()) actionLoading = false;
     }
-    actionLoading = false;
   }
 
   async function handleToggleAutoLoop() {
-    if (!nodeIp || actionLoading) return;
+    if (!nodeIp || actionLoading || !statusFresh) return;
+    const owner = captureNodeOperation(nodeIp);
     actionLoading = true;
     const nextState = !(liveState.status?.autoLoop ?? false);
     try {
-      await postFactoryAutoLoop(nodeIp, nextState);
-      toast(`Auto loop ${nextState ? 'enabled' : 'disabled'}`);
+      await postFactoryAutoLoop(owner.ip, nextState);
+      if (disposed || !owner.isCurrent()) return;
+      toast(`Auto loop ${nextState ? 'enable' : 'disable'} requested. Waiting for node status.`);
+      recoverStateViaHttp(owner.ip).catch(() => {});
     } catch (e) {
-      toast(`Toggle failed: ${e}`);
+      if (!disposed && owner.isCurrent()) toast(`Auto loop not confirmed: ${e}`);
+    } finally {
+      if (!disposed && owner.isCurrent()) actionLoading = false;
     }
-    actionLoading = false;
   }
 
   async function handleSetBrightness(e: Event) {
     const val = Number((e.target as HTMLInputElement).value);
     localBri = val;
-    if (!nodeIp) return;
+    brightnessDirty = true;
+    if (!nodeIp || actionLoading || !statusFresh || !liveState.status?.effect) return;
+    const owner = captureNodeOperation(nodeIp);
+    const effect = liveState.status.effect;
+    actionLoading = true;
+    pendingBrightness = val;
+    brightnessSnapshot = liveState.snapshot;
+    if (brightnessTimer) clearTimeout(brightnessTimer);
     try {
-      await postFactoryEffect(nodeIp, (liveState.status?.effect || 'identity') as any, val);
-    } catch {
-      // transient
+      await postFactoryEffect(owner.ip, effect as any, val);
+      if (disposed || !owner.isCurrent()) return;
+      if (pendingBrightness !== null) {
+        toast('Brightness requested. Waiting for node status.');
+        brightnessTimer = setTimeout(() => {
+          if (!disposed && owner.isCurrent() && pendingBrightness === val) {
+            pendingBrightness = null;
+            toast('Brightness is not yet confirmed. Your draft is preserved.');
+          }
+        }, 8000);
+      }
+      recoverStateViaHttp(owner.ip).catch(() => {});
+    } catch (error) {
+      if (!disposed && owner.isCurrent()) {
+        pendingBrightness = null;
+        toast(`Brightness not confirmed. Your draft is preserved. ${error}`);
+      }
+    } finally {
+      if (!disposed && owner.isCurrent()) actionLoading = false;
     }
   }
 
@@ -152,14 +206,17 @@
 
   async function pollFleetDiscovery() {
     if (!nodeIp || isScanningFleet) return;
+    const owner = captureNodeOperation(nodeIp);
+    const request = ++discoveryRequest;
     isScanningFleet = true;
     try {
-      const resp = await getFleetNodes(nodeIp);
+      const resp = await getFleetNodes(owner.ip);
+      if (disposed || !owner.isCurrent() || request !== discoveryRequest) return;
       if (resp?.self) {
         upsertNodeRecord({
           id: resp.self.id,
           name: resp.self.name,
-          address: nodeIp,
+          address: owner.ip,
           family: resp.self.family,
           model: resp.self.model,
           firmware: resp.self.firmware,
@@ -187,19 +244,26 @@
     } catch {
       // transient discovery failure or unauthenticated
     } finally {
-      isScanningFleet = false;
+      if (!disposed && owner.isCurrent() && request === discoveryRequest) isScanningFleet = false;
     }
   }
 
   function handleSelectFleetNode(ip: string) {
     setSelectedNodeIp(ip);
-    nodeIp = ip;
     connect(ip);
-    getNodeInfo(ip).then(info => { nodeInfo = info; }).catch(() => {});
-    getDeviceConfig(ip).then(cfg => { deviceConfig = cfg; }).catch(() => {});
-    pollFleetDiscovery();
     activeTab = 'node';
-    toast(`Connected to node ${ip}`);
+    toast(`Selected node ${ip}. Waiting for its status.`);
+  }
+
+  function loadNodeDetails() {
+    const owner = captureNodeOperation(nodeIp);
+    getNodeInfo(owner.ip).then(info => {
+      if (!disposed && owner.isCurrent()) nodeInfo = info;
+    }).catch(() => {});
+    getDeviceConfig(owner.ip).then(cfg => {
+      if (!disposed && owner.isCurrent()) deviceConfig = cfg;
+    }).catch(() => {});
+    pollFleetDiscovery();
   }
 
   function handleAddFleetNode() {
@@ -312,6 +376,7 @@
   }
 
   onMount(() => {
+    disposed = false;
     nodeIp = getSelectedNodeIp();
     isAdmin = nodeAuthStore.getRole(nodeIp) === 'admin';
     refreshFleetList();
@@ -322,10 +387,8 @@
 
     if (nodeIp) {
       connect(nodeIp);
-      getNodeInfo(nodeIp).then(info => { nodeInfo = info; }).catch(() => {});
-      getDeviceConfig(nodeIp).then(cfg => { deviceConfig = cfg; }).catch(() => {});
-      pollFleetDiscovery();
     }
+    clockTimer = setInterval(() => { clock = Date.now(); }, 1000);
 
     discoveryTimer = setInterval(() => {
       if (nodeIp) {
@@ -335,18 +398,30 @@
 
     unsubscribeState = getNodeLiveState().subscribe(val => {
       liveState = val;
-      if (val.nodeIp !== nodeIp) {
+      isAdmin = val.authenticated && val.role === 'admin';
+      if (val.nodeIp !== nodeIp || !viewOwner.isCurrent()) {
         nodeIp = val.nodeIp;
+        viewOwner = captureNodeOperation(nodeIp);
+        nodeInfo = null;
+        deviceConfig = null;
+        actionToast = '';
+        actionLoading = isScanningFleet = brightnessDirty = false;
+        pendingBrightness = null;
+        if (brightnessTimer) clearTimeout(brightnessTimer);
+        discoveryRequest++;
         if (nodeIp) {
-          getNodeInfo(nodeIp).then(info => { nodeInfo = info; }).catch(() => {});
-          getDeviceConfig(nodeIp).then(cfg => { deviceConfig = cfg; }).catch(() => {});
-          pollFleetDiscovery();
-        } else {
-          nodeInfo = null;
-          deviceConfig = null;
+          loadNodeDetails();
         }
       }
-      if (val.status?.brightness !== undefined) {
+      if (pendingBrightness !== null && val.snapshot !== brightnessSnapshot &&
+          val.status?.brightness === pendingBrightness) {
+        // A confirmation can arrive after the operator has begun another draft.
+        brightnessDirty = localBri !== pendingBrightness;
+        pendingBrightness = null;
+        if (brightnessTimer) clearTimeout(brightnessTimer);
+        toast(brightnessDirty ? 'Previous brightness confirmed. Your newer draft is preserved.' : 'Node confirmed brightness.');
+      }
+      if (!brightnessDirty && val.status?.brightness !== undefined) {
         localBri = val.status.brightness;
       }
     });
@@ -361,6 +436,9 @@
   });
 
   onDestroy(() => {
+    disposed = true;
+    if (clockTimer) clearInterval(clockTimer);
+    if (brightnessTimer) clearTimeout(brightnessTimer);
     if (discoveryTimer) clearInterval(discoveryTimer);
     if (rafId) cancelAnimationFrame(rafId);
     if (unsubscribeState) unsubscribeState();
@@ -374,7 +452,7 @@
 
 <div class="overview-page">
   {#if actionToast}
-    <div class="toast-bar">{actionToast}</div>
+    <div class="toast-bar" role="status">{actionToast}</div>
   {/if}
 
   <!-- View Mode Selector Bar -->
@@ -496,7 +574,7 @@
               <tbody>
                 {#each savedFleet as fn}
                   {@const isSelected = fn.ip === nodeIp}
-                  {@const isConnected = isSelected && liveState.connection === 'connected'}
+                  {@const isConnected = isSelected && statusFresh}
                   <tr class:selected-row={isSelected}>
                     <td data-label="Node Identity">
                       <span class="fn-name">{fn.name}</span>
@@ -591,9 +669,9 @@
               <span class="node-address">{nodeIp}</span>
             {/if}
           </div>
-          <span class="status-badge {liveState.connection}">
+          <span class="status-badge {statusFresh ? 'online' : liveState.connection === 'online' ? 'degraded' : liveState.connection}">
             <span class="dot"></span>
-            {liveState.connection.toUpperCase()}
+            {connectionLabel}
           </span>
           <span class="role-pill">
             {liveState.authenticated ? liveState.role.toUpperCase() : 'AUTH PENDING'}
@@ -604,12 +682,17 @@
           <span>·</span>
           <span>Firmware: <strong>{nodeInfo?.firmwareVersion || '—'}</strong></span>
           <span>·</span>
-          <span>Outputs: <strong>{(liveState.snapshot?.output.enabled ?? liveState.status?.outputsEnabled) ? 'ENABLED' : 'DISABLED'}</strong></span>
+          <span>Outputs: <strong>{!hasStatus ? 'UNKNOWN' : liveState.snapshot?.output.enabled ? 'ENABLED' : 'DISABLED'}</strong></span>
           {#if liveState.health}
             <span>·</span>
             <span>FPS: <strong>{liveState.health.system.fps.toFixed(1)}</strong></span>
           {/if}
         </div>
+        {#if !statusFresh}
+          <p class="field-error" role="status">{hasStatus
+            ? 'Status is stale. Showing the last received values; live controls are waiting for fresh status.'
+            : 'Waiting for this node’s status. Output state and brightness are unknown.'}</p>
+        {/if}
       </div>
     </header>
 
@@ -622,13 +705,13 @@
         </div>
         <div class="status-flags">
           <span class="flag-pill" class:active={liveState.status?.outputsEnabled}>
-            {liveState.status?.outputsEnabled ? 'OUTPUTS ON' : 'OUTPUTS OFF'}
+            {!hasStatus ? 'OUTPUTS UNKNOWN' : liveState.status?.outputsEnabled ? 'OUTPUTS ON' : 'OUTPUTS OFF'}
           </span>
           <span class="flag-pill loop" class:active={liveState.status?.autoLoop}>
-            {liveState.status?.autoLoop ? 'AUTO LOOP' : 'LOOP OFF'}
+            {!hasStatus ? 'LOOP UNKNOWN' : liveState.status?.autoLoop ? 'AUTO LOOP' : 'LOOP OFF'}
           </span>
           <span class="flag-pill test" class:active={liveState.status?.testActive}>
-            {liveState.status?.testActive ? 'TEST RUNNING' : 'STANDBY'}
+            {!hasStatus ? 'TEST UNKNOWN' : liveState.status?.testActive ? 'TEST RUNNING' : 'STANDBY'}
           </span>
         </div>
       </div>
@@ -645,28 +728,34 @@
       <div class="output-controls-bar">
         <div class="meta-item">
           <span class="meta-label">Active Effect</span>
-          <span class="meta-value effect-name">{liveState.status?.effect ?? 'None (Idle)'}</span>
+          <span class="meta-value effect-name">{liveState.status?.effect || 'Unknown'}</span>
         </div>
 
         <div class="meta-item brightness-item">
           <div class="label-val">
             <span class="meta-label">Brightness</span>
-            <span class="meta-value">{localBri} / 255</span>
+            <span class="meta-value">{hasStatus ? `${localBri} / 255` : 'Unknown'}</span>
           </div>
           <input
             type="range"
             min="0"
             max="255"
             value={localBri}
+            aria-label="Brightness"
+            oninput={(e) => { localBri = Number(e.currentTarget.value); brightnessDirty = true; }}
             onchange={handleSetBrightness}
             class="bri-slider"
+            disabled={actionLoading || !statusFresh || !liveState.status?.effect}
           />
+          {#if brightnessDirty}
+            <span class="stat-sub">{pendingBrightness !== null ? 'Awaiting confirmation' : 'Draft preserved'} · Node: {liveState.status?.brightness ?? 'unknown'}</span>
+          {/if}
         </div>
 
         <div class="meta-item">
           <span class="meta-label">Output Stage</span>
           <span class="meta-value" class:fault={liveState.health?.output.fault}>
-            {liveState.health?.output.state ?? 'Normal'}
+            {liveState.snapshot?.output.state ?? 'Unknown'}
           </span>
         </div>
       </div>
@@ -679,20 +768,20 @@
         <button
           class="action-btn blackout-btn"
           onclick={handleBlackout}
-          disabled={actionLoading}
+          disabled={actionLoading || !liveState.authenticated}
           type="button"
         >
           <span class="btn-icon">⬛</span>
           <span class="btn-text">
-            <strong>Immediate Blackout</strong>
-            <small>Emergency output suppression</small>
+            <strong>Request Blackout</strong>
+            <small>Wait for node confirmation</small>
           </span>
         </button>
 
         <button
           class="action-btn"
           onclick={handleToggleAutoLoop}
-          disabled={actionLoading}
+          disabled={actionLoading || !statusFresh}
           type="button"
         >
           <span class="btn-icon">⟳</span>
@@ -741,6 +830,11 @@
     <!-- ── HEALTH & TELEMETRY ───────────────────────────────────────────────── -->
     <section class="section-card health-section">
       <h3>System & Subsystem Health</h3>
+      {#if !healthFresh}
+        <p class="field-error" role="status">{liveState.health
+          ? 'Health telemetry is stale. These are the last received values.'
+          : 'Health telemetry is unavailable for this node.'}</p>
+      {/if}
       <div class="health-grid">
         <div class="health-stat-card">
           <span class="stat-label">Free Heap</span>
@@ -756,30 +850,35 @@
 
         <div class="health-stat-card">
           <span class="stat-label">NVS Storage</span>
-          <span class="stat-value">{liveState.health?.nvs.used ?? 0} entries</span>
-          <span class="stat-sub">{liveState.health?.nvs.free ?? 0} available</span>
+          <span class="stat-value">{liveState.health?.nvs.used ?? '—'} entries</span>
+          <span class="stat-sub">{liveState.health?.nvs.free ?? '—'} available</span>
         </div>
 
         <div class="health-stat-card">
           <span class="stat-label">Config State</span>
           <span class="stat-value" class:text-ok={liveState.health?.config.valid}>
-            {liveState.health?.config.valid ? 'Valid' : 'Degraded'}
+            {!liveState.health ? 'Unknown' : liveState.health.config.valid ? 'Valid' : 'Degraded'}
           </span>
-          <span class="stat-sub">{liveState.health?.config.persistence_state || 'NVS'}</span>
+          <span class="stat-sub">{liveState.health?.config.persistence_state || 'Unavailable'}</span>
         </div>
 
         <div class="health-stat-card">
           <span class="stat-label">Output Stage</span>
           <span class="stat-value" class:text-fault={liveState.health?.output.fault}>
-            {liveState.health?.output.state || 'Healthy'}
+            {liveState.health?.output.state || 'Unknown'}
           </span>
-          <span class="stat-sub">Power: {liveState.health?.output.current_power_mw ? `${(liveState.health.output.current_power_mw / 1000).toFixed(1)}W` : '0W'}</span>
+          <span class="stat-sub">Estimated power: {estimatedPowerMw !== undefined && Number.isFinite(estimatedPowerMw) ? `${(estimatedPowerMw / 1000).toFixed(1)} W` : 'Unavailable'}</span>
+          {#if powerEstimate?.estimateComplete === false}
+            <span class="stat-sub text-fault">Incomplete estimate</span>
+          {:else if !powerEstimate}
+            <span class="stat-sub">Completeness unknown</span>
+          {/if}
         </div>
 
         <div class="health-stat-card">
           <span class="stat-label">DMX Ingestion</span>
-          <span class="stat-value">{liveState.health?.dmx.sources_active ?? 0} active</span>
-          <span class="stat-sub">{liveState.health?.dmx.packets_accepted ?? 0} accepted</span>
+          <span class="stat-value">{liveState.health?.dmx.sources_active ?? '—'} active</span>
+          <span class="stat-sub">{liveState.health?.dmx.packets_accepted ?? '—'} accepted</span>
         </div>
       </div>
     </section>
@@ -817,7 +916,7 @@
           </div>
           <div class="conn-row">
             <span class="conn-key">AP Password</span>
-            <span class="conn-val conn-hint">Installer token (set in Config → Auth)</span>
+            <span class="conn-val conn-hint">Per-device Wi-Fi key shown on the serial console</span>
           </div>
           {#if deviceConfig?.deviceName}
             <div class="conn-row">
@@ -1214,27 +1313,27 @@
     height: 6px;
     border-radius: 50%;
   }
-  .status-badge.connected {
+  .status-badge.online {
     background: rgba(48, 209, 88, 0.12);
     color: #30d158;
     border: 1px solid rgba(48, 209, 88, 0.3);
   }
-  .status-badge.connected .dot {
+  .status-badge.online .dot {
     background: #30d158;
     box-shadow: 0 0 6px #30d158;
   }
-  .status-badge.connecting {
+  .status-badge.connecting, .status-badge.degraded {
     background: rgba(255, 149, 0, 0.12);
     color: #ff9500;
     border: 1px solid rgba(255, 149, 0, 0.3);
   }
-  .status-badge.connecting .dot { background: #ff9500; }
-  .status-badge.disconnected, .status-badge.idle, .status-badge.error {
+  .status-badge.connecting .dot, .status-badge.degraded .dot { background: var(--dash-warm); }
+  .status-badge.offline, .status-badge.auth-required, .status-badge.transport-blocked, .status-badge.idle, .status-badge.error {
     background: rgba(255, 69, 58, 0.12);
     color: #ff453a;
     border: 1px solid rgba(255, 69, 58, 0.3);
   }
-  .status-badge.disconnected .dot, .status-badge.error .dot { background: #ff453a; }
+  .status-badge.offline .dot, .status-badge.error .dot { background: var(--dash-danger); }
 
   .role-pill {
     font-size: 0.72rem;
@@ -1496,8 +1595,9 @@
 
   @media (max-width: 720px) {
     .mode-bar { align-items: stretch; }
-    .mode-selector { width: 100%; overflow-x: auto; }
-    .mode-btn { flex: 1; justify-content: center; white-space: nowrap; }
+    .mode-selector { width: 100%; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .mode-btn { min-width: 0; justify-content: center; flex-wrap: wrap; white-space: normal; }
+    .mode-pill.mono { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .icon-refresh-btn { width: 100%; }
     .add-node-form { flex-direction: column; }
     .input-ip, .input-name { min-width: 0; width: 100%; }

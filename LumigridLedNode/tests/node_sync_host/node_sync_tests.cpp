@@ -179,6 +179,93 @@ int main(int argc,char** argv){
    CHECK(f.sync.active_role()==NodeRole::Master);CHECK(cleared==0);f.sync.stop(0);return -1;
   };
   host::run(0);CHECK(f.sync.stop(0)==ESP_OK);
+ } else if(name=="preferred_timeline_leader_releases"||name=="preferred_cue_leader_releases"||
+           name=="stale_leader_releases_before_reacquire"||name=="stale_changed_leader_releases"){
+  Fixture f;host::socket_result=10;int received=0,releases=0,applied=0;bool remote_owned=false;
+  const bool stale=name=="stale_leader_releases_before_reacquire"||name=="stale_changed_leader_releases";
+  const bool same_source=name=="stale_leader_releases_before_reacquire";
+  const uint32_t next_address=same_source?0xC0A80101:0xC0A80102;
+  auto old=heartbeat();old.transport=name=="preferred_cue_leader_releases"?3:2;
+  old.sequence=50;old.timeline_anchor_ms=1000;old.cue_state=1;
+  auto next=old;next.sequence=1;next.timeline_anchor_ms=8000;
+  if(!same_source)next.sender_mac[5]=0;
+  f.sync.set_remote_transport_callback([&](const auto& snap,uint8_t&){
+   CHECK(host::critical_depth==0);
+   if(snap.mode==ShowTransportMode::Standalone){++releases;remote_owned=false;return true;}
+   CHECK(!remote_owned);CHECK(releases==applied);
+   // Different leaders/reboots may reuse both timeline and cue generations.
+   CHECK(snap.transport_generation==42&&snap.cue_generation==7);
+   CHECK(snap.timeline_anchor_ms==(applied==0?1000:8000));
+   remote_owned=true;++applied;return true;
+  });
+  CHECK(f.sync.start(stale?NodeRole::Worker:NodeRole::Auto)==ESP_OK);
+  host::recv_hook=[&](void* data,size_t len,sockaddr* from,socklen_t* slen){
+   if(received++==0)return deliver(old,data,len,from,slen);
+   if(received==2){
+    CHECK(applied==1&&releases==0);if(stale)host::now_us+=3001000;
+    return deliver(next,data,len,from,slen,0,next_address);
+   }
+   const auto status=f.sync.status();CHECK(applied==2&&releases==1);
+   CHECK(status.master_address==htonl(next_address));
+   CHECK(status.packets_received==2&&status.packets_missed==0);
+   CHECK(status.transport==old.transport&&status.transport_generation==42);
+   CHECK(status.transport_apply_ok&&status.transport_error==0);
+   CHECK(host::send_count==2&&f.engine.feed_count==2);f.sync.stop(0);return -1;
+  };
+  host::run(0);CHECK(f.sync.stop(0)==ESP_OK);
+ } else if(name=="rejected_leader_handover_retries"){
+  Fixture f;host::socket_result=10;int received=0,releases=0,applied=0,notified=0;bool allow=false;
+  auto old=heartbeat();old.transport=2;old.sequence=50;
+  auto next=old;next.sender_mac[5]=0;next.sequence=1;next.transport=3;
+  next.flags|=1;next.global_clock_ms=90000;
+  f.sync.set_remote_transport_callback([&](const auto& snap,uint8_t& error){
+   CHECK(host::critical_depth==0);
+   if(snap.mode==ShowTransportMode::Standalone){++releases;error=9;return allow;}
+   ++applied;return true;
+  });
+  f.sync.set_transport_callback([&](const auto&){++notified;});
+  CHECK(f.sync.start(NodeRole::Auto)==ESP_OK);
+  host::recv_hook=[&](void* data,size_t len,sockaddr* from,socklen_t* slen){
+   if(received++==0)return deliver(old,data,len,from,slen);
+   if(received==2){host::now_us+=100000;return deliver(next,data,len,from,slen,0,0xC0A80102);}
+   if(received==3){
+    const auto status=f.sync.status();CHECK(status.master_address==htonl(0xC0A80101));
+    CHECK(status.transport==2&&status.transport_generation==42);
+    CHECK(status.packets_received==1&&status.packets_missed==0&&status.last_packet_age_ms==100);
+    CHECK(!status.transport_apply_ok&&status.transport_error==9);
+    CHECK(applied==1&&releases==1&&notified==0);
+    CHECK(f.engine.feed_count==1&&host::send_count==1);
+    CHECK(!f.clock.has_epoch()&&f.clock.now_ms()==1100);
+    return deliver(old,data,len,from,slen); // The old sequence is still remembered.
+   }
+   if(received==4){
+    CHECK(applied==1&&releases==1&&host::send_count==1);
+    allow=true;return deliver(next,data,len,from,slen,0,0xC0A80102);
+   }
+   const auto status=f.sync.status();CHECK(status.master_address==htonl(0xC0A80102));
+   CHECK(status.transport==3&&status.packets_received==2&&status.packets_missed==0);
+   CHECK(status.transport_apply_ok&&status.transport_error==0);
+   CHECK(applied==2&&releases==2&&notified==1);
+   CHECK(f.engine.feed_count==2&&host::send_count==2&&f.clock.has_epoch());
+   f.sync.stop(0);return -1;
+  };
+  host::run(0);CHECK(f.sync.stop(0)==ESP_OK);
+ } else if(name=="current_leader_replay_does_not_release"){
+  Fixture f;host::socket_result=10;int received=0,releases=0,applied=0;auto packet=heartbeat();packet.sequence=50;
+  f.sync.set_remote_transport_callback([&](const auto& snap,uint8_t&){
+   if(snap.mode==ShowTransportMode::Standalone)++releases;else ++applied;return true;
+  });
+  CHECK(f.sync.start(NodeRole::Auto)==ESP_OK);
+  host::recv_hook=[&](void* data,size_t len,sockaddr* from,socklen_t* slen){
+   ++received;
+   if(received<=2)return deliver(packet,data,len,from,slen);
+   if(received==3){auto older=packet;--older.sequence;return deliver(older,data,len,from,slen);}
+   if(received==4){auto other=packet;other.sender_mac[5]=3;return deliver(other,data,len,from,slen,0,0xC0A80103);}
+   if(received==5){CHECK(applied==1&&releases==0);++packet.sequence;return deliver(packet,data,len,from,slen);}
+   CHECK(applied==2&&releases==0&&host::send_count==2);
+   CHECK(f.sync.status().packets_missed==0);f.sync.stop(0);return -1;
+  };
+  host::run(0);CHECK(f.sync.stop(0)==ESP_OK);
  } else if(name=="expired_peer_slots_recycled"||name=="live_peer_slots_preserved"){
   Fixture f;host::socket_result=10;int received=0;auto p=heartbeat();p.type=NodeSync::PacketType::Acknowledgement;
   const bool expire=name=="expired_peer_slots_recycled";

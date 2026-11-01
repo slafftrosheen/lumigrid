@@ -22,7 +22,13 @@ Defaults do not replace saved settings. `reset()` clears nested channel/group/su
 
 Units are milliwatts, millivolts and milliamps. `rated_full_power_mw` describes PWM full-duty load; `channel_limit_mw` is the local ceiling; `max_milliwatts` is a compatibility field. Up to four logical supply domains assign channel masks and derive usable power from voltage, rated current and usable-capacity permille.
 
-`PowerBudget` applies channel/supply/global limits and soft start. Model states are `complete`, `partial`, `unknown`; missing data is not zero consumption. These are estimates, not sensors or electrical/thermal certification.
+`PowerBudget` and the final output guard share conservative command estimates: 5 mW of fixed idle per configured addressable pixel, 295 mW per full-scale RGB component and 380 mW per full-scale white component. Full RGB therefore estimates 890 mW per pixel, and full RGBW estimates 1,270 mW. PWM uses its configured full-duty load rating. These assumptions preserve the final guard's previous model and still require calibration against the actual fixtures.
+
+Channel, supply and global ceilings scale active demand, followed by soft start and transient limiting. Each stage re-estimates the quantized commands; fractional loads remain exact until aggregate reporting rounds upward. Requested power represents the command before these limits, while limited power and supply loads represent the final confirmed driver commands. Renderer previews can differ from final output brightness.
+
+A zero channel/global ceiling means no ceiling at that tier. A disabled supply domain is ignored; an **enabled supply with zero usable capacity** extinguishes its assigned active outputs, including unrated PWM. Fixed addressable idle remains in the estimate. If a ceiling is below that idle floor, the estimate can exceed the ceiling even with all active components zero.
+
+Model states are `complete`, `partial`, `unknown`; missing ratings are not zero consumption. Positive budgets cannot fully constrain an unrated PWM load. Failed output plus failed blackout retains the last confirmed command estimate and marks it incomplete/unknown until a confirmed operation. `output.power.estimateComplete` qualifies the runtime snapshot estimate; measured power remains unavailable. These are software estimates, not current sensors or electrical/thermal certification.
 
 ## Network
 

@@ -1,166 +1,129 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import * as configApi from '$lib/api/config';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { loadPageFunctions } from '$lib/testing/pageScriptHarness';
 
-describe('NetworkConfigCard component logic', () => {
-  beforeEach(() => {
-    vi.restoreAllMocks();
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>(done => { resolve = done; });
+  return { promise, resolve };
+}
+
+function workspace() {
+  const session = {};
+  const saved = { mode: 'sta_with_ap_fallback', ssid: 'Venue A', passwordSet: true, apName: 'Recovery A', apChannel: 6 };
+  const runtime = { state: 'connected', applyState: 'idle', pendingCommandId: null, lastApplyError: null,
+    persistedMatchesRuntime: true, staSsid: 'Venue A', staConnected: true };
+  const c: Record<string, any> = {
+    nodeIp: 'node-a', activeIp: 'node-a', activeSession: session, disposed: false,
+    generation: 1, loadRequest: 0, statusRequest: 0, applyRequest: 0,
+    loading: false, applying: false, configLoaded: true, isAdmin: true,
+    config: saved, status: runtime, loadError: '', statusError: '',
+    mode: saved.mode, ssid: saved.ssid, password: '', clearPassword: false, apName: saved.apName, apChannel: 6,
+    validationError: null, applyError: null, applyMessage: null, pollTimer: null, deadlineTimer: null,
+    nodeAuthStore: { getSession: () => session }, onNetworkChanged: vi.fn(),
+    getNetworkConfig: vi.fn(async () => saved), getNetworkStatus: vi.fn(async () => runtime),
+    saveNetworkConfig: vi.fn(async () => ({ accepted: true, commandId: 7, applyPending: true })),
+  };
+  Object.defineProperty(c, 'inputsDisabled', { get: () => c.loading || c.applying || !c.configLoaded || !c.isAdmin });
+  const page = loadPageFunctions(new URL('./NetworkConfigCard.svelte', import.meta.url), [
+    'restoreDraft', 'savedDraft', 'captureOwner', 'stopPolling', 'loadData',
+    'validateInput', 'handleApply', 'matchesSaved', 'startReconnectPolling',
+  ], c);
+  return { c, page, saved, runtime };
+}
+
+describe('NetworkConfigCard production async workflows', () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => { vi.clearAllTimers(); vi.restoreAllMocks(); vi.useRealTimers(); });
+
+  it('does not save default inputs until this node’s saved settings loaded', async () => {
+    const { c, page } = workspace();
+    c.configLoaded = false;
+    await page.handleApply();
+    expect(c.saveNetworkConfig).not.toHaveBeenCalled();
   });
 
-  it('GET config never expects password contents and displays passwordSet status', async () => {
-    const mockConfig: configApi.NetworkConfigWire = {
-      mode: 'sta_with_ap_fallback',
-      ssid: 'Venue-Lighting-2.4G',
-      passwordSet: true,
-      apName: 'LumiGrid-Recovery',
-      apChannel: 6,
-    };
-    vi.spyOn(configApi, 'getNetworkConfig').mockResolvedValue(mockConfig);
-
-    const config = await configApi.getNetworkConfig('192.168.4.1');
-    expect(config.passwordSet).toBe(true);
-    expect((config as any).password).toBeUndefined();
+  it('preserves a saved password when blank, and clears it only on the explicit checkbox', async () => {
+    const first = workspace();
+    await first.page.handleApply();
+    expect(first.c.saveNetworkConfig.mock.calls[0][1]).not.toHaveProperty('password');
+    expect(first.c.saveNetworkConfig.mock.calls[0][1]).not.toHaveProperty('clearPassword');
+    const second = workspace();
+    second.c.clearPassword = true;
+    await second.page.handleApply();
+    expect(second.c.saveNetworkConfig.mock.calls[0][1]).toHaveProperty('clearPassword', true);
   });
 
-  it('existing password is preserved when input remains blank on save', async () => {
-    const saveSpy = vi.spyOn(configApi, 'saveNetworkConfig').mockResolvedValue({
-      accepted: true,
-      commandId: 105,
-      applyPending: true,
-    });
-
-    const update: configApi.NetworkConfigUpdate = {
-      mode: 'sta_with_ap_fallback',
-      ssid: 'Venue-Lighting-2.4G',
-      apChannel: 6,
-    };
-
-    // When password input is blank, no password field is included in the payload
-    await configApi.saveNetworkConfig('192.168.4.1', update);
-    expect(saveSpy).toHaveBeenCalledWith('192.168.4.1', expect.not.objectContaining({ password: expect.anything() }));
+  it('rejects fractional, empty and out-of-range AP channels before any save', async () => {
+    const { c, page } = workspace();
+    for (const channel of [undefined, 0, 1.5, 14]) {
+      c.apChannel = channel;
+      await page.handleApply();
+      expect(c.validationError).toContain('whole number');
+    }
+    expect(c.saveNetworkConfig).not.toHaveBeenCalled();
   });
 
-  it('clearPassword is explicit when checkbox is checked', async () => {
-    const saveSpy = vi.spyOn(configApi, 'saveNetworkConfig').mockResolvedValue({
-      accepted: true,
-      commandId: 106,
-      applyPending: true,
-    });
-
-    const update: configApi.NetworkConfigUpdate = {
-      mode: 'sta_only',
-      ssid: 'OpenVenue',
-      clearPassword: true,
-    };
-
-    await configApi.saveNetworkConfig('192.168.4.1', update);
-    expect(saveSpy).toHaveBeenCalledWith('192.168.4.1', expect.objectContaining({ clearPassword: true }));
+  it('keeps a failed config read unavailable even when runtime status succeeds', async () => {
+    const { c, page } = workspace();
+    c.getNetworkConfig.mockRejectedValueOnce(new Error('offline'));
+    await page.loadData();
+    expect(c.configLoaded).toBe(false);
+    expect(c.loadError).toContain('unavailable');
+    await page.handleApply();
+    expect(c.saveNetworkConfig).not.toHaveBeenCalled();
   });
 
-  it('apply shows pending/reconnecting state and handles transition', async () => {
-    vi.spyOn(configApi, 'saveNetworkConfig').mockResolvedValue({
-      accepted: true,
-      commandId: 107,
-      applyPending: true,
-    });
-
-    let pollCount = 0;
-    vi.spyOn(configApi, 'getNetworkStatus').mockImplementation(async () => {
-      pollCount++;
-      if (pollCount === 1) {
-        return {
-          state: 'connecting',
-          mode: 'sta_with_ap_fallback',
-          staConnected: false,
-          staSsid: 'NewVenueLAN',
-          staRssi: 0,
-          staIp: '0.0.0.0',
-          apActive: true,
-          apIp: '192.168.4.1',
-          retryCount: 1,
-          applyState: 'waiting_for_network',
-          pendingCommandId: 107,
-          lastApplyError: null,
-          lastDisconnectReason: 0,
-          persistedMatchesRuntime: false,
-        };
-      }
-      return {
-        state: 'connected',
-        mode: 'sta_with_ap_fallback',
-        staConnected: true,
-        staSsid: 'NewVenueLAN',
-        staRssi: -52,
-        staIp: '192.168.1.180',
-        apActive: false,
-        apIp: '0.0.0.0',
-        retryCount: 0,
-        applyState: 'idle',
-        pendingCommandId: null,
-        lastApplyError: null,
-        lastDisconnectReason: 0,
-        persistedMatchesRuntime: true,
-      };
-    });
-
-    const res = await configApi.saveNetworkConfig('192.168.4.1', {
-      mode: 'sta_with_ap_fallback',
-      ssid: 'NewVenueLAN',
-    });
-    expect(res.applyPending).toBe(true);
-
-    const st1 = await configApi.getNetworkStatus('192.168.4.1');
-    expect(st1.applyState).toBe('waiting_for_network');
-
-    const st2 = await configApi.getNetworkStatus('192.168.4.1');
-    expect(st2.applyState).toBe('idle');
-    expect(st2.persistedMatchesRuntime).toBe(true);
+  it('ignores config and status from an earlier node selection', async () => {
+    const { c, page, saved } = workspace();
+    const pending = deferred<any>();
+    c.getNetworkConfig.mockReturnValueOnce(pending.promise);
+    const load = page.loadData();
+    c.nodeIp = c.activeIp = 'node-b'; c.generation++;
+    c.ssid = 'Node B draft'; c.config = null;
+    pending.resolve(saved);
+    await load;
+    expect(c.ssid).toBe('Node B draft');
+    expect(c.config).toBeNull();
   });
 
-  it('failed STA shows recovery state truth', async () => {
-    vi.spyOn(configApi, 'getNetworkStatus').mockResolvedValue({
-      state: 'fallback_ap',
-      mode: 'sta_with_ap_fallback',
-      staConnected: false,
-      staSsid: 'BadPasswordSSID',
-      staRssi: 0,
-      staIp: '0.0.0.0',
-      apActive: true,
-      apIp: '192.168.4.1',
-      retryCount: 3,
-      applyState: 'failed',
-      pendingCommandId: null,
-      lastApplyError: 'sta_connect_failed',
-      lastDisconnectReason: 204,
-      persistedMatchesRuntime: false,
-    });
-
-    const status = await configApi.getNetworkStatus('192.168.4.1');
-    expect(status.state).toBe('fallback_ap');
-    expect(status.lastApplyError).toBe('sta_connect_failed');
-    expect(status.persistedMatchesRuntime).toBe(false);
+  it('keeps denied or unconfirmed saves as failures without starting confirmation polls', async () => {
+    const { c, page } = workspace();
+    c.ssid = 'My preserved draft'; c.password = 'NewPassword123';
+    c.saveNetworkConfig.mockRejectedValueOnce(new Error('HTTP 403 not permitted'));
+    await page.handleApply();
+    expect(c.applyError).toContain('not confirmed');
+    expect(c.ssid).toBe('My preserved draft');
+    expect(c.password).toBe('NewPassword123');
+    await vi.advanceTimersByTimeAsync(65000);
+    expect(c.getNetworkStatus).not.toHaveBeenCalled();
   });
 
-  it('validation blocks invalid channel (< 1 or > 13)', () => {
-    const isValidChannel = (ch: number) => ch >= 1 && ch <= 13 && Number.isInteger(ch);
-    expect(isValidChannel(0)).toBe(false);
-    expect(isValidChannel(14)).toBe(false);
-    expect(isValidChannel(1)).toBe(true);
-    expect(isValidChannel(13)).toBe(true);
-    expect(isValidChannel(6)).toBe(true);
-  });
+  it('does not let a poll from a timed-out apply finish the next apply on the same node', async () => {
+    const { c, page, runtime } = workspace();
+    c.ssid = 'Attempt A';
+    c.getNetworkStatus.mockResolvedValue({ ...runtime, applyState: 'waiting_for_network', pendingCommandId: 7 });
+    await page.handleApply();
+    await vi.advanceTimersByTimeAsync(56000);
+    const lateStatus = deferred<any>();
+    c.getNetworkStatus.mockReturnValueOnce(lateStatus.promise);
+    await vi.advanceTimersByTimeAsync(2000); // A poll begins at t=58 s, inside its 8 s API window.
+    await vi.advanceTimersByTimeAsync(3000); // A's 60 s operation deadline expires.
+    expect(c.applying).toBe(false);
+    expect(c.applyError).toContain('after 60 seconds');
 
-  it('validation blocks invalid SSID (empty for sta modes, or > 32 chars)', () => {
-    const isValidSsid = (mode: string, ssid: string) => {
-      if (mode === 'sta_only' || mode === 'sta_with_ap_fallback') {
-        if (!ssid || ssid.trim().length === 0 || ssid.length > 32) return false;
-      }
-      return true;
-    };
-
-    expect(isValidSsid('sta_only', '')).toBe(false);
-    expect(isValidSsid('sta_with_ap_fallback', '   ')).toBe(false);
-    expect(isValidSsid('sta_with_ap_fallback', 'A'.repeat(33))).toBe(false);
-    expect(isValidSsid('sta_with_ap_fallback', 'Valid_SSID')).toBe(true);
-    expect(isValidSsid('ap_only', '')).toBe(true); // AP only mode does not require STA SSID
+    c.ssid = 'Attempt B';
+    c.saveNetworkConfig.mockResolvedValueOnce({ accepted: true, commandId: 8, applyPending: true });
+    c.getNetworkStatus.mockResolvedValue({ ...runtime, applyState: 'waiting_for_network', pendingCommandId: 8 });
+    await page.handleApply();
+    lateStatus.resolve(runtime);
+    await Promise.resolve(); await Promise.resolve();
+    expect(c.getNetworkConfig).not.toHaveBeenCalled();
+    expect(c.applying).toBe(true);
+    expect(c.ssid).toBe('Attempt B');
+    expect(c.onNetworkChanged).not.toHaveBeenCalled();
+    const count = c.getNetworkStatus.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(c.getNetworkStatus.mock.calls.length).toBeGreaterThan(count);
+    expect(c.applying).toBe(true);
   });
 });

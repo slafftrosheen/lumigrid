@@ -156,13 +156,13 @@ RuntimeSnapshot collect_runtime_snapshot(FactoryApi* api, uint32_t stream_seq) {
         const auto& ctrl = api->signage()->controller();
         const auto m = ctrl.commit_metrics();
         const auto ftm = api->signage()->frame_timing_metrics();
-        const auto& pb = api->signage()->power_budget();
+        const auto power = api->signage()->power_diagnostics();
         snap.output.enabled = ctrl.output_enabled();
-        snap.output.power_mw = pb.current_power_mw();
-        snap.output.estimated_requested_mw = pb.requested_power_mw();
-        snap.output.estimated_limited_mw = pb.limited_power_mw();
-        snap.output.estimate_complete = pb.estimate_complete();
-        snap.output.limit_mw = pb.limit_mw();
+        snap.output.power_mw = power.limited_power_mw;
+        snap.output.estimated_requested_mw = power.requested_power_mw;
+        snap.output.estimated_limited_mw = power.limited_power_mw;
+        snap.output.estimate_complete = power.estimate_complete;
+        snap.output.limit_mw = power.limit_mw;
         snprintf(snap.output.state, sizeof(snap.output.state), "%s",
                  output_state_to_str(api->signage()->output_state()));
         snap.output.fault = api->signage()->output_fault();

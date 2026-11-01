@@ -1,4 +1,18 @@
-import type { RuntimeSnapshotV3, RuntimeChannelState } from '../runtimeSnapshot';
+import type { RuntimeSnapshotV3, RuntimeChannelState, OutputState } from '../runtimeSnapshot';
+
+function normalizePowerEstimate(raw: unknown): OutputState['power'] {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const power = raw as Record<string, unknown>;
+  const fields = ['estimatedRequestedMw', 'estimatedLimitedMw', 'limitMw'] as const;
+  if (typeof power.estimateComplete !== 'boolean' || fields.some(field =>
+    typeof power[field] !== 'number' || !Number.isFinite(power[field]) || power[field] < 0)) return undefined;
+  return {
+    estimatedRequestedMw: power.estimatedRequestedMw as number,
+    estimatedLimitedMw: power.estimatedLimitedMw as number,
+    estimateComplete: power.estimateComplete,
+    limitMw: power.limitMw as number,
+  };
+}
 
 export class InvalidRuntimeSnapshotError extends Error {
   constructor(message: string) {
@@ -54,6 +68,7 @@ export function normalizeRuntimeSnapshot(raw: unknown): RuntimeSnapshotV3 {
       output: {
         enabled: data.output.enabled !== undefined ? Boolean(data.output.enabled) : true,
         powerMw: Number(data.output.powerMw) || 0,
+        power: normalizePowerEstimate(data.output.power),
         state: String(data.output.state || (data.output.fault ? 'fault' : 'healthy')),
         fault: Boolean(data.output.fault),
         faultCount: Number(data.output.faultCount) || 0,
