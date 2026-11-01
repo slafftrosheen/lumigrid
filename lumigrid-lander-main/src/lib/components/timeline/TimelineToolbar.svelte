@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onDestroy } from 'svelte';
   import {
     timelineEditor,
     isTimelineEditorDirty,
@@ -8,18 +9,22 @@
     startTimeline,
     stopTimeline,
     restartTimeline,
+    type ShowControlResponse,
   } from '$lib/api/showTransport';
   import type { RuntimeSnapshotV3 } from '$lib/state/runtimeSnapshot';
-  import { nodeStore } from '$lib/state/nodeStore';
+  import { nodeStore, captureNodeOperation } from '$lib/state/nodeStore';
 
   interface Props {
     snapshot: RuntimeSnapshotV3 | null;
     isFollower: boolean;
+    statusFresh: boolean;
+    canSave: boolean;
+    libraryReady: boolean;
     onExport: () => void;
     onImport: () => void;
   }
 
-  const { snapshot, isFollower, onExport, onImport }: Props = $props();
+  const { snapshot, isFollower, statusFresh, canSave, libraryReady, onExport, onImport }: Props = $props();
 
   const working = $derived($timelineEditor.working);
   const persisted = $derived($timelineEditor.persisted);
@@ -30,84 +35,149 @@
 
   // Runtime transport truth from canonical snapshot (LG-031 / LG-033)
   const isRunning = $derived(snapshot?.transport?.mode === 'timeline' || Boolean(snapshot?.transport?.timeline?.running));
-  const runtimeBpm = $derived(snapshot?.transport?.timeline?.bpm ?? 120);
-  const runtimeGeneration = $derived(snapshot?.transport?.timeline?.generation ?? 0);
+  const runtimeBpm = $derived(snapshot?.transport?.timeline?.bpm);
   const contentStale = $derived(Boolean(snapshot?.transport?.timeline?.contentStale));
+  const canControl = $derived(statusFresh && Boolean($nodeStore.nodeIp) && !isFollower);
+  const canRunSaved = $derived(canControl && $timelineEditor.loaded && !$timelineEditor.loading &&
+    !$timelineEditor.remoteChanged && persisted !== null);
 
   const bpmPresets = [60, 90, 120, 128, 140];
 
   let actionInProgress = $state(false);
+  let actionError = $state('');
+  let actionFeedback = $state('');
+  let actionRequest = 0;
+  let disposed = false;
+  let confirmationTimer: ReturnType<typeof setTimeout> | null = null;
+  let actionOwner = $state.raw<{ ip: string; isCurrent: () => boolean } | null>(null);
+  let pendingTransport = $state.raw<{
+    kind: 'start' | 'restart' | 'stop';
+    response: ShowControlResponse;
+    before: RuntimeSnapshotV3 | null;
+    owner: ReturnType<typeof captureToolbarOperation>;
+  } | null>(null);
+
+  function captureToolbarOperation() {
+    const operation = captureNodeOperation($nodeStore.nodeIp || '');
+    const request = ++actionRequest;
+    const loadGeneration = $timelineEditor.loadGeneration;
+    const owner = { ip: operation.ip, isCurrent: () => !disposed && request === actionRequest &&
+      loadGeneration === $timelineEditor.loadGeneration && operation.isCurrent() };
+    actionOwner = owner;
+    return owner;
+  }
+
+  function finishConfirmation() {
+    if (confirmationTimer) clearTimeout(confirmationTimer);
+    confirmationTimer = null;
+    pendingTransport = null;
+    actionInProgress = false;
+  }
+
+  function observeTransport() {
+    const pending = pendingTransport;
+    if (!pending || !pending.owner.isCurrent() || !statusFresh || !snapshot || snapshot === pending.before) return;
+    const timeline = snapshot.transport.timeline;
+    const matchesGeneration = typeof pending.response.generation === 'number' &&
+      snapshot.transport.generation === pending.response.generation;
+    const matchesState = pending.kind === 'stop'
+      ? snapshot.transport.mode !== 'timeline' && !timeline.running
+      : snapshot.transport.mode === 'timeline' && timeline.running &&
+        (pending.response.checksum === undefined || timeline.activeChecksum === pending.response.checksum);
+    if (!matchesGeneration || !matchesState) return;
+    actionFeedback = pending.kind === 'stop' ? 'Stopped — confirmed by the node.' : 'Running saved timeline — confirmed by the node.';
+    finishConfirmation();
+  }
+
+  $effect(() => {
+    if (actionOwner && !actionOwner.isCurrent()) {
+      finishConfirmation();
+      actionOwner = null;
+      actionError = actionFeedback = '';
+    } else observeTransport();
+  });
+
+  async function requestTransport(kind: 'start' | 'restart' | 'stop', owner = captureToolbarOperation()) {
+    if (!owner.isCurrent() || !canControl || (kind !== 'stop' && !canRunSaved)) return;
+    actionInProgress = true;
+    actionError = '';
+    actionFeedback = 'Sending playback request…';
+    const before = snapshot;
+    try {
+      const response = kind === 'stop' ? await stopTimeline(owner.ip)
+        : kind === 'restart' ? await restartTimeline(owner.ip, persisted!.bpm)
+          : await startTimeline(owner.ip, persisted!.bpm);
+      if (!owner.isCurrent()) return;
+      if (response.accepted !== true) throw new Error(response.error || 'The node did not accept the playback request.');
+      pendingTransport = { kind, response, before, owner };
+      actionFeedback = 'Accepted — waiting for fresh node confirmation…';
+      confirmationTimer = setTimeout(() => {
+        if (!owner.isCurrent()) return;
+        finishConfirmation();
+        actionFeedback = '';
+        actionError = 'Playback was accepted, but no matching status arrived. Check the live status before trying again.';
+      }, 12000);
+      observeTransport();
+    } catch (error) {
+      if (!owner.isCurrent()) return;
+      actionInProgress = false;
+      actionFeedback = '';
+      actionError = error instanceof Error ? error.message : 'Playback request failed.';
+    }
+  }
 
   async function handleRun() {
-    const ip = $nodeStore.nodeIp;
-    if (!ip || isFollower) return;
-
-    actionInProgress = true;
-    try {
-      const bpm = working?.bpm ?? 120;
-      await startTimeline(ip, bpm);
-    } catch (err: any) {
-      console.error('Failed to start timeline:', err);
-    } finally {
-      actionInProgress = false;
-    }
+    if (actionInProgress || !canRunSaved) return;
+    await requestTransport('start');
   }
 
   async function handleStop() {
-    const ip = $nodeStore.nodeIp;
-    if (!ip || isFollower) return;
-
-    actionInProgress = true;
-    try {
-      await stopTimeline(ip);
-    } catch (err: any) {
-      console.error('Failed to stop timeline:', err);
-    } finally {
-      actionInProgress = false;
-    }
+    if (actionInProgress || !canControl) return;
+    await requestTransport('stop');
   }
 
   async function handleRestartWithSaved() {
-    const ip = $nodeStore.nodeIp;
-    if (!ip || isFollower) return;
-
-    actionInProgress = true;
-    try {
-      const bpm = persisted?.bpm ?? working?.bpm ?? 120;
-      await restartTimeline(ip, bpm);
-    } catch (err: any) {
-      console.error('Failed to restart timeline:', err);
-    } finally {
-      actionInProgress = false;
-    }
+    if (actionInProgress || !canRunSaved) return;
+    await requestTransport('restart');
   }
 
   async function handleSaveAndRun() {
-    const ip = $nodeStore.nodeIp;
-    if (!ip || isFollower) return;
-
+    if (actionInProgress || !canSave || !canRunSaved) return;
+    const owner = captureToolbarOperation();
     actionInProgress = true;
+    actionError = actionFeedback = '';
     try {
       const ok = await timelineEditor.save();
-      if (ok) {
-        const bpm = $timelineEditor.working?.bpm ?? 120;
-        await startTimeline(ip, bpm);
+      if (!owner.isCurrent()) return;
+      if (ok && !$isTimelineEditorDirty && canRunSaved) {
+        await requestTransport('start', owner);
+        return;
       }
-    } catch (err: any) {
-      console.error('Save & Run failed:', err);
+      if (ok) actionFeedback = 'Submitted version saved. Newer edits or changed live status need review before running.';
     } finally {
-      actionInProgress = false;
+      if (owner.isCurrent() && !pendingTransport) actionInProgress = false;
     }
   }
 
   async function handleSaveOnly() {
+    if (actionInProgress || !canSave) return;
+    const owner = captureToolbarOperation();
     actionInProgress = true;
+    actionError = actionFeedback = '';
     try {
-      await timelineEditor.save();
+      const ok = await timelineEditor.save();
+      if (ok && owner.isCurrent()) actionFeedback = $isTimelineEditorDirty
+        ? 'Submitted version saved. Newer edits remain in this draft.' : 'Timeline saved. Playback is unchanged.';
     } finally {
-      actionInProgress = false;
+      if (owner.isCurrent()) actionInProgress = false;
     }
   }
+
+  onDestroy(() => {
+    disposed = true;
+    ++actionRequest;
+    if (confirmationTimer) clearTimeout(confirmationTimer);
+  });
 
   function handleBpmChange(e: Event) {
     const val = parseInt((e.target as HTMLInputElement).value, 10);
@@ -129,7 +199,9 @@
   <!-- Left: Status & Primary Transport Actions -->
   <div class="toolbar-section left">
     <div class="status-group">
-      {#if conflict}
+      {#if !statusFresh}
+        <span class="badge badge-stale">{snapshot ? 'STALE STATUS' : 'STATUS UNAVAILABLE'}</span>
+      {:else if conflict}
         <span class="badge badge-conflict">CONFLICT</span>
       {:else if isFollower}
         <span class="badge badge-follower" title="Playback is controlled by sync leader">FOLLOWER</span>
@@ -143,6 +215,10 @@
 
       {#if isDirty}
         <span class="badge badge-edited">EDITED</span>
+      {:else if $timelineEditor.loading}
+        <span class="badge badge-saved">LOADING DOCUMENT</span>
+      {:else if !$timelineEditor.loaded || !persisted}
+        <span class="badge badge-stale">DOCUMENT UNAVAILABLE</span>
       {:else}
         <span class="badge badge-saved">SAVED</span>
       {/if}
@@ -158,7 +234,7 @@
         <button
           class="btn btn-primary"
           onclick={handleSaveAndRun}
-          disabled={saving || actionInProgress}
+          disabled={!canSave || !canRunSaved || saving || actionInProgress}
         >
           {saving ? 'SAVING...' : 'SAVE & RUN'}
         </button>
@@ -166,7 +242,7 @@
           <button
             class="btn btn-danger"
             onclick={handleStop}
-            disabled={actionInProgress}
+            disabled={!canControl || actionInProgress}
           >
             STOP
           </button>
@@ -174,31 +250,24 @@
           <button
             class="btn btn-secondary"
             onclick={handleRun}
-            disabled={actionInProgress}
+            disabled={!canRunSaved || actionInProgress}
             title="Runs previously saved version from node"
           >
             RUN SAVED
           </button>
         {/if}
-        <button
-          class="btn btn-outline"
-          onclick={handleSaveOnly}
-          disabled={saving || actionInProgress}
-        >
-          {saving ? 'SAVING...' : 'SAVE'}
-        </button>
       {:else if isRunning && contentStale}
         <button
           class="btn btn-amber"
           onclick={handleRestartWithSaved}
-          disabled={actionInProgress}
+          disabled={!canRunSaved || actionInProgress}
         >
           RESTART WITH SAVED
         </button>
         <button
           class="btn btn-danger"
           onclick={handleStop}
-          disabled={actionInProgress}
+          disabled={!canControl || actionInProgress}
         >
           STOP
         </button>
@@ -206,7 +275,7 @@
         <button
           class="btn btn-danger"
           onclick={handleStop}
-          disabled={actionInProgress}
+          disabled={!canControl || actionInProgress}
         >
           STOP
         </button>
@@ -214,9 +283,18 @@
         <button
           class="btn btn-success"
           onclick={handleRun}
-          disabled={actionInProgress}
+          disabled={!canRunSaved || actionInProgress}
         >
           RUN
+        </button>
+      {/if}
+      {#if isDirty}
+        <button
+          class="btn btn-outline"
+          onclick={handleSaveOnly}
+          disabled={!canSave || saving || actionInProgress}
+        >
+          {saving ? 'SAVING...' : 'SAVE'}
         </button>
       {/if}
     </div>
@@ -231,7 +309,8 @@
         type="number"
         min="10"
         max="500"
-        value={working?.bpm ?? 120}
+        value={working?.bpm ?? ''}
+        disabled={!working}
         onchange={handleBpmChange}
         class="bpm-input"
       />
@@ -243,13 +322,14 @@
             class="bpm-preset-btn"
             class:active={working?.bpm === bpm}
             onclick={() => handleSetBpmPreset(bpm)}
+            disabled={!working}
           >
             {bpm}
           </button>
         {/each}
       </div>
 
-      {#if isRunning && runtimeBpm !== working?.bpm}
+      {#if statusFresh && isRunning && runtimeBpm !== undefined && runtimeBpm !== working?.bpm}
         <span class="bpm-mismatch" title="Running at {runtimeBpm} BPM. Restart needed to apply {working?.bpm} BPM.">
           running @ {runtimeBpm}
         </span>
@@ -288,25 +368,40 @@
     </div>
 
     <div class="file-actions">
-      <button class="btn btn-ghost" onclick={onImport} title="Import JSON timeline document">
+      <button class="btn btn-ghost" onclick={onImport} disabled={!$timelineEditor.loaded || !libraryReady} title="Import JSON timeline document as an unsaved draft">
         Import
       </button>
-      <button class="btn btn-ghost" onclick={onExport} title="Export JSON timeline document">
+      <button class="btn btn-ghost" onclick={onExport} disabled={!working} title="Export current timeline draft">
         Export
       </button>
     </div>
+  </div>
+  <div class="toolbar-feedback">
+    {#if $timelineEditor.remoteChanged && !conflict}
+      <p role="status">The node's saved timeline changed. Review and reload its version before running saved content.</p>
+      <button type="button" class="btn btn-secondary" onclick={() => timelineEditor.reviewConflict()}>Review saved version</button>
+    {/if}
+    {#if !statusFresh}
+      <p role="status">{snapshot ? 'Showing the last received playback status.' : 'Waiting for playback status.'} Live controls require fresh node status.</p>
+    {/if}
+    {#if working && !canSave && isDirty}
+      <p role="status">Draft kept in this browser. Load the saved document and scene library, and resolve missing references before saving.</p>
+    {/if}
+    {#if actionFeedback}<p role="status">{actionFeedback}</p>{/if}
+    {#if actionError}<p role="alert" class="action-error">{actionError}</p>{/if}
   </div>
 </div>
 
 <style>
   .timeline-toolbar {
+    flex-shrink: 0;
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 16px;
     padding: 10px 16px;
-    background: var(--dash-card-bg, #111827);
-    border: 1px solid var(--dash-border, #1f2937);
+    background: var(--dash-surface);
+    border: 1px solid var(--dash-border);
     border-radius: 8px;
     margin-bottom: 12px;
     flex-wrap: wrap;
@@ -316,12 +411,15 @@
     display: flex;
     align-items: center;
     gap: 12px;
+    flex-wrap: wrap;
+    min-width: 0;
   }
 
   .status-group {
     display: flex;
     align-items: center;
     gap: 6px;
+    flex-wrap: wrap;
   }
 
   .badge {
@@ -379,6 +477,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
+    flex-wrap: wrap;
   }
 
   .btn {
@@ -400,11 +499,11 @@
   }
 
   .btn-primary {
-    background: #3b82f6;
-    color: white;
+    background: var(--dash-accent);
+    color: var(--dash-text);
   }
   .btn-primary:hover:not(:disabled) {
-    background: #2563eb;
+    background: var(--dash-accent-hover);
   }
 
   .btn-success {
@@ -465,6 +564,7 @@
   }
 
   .bpm-control {
+    flex-wrap: wrap;
     display: flex;
     align-items: center;
     gap: 8px;
@@ -507,9 +607,9 @@
     color: #f3f4f6;
   }
   .bpm-preset-btn.active {
-    background: #3b82f6;
-    color: white;
-    border-color: #3b82f6;
+    background: var(--dash-accent);
+    color: var(--dash-text);
+    border-color: var(--dash-accent);
   }
 
   .bpm-mismatch {
@@ -557,4 +657,9 @@
     display: flex;
     gap: 4px;
   }
+  .toolbar-feedback { flex-basis: 100%; color: var(--dash-muted); font-size: 12px; overflow-wrap: anywhere; }
+  .toolbar-feedback:empty { display: none; }
+  .toolbar-feedback p { margin: 4px 0; }
+  .toolbar-feedback .action-error { color: var(--dash-danger); }
+  button:focus-visible, input:focus-visible { outline: 2px solid var(--dash-accent); outline-offset: 2px; }
 </style>

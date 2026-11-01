@@ -1,16 +1,18 @@
 import { writable, derived, get } from 'svelte/store';
-import type { TimelineDocument, TimelineTrack, TimelineStep } from '../api/timeline';
+import type { TimelineDocument } from '../api/timeline';
 import {
   getSequence,
   saveSequence,
-  createDefaultTimelineDocument,
   cloneTimelineDocument,
   isTimelineDirty,
-  normalizeTimelineDocument,
 } from '../api/timeline';
+import { captureNodeOperation } from '../state/nodeStore';
+import { nodeAuthStore } from '../auth/nodeAuth';
+import { parseTimelineDocument, validateTimelineDocument } from './validation';
 import {
   addStep,
   updateStepLength,
+  updateStepPreset,
   duplicateStep,
   deleteStep,
   moveStepLeft,
@@ -40,6 +42,9 @@ export interface TimelineEditorState {
   nodeId: string | null;
   nodeIp: string | null;
   loadGeneration: number;
+  loading: boolean;
+  loaded: boolean;
+  sceneSlots: Set<number> | null;
 
   persisted: TimelineDocument | null;
   working: TimelineDocument | null;
@@ -52,6 +57,7 @@ export interface TimelineEditorState {
   saving: boolean;
   conflict: boolean;
   conflictChecksum: number | null;
+  remoteChanged: boolean;
 
   error: string | null;
 }
@@ -60,6 +66,9 @@ const initialState: TimelineEditorState = {
   nodeId: null,
   nodeIp: null,
   loadGeneration: 0,
+  loading: false,
+  loaded: false,
+  sceneSlots: null,
   persisted: null,
   working: null,
   selectedChannel: null,
@@ -68,51 +77,81 @@ const initialState: TimelineEditorState = {
   saving: false,
   conflict: false,
   conflictChecksum: null,
+  remoteChanged: false,
   error: null,
 };
 
-function createTimelineEditorStore() {
+export function createTimelineEditorStore() {
   const { subscribe, set, update } = writable<TimelineEditorState>(initialState);
 
   let currentLoadGen = 0;
+  let currentSaveGen = 0;
+  let boundSession: ReturnType<typeof nodeAuthStore.getSession> = null;
+  let owner: ReturnType<typeof captureNodeOperation> | null = null;
 
   return {
     subscribe,
 
-    async load(nodeId: string, nodeIp: string) {
+    async load(nodeId: string, nodeIp: string, preserveDraft = false) {
+      const operation = captureNodeOperation(nodeIp);
+      if (!operation.isCurrent()) return false;
       const gen = ++currentLoadGen;
+      ++currentSaveGen;
+      const session = nodeAuthStore.getSession(nodeIp);
+      const previous = get({ subscribe });
+      const sameOwner = previous.nodeIp === nodeIp && boundSession === session;
+      boundSession = session;
+      owner = operation;
+      const isCurrent = () => currentLoadGen === gen && operation.isCurrent();
       update((s) => ({
-        ...s,
+        ...(sameOwner ? s : { ...initialState, zoom: s.zoom }),
         nodeId,
         nodeIp,
         loadGeneration: gen,
+        loading: true,
+        loaded: false,
         saving: false,
-        conflict: false,
-        conflictChecksum: null,
+        conflict: sameOwner && !preserveDraft ? previous.conflict : false,
+        conflictChecksum: sameOwner && !preserveDraft ? previous.conflictChecksum : null,
         error: null,
       }));
 
       try {
         const raw = await getSequence(nodeIp);
-        // Node-change race guard: ensure response matches active loadGeneration
-        if (currentLoadGen !== gen) return;
-
-        const doc = normalizeTimelineDocument(raw);
-        update((s) => ({
-          ...s,
-          persisted: cloneTimelineDocument(doc),
-          working: cloneTimelineDocument(doc),
-          selectedChannel: null,
-          selectedStep: null,
-          error: null,
-        }));
+        if (!isCurrent()) return false;
+        const doc = parseTimelineDocument(raw, true);
+        update((s) => {
+          const keepDraft = sameOwner && preserveDraft && isTimelineDirty(s.working, s.persisted);
+          const conflict = keepDraft && s.persisted?.checksum !== doc.checksum;
+          return {
+            ...s,
+            persisted: conflict ? s.persisted : cloneTimelineDocument(doc),
+            working: keepDraft ? s.working : cloneTimelineDocument(doc),
+            selectedChannel: keepDraft ? s.selectedChannel : null,
+            selectedStep: keepDraft ? s.selectedStep : null,
+            loading: false,
+            loaded: true,
+            conflict,
+            conflictChecksum: conflict ? doc.checksum : null,
+            remoteChanged: conflict,
+            error: conflict ? 'The saved timeline changed while this draft was open.' : null,
+          };
+        });
+        return true;
       } catch (err: any) {
-        if (currentLoadGen !== gen) return;
+        if (!isCurrent()) return false;
         update((s) => ({
           ...s,
+          loading: false,
+          loaded: false,
           error: err?.message || 'Failed to load timeline sequence',
         }));
+        return false;
       }
+    },
+
+    setSceneSlots(slots: Set<number> | null) {
+      update((s) => ({ ...s, sceneSlots: slots ? new Set(slots) : null }));
     },
 
     setZoom(zoom: TimelineZoomLevel) {
@@ -156,6 +195,18 @@ function createTimelineEditorStore() {
         return {
           ...s,
           working: updateTrackInDocument(s.working, updatedTrack),
+        };
+      });
+    },
+
+    replaceBlockScene(channelId: number, stepIndex: number, presetIndex: number) {
+      update((s) => {
+        if (!s.working || !s.sceneSlots?.has(presetIndex)) return s;
+        const track = s.working.tracks[channelId];
+        if (!track) return s;
+        return {
+          ...s,
+          working: updateTrackInDocument(s.working, updateStepPreset(track, stepIndex, presetIndex)),
         };
       });
     },
@@ -305,36 +356,58 @@ function createTimelineEditorStore() {
 
     async save(): Promise<boolean> {
       const state = get({ subscribe });
-      if (!state.nodeIp || !state.working) return false;
+      if (!state.nodeIp || !state.working || !state.persisted || !state.loaded ||
+          state.loading || state.saving || !owner?.isCurrent()) return false;
+      if (!state.sceneSlots) {
+        update((s) => ({ ...s, error: 'Load the scene library before saving this timeline.' }));
+        return false;
+      }
+      const validation = validateTimelineDocument(state.working, state.sceneSlots);
+      if (!validation.valid) {
+        update((s) => ({ ...s, error: validation.errors[0] || 'Resolve missing scene references before saving.' }));
+        return false;
+      }
+      const operation = owner;
+      const gen = ++currentSaveGen;
+      const loadGen = currentLoadGen;
+      const isCurrent = () => gen === currentSaveGen && loadGen === currentLoadGen && operation.isCurrent();
+      const submitted = cloneTimelineDocument(state.working);
 
       update((s) => ({ ...s, saving: true, error: null }));
       try {
-        const expectedChecksum = state.persisted?.checksum ?? 0;
-        const res = await saveSequence(state.nodeIp, state.working, expectedChecksum);
-
-        // Success: update persisted checksum and state
+        const res = await saveSequence(state.nodeIp, submitted, state.persisted.checksum);
+        if (!isCurrent()) return false;
+        if (res.saved !== true || !Number.isInteger(res.checksum) || res.checksum! < 0 || res.checksum! > 0xffffffff) {
+          update((s) => ({ ...s, loaded: false }));
+          throw new Error('Save could not be confirmed. Reload the node version before saving again.');
+        }
         const updatedPersisted: TimelineDocument = {
-          ...cloneTimelineDocument(state.working),
-          checksum: res.checksum,
+          ...submitted,
+          checksum: res.checksum!,
         };
 
         update((s) => ({
           ...s,
           persisted: cloneTimelineDocument(updatedPersisted),
-          working: cloneTimelineDocument(updatedPersisted),
+          working: isTimelineDirty(s.working, submitted) && s.working
+            ? { ...cloneTimelineDocument(s.working), checksum: updatedPersisted.checksum }
+            : cloneTimelineDocument(updatedPersisted),
           saving: false,
           conflict: false,
           conflictChecksum: null,
+          remoteChanged: false,
           error: null,
         }));
         return true;
       } catch (err: any) {
+        if (!isCurrent()) return false;
         if (err?.status === 409 || err?.error === 'timeline_conflict') {
           update((s) => ({
             ...s,
             saving: false,
             conflict: true,
-            conflictChecksum: err?.currentChecksum ?? null,
+            conflictChecksum: err?.details?.currentChecksum ?? err?.currentChecksum ?? null,
+            remoteChanged: true,
             error: 'Timeline was modified on the node by another session.',
           }));
         } else {
@@ -350,7 +423,7 @@ function createTimelineEditorStore() {
 
     async reloadNodeVersion() {
       const state = get({ subscribe });
-      if (!state.nodeIp) return;
+      if (!state.nodeIp || !owner?.isCurrent() || state.loading || state.saving) return;
       await this.load(state.nodeId || '', state.nodeIp);
     },
 
@@ -358,8 +431,14 @@ function createTimelineEditorStore() {
       update((s) => ({ ...s, conflict: false }));
     },
 
+    reviewConflict() {
+      update((s) => s.remoteChanged ? { ...s, conflict: true } : s);
+    },
+
     importDocument(imported: Partial<TimelineDocument>) {
-      const doc = normalizeTimelineDocument(imported);
+      const state = get({ subscribe });
+      if (!state.loaded || !state.working || !owner?.isCurrent()) return;
+      const doc = parseTimelineDocument(imported);
       update((s) => ({
         ...s,
         working: doc,
@@ -370,6 +449,10 @@ function createTimelineEditorStore() {
     },
 
     reset() {
+      ++currentLoadGen;
+      ++currentSaveGen;
+      owner = null;
+      boundSession = null;
       set(initialState);
     },
   };

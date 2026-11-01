@@ -60,6 +60,143 @@ struct LightingFixture {
     FrameResult render() { return runtime->render_frame(static_cast<uint32_t>(host_now_us.load() / 1000)); }
 };
 
+void scheduler_rejects_stale_topology() {
+    for (unsigned change = 0; change < 7; ++change) {
+        ControllerFixture f;
+        const auto rendered_cfg = config(1, 1, 4);
+        auto current_cfg = rendered_cfg;
+        if (change == 0 || change == 6) current_cfg.channels[0].pixel_count = 2;
+        if (change == 1) current_cfg = config(2, 1, 4);
+        if (change == 2) {
+            current_cfg.channels[0].addressable_type = AddressableType::SK6812;
+            current_cfg.channels[0].pixel_order = PixelOrder::GRBW;
+        }
+        if (change == 3) current_cfg.channels[0].pixel_order = PixelOrder::RGB;
+        if (change == 4) {
+            current_cfg.channels[8].enabled = false;
+            current_cfg.channels[9].enabled = true;
+        }
+        f.start(current_cfg);
+        if (change >= 5) f.controller.set_pwm_available(false);
+        std::array<std::vector<uint8_t>, 8> staged;
+        for (uint8_t lane = 0; lane < 8; ++lane) {
+            if (!f.controller.pixels().configured(lane)) continue;
+            f.controller.pixels().fill(lane, 11, 22, 33, 44);
+            const auto* wire = f.controller.pixels().wire_data(lane);
+            staged[lane].assign(wire, wire + f.controller.pixels().rmt().wire_len(lane));
+        }
+        f.controller.pwm().set_all(789);
+        auto frame = std::make_unique<RenderFrame>();
+        frame->channels[0].pixels.fill({200, 201, 202, 203});
+        frame->channels[8].pwm = 3000;
+        const unsigned writes = f.pca.frames;
+        const size_t rmt_events = f.rmt.events.size();
+        const auto rejected = OutputScheduler::schedule(*frame, rendered_cfg, f.controller);
+        const bool no_commit = f.pca.frames == writes && f.rmt.events.size() == rmt_events &&
+                               f.controller.commit_metrics().attempted == 0;
+        bool unchanged = std::all_of(f.controller.pwm().values().begin(), f.controller.pwm().values().end(),
+                                     [](uint16_t value) { return value == 789; });
+        for (uint8_t lane = 0; lane < 8; ++lane) {
+            if (!staged[lane].empty()) {
+                unchanged &= std::equal(staged[lane].begin(), staged[lane].end(), f.controller.pixels().wire_data(lane));
+            }
+        }
+        if (change >= 5) f.controller.set_pwm_available(true);
+        const esp_err_t expected = change >= 5 ? ESP_ERR_INVALID_STATE : kErrStaleOutputFrame;
+        require(rejected == expected && no_commit && unchanged,
+                "stale topology/unavailable PWM was acknowledged or mutated buffers before rejection");
+        require(OutputScheduler::schedule(*frame, current_cfg, f.controller) == ESP_OK,
+                "current-topology frame could not resume after stale input rejection");
+    }
+}
+
+void scheduler_invalid_frame_atomic() {
+    ControllerFixture f;
+    const auto cfg = config(1, 1, 4);
+    f.start(cfg);
+    for (unsigned invalid = 0; invalid < 4; ++invalid) {
+        auto candidate = cfg;
+        auto frame = std::make_unique<RenderFrame>();
+        frame->channels[0].pixels.fill({190, 191, 192, 0});
+        frame->channels[8].pwm = invalid == 0 ? 4096 : 500;
+        if (invalid == 1) candidate.channels[0].pixel_order = PixelOrder::RGBW;
+        if (invalid == 2) candidate.channels[0].pixel_count = 0;
+        if (invalid == 3) candidate.channels[0].pixel_count = MAX_PIXELS + 1;
+        f.controller.pixels().fill(0, 7, 8, 9);
+        f.controller.pwm().set(0, 333);
+        const auto* wire = f.controller.pixels().wire_data(0);
+        const std::vector<uint8_t> before(wire, wire + 12);
+        const unsigned writes = f.pca.frames;
+        const size_t events = f.rmt.events.size();
+        require(OutputScheduler::schedule(*frame, candidate, f.controller) == ESP_ERR_INVALID_ARG,
+                "invalid PWM/pixel topology was silently accepted");
+        require(f.pca.frames == writes && f.rmt.events.size() == events && f.controller.pwm().values()[0] == 333 &&
+                std::equal(before.begin(), before.end(), wire), "invalid input changed staged or physical output");
+    }
+    auto frame = std::make_unique<RenderFrame>();
+    frame->channels[8].pwm = 700;
+    frame->channels[9].pwm = UINT16_MAX; // Disabled channel data is deliberately ignored.
+    require(OutputScheduler::schedule(*frame, cfg, f.controller) == ESP_OK && f.pca.duties[0] == 700 && f.pca.duties[1] == 0,
+            "disabled-channel input affected the active PWM channel");
+}
+
+void scheduler_reconfigure_race() {
+    {
+        ControllerFixture f;
+        const auto rendered_cfg = config(1, 1, 4);
+        f.start(rendered_cfg);
+        auto frame = std::make_unique<RenderFrame>();
+        frame->channels[0].pixels.fill({80, 90, 100, 0});
+        frame->channels[8].pwm = 900;
+        std::promise<void> awaiting_transaction;
+        auto arrived = awaiting_transaction.get_future();
+        f.controller.lock();
+        auto scheduled = std::async(std::launch::async, [&] {
+            host_before_take = [&](SemaphoreHandle_t) { awaiting_transaction.set_value(); };
+            return OutputScheduler::schedule(*frame, rendered_cfg, f.controller);
+        });
+        const bool queued = arrived.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+        auto next = rendered_cfg;
+        next.channels[0].pixel_count = 2;
+        const esp_err_t changed = f.controller.reconfigure(next);
+        f.controller.unlock();
+        const esp_err_t result = scheduled.get();
+        require(queued && changed == ESP_OK && result == kErrStaleOutputFrame &&
+                f.controller.commit_metrics().successful == 0,
+                "topology validation ran before acquiring the staging transaction or acknowledged a stale frame");
+        require(OutputScheduler::schedule(*frame, next, f.controller) == ESP_OK,
+                "fresh configuration could not render after the concurrent topology change");
+    }
+
+    LightingFixture f(1, 1);
+    require(f.render() == FrameResult::Committed, "runtime could not establish its initial topology");
+    uint32_t generation = 0;
+    require(f.runtime->activate_scene_checked(1, &generation) && f.runtime->scene_apply_pending(),
+            "could not establish a pending scene generation");
+    bool swapped = false;
+    unsigned writes_after_change = 0;
+    const auto attempted = f.output.controller.commit_metrics().attempted;
+    host_after_give_target = f.runtime->mutex_;
+    host_after_give = [&](SemaphoreHandle_t) {
+        stored_config.channels[0].pixel_count = 2;
+        swapped = f.output.controller.reconfigure(stored_config) == ESP_OK;
+        f.runtime->reload_device_config();
+        writes_after_change = f.output.pca.frames;
+    };
+    require(f.render() == FrameResult::NoOutput && swapped && f.output.pca.frames == writes_after_change &&
+            f.output.controller.commit_metrics().attempted == attempted &&
+            !f.runtime->is_output_fault() && f.runtime->output_fault_count() == 0 &&
+            f.runtime->scene_apply_pending() && f.runtime->applied_scene_generation() < generation,
+            "stale runtime frame was committed, fault-latched, or acknowledged after topology changed");
+    require(f.render() == FrameResult::Committed && !f.runtime->scene_apply_pending() &&
+            f.runtime->applied_scene_generation() == generation && !f.runtime->is_output_fault(),
+            "runtime did not retry and acknowledge the pending scene using fresh topology");
+    f.output.controller.set_pwm_available(false);
+    require(f.render() == FrameResult::Failed && f.runtime->is_output_fault(),
+            "actual PWM unavailability was treated as a recoverable stale frame");
+    f.output.controller.set_pwm_available(true);
+}
+
 void power_shared_model() {
     ControllerFixture f;
     auto cfg = config(3, 1, 1);
@@ -297,7 +434,12 @@ void power_failed_commit_snapshot() {
 }
 
 void lighting_case(const std::string& name) {
-    if (name == "power_shared_model") power_shared_model();
+    if (name == "scheduler_rejects_stale_topology") scheduler_rejects_stale_topology();
+    else if (name == "scheduler_invalid_frame_atomic") scheduler_invalid_frame_atomic();
+    else if (name == "scheduler_reconfigure_race") scheduler_reconfigure_race();
+    else if (name == "controller_rmt_failure_skips_pwm") controller_rmt_failure_skips_pwm();
+    else if (name == "transaction_cross_controller_move") transaction_cross_controller_move();
+    else if (name == "power_shared_model") power_shared_model();
     else if (name == "power_idle_floors") power_idle_floors();
     else if (name == "power_limit_chain") power_limit_chain();
     else if (name == "power_zero_supply") power_zero_supply();

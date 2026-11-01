@@ -20,14 +20,22 @@ esp_err_t OutputScheduler::schedule(
 
         const auto hw = channel_hardware(ch);
         if (hw.kind == ChannelKind::Addressable) {
-            if (ccfg.pixel_count == 0 || ccfg.pixel_count > MAX_PIXELS) {
+            if (ccfg.pixel_count == 0 || ccfg.pixel_count > MAX_PIXELS ||
+                !pixel_order_valid(ccfg.addressable_type, ccfg.pixel_order)) {
                 return ESP_ERR_INVALID_ARG;
             }
+        } else if (frame.channels[ch].pwm > 4095) {
+            return ESP_ERR_INVALID_ARG;
         }
     }
 
     // ── Pass 2: Driver state mutation & staging via RAII OutputTransaction ──
     OutputTransaction tx = controller.begin_transaction();
+    // Rendering and topology application use different critical sections.
+    // Reject stale frames before touching buffers, rather than acknowledging
+    // silently dropped pixels/PWM channels after a concurrent reconfiguration.
+    const esp_err_t topology = controller.validate_frame_topology_locked(device_cfg);
+    if (topology != ESP_OK) return topology;
     tx.pixels().clear_buffer();
     tx.pwm().set_all(0);
 

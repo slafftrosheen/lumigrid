@@ -1,5 +1,8 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+import { apiJson } from './transport';
 import {
+  createDefaultTimelineDocument,
+  saveSequence,
   createDefaultStep,
   createDefaultTrack,
   createDefaultSequence,
@@ -148,4 +151,12 @@ describe('timeline model & serialization', () => {
     expect(normalized.tracks[2].numSteps).toBe(6);
     expect(normalized.tracks[2].steps[10]).toEqual({ presetIndex: 12, lengthBeats: 8 });
   });
+});
+
+vi.mock('./transport', () => ({ apiJson: vi.fn(async () => ({ saved: true, checksum: 1 })) }));
+
+it('includes a known zero checksum in optimistic timeline saves', async () => {
+  await saveSequence('node-a', createDefaultTimelineDocument(), 0);
+  const options = vi.mocked(apiJson).mock.calls.at(-1)?.[2];
+  expect(JSON.parse(String(options?.body)).expectedChecksum).toBe(0);
 });

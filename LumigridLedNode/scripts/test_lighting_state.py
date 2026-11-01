@@ -133,6 +133,7 @@ def main():
         if args.baseline_ref:
             for relative in ("components/signage/LightingRuntime.cpp", "components/signage/include/LightingRuntime.hpp",
                              "components/signage/SceneManager.cpp", "components/signage/include/SceneManager.hpp",
+                             "components/signage/OutputScheduler.cpp",
                              "components/output/OutputController.cpp", "components/output/include/OutputController.hpp"):
                 path = build / Path(relative).name
                 source = subprocess.run(["git", "show", f"{args.baseline_ref}:LumigridLedNode/{relative}"],
@@ -163,7 +164,8 @@ def main():
                               "restart_snapshot_excludes_initialization", "restart_discards_frozen_transition",
                               "new_scene_replaces_frozen_transition", "preset_and_watchdog_replace_manual_transition",
                               "power_shared_model", "power_idle_floors", "power_limit_chain", "power_zero_supply",
-                              "power_post_guard_snapshot", "power_failed_commit_snapshot"]
+                              "power_post_guard_snapshot", "power_failed_commit_snapshot",
+                              "scheduler_rejects_stale_topology", "scheduler_invalid_frame_atomic", "scheduler_reconfigure_race"]
         failures = []
         for case in cases:
             result = subprocess.run([str(executable), case], env=env, capture_output=True, text=True, timeout=10)

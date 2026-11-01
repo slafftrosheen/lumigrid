@@ -1,117 +1,141 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { uploadFirmware, getOtaStatus, isOtaSuccess, isOtaRolledBack, firmwareFitsSlot } from '$lib/api/firmware';
-  import type { OtaUploadResponse, OtaStatus } from '$lib/api/firmware';
+  import { nodeAuthStore } from '$lib/auth/nodeAuth';
+  import {
+    uploadFirmware, getVerifiedOtaStatus, bindOtaTarget, isOtaTargetStatus,
+    isOtaSuccess, isOtaRolledBack, isOtaSlotReady, firmwareFitsSlot, waitForOtaDelay,
+    OtaUnconfirmedError, OtaIdentityError,
+    type OtaUploadResponse, type OtaStatus, type OtaVerificationTarget,
+  } from '$lib/api/firmware';
 
-  interface Props {
-    nodeIp: string;
-    /** Immutable node ID — used to reconnect after reboot. */
-    nodeId: string;
-  }
-
-  let { nodeIp, nodeId }: Props = $props();
-
-  type Phase =
-    | 'select'
-    | 'uploading'
-    | 'pending_reboot'
-    | 'waiting'
-    | 'checking'
-    | 'success'
-    | 'rolled_back'
-    | 'failed';
-
+  let { nodeIp, nodeId }: { nodeIp: string; nodeId: string } = $props();
+  type Phase = 'select' | 'uploading' | 'pending_reboot' | 'waiting' | 'checking' | 'success' | 'rolled_back' | 'failed' | 'unconfirmed';
   let phase = $state<Phase>('select');
   let selectedFile = $state<File | null>(null);
+  let fileInput = $state<HTMLInputElement>();
   let progress = $state(0);
   let uploadResult = $state<OtaUploadResponse | null>(null);
   let otaStatus = $state<OtaStatus | null>(null);
   let error = $state('');
   let capacity = $state<OtaStatus | null>(null);
+  let capacityLoading = $state(false);
+  let generation = 0;
+  let disposed = false;
+  let controller: AbortController | null = null;
   const fits = $derived(selectedFile && capacity?.maxFirmwareBytes
     ? firmwareFitsSlot(selectedFile.size, capacity.maxFirmwareBytes) : null);
+  const capacityReady = $derived(Boolean(capacity && isOtaSlotReady(capacity)));
+  const earlierUpdatePending = $derived(capacity?.state === 'pending_reboot' || capacity?.state === 'pending_verify');
   const mb = (bytes: number) => (bytes / 1048576).toFixed(2) + ' MB';
-  onMount(() => { getOtaStatus(nodeIp).then(status => { capacity = status; }).catch(() => {}); });
 
-  function reset() {
-    phase = 'select';
-    selectedFile = null;
-    progress = 0;
-    uploadResult = null;
-    otaStatus = null;
-    error = '';
+  function captureOperation() {
+    const current = generation, ip = nodeIp, id = nodeId, session = nodeAuthStore.getSession(ip);
+    return { ip, id, isCurrent: () => !disposed && generation === current && nodeIp === ip && nodeId === id && nodeAuthStore.getSession(ip) === session };
   }
 
-  function onFileSelected(e: Event) {
-    const file = (e.target as HTMLInputElement).files?.[0];
-    (e.target as HTMLInputElement).value = '';
+  async function loadCapacity() {
+    const owner = captureOperation();
+    capacityLoading = true; capacity = null; error = '';
+    try {
+      const status = await getVerifiedOtaStatus(owner.ip, owner.id);
+      if (!owner.isCurrent()) return;
+      capacity = status;
+      if (!isOtaSlotReady(status)) error = 'Firmware slot information is unavailable. Reload it before uploading.';
+    } catch (cause) {
+      if (owner.isCurrent()) error = `Could not read this node's update status: ${cause instanceof Error ? cause.message : String(cause)}`;
+    } finally { if (owner.isCurrent()) capacityLoading = false; }
+  }
+
+  onMount(() => {
+    disposed = false;
+    void loadCapacity();
+    return () => { disposed = true; generation++; controller?.abort(); };
+  });
+
+  function reset() {
+    generation++; controller?.abort(); controller = null;
+    phase = 'select'; selectedFile = null; progress = 0; uploadResult = otaStatus = null; error = '';
+    void loadCapacity();
+  }
+
+  function onFileSelected(event: Event) {
+    const input = event.target as HTMLInputElement;
+    const file = input.files?.[0]; input.value = '';
     if (!file) return;
-    if (!file.name.toLowerCase().endsWith('.bin')) {
-      error = 'Select a firmware .bin file.';
-      return;
+    if (!file.name.toLowerCase().endsWith('.bin') || file.size <= 0) {
+      selectedFile = null; error = 'Select a non-empty firmware .bin file.'; return;
     }
-    if (file.size <= 0) {
-      error = 'The selected firmware binary is empty.';
-      return;
-    }
-    selectedFile = file;
-    error = '';
+    selectedFile = file; error = '';
   }
 
   async function startUpload() {
-    if (!selectedFile || phase !== 'select' || fits === false) return;
-    phase = 'uploading';
-    progress = 0;
-    error = '';
-
+    if (!selectedFile || phase !== 'select' || !capacityReady || capacityLoading || earlierUpdatePending || fits !== true) return;
+    const owner = captureOperation(), file = selectedFile;
+    if (!owner.isCurrent()) return;
+    const operation = new AbortController(); controller = operation;
+    let uploadStarted = false;
+    phase = 'uploading'; progress = 0; error = '';
     try {
-      // Single canonical OTA path — POST /api/v1/ota via getNodeHttpBase()
-      // targetVersion comes from firmware metadata, never from filename
-      uploadResult = await uploadFirmware(nodeIp, selectedFile, (pct) => {
-        progress = pct;
-      });
-      progress = 100;
-      phase = 'pending_reboot';
-      // Start polling after a short delay for reboot to begin
-      setTimeout(() => waitForNode(), 3000);
-    } catch (e) {
-      error = `Upload failed: ${e instanceof Error ? e.message : String(e)}`;
-      phase = 'failed';
+      const before = await getVerifiedOtaStatus(owner.ip, owner.id, operation.signal);
+      if (!owner.isCurrent()) return;
+      capacity = before;
+      if (!isOtaSlotReady(before) || !firmwareFitsSlot(file.size, before.maxFirmwareBytes ?? 0) || before.state === 'pending_reboot' || before.state === 'pending_verify') {
+        throw new Error('The node is not ready for this image. Reload its update status before retrying.');
+      }
+      uploadStarted = true;
+      const receipt = await uploadFirmware(owner.ip, file, (pct) => {
+        if (owner.isCurrent()) progress = pct;
+      }, { signal: operation.signal, expectedNodeId: before.targetBinding ? owner.id : undefined });
+      if (!owner.isCurrent()) return;
+      const target = bindOtaTarget(receipt, before, owner.id);
+      uploadResult = receipt; progress = 100; phase = 'pending_reboot';
+      await waitForOtaDelay(3000, operation.signal);
+      if (owner.isCurrent()) await waitForNode(owner, target, operation);
+    } catch (cause) {
+      if (!owner.isCurrent()) return;
+      error = cause instanceof Error ? cause.message : String(cause);
+      if (!uploadStarted) {
+        // No image was sent: keep the selected file for a fresh preflight.
+        capacity = null; phase = 'select';
+      } else {
+        phase = cause instanceof OtaUnconfirmedError || cause instanceof OtaIdentityError ? 'unconfirmed' : 'failed';
+      }
+    } finally {
+      if (owner.isCurrent() && controller === operation) controller = null;
     }
   }
 
-  async function waitForNode() {
+  async function waitForNode(owner: ReturnType<typeof captureOperation>, target: OtaVerificationTarget, operation: AbortController) {
     phase = 'waiting';
-    const deadline = Date.now() + 90000; // 90s timeout
-    while (Date.now() < deadline) {
-      await new Promise((r) => setTimeout(r, 3000));
-      phase = 'checking';
-      try {
-        const status = await getOtaStatus(nodeIp);
-        otaStatus = status;
-
-        if (isOtaSuccess(status)) {
-          phase = 'success';
-          return;
+    const deadline = setTimeout(() => {
+      if (!owner.isCurrent()) return;
+      phase = 'unconfirmed'; error = 'Startup verification was not confirmed within 90 seconds. Check this node before retrying.';
+      operation.abort();
+    }, 90000);
+    try {
+      while (owner.isCurrent() && !operation.signal.aborted) {
+        await waitForOtaDelay(3000, operation.signal);
+        if (!owner.isCurrent()) return;
+        phase = 'checking';
+        try {
+          const status = await getVerifiedOtaStatus(owner.ip, owner.id, operation.signal);
+          if (!owner.isCurrent() || operation.signal.aborted) return;
+          otaStatus = status;
+          if (isOtaTargetStatus(status, target)) {
+            if (isOtaRolledBack(status)) { phase = 'rolled_back'; return; }
+            if (isOtaSuccess(status, target)) { phase = 'success'; return; }
+            if (status.state === 'failed') { phase = 'failed'; error = status.reason ?? 'Startup verification failed on this node.'; return; }
+          }
+          phase = 'waiting';
+        } catch (cause) {
+          if (!owner.isCurrent() || operation.signal.aborted) return;
+          if (cause instanceof OtaIdentityError) { phase = 'unconfirmed'; error = cause.message; return; }
+          phase = 'waiting';
         }
-        if (isOtaRolledBack(status)) {
-          phase = 'rolled_back';
-          return;
-        }
-        if (status.state === 'failed') {
-          phase = 'failed';
-          error = status.reason ?? 'OTA failed on node.';
-          return;
-        }
-        // pending_reboot or pending_verify — keep waiting
-        phase = 'waiting';
-      } catch {
-        // Node is rebooting — expected
-        phase = 'waiting';
       }
-    }
-    phase = 'failed';
-    error = 'Verification timeout. Check node manually.';
+    } catch (cause) {
+      if (!operation.signal.aborted) throw cause;
+    } finally { clearTimeout(deadline); }
   }
 </script>
 
@@ -125,24 +149,21 @@
 
   {#if phase === 'select'}
     <p class="instruction">
-      Select an ESP-IDF application image (.bin). The firmware image is NOT signed.
+      Select a LumiGrid application image (.bin). Use the application binary, not a merged installation image. Keep this page open until startup verification finishes.
     </p>
 
     {#if error}
       <div class="error-notice" role="alert">{error}</div>
     {/if}
 
+    {#if capacityLoading}<p class="instruction" role="status">Reading this node's firmware storage…</p>{/if}
+    {#if !capacityReady || earlierUpdatePending}
+      <p class="instruction">{earlierUpdatePending ? 'An earlier update is still awaiting startup verification.' : 'Load this node’s identity and firmware slot before uploading.'}</p>
+      <button type="button" class="btn-secondary" onclick={loadCapacity} disabled={capacityLoading}>Reload update status</button>
+    {/if}
     <div class="file-drop-row">
-      <label class="file-select-btn" for="ota-file-input" id="ota-select-label">
-        Select firmware.bin…
-        <input
-          id="ota-file-input"
-          type="file"
-          accept=".bin"
-          onchange={onFileSelected}
-          style="display:none"
-        />
-      </label>
+      <button type="button" class="file-select-btn" onclick={() => fileInput?.click()} id="ota-select-label">Select firmware.bin…</button>
+      <input bind:this={fileInput} id="ota-file-input" type="file" accept=".bin" aria-label="Firmware application image" onchange={onFileSelected} hidden />
       {#if selectedFile}
         <span class="file-name">{selectedFile.name} ({(selectedFile.size / 1024).toFixed(0)} KB)</span>
         {#if fits !== null}<span>{fits ? 'Fits OTA slot ✓' : 'Image exceeds OTA slot capacity'}</span>{/if}
@@ -151,7 +172,7 @@
 
     {#if selectedFile}
       <div class="upload-row">
-        <button type="button" class="btn-upload" onclick={startUpload} id="ota-upload-btn" disabled={fits === false}>
+        <button type="button" class="btn-upload" onclick={startUpload} id="ota-upload-btn" disabled={!capacityReady || capacityLoading || earlierUpdatePending || fits !== true}>
           Upload Firmware
         </button>
       </div>
@@ -160,7 +181,7 @@
   {:else if phase === 'uploading'}
     <div class="progress-section">
       <div class="progress-label">Uploading… {progress}%</div>
-      <div class="progress-track">
+      <div class="progress-track" role="progressbar" aria-label="Firmware upload" aria-valuemin="0" aria-valuemax="100" aria-valuenow={progress}>
         <div class="progress-bar" style="width:{progress}%"></div>
       </div>
     </div>
@@ -183,7 +204,7 @@
       <span>{phase === 'checking' ? 'Checking OTA status…' : 'Waiting for node…'}</span>
     </div>
     <p class="reconnect-note">
-      Reconnect tracked by immutable node ID.
+      Confirming {nodeId} at {nodeIp}. If its address changes, select the node at its new address and check its update status.
     </p>
 
   {:else if phase === 'success'}
@@ -222,6 +243,13 @@
       </button>
     </div>
 
+  {:else if phase === 'unconfirmed'}
+    <div class="error-notice" role="alert">
+      <strong>Update outcome unconfirmed</strong>
+      <div>{error}</div>
+      <div>An already accepted update may still finish on the node.</div>
+    </div>
+    <button type="button" class="btn-secondary" onclick={reset}>Return to update status</button>
   {:else if phase === 'failed'}
     <div class="error-notice" role="alert">
       <strong>OTA failed</strong>
@@ -237,7 +265,7 @@
     border: 1px solid #333;
     border-radius: 10px;
     padding: 20px;
-    color: #e8e8ed;
+    color: var(--dash-text);
     font-family: inherit;
   }
 
@@ -245,7 +273,7 @@
     margin: 0 0 12px;
     font-size: 1rem;
     font-weight: 600;
-    color: #e8e8ed;
+    color: var(--dash-text);
   }
 
   .instruction {
@@ -269,7 +297,7 @@
     border-radius: 8px;
     border: 1px solid #444;
     background: #252528;
-    color: #e8e8ed;
+    color: var(--dash-text);
     font-size: 0.9rem;
     cursor: pointer;
     transition: background 0.15s;
@@ -278,6 +306,8 @@
   .file-select-btn:hover { background: #303035; }
 
   .file-name {
+    min-width: 0;
+    overflow-wrap: anywhere;
     color: #888;
     font-size: 0.85rem;
     font-family: monospace;
@@ -290,16 +320,16 @@
   .btn-upload {
     padding: 9px 20px;
     border-radius: 8px;
-    border: 1px solid #0a84ff;
-    background: #0a1a3a;
-    color: #0a84ff;
+    border: 1px solid var(--dash-accent);
+    background: rgba(var(--dash-accent-rgb), .16);
+    color: var(--dash-accent);
     font-size: 0.92rem;
     font-weight: 500;
     cursor: pointer;
     transition: background 0.15s;
   }
 
-  .btn-upload:hover { background: #0e2050; }
+  .btn-upload:hover { background: rgba(var(--dash-accent-rgb), .25); }
 
   .progress-section {
     margin: 8px 0;
@@ -320,7 +350,7 @@
 
   .progress-bar {
     height: 100%;
-    background: linear-gradient(90deg, #0a84ff, #00d4ff);
+    background: linear-gradient(90deg, var(--dash-accent), var(--dash-accent-hover));
     border-radius: 3px;
     transition: width 0.3s;
   }
@@ -334,7 +364,7 @@
 
   .status-primary {
     font-size: 0.95rem;
-    color: #e8e8ed;
+    color: var(--dash-text);
   }
 
   .status-sub {
@@ -354,7 +384,7 @@
     width: 18px;
     height: 18px;
     border: 2px solid #333;
-    border-top-color: #0a84ff;
+    border-top-color: var(--dash-accent);
     border-radius: 50%;
     animation: spin 0.8s linear infinite;
     flex-shrink: 0;
@@ -363,7 +393,7 @@
   @keyframes spin { to { transform: rotate(360deg); } }
 
   .reconnect-note {
-    color: #555;
+    color: var(--dash-muted);
     font-size: 0.82rem;
     margin: 4px 0 0;
   }
@@ -452,4 +482,6 @@
   }
 
   .btn-secondary:hover { background: #303035; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  button:focus-visible { outline: 2px solid var(--dash-accent); outline-offset: 3px; }
 </style>

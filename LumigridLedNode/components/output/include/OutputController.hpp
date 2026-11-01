@@ -54,7 +54,7 @@ public:
     bool is_active() const { return active_; }
 
 private:
-    OutputController& controller_;
+    OutputController* controller_;
     bool active_ = false;
 };
 
@@ -164,6 +164,11 @@ public:
 
     /// Commit while caller already holds lock()
     esp_err_t try_commit_locked(const OutputPowerRequest* power_request = nullptr);
+
+    /// Validate a rendered configuration against current hardware while the
+    /// caller owns an OutputTransaction. A topology swap cannot race staging.
+    /// A healthy topology mismatch is retryable; invalid hardware is not.
+    esp_err_t validate_frame_topology_locked(const DeviceConfig& cfg) const;
 
     /// Begin a controlled RAII transaction (Batch 8 Item 8)
     OutputTransaction begin_transaction() {

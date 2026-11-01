@@ -1,5 +1,7 @@
 <script lang="ts">
   import type { ScenePreset } from '$lib/api/scenes';
+  import OperatorDialog from '$lib/components/dashboard/OperatorDialog.svelte';
+  import { getChannelPort } from '$lib/api/timeline';
   import SceneThumbnail from '$lib/components/dashboard/SceneThumbnail.svelte';
 
   interface Props {
@@ -41,21 +43,12 @@
   );
 </script>
 
-<div class="modal-backdrop" onclick={onClose} role="presentation">
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <div class="modal-panel" onclick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" tabindex="-1">
-    <div class="modal-header">
-      <div class="modal-title-group">
-        <h3 class="modal-title">Select Scene for Track</h3>
-        <p class="modal-subtitle">Pick an active stored scene to assign to this block</p>
-      </div>
-      <button type="button" class="close-btn" onclick={onClose}>✕</button>
-    </div>
-
+<OperatorDialog open title={`Select scene for ${getChannelPort(channelId)}`} description="Choose a saved scene for this timeline block." oncancel={onClose}>
     <!-- Search Input -->
     <div class="search-bar">
       <input
         type="text"
+        aria-label="Filter scenes by name or slot"
         placeholder="Filter scenes by name or slot..."
         bind:value={searchQuery}
         class="search-input"
@@ -95,71 +88,13 @@
     </div>
 
     <div class="modal-footer">
-      <button type="button" class="btn btn-secondary" onclick={onClose}>
+      <button type="button" data-dialog-cancel class="btn btn-secondary" onclick={onClose}>
         Cancel
       </button>
     </div>
-  </div>
-</div>
+</OperatorDialog>
 
 <style>
-  .modal-backdrop {
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.7);
-    backdrop-filter: blur(4px);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 100;
-    padding: 16px;
-  }
-
-  .modal-panel {
-    background: #0b0f19;
-    border: 1px solid #1e293b;
-    border-radius: 12px;
-    width: 100%;
-    max-width: 680px;
-    max-height: 85vh;
-    display: flex;
-    flex-direction: column;
-    box-shadow: 0 20px 40px rgba(0, 0, 0, 0.8);
-    overflow: hidden;
-  }
-
-  .modal-header {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    padding: 16px 20px;
-    border-bottom: 1px solid #1e293b;
-  }
-
-  .modal-title {
-    font-size: 16px;
-    font-weight: 700;
-    color: #f1f5f9;
-    margin: 0;
-  }
-
-  .modal-subtitle {
-    font-size: 12px;
-    color: #94a3b8;
-    margin: 4px 0 0 0;
-  }
-
-  .close-btn {
-    background: transparent;
-    border: none;
-    color: #64748b;
-    font-size: 16px;
-    cursor: pointer;
-  }
-  .close-btn:hover {
-    color: #f1f5f9;
-  }
-
   .search-bar {
     padding: 12px 20px;
     border-bottom: 1px solid #1e293b;
@@ -182,6 +117,7 @@
 
   .scenes-grid {
     flex: 1;
+    max-height: 50vh;
     overflow-y: auto;
     padding: 16px 20px;
     display: grid;
@@ -284,4 +220,5 @@
   .btn-secondary:hover {
     background: #475569;
   }
+  button:focus-visible, input:focus-visible { outline: 2px solid var(--dash-accent); outline-offset: 2px; }
 </style>

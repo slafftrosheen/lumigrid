@@ -1,6 +1,7 @@
 import { test, expect, type Page, type Route } from '@playwright/test';
 import { createDefaultPreset } from '../../src/lib/api/scenes';
 import { createDefaultSceneMotion } from '../../src/lib/api/sceneMotion';
+import { createDefaultTimelineDocument } from '../../src/lib/api/timeline';
 
 const a = '192.168.1.50';
 const b = '192.168.1.60';
@@ -359,4 +360,156 @@ test('Scene Studio conflict reload requests the current node document', async ({
   await expect(name).toHaveValue('Updated on Node');
   expect(freshReads()).toBe(1);
   expect(calls.some(call => call.path.includes('/activate'))).toBe(false);
+});
+
+async function timelineFixture(page: Page, options: {
+  saveGate?: Promise<void>; onSave?: () => void; unavailableB?: () => boolean; conflict?: boolean;
+} = {}) {
+  const presets = [createDefaultPreset(0, 'Warm Wash'), createDefaultPreset(1, 'Evening Glow')];
+  const sequence = (bpm: number, checksum: number) => {
+    const doc = { ...createDefaultTimelineDocument(bpm), checksum };
+    doc.tracks[0] = { channelId: 0, numSteps: 1, enabled: true, steps: [{ presetIndex: 0, lengthBeats: 12 }] };
+    return doc;
+  };
+  const documents = new Map([[a, sequence(120, 11)], [b, sequence(80, 44)]]);
+  const snapshots = new Map<string, any>([[a, runtime(a)], [b, runtime(b)]]);
+  const result = await fixture(page, async (route, ip, path) => {
+    const method = route.request().method();
+    if (method === 'OPTIONS') { await route.fulfill({ status: 204, headers }); return true; }
+    if (path === '/api/v1/presets') { await route.fulfill({ json: presets, headers }); return true; }
+    if (path === '/api/v1/status') { await route.fulfill({ json: snapshots.get(ip), headers }); return true; }
+    if (path === '/api/v1/sequence') {
+      if (method === 'PUT') {
+        options.onSave?.();
+        if (options.saveGate) await options.saveGate;
+        if (options.conflict) {
+          documents.set(ip, sequence(150, 33));
+          await route.fulfill({ status: 409, json: { error: 'timeline_conflict', currentChecksum: 33 }, headers });
+        } else {
+          documents.set(ip, { ...route.request().postDataJSON(), checksum: 22 });
+          await route.fulfill({ json: { saved: true, checksum: 22 }, headers });
+        }
+      } else if (ip === b && options.unavailableB?.()) {
+        await route.fulfill({ status: 503, json: { error: 'Saved timeline unavailable' }, headers });
+      } else await route.fulfill({ json: documents.get(ip), headers });
+      return true;
+    }
+    if (path === '/api/v1/show/control') {
+      await route.fulfill({ json: { accepted: true, mode: 'timeline', generation: 8, checksum: 22 }, headers });
+      return true;
+    }
+    return false;
+  });
+  return { ...result, document: sequence, publish: (ip: string) => {
+    const next = { ...runtime(ip), streamSeq: 2, generatedAtMs: 13000,
+      transport: { mode: 'timeline', generation: 8, sceneIndex: 0,
+        timeline: { running: true, bpm: 140, generation: 500, anchorMs: 12000, elapsedMs: 1000,
+          currentBeat: 2.5, activeChecksum: 22, savedChecksum: 22, contentStale: false }, cue: { running: false } },
+      timeline: { clockMs: 13000, driftPpm: 0, synced: false } };
+    snapshots.set(ip, next);
+    for (const stream of result.streams.filter(stream => stream.ip === ip)) stream.send(JSON.stringify(next));
+  } };
+}
+
+test('Timeline Studio imports a reactive draft, replaces one block, and resumes guarded navigation', async ({ page }, testInfo) => {
+  const errors: string[] = []; page.on('pageerror', error => errors.push(error.message));
+  const { document } = await timelineFixture(page);
+  await page.goto('/dashboard/timeline');
+  await expect(page.getByLabel('BPM', { exact: true })).toHaveValue('120');
+  await page.getByRole('button', { name: 'Import', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Import Timeline Document', exact: true });
+  await expect(dialog.getByRole('button', { name: 'Cancel', exact: true })).toBeFocused();
+  await page.getByLabel('Or paste timeline JSON', { exact: true }).fill('{}');
+  await expect(dialog.getByRole('alert')).toContainText('schema 2');
+  await expect(dialog.getByRole('button', { name: 'Import as draft', exact: true })).toBeDisabled();
+  const { checksum: _checksum, ...draft } = document(145, 0);
+  await page.getByLabel('Or paste timeline JSON', { exact: true }).fill(JSON.stringify({ ...draft, type: 'lumigrid-timeline' }));
+  await dialog.getByRole('button', { name: 'Import as draft', exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(page.getByLabel('BPM', { exact: true })).toHaveValue('145');
+  await expect(page.locator('.timeline-block')).toHaveCount(1);
+  await page.locator('.timeline-block').click();
+  await page.getByRole('button', { name: 'Change', exact: true }).click();
+  const picker = page.getByRole('dialog', { name: 'Select scene for A1', exact: true });
+  await expect(picker.getByRole('button', { name: 'Cancel', exact: true })).toBeFocused();
+  await picker.getByRole('button', { name: /S02 Evening Glow/ }).click();
+  await expect(page.locator('.timeline-block')).toHaveCount(1);
+  await expect(page.locator('.timeline-block')).toContainText('Evening Glow');
+  await expect(page.locator('.block-inspector-panel .length-input')).toHaveValue('12');
+  const lanes = page.locator('.sequencer-scroll-wrapper');
+  await expect(lanes).toHaveCSS('overflow-y', 'auto');
+  await lanes.hover(); await page.mouse.wheel(0, 1200);
+  await expect(page.locator('.timeline-track-row').last()).toBeInViewport();
+  await lanes.evaluate(el => { el.scrollTop = 0; });
+  await page.screenshot({ path: testInfo.outputPath('timeline-desktop.png'), fullPage: true });
+
+  const overview = page.getByRole('link', { name: '⬡ Fleet', exact: true });
+  await overview.click();
+  const unsaved = page.getByRole('dialog', { name: 'Unsaved Timeline Changes', exact: true });
+  await expect(unsaved.getByRole('button', { name: 'Stay on page', exact: true })).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(unsaved).toHaveCount(0);
+  await expect(page.getByLabel('BPM', { exact: true })).toHaveValue('145');
+  await overview.click();
+  await unsaved.getByRole('button', { name: 'Discard and leave', exact: true }).click();
+  await expect(page).toHaveURL(/\/dashboard\/?$/);
+  expect(errors).toEqual([]);
+});
+
+test('Timeline Studio preserves edits during save and confirms playback from fresh status', async ({ page }) => {
+  let release!: () => void;
+  let started!: () => void;
+  const saveGate = new Promise<void>(resolve => { release = resolve; });
+  const saveStarted = new Promise<void>(resolve => { started = resolve; });
+  const { calls, publish } = await timelineFixture(page, { saveGate, onSave: started });
+  await page.goto('/dashboard/timeline');
+  const bpm = page.getByLabel('BPM', { exact: true });
+  await expect(bpm).toHaveValue('120');
+  await bpm.fill('140'); await bpm.blur();
+  await page.getByRole('button', { name: 'SAVE & RUN', exact: true }).click();
+  await saveStarted;
+  await bpm.fill('160'); await bpm.blur();
+  release();
+  await expect(page.locator('.toolbar-feedback')).toContainText('Newer edits');
+  await expect(bpm).toHaveValue('160');
+  expect(calls.filter(call => call.path === '/api/v1/show/control')).toHaveLength(0);
+  await page.getByRole('button', { name: 'RUN SAVED', exact: true }).click();
+  await expect(page.locator('.toolbar-feedback')).toContainText('Accepted — waiting for fresh node confirmation');
+  expect(calls.find(call => call.path === '/api/v1/show/control')?.body.bpm).toBe(140);
+  publish(a);
+  await expect(page.locator('.toolbar-feedback')).toContainText('Running saved timeline — confirmed by the node');
+  await expect(page.locator('.timeline-playhead')).toBeVisible();
+  await expect.poll(async () => page.locator('.timeline-playhead').evaluate(el => parseFloat((el as HTMLElement).style.left))).toBeGreaterThan(220);
+  await expect(bpm).toHaveValue('160');
+});
+
+test('Timeline Studio clears a failed new-node document and reloads conflicts on mobile', async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  let unavailable = true;
+  const { calls } = await timelineFixture(page, { unavailableB: () => unavailable, conflict: true });
+  await page.goto('/dashboard/timeline');
+  await expect(page.getByLabel('BPM', { exact: true })).toHaveValue('120');
+  await page.getByRole('combobox', { name: 'Active node', exact: true }).selectOption(b);
+  await expect(page.locator('.load-error')).toContainText('Saved timeline unavailable');
+  await expect(page.getByLabel('BPM', { exact: true })).toBeDisabled();
+  await expect(page.getByLabel('BPM', { exact: true })).toHaveValue('');
+  await expect(page.locator('.timeline-block')).toHaveCount(0);
+  unavailable = false;
+  await page.getByRole('button', { name: 'Retry loading', exact: true }).click();
+  await expect(page.getByLabel('BPM', { exact: true })).toHaveValue('80');
+  await page.getByLabel('BPM', { exact: true }).fill('100');
+  await page.getByLabel('BPM', { exact: true }).blur();
+  await page.getByRole('button', { name: 'SAVE', exact: true }).click();
+  const conflict = page.getByRole('dialog', { name: 'Timeline Conflict Detected', exact: true });
+  await expect(conflict.getByRole('button', { name: 'Keep my draft', exact: true })).toBeFocused();
+  await conflict.getByRole('button', { name: 'Keep my draft', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'RUN SAVED', exact: true })).toBeDisabled();
+  await page.getByRole('button', { name: 'Review saved version', exact: true }).click();
+  await expect(conflict.getByRole('button', { name: 'Keep my draft', exact: true })).toBeFocused();
+  await page.screenshot({ path: testInfo.outputPath('timeline-mobile-conflict.png'), fullPage: true });
+  await conflict.getByRole('button', { name: 'Reload node version', exact: true }).click();
+  await expect(conflict).toHaveCount(0);
+  await expect(page.getByLabel('BPM', { exact: true })).toHaveValue('150');
+  expect(calls.filter(call => call.ip === b && call.path === '/api/v1/sequence' && call.method === 'GET')).toHaveLength(3);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });

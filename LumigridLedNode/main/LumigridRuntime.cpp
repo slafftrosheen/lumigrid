@@ -1049,14 +1049,14 @@ esp_err_t LumigridRuntime::start() {
                                                       &remote_snap,
                                                   uint8_t &out_error) -> bool {
     if (remote_snap.mode == ShowTransportMode::Scene) {
-      if (cue_runner_.snapshot(0).running)
-        cue_runner_.stop(CueStopReason::Preempted, clock_.now_ms());
-      scheduler_.apply_remote_show_mode(Scheduler::RemoteShowMode::Scene,
-                                        remote_snap.bpm, clock_.now_ms());
       if (!config_.scene_exists(remote_snap.active_scene)) {
         out_error = static_cast<uint8_t>(SyncTransportError::SceneMissing);
         return false;
       }
+      if (cue_runner_.snapshot(0).running)
+        cue_runner_.stop(CueStopReason::Preempted, clock_.now_ms());
+      scheduler_.apply_remote_show_mode(Scheduler::RemoteShowMode::Scene,
+                                        remote_snap.bpm, clock_.now_ms());
       if (lighting_.active_scene_index() != remote_snap.active_scene) {
         if (!lighting_.activate_scene_checked(remote_snap.active_scene)) {
           out_error =
@@ -1084,28 +1084,6 @@ esp_err_t LumigridRuntime::start() {
                                        remote_snap.bpm, clock_.now_ms());
       return true;
     } else if (remote_snap.mode == ShowTransportMode::Cue) {
-      scheduler_.apply_remote_show_mode(Scheduler::RemoteShowMode::Cue,
-                                        remote_snap.bpm, clock_.now_ms());
-      if (remote_snap.cue.list_index >= kMaxCueLists) {
-        out_error = static_cast<uint8_t>(SyncTransportError::CueListMissing);
-        return false;
-      }
-
-      // LG-034 В§29: content parity gate. A follower must never run a
-      // different Cue List under synchronized transport.
-      CueList local_list{};
-      if (config_.load_cue_list(remote_snap.cue.list_index, local_list) !=
-              ESP_OK ||
-          local_list.count == 0) {
-        out_error = static_cast<uint8_t>(SyncTransportError::CueListMissing);
-        return false;
-      }
-      if (remote_snap.cue_list_checksum != 0 &&
-          remote_snap.cue_list_checksum != local_list.checksum) {
-        out_error = static_cast<uint8_t>(SyncTransportError::CueListMismatch);
-        return false;
-      }
-
       CueSyncSnapshot cue_snap{};
       cue_snap.active = remote_snap.cue.active;
       cue_snap.state = static_cast<CueRunnerState>(remote_snap.cue.state);
@@ -1123,17 +1101,24 @@ esp_err_t LumigridRuntime::start() {
           remote_snap.cue_transition_progress_q15;
       cue_snap.source_scene = remote_snap.cue_source_scene;
 
+      CueSyncError cue_error = CueSyncError::None;
       esp_err_t cue_err =
-          cue_runner_.apply_sync_snapshot(cue_snap, clock_.now_ms());
+          cue_runner_.apply_sync_snapshot(cue_snap, clock_.now_ms(), &cue_error);
       if (cue_err != ESP_OK) {
-        if (cue_err == ESP_ERR_NOT_FOUND)
+        if (cue_error == CueSyncError::SceneMissing)
           out_error = static_cast<uint8_t>(SyncTransportError::SceneMissing);
-        else if (cue_err == ESP_ERR_INVALID_ARG)
+        else if (cue_error == CueSyncError::CueInvalid)
           out_error = static_cast<uint8_t>(SyncTransportError::CueIndexInvalid);
+        else if (cue_error == CueSyncError::ListMismatch)
+          out_error = static_cast<uint8_t>(SyncTransportError::CueListMismatch);
+        else if (cue_error == CueSyncError::StateInvalid)
+          out_error = static_cast<uint8_t>(SyncTransportError::UnsupportedTransport);
         else
           out_error = static_cast<uint8_t>(SyncTransportError::CueListMissing);
         return false;
       }
+      scheduler_.apply_remote_show_mode(Scheduler::RemoteShowMode::Cue,
+                                        remote_snap.bpm, clock_.now_ms());
       return true;
     } else {
       scheduler_.clear_remote_show_mode();

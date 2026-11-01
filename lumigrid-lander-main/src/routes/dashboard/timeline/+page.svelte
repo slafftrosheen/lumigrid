@@ -1,13 +1,14 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { beforeNavigate } from '$app/navigation';
-  import { nodeStore } from '$lib/state/nodeStore';
+  import { beforeNavigate, goto } from '$app/navigation';
+  import { nodeStore, captureNodeOperation } from '$lib/state/nodeStore';
+  import { nodeAuthStore } from '$lib/auth/nodeAuth';
+  import OperatorDialog from '$lib/components/dashboard/OperatorDialog.svelte';
   import { getPresets, type ScenePreset } from '$lib/api/scenes';
   import {
     timelineEditor,
     isTimelineEditorDirty,
     timelinePixelsPerBeat,
-    type TimelineZoomLevel,
   } from '$lib/timeline/editorStore';
   import { getTrackTotalBeats } from '$lib/timeline/evaluation';
   import { validateTimelineDocument } from '$lib/timeline/validation';
@@ -30,7 +31,6 @@
   const syncLeaderAddress = $derived(snapSync?.masterAddress || 'Leader');
 
   const working = $derived($timelineEditor.working);
-  const persisted = $derived($timelineEditor.persisted);
   const isDirty = $derived($isTimelineEditorDirty);
   const pixelsPerBeat = $derived($timelinePixelsPerBeat);
   const selectedChannel = $derived($timelineEditor.selectedChannel);
@@ -39,12 +39,18 @@
   let scenes = $state<Map<number, ScenePreset>>(new Map());
   let existingSceneSlots = $state<Set<number>>(new Set());
   let scenesLoading = $state(false);
+  let scenesLoaded = $state(false);
+  let scenesError = $state('');
+  let clock = $state(Date.now());
+  const statusFresh = $derived(snapshot !== null && clock - $nodeStore.lastSnapshotAt <= 10000 &&
+    ($nodeStore.connection === 'online' || $nodeStore.connection === 'degraded'));
 
   // Dialog states
   let isScenePickerOpen = $state(false);
   let scenePickerChannel = $state(0);
   let scenePickerTargetStep = $state<number | null>(null);
   let isImportDialogOpen = $state(false);
+  let dialogOwner: ReturnType<typeof captureWorkspaceOperation> | null = null;
 
   // Horizontal scroll sync
   let scrollContainer: HTMLElement | null = $state(null);
@@ -105,24 +111,37 @@
   // Validation check against existing scenes
   const validationResult = $derived.by(() => {
     if (!working) return { valid: true, errors: [], missingScenes: [] };
-    return validateTimelineDocument(working, existingSceneSlots);
+    return validateTimelineDocument(working, scenesLoaded ? existingSceneSlots : undefined);
   });
+  const canSave = $derived($timelineEditor.loaded && !$timelineEditor.loading &&
+    scenesLoaded && !scenesLoading && validationResult.valid);
 
-  // Load scenes & timeline on node change
-  let activeNodeIp: string | null = null;
-  $effect(() => {
-    const ip = $nodeStore.nodeIp;
-    const id = $nodeStore.nodeId || ip || 'node';
-    if (ip && ip !== activeNodeIp) {
-      activeNodeIp = ip;
-      loadNodeData(id, ip);
-    }
-  });
+  let activeNodeIp = $state('');
+  let activeSession: ReturnType<typeof nodeAuthStore.getSession> = null;
+  let workspaceOwner: ReturnType<typeof captureNodeOperation> | null = null;
+  let workspaceGeneration = $state(0);
+  let libraryRequest = 0;
+  let disposed = false;
 
-  async function loadNodeData(nodeId: string, nodeIp: string) {
+  function captureWorkspaceOperation() {
+    const owner = captureNodeOperation(activeNodeIp);
+    const generation = workspaceGeneration;
+    return { ip: owner.ip, isCurrent: () => !disposed && generation === workspaceGeneration && owner.isCurrent() };
+  }
+
+  async function loadNodeData(preserveDraft = true) {
+    if (!activeNodeIp) return;
+    const owner = captureWorkspaceOperation();
+    const request = ++libraryRequest;
+    const isCurrent = () => owner.isCurrent() && request === libraryRequest;
     scenesLoading = true;
+    scenesLoaded = false;
+    scenesError = '';
+    timelineEditor.setSceneSlots(null);
+    const documentLoad = timelineEditor.load($nodeStore.nodeId || owner.ip, owner.ip, preserveDraft);
     try {
-      const presets = await getPresets(nodeIp).catch(() => []);
+      const presets = await getPresets(owner.ip);
+      if (!isCurrent()) return;
       const sceneMap = new Map<number, ScenePreset>();
       const slots = new Set<number>();
       for (const p of presets) {
@@ -131,30 +150,83 @@
       }
       scenes = sceneMap;
       existingSceneSlots = slots;
+      scenesLoaded = true;
+      timelineEditor.setSceneSlots(slots);
+    } catch (error) {
+      if (isCurrent()) scenesError = error instanceof Error ? error.message : 'Could not load the scene library.';
     } finally {
-      scenesLoading = false;
+      if (isCurrent()) scenesLoading = false;
     }
-    await timelineEditor.load(nodeId, nodeIp);
+    await documentLoad;
+  }
+
+  function syncFocusedNode(ip: string) {
+    const session = nodeAuthStore.getSession(ip);
+    const changedOwner = ip !== activeNodeIp || session !== activeSession;
+    if (!changedOwner && workspaceOwner?.isCurrent()) return;
+    activeNodeIp = ip;
+    activeSession = session;
+    ++workspaceGeneration;
+    ++libraryRequest;
+    workspaceOwner = captureNodeOperation(ip);
+    isScenePickerOpen = isImportDialogOpen = showUnsavedModal = false;
+    dialogOwner = null;
+    pendingDestination = null;
+    scenesError = '';
+    scenesLoaded = false;
+    if (changedOwner || !ip) {
+      scenes = new Map();
+      existingSceneSlots = new Set();
+      timelineEditor.reset();
+    }
+    if (ip) void loadNodeData(!changedOwner);
+    else scenesLoading = false;
   }
 
   // Navigation guard
   let showUnsavedModal = $state(false);
+  let pendingDestination: string | null = null;
 
-  beforeNavigate(({ cancel }) => {
-    if ($isTimelineEditorDirty && !showUnsavedModal) {
-      cancel();
-      showUnsavedModal = true;
-    }
+  beforeNavigate((navigation) => {
+    if (!$isTimelineEditorDirty) return;
+    navigation.cancel();
+    // Leaving the app uses the browser's own unload confirmation.
+    if (navigation.willUnload) return;
+    pendingDestination = navigation.to?.url?.href ?? null;
+    showUnsavedModal = true;
   });
 
   function confirmDiscardNavigation() {
+    const destination = pendingDestination;
+    pendingDestination = null;
     showUnsavedModal = false;
     timelineEditor.reset();
+    if (destination) void goto(destination);
   }
 
   function cancelDiscardNavigation() {
     showUnsavedModal = false;
+    pendingDestination = null;
   }
+
+  onMount(() => {
+    disposed = false;
+    const timer = setInterval(() => { clock = Date.now(); }, 1000);
+    const beforeUnload = (event: BeforeUnloadEvent) => {
+      if (isDirty) { event.preventDefault(); event.returnValue = ''; }
+    };
+    window.addEventListener('beforeunload', beforeUnload);
+    const unsubscribe = nodeStore.subscribe(state => syncFocusedNode(state.route || ''));
+    return () => {
+      disposed = true;
+      ++workspaceGeneration;
+      ++libraryRequest;
+      unsubscribe();
+      clearInterval(timer);
+      window.removeEventListener('beforeunload', beforeUnload);
+      timelineEditor.reset();
+    };
+  });
 
   // Block Inspector Handlers
   function handleUpdateLength(beats: number) {
@@ -164,7 +236,8 @@
   }
 
   function handleOpenChangeScene() {
-    if (selectedChannel !== null && selectedStep !== null) {
+    if (scenesLoaded && selectedChannel !== null && selectedStep !== null) {
+      dialogOwner = captureWorkspaceOperation();
       scenePickerChannel = selectedChannel;
       scenePickerTargetStep = selectedStep;
       isScenePickerOpen = true;
@@ -207,25 +280,33 @@
 
   // Track Action Handlers
   function handleOpenAddScene(channelId: number) {
+    if (!scenesLoaded) return;
+    dialogOwner = captureWorkspaceOperation();
     scenePickerChannel = channelId;
     scenePickerTargetStep = null;
     isScenePickerOpen = true;
   }
 
   function handleScenePicked(presetIndex: number) {
+    if (!dialogOwner?.isCurrent() || !scenesLoaded || !existingSceneSlots.has(presetIndex)) return;
     if (scenePickerTargetStep !== null) {
-      // Change existing block
-      timelineEditor.resizeBlock(scenePickerChannel, scenePickerTargetStep, working?.tracks[scenePickerChannel]?.steps[scenePickerTargetStep]?.lengthBeats ?? 4);
-      // Update preset
-      const track = working?.tracks[scenePickerChannel];
-      if (track) {
-        timelineEditor.addBlock(scenePickerChannel, presetIndex, 4); // or replace
-      }
+      timelineEditor.replaceBlockScene(scenePickerChannel, scenePickerTargetStep, presetIndex);
     } else {
       // Add new block
       timelineEditor.addBlock(scenePickerChannel, presetIndex, 4);
     }
     isScenePickerOpen = false;
+  }
+
+  function openImportDialog() {
+    if (!$timelineEditor.loaded || !scenesLoaded) return;
+    dialogOwner = captureWorkspaceOperation();
+    isImportDialogOpen = true;
+  }
+
+  function handleImportDocument(doc: TimelineDocument) {
+    if (!dialogOwner?.isCurrent() || !isImportDialogOpen) return;
+    timelineEditor.importDocument(doc);
   }
 
   // Export clean JSON document
@@ -259,6 +340,15 @@
 </script>
 
 <div class="timeline-studio-page">
+  {#if scenesError || $timelineEditor.error}
+    <div class="load-error" role="alert">
+      {#if scenesError}<p>Scene library unavailable: {scenesError}</p>{/if}
+      {#if $timelineEditor.error}<p>{$timelineEditor.error}</p>{/if}
+      {#if !scenesLoaded || !$timelineEditor.loaded}
+        <button type="button" class="dialog-btn dialog-secondary" disabled={scenesLoading || $timelineEditor.loading} onclick={() => loadNodeData(true)}>Retry loading</button>
+      {/if}
+    </div>
+  {/if}
   <!-- Follower Notice Banner -->
   {#if isFollower}
     <div class="follower-banner" role="status">
@@ -290,12 +380,17 @@
   {/if}
 
   <!-- Main Toolbar -->
-  <TimelineToolbar
-    {snapshot}
-    {isFollower}
-    onExport={handleExportTimeline}
-    onImport={() => (isImportDialogOpen = true)}
-  />
+  {#key workspaceGeneration}
+    <TimelineToolbar
+      {snapshot}
+      {isFollower}
+      {statusFresh}
+      {canSave}
+      libraryReady={scenesLoaded}
+      onExport={handleExportTimeline}
+      onImport={openImportDialog}
+    />
+  {/key}
 
   <!-- Sequencer Area -->
   <div class="sequencer-container">
@@ -312,7 +407,7 @@
       <div class="tracks-stack">
         <!-- Live Playhead Line -->
         <TimelinePlayhead
-          {snapshot}
+          snapshot={statusFresh ? snapshot : null}
           {pixelsPerBeat}
           {scrollLeft}
         />
@@ -327,7 +422,7 @@
               {selectedChannel}
               {selectedStep}
               globalBeat={snapshot?.transport?.timeline?.currentBeat ?? 0}
-              isTimelineRunning={snapshot?.transport?.mode === 'timeline' || Boolean(snapshot?.transport?.timeline?.running)}
+              isTimelineRunning={statusFresh && (snapshot?.transport?.mode === 'timeline' || Boolean(snapshot?.transport?.timeline?.running))}
               onSelectBlock={(ch, step) => timelineEditor.selectStep(ch, step)}
               onResizeBlock={(ch, step, beats) => timelineEditor.resizeBlock(ch, step, beats)}
               onReorderBlock={(ch, from, to) => timelineEditor.reorderBlock(ch, from, to)}
@@ -341,7 +436,7 @@
           {/each}
         {:else}
           <div class="loading-placeholder">
-            <span>Loading timeline sequence...</span>
+            <span>{$timelineEditor.loading ? 'Loading saved timeline…' : activeNodeIp ? 'Saved timeline unavailable. Retry loading before editing or saving.' : 'Select a node to load its saved timeline.'}</span>
           </div>
         {/if}
       </div>
@@ -384,6 +479,8 @@
   {#if $timelineEditor.conflict}
     <TimelineConflictDialog
       currentChecksum={$timelineEditor.conflictChecksum}
+      busy={$timelineEditor.loading}
+      error={$timelineEditor.error}
       onReload={() => timelineEditor.reloadNodeVersion()}
       onKeepDraft={() => timelineEditor.keepDraft()}
     />
@@ -392,28 +489,22 @@
   {#if isImportDialogOpen}
     <TimelineImportDialog
       {existingSceneSlots}
-      onImportSuccess={(doc) => timelineEditor.importDocument(doc)}
+      onImportSuccess={handleImportDocument}
       onClose={() => (isImportDialogOpen = false)}
     />
   {/if}
 
   {#if showUnsavedModal}
-    <div class="modal-backdrop" role="alertdialog" aria-modal="true" tabindex="-1">
-      <div class="modal-panel" role="document">
-        <h3 class="modal-title">Unsaved Timeline Changes</h3>
-        <p class="modal-description">
-          You have unsaved changes to the timeline sequencer. Discard changes and leave page?
-        </p>
-        <div class="modal-actions">
-          <button type="button" class="dialog-btn dialog-secondary" onclick={cancelDiscardNavigation}>
-            Stay on Page
-          </button>
-          <button type="button" class="dialog-btn dialog-danger" onclick={confirmDiscardNavigation}>
-            Discard Changes
-          </button>
-        </div>
-      </div>
-    </div>
+    <OperatorDialog
+      open
+      title="Unsaved Timeline Changes"
+      description="This draft has changes that are not saved to the node. Stay to keep editing, or discard them and continue."
+      confirmLabel="Discard and leave"
+      cancelLabel="Stay on page"
+      tone="danger"
+      onconfirm={confirmDiscardNavigation}
+      oncancel={cancelDiscardNavigation}
+    />
   {/if}
 </div>
 
@@ -488,6 +579,8 @@
   }
 
   .sequencer-container {
+    flex: 1 1 auto;
+    min-height: 280px;
     background: #0b0f19;
     border: 1px solid #1e293b;
     border-radius: 8px;
@@ -497,8 +590,9 @@
   }
 
   .sequencer-scroll-wrapper {
+    min-height: 0;
     overflow-x: auto;
-    overflow-y: hidden;
+    overflow-y: auto;
     position: relative;
     max-width: 100%;
   }
@@ -516,52 +610,16 @@
     font-size: 13px;
   }
 
-  .modal-backdrop {
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.75);
-    backdrop-filter: blur(4px);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 120;
-    padding: 16px;
+  .load-error {
+    color: var(--dash-danger);
+    border: 1px solid var(--dash-border);
+    border-radius: var(--dash-radius-sm);
+    background: var(--dash-surface);
+    padding: 12px 16px;
+    margin-bottom: 12px;
+    overflow-wrap: anywhere;
   }
-
-  .modal-panel {
-    background: #0b0f19;
-    border: 1px solid rgba(245, 158, 11, 0.4);
-    border-radius: 12px;
-    width: 100%;
-    max-width: 440px;
-    padding: 24px;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    text-align: center;
-    box-shadow: 0 20px 40px rgba(0, 0, 0, 0.9);
-  }
-
-  .modal-title {
-    margin: 0 0 8px 0;
-    font-size: 16px;
-    font-weight: 600;
-    color: #f1f5f9;
-  }
-
-  .modal-description {
-    margin: 0 0 20px 0;
-    font-size: 13px;
-    color: #94a3b8;
-    line-height: 1.5;
-  }
-
-  .modal-actions {
-    display: flex;
-    gap: 12px;
-    width: 100%;
-    justify-content: center;
-  }
+  .load-error p { margin: 4px 0 12px; }
 
   .dialog-btn {
     padding: 8px 16px;
@@ -578,13 +636,9 @@
   }
 
   .dialog-secondary {
-    background: #1e293b;
-    color: #cbd5e1;
-    border: 1px solid #334155;
+    background: var(--dash-surface);
+    color: var(--dash-text);
+    border: 1px solid var(--dash-border);
   }
 
-  .dialog-danger {
-    background: #ef4444;
-    color: #ffffff;
-  }
 </style>

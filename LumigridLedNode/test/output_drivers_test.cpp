@@ -437,6 +437,71 @@ void controller_mixed_output() {
     require_disabled("blackout left PWM enabled");
 }
 
+void controller_rmt_failure_skips_pwm() {
+    ControllerFixture f;
+    f.start(config(1, 1));
+    f.controller.pixels().fill(0, 20, 30, 40);
+    f.controller.pwm().set(0, 600);
+    require(f.controller.try_commit() == ESP_OK && Pca9685Driver::is_outputs_enabled(),
+            "could not establish an exposed prior PWM frame");
+
+    const unsigned writes_before = f.pca.frames;
+    uint16_t first_written_duty = UINT16_MAX;
+    f.pca.frame_hook = [&] { first_written_duty = f.pca.duties[0]; };
+    f.rmt.wrong_symbols_lane = 0;
+    f.controller.pixels().fill(0, 100, 110, 120);
+    f.controller.pwm().set(0, 3000);
+    const esp_err_t failed = f.controller.try_commit();
+    const unsigned failure_writes = f.pca.frames - writes_before;
+    const auto metrics = f.controller.commit_metrics();
+    const bool inhibited = !Pca9685Driver::is_outputs_enabled();
+    f.rmt.wrong_symbols_lane = -1;
+    require(f.controller.blackout() == ESP_OK, "could not clear the injected RMT failure");
+
+    require(failed == ESP_ERR_INVALID_SIZE && inhibited, "failed mixed frame did not retain its RMT error and inhibit PWM");
+    require(first_written_duty == 0 && failure_writes == 1,
+            "rejected addressable frame exposed its new nonzero PWM command before blackout");
+    require(metrics.last_pwm_us == 0 && metrics.last_failed_lane == 0,
+            "skipped PWM write was reported as a completed PWM stage");
+    f.controller.pixels().fill(0, 50, 60, 70);
+    f.controller.pwm().set(0, 900);
+    require(f.controller.try_commit() == ESP_OK && f.pca.duties[0] == 900 &&
+            Pca9685Driver::is_outputs_enabled(), "fresh mixed output did not resume after confirmed blackout");
+}
+
+void transaction_cross_controller_move() {
+    ControllerFixture first, second;
+    first.start(config(0, 1));
+    second.start(config(0, 1));
+    const unsigned first_writes = first.pca.frames, second_writes = second.pca.frames;
+    {
+        auto destination = first.controller.begin_transaction();
+        auto source = second.controller.begin_transaction();
+        destination.pwm().set(0, 111);
+        source.pwm().set(0, 777);
+        destination = std::move(source);
+        const bool transferred = &destination.pwm() == &second.controller.pwm();
+        if (!transferred) {
+            // Balance the old reference-based implementation's stranded lock
+            // before reporting failure, so baseline comparison can exit safely.
+            first.controller.lock();
+            second.controller.unlock();
+        }
+        require(transferred && destination.is_active() && !source.is_active(),
+                "move-assignment retained the destination's old controller instead of transferred lock ownership");
+        require(destination.commit() == ESP_OK && first.pca.frames == first_writes &&
+                second.pca.frames == second_writes + 1 && second.pca.duties[0] == 777,
+                "moved transaction committed to or unlocked the wrong controller");
+        require(source.commit() == ESP_ERR_INVALID_STATE && destination.commit() == ESP_ERR_INVALID_STATE,
+                "moved-from or completed transaction could commit again");
+    }
+    auto original = first.controller.begin_transaction();
+    original.pwm().set(0, 333);
+    OutputTransaction moved(std::move(original));
+    require(!original.is_active() && moved.is_active() && moved.commit() == ESP_OK && first.pca.duties[0] == 333,
+            "move construction failed to retain its controller and single-lock lifetime");
+}
+
 void controller_disabled_pwm() {
     ControllerFixture f;
     auto cfg = config(0, 1);
@@ -975,6 +1040,8 @@ void controller_observer_replacement_waits() {
 
 using Test = std::pair<const char*, void (*)()>;
 const Test tests[] = {
+    {"controller_rmt_failure_skips_pwm", controller_rmt_failure_skips_pwm},
+    {"transaction_cross_controller_move", transaction_cross_controller_move},
     {"controller_observer_replacement_waits", controller_observer_replacement_waits},
     {"controller_estop_during_commit", controller_estop_during_commit},
     {"controller_new_estop_during_clear", controller_new_estop_during_clear},

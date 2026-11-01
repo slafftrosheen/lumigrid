@@ -116,8 +116,22 @@ Typical errors include 400 invalid payload, 401 authorization/session expiry,
 the server response rather than turning every error into a connectivity message.
 
 OTA is Admin-only, checks image/storage conditions and requires post-reboot
-verification. See [Flash layout](FLASH_LAYOUT.md), including the effective
-signed-OTA setting. Backup and restore are separate from credential
+verification. `GET /api/v1/ota/status` includes `nodeId`, `targetBinding`,
+`runningPartition`, `nextPartition`, `targetPartition` and `maxFirmwareBytes`.
+When `targetBinding` is true, send `X-LumiGrid-Node-Id` with the selected node's
+immutable identity; an invalid or mismatched value is rejected before image
+reads or flash writes. Successful full receipts include `nodeId` and
+`targetPartition` alongside the accepted version and command/job IDs.
+
+Confirm an upload only when fresh identity and OTA status match its accepted
+node, version and target partition, the running partition equals that target,
+the state is `confirmed`, and no rollback is reported. An earlier same-version
+confirmation, missing status or an incomplete receipt is not confirmation of
+the new candidate. Older nodes without `targetBinding` use identity preflight
+and readback without the new header; they do not provide server-side address
+binding. Cancelling the browser operation stops further requests but does not
+undo an already accepted update. See [Flash layout](FLASH_LAYOUT.md), including
+the effective signed-OTA setting. Backup and restore are separate from credential
 recovery; inspect validation/scope before applying a restore.
 
 ## Registered routes

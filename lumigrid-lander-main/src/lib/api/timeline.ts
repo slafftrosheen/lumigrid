@@ -59,7 +59,7 @@ export async function saveSequence(
   expectedChecksum?: number
 ): Promise<SaveTimelineResponse> {
   const bodyObj: Record<string, unknown> = { ...seq };
-  if (expectedChecksum !== undefined && expectedChecksum !== 0) {
+  if (expectedChecksum !== undefined) {
     bodyObj.expectedChecksum = expectedChecksum;
   }
 

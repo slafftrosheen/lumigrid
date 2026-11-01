@@ -5,6 +5,9 @@ import * as timelineApi from '../api/timeline';
 import * as showTransportApi from '../api/showTransport';
 import type { TimelineDocument } from '../api/timeline';
 
+vi.mock('../state/nodeStore', () => ({ captureNodeOperation: (ip: string) => ({ ip, isCurrent: () => true }) }));
+vi.mock('../auth/nodeAuth', () => ({ nodeAuthStore: { getSession: () => null } }));
+
 describe('Timeline Transport & Editor Integration (Requirement 73: Tests I..P)', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -53,6 +56,7 @@ describe('Timeline Transport & Editor Integration (Requirement 73: Tests I..P)',
     });
 
     await timelineEditor.load('node-1', '192.168.1.50');
+    timelineEditor.setSceneSlots(new Set([0, 5]));
     expect(get(isTimelineEditorDirty)).toBe(false);
 
     // Edit BPM to make dirty
@@ -142,6 +146,7 @@ describe('Timeline Transport & Editor Integration (Requirement 73: Tests I..P)',
 
     vi.spyOn(timelineApi, 'getSequence').mockResolvedValue(mockDoc);
     await timelineEditor.load('node-1', '192.168.1.50');
+    timelineEditor.setSceneSlots(new Set([0, 5]));
 
     // Make an edit
     timelineEditor.addBlock(0, 5, 8);

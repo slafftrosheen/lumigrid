@@ -2,8 +2,8 @@
   import { onMount } from 'svelte';
   import { getIdentity, type NodeIdentity } from '$lib/api/node';
   import { getRecoveryStatus, type RecoveryStatus } from '$lib/api/recovery';
-  import { getSelectedNodeIp } from '$lib/auth/storage';
-  import { getNodeLiveState } from '$lib/state/nodeStore';
+  import { nodeAuthStore } from '$lib/auth/nodeAuth';
+  import { nodeStore } from '$lib/state/nodeStore';
 
   import RecoveryStatusCard from '$lib/components/system/RecoveryStatusCard.svelte';
   import DeviceConfigPanel from '$lib/components/system/DeviceConfigPanel.svelte';
@@ -23,69 +23,73 @@
   let loadingRecovery = $state(false);
   let showWizard = $state(false);
 
-  let liveState = $state({ connection: 'disconnected', nodeId: '' });
+  let liveState = $state({ connection: 'idle' });
+  let targetGeneration = $state(0);
+  let nodeSession: ReturnType<typeof nodeAuthStore.getSession> = null;
+  let disposed = false;
+  let readRequest = 0;
+  let pageError = $state('');
+
+  function capturePageOperation() {
+    const generation = targetGeneration, ip = nodeIp, session = nodeAuthStore.getSession(ip);
+    return { ip, isCurrent: () => !disposed && generation === targetGeneration && nodeIp === ip && nodeAuthStore.getSession(ip) === session };
+  }
 
   async function loadNodeState(ip: string) {
-    if (!ip) {
-      identity = null;
-      recoveryStatus = null;
-      return;
-    }
+    const owner = capturePageOperation();
+    if (!ip || owner.ip !== ip || !owner.isCurrent()) return;
+    const request = ++readRequest;
     loadingRecovery = true;
     try {
-      const [idRes, recRes] = await Promise.allSettled([
-        getIdentity(ip),
-        getRecoveryStatus(ip),
-      ]);
-      if (idRes.status === 'fulfilled') {
-        identity = idRes.value;
-        nodeId = idRes.value.id;
-      }
-      if (recRes.status === 'fulfilled') {
-        recoveryStatus = recRes.value;
-      }
+      const [idRes, recRes] = await Promise.allSettled([getIdentity(ip), getRecoveryStatus(ip)]);
+      if (!owner.isCurrent() || request !== readRequest) return;
+      const issues: string[] = [];
+      if (idRes.status === 'fulfilled' && idRes.value?.id) {
+        if (nodeId && nodeId !== idRes.value.id) {
+          targetGeneration++; recoveryStatus = null; showWizard = false;
+          identity = idRes.value; nodeId = idRes.value.id; loadingRecovery = false;
+          pageError = 'A different node now uses this address. Its system view has been reloaded.';
+          return;
+        }
+        identity = idRes.value; nodeId = idRes.value.id;
+      } else issues.push('Node identity could not be loaded.');
+      if (recRes.status === 'fulfilled') recoveryStatus = recRes.value;
+      else issues.push('Recovery status could not be refreshed. Any displayed status is the last received value.');
+      pageError = issues.join(' ');
     } finally {
-      loadingRecovery = false;
+      if (owner.isCurrent() && request === readRequest) loadingRecovery = false;
     }
   }
 
+  function syncFocusedNode(ip: string) {
+    const session = nodeAuthStore.getSession(ip);
+    if (ip === nodeIp && session === nodeSession) return;
+    targetGeneration++; readRequest++;
+    nodeIp = ip; nodeSession = session; nodeId = '';
+    identity = recoveryStatus = null; showWizard = false; pageError = ''; loadingRecovery = false;
+    if (ip) void loadNodeState(ip);
+  }
+
   onMount(() => {
-    nodeIp = getSelectedNodeIp();
-    if (nodeIp) {
-      loadNodeState(nodeIp);
-    }
-
-    const unsubLive = getNodeLiveState().subscribe((val) => {
-      liveState = { connection: val.connection, nodeId: val.nodeId };
-      if (val.nodeId && !nodeId) {
-        nodeId = val.nodeId;
-      }
+    disposed = false;
+    const unsubscribe = nodeStore.subscribe(state => {
+      liveState = { connection: state.connection };
+      syncFocusedNode(state.route || '');
     });
-
-    const interval = setInterval(() => {
-      if (nodeIp) {
-        getRecoveryStatus(nodeIp).then((s) => {
-          recoveryStatus = s;
-        }).catch(() => {});
-      }
-    }, 10000);
-
-    return () => {
-      unsubLive();
-      clearInterval(interval);
+    const unsubscribeAuth = nodeAuthStore.subscribe(() => syncFocusedNode(nodeIp));
+    let timer: ReturnType<typeof setTimeout>;
+    const refresh = async () => {
+      if (nodeIp) await loadNodeState(nodeIp);
+      if (!disposed) timer = setTimeout(refresh, 10000);
     };
+    timer = setTimeout(refresh, 10000);
+    return () => { disposed = true; targetGeneration++; readRequest++; clearTimeout(timer); unsubscribe(); unsubscribeAuth(); };
   });
 
-  const resolvedIdentity = $derived<NodeIdentity>(
-    identity ?? {
-      id: nodeId || liveState.nodeId || 'unknown-node',
-      name: 'LumiGrid Node',
-      family: 'led-node',
-      model: 'LumiGrid LED Node',
-      hardwareRevision: 'v1.0',
-      firmwareVersion: '1.0.0',
-    }
-  );
+  const resolvedIdentity = $derived<NodeIdentity>(identity ?? {
+    id: 'Unavailable', name: 'LumiGrid Node', family: 'Unavailable', model: 'Unavailable',
+    hardwareRevision: 'Unavailable', firmwareVersion: 'Unavailable',
+  });
 </script>
 
 <svelte:head>
@@ -97,12 +101,12 @@
     <div class="header-left">
       <h1>System & Recovery</h1>
       <p class="header-sub">
-        Hardware configuration, authoritative limits, streaming backup/restore, and canonical OTA operations.
+        Configure this node, protect saved shows, and verify firmware updates.
       </p>
     </div>
     {#if nodeIp}
       <div class="node-badge">
-        <span class="node-dot" class:online={liveState.connection === 'connected'}></span>
+        <span class="node-dot" class:online={liveState.connection === 'online' || liveState.connection === 'degraded'}></span>
         <span class="node-id-text">{resolvedIdentity.id} ({nodeIp})</span>
       </div>
     {/if}
@@ -161,13 +165,24 @@
     </button>
   </nav>
 
+  {#if pageError}
+    <div class="loading-box" role="alert">
+      <p>{pageError}</p>
+      <button type="button" class="btn-wizard" onclick={() => loadNodeState(nodeIp)} disabled={!nodeIp || loadingRecovery}>Retry</button>
+    </div>
+  {/if}
+
   <!-- Tab Content -->
   <div class="tab-content">
+    {#key activeTab === 'fleet' ? 'fleet' : targetGeneration}
+    {@const owner = capturePageOperation()}
     {#if !nodeIp && activeTab !== 'fleet'}
       <div class="no-node-card">
         <h3>No Node Selected</h3>
         <p>Please select an active node from the dashboard navigation to manage its system settings.</p>
       </div>
+    {:else if !identity && activeTab !== 'fleet'}
+      <div class="loading-box" role="status">{loadingRecovery ? 'Loading this node’s identity and recovery status…' : 'Node identity is unavailable. Reload before managing this node.'}</div>
     {:else if activeTab === 'overview'}
       <div class="overview-grid">
         <!-- Recovery Status Card -->
@@ -219,7 +234,7 @@
         <RestorePanel
           {nodeIp}
           nodeId={resolvedIdentity.id}
-          onRestoreComplete={() => loadNodeState(nodeIp)}
+          onRestoreComplete={() => { if (owner.isCurrent()) void loadNodeState(owner.ip); }}
         />
       </div>
     {:else if activeTab === 'ota'}
@@ -227,10 +242,11 @@
     {:else if activeTab === 'fleet'}
       <FleetOtaPanel />
     {/if}
+    {/key}
   </div>
 </div>
 
-{#if showWizard && nodeIp}
+{#if showWizard && nodeIp && identity}
   <CommissioningWizard
     {nodeIp}
     nodeId={resolvedIdentity.id}
@@ -309,6 +325,7 @@
   }
 
   .tab-btn {
+    flex: 0 0 auto;
     background: none;
     border: none;
     border-bottom: 2px solid transparent;

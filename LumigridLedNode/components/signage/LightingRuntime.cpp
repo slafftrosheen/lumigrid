@@ -570,6 +570,12 @@ FrameResult LightingRuntime::render_frame(uint32_t current_ms) {
         ControlSource dominant = source_manager_.current_owner();
         if (dominant != ControlSource::Factory && dominant != ControlSource::EStop) {
             const esp_err_t sched_err = OutputScheduler::schedule(render_frame, local_cfg, controller_, &power_request);
+            if (sched_err == kErrStaleOutputFrame) {
+                // Configuration changed after this frame's render snapshot.
+                // Retry with fresh configuration next tick without a hardware
+                // fault or acknowledging an uncommitted scene generation.
+                return FrameResult::NoOutput;
+            }
             if (sched_err != ESP_OK) {
                 report_output_fault(sched_err);
                 if (preview_cb_) {

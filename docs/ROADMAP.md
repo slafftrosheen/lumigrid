@@ -4,7 +4,7 @@ This is a source-observed gap list, not release dates or delivery promises.
 
 | Work | Completion evidence |
 | --- | --- |
-| Signed OTA truth | Align advertised flag with enforced/tested policy or disable claim |
+| Production signing/provisioning | The advertised signed-OTA flag now follows the effective build setting; the default candidate disables enforcement. Agree, implement and validate the production signing/key-provisioning policy before enabling it. |
 | Release delivery | Versioned artifacts/hashes, matching layout and verified manifest if offered |
 | MQTT security | Intended broker credential/certificate configuration and validation |
 | Hardware acceptance | Per-channel and combined RMT/PWM/Wi-Fi measurements on exact build |

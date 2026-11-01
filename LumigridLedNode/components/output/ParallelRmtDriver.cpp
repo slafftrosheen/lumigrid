@@ -32,6 +32,7 @@ static const char* TAG = "rmt_par";
 const char* output_err_name(esp_err_t err) {
     if (err == kErrRmtResourceExhausted) return "rmt_resource_exhausted";
     if (err == kErrInsufficientRuntimeMemory) return "insufficient_runtime_memory";
+    if (err == kErrStaleOutputFrame) return "stale_output_frame";
     return esp_err_to_name(err);
 }
 

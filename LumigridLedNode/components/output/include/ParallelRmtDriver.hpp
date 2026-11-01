@@ -42,6 +42,9 @@ constexpr int kRmtInterruptPriority = 3;
 constexpr esp_err_t kErrRmtResourceExhausted = 0x6A01;
 // LG-038.3 §41: explicit memory-admission failure (not a bare ESP_ERR_NO_MEM).
 constexpr esp_err_t kErrInsufficientRuntimeMemory = 0x6A02;
+// The rendered frame differs from the current valid topology. Render again;
+// no physical commit was attempted and no hardware fault should be latched.
+constexpr esp_err_t kErrStaleOutputFrame = 0x6A03;
 
 // Post-allocation reserve in internal DRAM enforced before accepting a new topology (LG-HW-002)
 constexpr uint32_t kPostTopologyInternalReserveBytes = 12 * 1024;

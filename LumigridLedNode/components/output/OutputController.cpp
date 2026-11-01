@@ -584,13 +584,13 @@ void OutputController::set_output_enabled(bool enabled) {
 
 // ── OutputTransaction Implementation (Batch 8 Item 8) ──
 OutputTransaction::OutputTransaction(OutputController& controller)
-    : controller_(controller), active_(true) {
-    controller_.lock();
+    : controller_(&controller), active_(true) {
+    controller_->lock();
 }
 
 OutputTransaction::~OutputTransaction() {
     if (active_) {
-        controller_.unlock();
+        controller_->unlock();
         active_ = false;
     }
 }
@@ -603,8 +603,9 @@ OutputTransaction::OutputTransaction(OutputTransaction&& other) noexcept
 OutputTransaction& OutputTransaction::operator=(OutputTransaction&& other) noexcept {
     if (this != &other) {
         if (active_) {
-            controller_.unlock();
+            controller_->unlock();
         }
+        controller_ = other.controller_;
         active_ = other.active_;
         other.active_ = false;
     }
@@ -612,27 +613,59 @@ OutputTransaction& OutputTransaction::operator=(OutputTransaction&& other) noexc
 }
 
 AddressableDriver& OutputTransaction::pixels() {
-    return controller_.pixels();
+    return controller_->pixels();
 }
 
 Pca9685Driver& OutputTransaction::pwm() {
-    return controller_.pwm();
+    return controller_->pwm();
 }
 
 esp_err_t OutputTransaction::commit(const OutputPowerRequest* power_request) {
     if (!active_) return ESP_ERR_INVALID_STATE;
-    esp_err_t err = controller_.try_commit_locked(power_request);
-    controller_.unlock();
+    esp_err_t err = controller_->try_commit_locked(power_request);
+    controller_->unlock();
     active_ = false;
     return err;
 }
 
 esp_err_t OutputTransaction::abort() {
     if (!active_) return ESP_ERR_INVALID_STATE;
-    BlackoutResult b_res = controller_.blackout_locked();
-    controller_.unlock();
+    BlackoutResult b_res = controller_->blackout_locked();
+    controller_->unlock();
     active_ = false;
     return b_res;
+}
+
+esp_err_t OutputController::validate_frame_topology_locked(const DeviceConfig& cfg) const {
+#if defined(CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS) && CONFIG_LUMIGRID_ENABLE_RUNTIME_TESTS
+    // Existing runtime mock mode has no physical RMT/PCA allocation to compare.
+    if (test_mode_.load(std::memory_order_acquire)) return ESP_OK;
+#endif
+    if (!topology_valid_.load(std::memory_order_acquire)) return ESP_ERR_INVALID_STATE;
+    bool stale = false;
+    for (uint8_t ch = 0; ch < kChannelCount; ++ch) {
+        const auto& requested = cfg.channels[ch];
+        const auto& current = power_cfg_.channels[ch];
+        stale |= requested.enabled != current.enabled;
+        if (ch >= AddressableDriver::kLanes) {
+            if (current.enabled && !pwm_available_.load(std::memory_order_acquire)) return ESP_ERR_INVALID_STATE;
+            continue;
+        }
+        if (current.enabled != pixels_.configured(ch)) return ESP_ERR_INVALID_STATE;
+        if (!current.enabled) continue;
+        const bool rgbw = current.addressable_type == AddressableType::SK6812;
+        const bool grb = current.pixel_order == PixelOrder::GRB || current.pixel_order == PixelOrder::GRBW;
+        if (!pixel_order_valid(current.addressable_type, current.pixel_order) ||
+            current.pixel_count != pixels_.configured_pixels(ch) ||
+            rgbw != pixels_.has_white(ch) || pixels_.rmt().pos_r(ch) != (grb ? 1 : 0) ||
+            pixels_.rmt().pos_g(ch) != (grb ? 0 : 1)) return ESP_ERR_INVALID_STATE;
+        if (requested.enabled) {
+            stale |= requested.pixel_count != current.pixel_count ||
+                     requested.addressable_type != current.addressable_type ||
+                     requested.pixel_order != current.pixel_order;
+        }
+    }
+    return stale ? kErrStaleOutputFrame : ESP_OK;
 }
 
 esp_err_t OutputController::try_commit_locked(const OutputPowerRequest* power_request) {
@@ -690,10 +723,12 @@ esp_err_t OutputController::try_commit_locked(const OutputPowerRequest* power_re
     const int64_t t_addr_end = esp_timer_get_time();
     const uint32_t addr_us = static_cast<uint32_t>(t_addr_end - t_addr_start);
 
-    // 2. PWM commit
+    // 2. PWM commit. A rejected addressable frame must never expose the new PWM
+    // command while /OE is still enabled from the previous successful frame.
+    // Failure recovery below writes zeros across both output families.
     esp_err_t pwm_err = ESP_OK;
     uint32_t pwm_us = 0;
-    if (pwm_available_.load(std::memory_order_acquire)) {
+    if (a_res.result == ESP_OK && pwm_available_.load(std::memory_order_acquire)) {
         const int64_t t_pwm_start = esp_timer_get_time();
         pwm_err = pwm_.commit();
         const int64_t t_pwm_end = esp_timer_get_time();

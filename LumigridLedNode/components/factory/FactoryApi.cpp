@@ -73,7 +73,7 @@ esp_err_t send_json(httpd_req_t* request,
     httpd_resp_set_type(request, "application/json");
     httpd_resp_set_hdr(request, "Cache-Control", "no-store");
     httpd_resp_set_hdr(request, "Access-Control-Allow-Origin", "*");
-    httpd_resp_set_hdr(request, "Access-Control-Allow-Headers", "Authorization, Content-Type, X-API-Key");
+    httpd_resp_set_hdr(request, "Access-Control-Allow-Headers", "Authorization, Content-Type, X-API-Key, X-LumiGrid-Node-Id");
     httpd_resp_set_hdr(request, "Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
     return httpd_resp_sendstr(request, body);
 }
@@ -1600,7 +1600,7 @@ esp_err_t get_logs(httpd_req_t* request) {
     httpd_resp_set_type(request, "text/plain");
     httpd_resp_set_hdr(request, "Cache-Control", "no-store");
     httpd_resp_set_hdr(request, "Access-Control-Allow-Origin", "*");
-    httpd_resp_set_hdr(request, "Access-Control-Allow-Headers", "Authorization, Content-Type, X-API-Key");
+    httpd_resp_set_hdr(request, "Access-Control-Allow-Headers", "Authorization, Content-Type, X-API-Key, X-LumiGrid-Node-Id");
     esp_err_t err = httpd_resp_sendstr(request, logs);
     
     delete[] logs;
@@ -2022,7 +2022,7 @@ esp_err_t get_presets(httpd_req_t* request) {
     httpd_resp_set_status(request, "200 OK");
     httpd_resp_set_hdr(request, "Cache-Control", "no-store");
     httpd_resp_set_hdr(request, "Access-Control-Allow-Origin", "*");
-    httpd_resp_set_hdr(request, "Access-Control-Allow-Headers", "Authorization, Content-Type, X-API-Key");
+    httpd_resp_set_hdr(request, "Access-Control-Allow-Headers", "Authorization, Content-Type, X-API-Key, X-LumiGrid-Node-Id");
     httpd_resp_set_hdr(request, "Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
     httpd_resp_send_chunk(request, "[", 1);
 
@@ -3459,6 +3459,12 @@ esp_err_t post_show_control(httpd_req_t* request) {
             api_ptr->command_journal().failed(cmd_id, ESP_ERR_INVALID_ARG);
             return send_error(request, "400 Bad Request", "invalid_scene_index");
         }
+        if (!api_ptr->config() ||
+            !api_ptr->config()->scene_exists(static_cast<uint8_t>(scene_idx))) {
+            cJSON_Delete(root);
+            api_ptr->command_journal().failed(cmd_id, ESP_ERR_NOT_FOUND);
+            return send_error(request, "404 Not Found", "scene_not_found");
+        }
 
         if (api_ptr->cue_runner()) {
             api_ptr->cue_runner()->stop(CueStopReason::Preempted, now_ms);
@@ -3500,17 +3506,24 @@ esp_err_t post_show_control(httpd_req_t* request) {
         uint32_t active_cs = 0;
 
         if (strcmp(action, "start") == 0 || strcmp(action, "restart") == 0) {
-            if (api_ptr->cue_runner()) {
-                api_ptr->cue_runner()->stop(CueStopReason::Preempted, now_ms);
-            }
             uint16_t bpm = 120;
             Sequence seq{};
-            if (api_ptr->config() && api_ptr->config()->load_sequence(seq) == ESP_OK) {
-                bpm = seq.bpm > 0 ? seq.bpm : 120;
+            const esp_err_t load_err = api_ptr->config()
+                ? api_ptr->config()->load_sequence(seq) : ESP_ERR_INVALID_STATE;
+            if (load_err != ESP_OK) {
+                cJSON_Delete(root);
+                api_ptr->command_journal().failed(cmd_id, load_err);
+                return send_error(request,
+                    load_err == ESP_ERR_NOT_FOUND ? "404 Not Found" : "503 Service Unavailable",
+                    load_err == ESP_ERR_NOT_FOUND ? "timeline_not_found" : "timeline_unavailable");
             }
+            bpm = seq.bpm > 0 ? seq.bpm : 120;
             const cJSON* bpm_j = cJSON_GetObjectItemCaseSensitive(root, "bpm");
             if (bpm_j && cJSON_IsNumber(bpm_j) && bpm_j->valueint > 0) {
                 bpm = static_cast<uint16_t>(bpm_j->valueint);
+            }
+            if (api_ptr->cue_runner()) {
+                api_ptr->cue_runner()->stop(CueStopReason::Preempted, now_ms);
             }
             if (api_ptr->scheduler()) {
                 api_ptr->scheduler()->start_local_timeline(bpm);
@@ -3565,9 +3578,6 @@ esp_err_t post_show_control(httpd_req_t* request) {
         // LG-034 §16: every transport op returns a deterministic status;
         // invalid requests fail with 400/409 instead of silently no-oping.
         if (strcmp(action, "start") == 0) {
-            if (api_ptr->scheduler()) {
-                api_ptr->scheduler()->stop_local_timeline();
-            }
             uint8_t list_idx = 0;
             uint8_t start_cue = 0;
             const cJSON* li = cJSON_GetObjectItemCaseSensitive(root, "cueListIndex");
@@ -3579,6 +3589,9 @@ esp_err_t post_show_control(httpd_req_t* request) {
                 api_ptr->command_journal().failed(cmd_id, err);
                 cJSON_Delete(root);
                 return send_error(request, "400 Bad Request", "start_failed");
+            }
+            if (api_ptr->scheduler()) {
+                api_ptr->scheduler()->stop_local_timeline();
             }
         } else if (strcmp(action, "restart") == 0) {
             // LG-034 §13: canonical restart — newest saved list, fresh active
@@ -3989,6 +4002,19 @@ esp_err_t post_activate(httpd_req_t* request) {
 
     uint64_t now_ms = api_ptr->show_clock_now_ms();
 
+    const auto reject_activation = [&]() {
+        const uint32_t command_id = api_ptr->command_journal().accept(CommandDomain::Scene, 0);
+        api_ptr->command_journal().failed(command_id, ESP_ERR_INVALID_STATE);
+
+        char detail[64];
+        snprintf(detail, sizeof(detail), "Preset %u activation rejected", index);
+        api::AuditLog::instance().log(api::ApiRole::Operator, "preset_activate_rejected", detail);
+        return send_error(request, "409 Conflict", "scene_activation_rejected");
+    };
+    if (!api_ptr->config() || !api_ptr->config()->scene_exists(index)) {
+        return reject_activation();
+    }
+
     // Stop Cue if running (Scene activation preempts without end action)
     if (api_ptr->cue_runner()) {
         api_ptr->cue_runner()->stop(CueStopReason::Preempted, now_ms);
@@ -4001,14 +4027,7 @@ esp_err_t post_activate(httpd_req_t* request) {
 
     uint32_t generation = 0;
     if (!api_ptr->signage()->activate_scene_checked(index, &generation)) {
-        const uint32_t command_id = api_ptr->command_journal().accept(CommandDomain::Scene, 0);
-        api_ptr->command_journal().failed(command_id, ESP_ERR_INVALID_STATE);
-
-        char detail[64];
-        snprintf(detail, sizeof(detail), "Preset %u activation rejected", index);
-        api::AuditLog::instance().log(api::ApiRole::Operator, "preset_activate_rejected", detail);
-
-        return send_error(request, "409 Conflict", "scene_activation_rejected");
+        return reject_activation();
     }
 
     if (api_ptr->show_transport()) {
@@ -5980,7 +5999,7 @@ esp_err_t get_effects(httpd_req_t* request) {
             httpd_resp_set_type(request, "application/json");
             httpd_resp_set_hdr(request, "Cache-Control", "no-store");
             httpd_resp_set_hdr(request, "Access-Control-Allow-Origin", "*");
-            httpd_resp_set_hdr(request, "Access-Control-Allow-Headers", "Authorization, Content-Type, X-API-Key");
+            httpd_resp_set_hdr(request, "Access-Control-Allow-Headers", "Authorization, Content-Type, X-API-Key, X-LumiGrid-Node-Id");
             httpd_resp_set_hdr(request, "Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
         }
         esp_err_t result = httpd_resp_send_chunk(request, i == 0 ? "[" : ",", 1);
@@ -6015,7 +6034,7 @@ esp_err_t get_palettes(httpd_req_t* request) {
             httpd_resp_set_type(request, "application/json");
             httpd_resp_set_hdr(request, "Cache-Control", "no-store");
             httpd_resp_set_hdr(request, "Access-Control-Allow-Origin", "*");
-            httpd_resp_set_hdr(request, "Access-Control-Allow-Headers", "Authorization, Content-Type, X-API-Key");
+            httpd_resp_set_hdr(request, "Access-Control-Allow-Headers", "Authorization, Content-Type, X-API-Key, X-LumiGrid-Node-Id");
             httpd_resp_set_hdr(request, "Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
         }
         esp_err_t result = httpd_resp_send_chunk(request, i == 0 ? "[" : ",", 1);
@@ -6294,6 +6313,17 @@ esp_err_t post_ota(httpd_req_t* request) {
     if (!api::authorize(request, api::ApiRole::Admin)) return ESP_OK;
 
     FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
+    // Bind a browser/fleet update to the physical node selected by the operator.
+    // Reject an address reused by another node before reading or writing the image.
+    const size_t expected_id_length = httpd_req_get_hdr_value_len(request, "X-LumiGrid-Node-Id");
+    if (expected_id_length > 0) {
+        char expected_id[sizeof(api_ptr->identity().id)]{};
+        if (expected_id_length >= sizeof(expected_id) ||
+            httpd_req_get_hdr_value_str(request, "X-LumiGrid-Node-Id", expected_id, sizeof(expected_id)) != ESP_OK)
+            return send_error(request, "400 Bad Request", "invalid_expected_node_id");
+        if (strcmp(expected_id, api_ptr->identity().id) != 0)
+            return send_error(request, "409 Conflict", "node_identity_mismatch");
+    }
     auto& verifier = OtaBootVerifier::instance();
 
     if (verifier.is_pending_verify()) {
@@ -6489,7 +6519,9 @@ esp_err_t post_ota(httpd_req_t* request) {
     if (response && cJSON_AddBoolToObject(response, "accepted", true) &&
         cJSON_AddNumberToObject(response, "commandId", cmd_id) &&
         cJSON_AddNumberToObject(response, "jobId", job_id) &&
+        cJSON_AddStringToObject(response, "nodeId", api_ptr->identity().id) &&
         cJSON_AddStringToObject(response, "targetVersion", candidate.version) &&
+        cJSON_AddStringToObject(response, "targetPartition", update_partition->label) &&
         cJSON_AddStringToObject(response, "projectName", candidate.project_name) &&
         cJSON_AddStringToObject(response, "state", "pending_reboot")) {
         send_json(request, response);
@@ -6508,6 +6540,7 @@ esp_err_t post_ota(httpd_req_t* request) {
 esp_err_t get_ota_status(httpd_req_t* request) {
     if (!api::authorize(request, api::ApiRole::Operator)) return ESP_OK;
 
+    FactoryApi* api_ptr = static_cast<FactoryApi*>(request->user_ctx);
     const auto& verifier = OtaBootVerifier::instance();
     cJSON* root = cJSON_CreateObject();
     if (!root) {
@@ -6516,6 +6549,8 @@ esp_err_t get_ota_status(httpd_req_t* request) {
     }
     const auto persisted = verifier.state();
     const auto storage = capture_storage();
+    cJSON_AddStringToObject(root, "nodeId", api_ptr->identity().id);
+    cJSON_AddBoolToObject(root, "targetBinding", true);
     cJSON_AddNumberToObject(root, "maxFirmwareBytes", storage.next ? storage.next->size : 0);
     cJSON_AddStringToObject(root, "runningPartition", storage.running ? storage.running->label : "unknown");
     cJSON_AddStringToObject(root, "nextPartition", storage.next ? storage.next->label : "unknown");
@@ -8209,7 +8244,7 @@ static esp_err_t options_handler(httpd_req_t* request) {
     httpd_resp_set_status(request, "204 No Content");
     httpd_resp_set_hdr(request, "Access-Control-Allow-Origin", "*");
     httpd_resp_set_hdr(request, "Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-    httpd_resp_set_hdr(request, "Access-Control-Allow-Headers", "Authorization, Content-Type, X-API-Key");
+    httpd_resp_set_hdr(request, "Access-Control-Allow-Headers", "Authorization, Content-Type, X-API-Key, X-LumiGrid-Node-Id");
     httpd_resp_set_hdr(request, "Access-Control-Max-Age", "86400");
     return httpd_resp_send(request, nullptr, 0);
 }

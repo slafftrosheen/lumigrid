@@ -306,7 +306,7 @@ describe('node-authoritative auth & session invariants', () => {
         addEventListener: vi.fn(),
       },
       status: 200,
-      responseText: JSON.stringify({ status: 'ok', accepted: true, commandId: 1, jobId: 1 }),
+      responseText: JSON.stringify({ accepted: true, commandId: 1, jobId: 1, state: 'pending_reboot', targetVersion: '1.2.0' }),
       readyState: 4,
     };
 

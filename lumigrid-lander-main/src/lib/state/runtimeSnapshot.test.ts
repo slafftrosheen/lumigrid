@@ -208,6 +208,26 @@ describe('LG-031 Frontend RuntimeSnapshot and Cutover Tests', () => {
   });
 
   // B. Schema 2 explicitly normalizes through compatibility adapter
+  it('preserves timeline playback metadata without fabricating missing or malformed values', () => {
+    const timeline = { running: true, bpm: 128, generation: 9, anchorMs: 500, elapsedMs: 1250,
+      currentBeat: 2.5, activeChecksum: 0, savedChecksum: 31, contentStale: true };
+    const raw = { schema: 3, node: { id: 'timeline-node' }, runtime: { brightness: 100 },
+      output: {}, scene: {}, channels: [], transport: { generation: 22, timeline } };
+    const parsed = normalizeRuntimeSnapshot(raw);
+    expect(parsed.transport.generation).toBe(22);
+    expect(parsed.transport.timeline).toEqual(timeline);
+    const missing = normalizeRuntimeSnapshot({ ...raw, transport: { timeline: { running: true, bpm: 128 } } });
+    expect(missing.transport.timeline.generation).toBeUndefined();
+    expect(missing.transport.timeline.activeChecksum).toBeUndefined();
+    expect(missing.transport.timeline.contentStale).toBeUndefined();
+    const invalid = normalizeRuntimeSnapshot({ ...raw, transport: { timeline: { ...timeline,
+      generation: -1, currentBeat: Infinity, activeChecksum: '31', contentStale: 'true' } } });
+    expect(invalid.transport.timeline.generation).toBeUndefined();
+    expect(invalid.transport.timeline.currentBeat).toBeUndefined();
+    expect(invalid.transport.timeline.activeChecksum).toBeUndefined();
+    expect(invalid.transport.timeline.contentStale).toBeUndefined();
+  });
+
   it('preserves incomplete power estimates above a configured ceiling without clamping', () => {
     const power = { estimatedRequestedMw: 1200, estimatedLimitedMw: 800, estimateComplete: false, limitMw: 500 };
     const raw = { schema: 3, node: { id: 'power-node' }, runtime: { brightness: 0 },

@@ -82,6 +82,7 @@ jobs:
           python LumigridLedNode/scripts/test_factory_jobs.py
           python LumigridLedNode/scripts/test_factory_cancellation_api.py
           python LumigridLedNode/scripts/test_lighting_state.py
+          python LumigridLedNode/scripts/test_cue_runner.py
           python LumigridLedNode/scripts/test_clock_discipline.py
           python LumigridLedNode/scripts/test_node_sync.py
           python LumigridLedNode/scripts/test_node_sync_threads.py
@@ -169,7 +170,7 @@ jobs:
           cd lumigrid-lander-main
           npm run test:embedded
           npm run check
-          npm run test:unit -- src/lib/auth/storage.test.ts src/lib/auth/nodeAuth.test.ts src/lib/api/transport.test.ts src/lib/api/integration.test.ts src/lib/server/documentation.test.ts src/lib/state/nodeStore.test.ts src/lib/state/nodeOwnership.test.ts src/lib/state/runtimeSnapshot.test.ts src/lib/state/commandTracker.test.ts src/lib/state/scenePageOwnership.test.ts src/lib/cues/editorStore.test.ts src/lib/cues/document.test.ts src/lib/api/cues.test.ts src/routes/dashboard/cues/cues.test.ts src/lib/components/dashboard/NetworkConfigCard.test.ts
+          npm run test:unit -- src/lib/auth/storage.test.ts src/lib/auth/nodeAuth.test.ts src/lib/api/transport.test.ts src/lib/api/integration.test.ts src/lib/server/documentation.test.ts src/lib/state/nodeStore.test.ts src/lib/state/nodeOwnership.test.ts src/lib/state/runtimeSnapshot.test.ts src/lib/state/commandTracker.test.ts src/lib/state/scenePageOwnership.test.ts src/lib/cues/editorStore.test.ts src/lib/cues/document.test.ts src/lib/api/cues.test.ts src/routes/dashboard/cues/cues.test.ts src/lib/components/dashboard/NetworkConfigCard.test.ts src/lib/api/firmware.test.ts src/lib/api/deployment.test.ts src/lib/state/systemPageOwnership.test.ts src/lib/timeline/editorStore.test.ts src/lib/timeline/pageOwnership.test.ts src/lib/timeline/document.test.ts src/lib/timeline/transport.test.ts src/lib/api/timeline.test.ts
           npm run build
 
       - name: Web Build Success Status

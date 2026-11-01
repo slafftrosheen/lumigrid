@@ -40,6 +40,8 @@ Restore is a checked multi-record operation, not an atomic NVS transaction. A po
 
 The default firmware accurately reports that signed OTA verification is disabled. This change does not provision signing keys, secure boot or irreversible eFuse settings.
 
+Subsequent November 1 hardening is recorded separately in [the output recovery and verified-update report](qualification/2026-11-01-RECOVERY-UPDATES.md), including output transaction checks, cue admission, Timeline editing and candidate-specific OTA confirmation. Its build hashes and validation results supersede the older numbers below only for that later software snapshot.
+
 ## Build and reproducibility
 
 The build pins PlatformIO 6.2.0 in CI, the Espressif32 platform to 6.7.0 and ESP-IDF to the platform's 5.2.1 package. The embedded dashboard uses the checked-in npm lockfile. Build the production candidate and the diagnostic image separately:

@@ -87,6 +87,16 @@ struct CueSyncSnapshot {
     uint8_t source_scene = 0;
 };
 
+// Admission detail for the runtime callback; not part of the wire protocol.
+enum class CueSyncError : uint8_t {
+    None,
+    ListMissing,
+    ListMismatch,
+    CueInvalid,
+    StateInvalid,
+    SceneMissing,
+};
+
 class CueRunner {
 public:
     /// Meaningful Cue runtime transitions (LG-034 §25). Listeners use these to
@@ -139,12 +149,14 @@ public:
     CueRunnerSnapshot snapshot(uint64_t current_ms) const;
     CueSyncSnapshot sync_snapshot(uint64_t now_ms) const;
 
-    esp_err_t apply_remote_sync(const CueSyncSnapshot& state, uint64_t current_ms);
+    esp_err_t apply_remote_sync(const CueSyncSnapshot& state, uint64_t current_ms,
+                               CueSyncError* error = nullptr);
     void clear_remote_sync(uint64_t current_ms = 0);
 
     // Compatibility aliases (legacy call sites)
-    esp_err_t apply_sync_snapshot(const CueSyncSnapshot& snapshot, uint64_t now_ms) {
-        return apply_remote_sync(snapshot, now_ms);
+    esp_err_t apply_sync_snapshot(const CueSyncSnapshot& snapshot, uint64_t now_ms,
+                                 CueSyncError* error = nullptr) {
+        return apply_remote_sync(snapshot, now_ms, error);
     }
 
     /// Status-change notifications for status broadcast coalescing (§25).

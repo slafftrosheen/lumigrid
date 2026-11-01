@@ -40,15 +40,20 @@ export interface OtaUploadResponse {
   jobId: number;
   targetVersion: string;
   projectName: string;
+  nodeId?: string;
+  targetPartition?: string;
   state: 'pending_reboot';
 }
 
 /**
  * Response from GET /api/v1/ota/status.
- * state == 'confirmed' AND runningVersion == targetVersion is the only success.
+ * Confirmation must match the accepted node, version and partition when
+ * checking a specific upload; version alone cannot distinguish same-version installs.
  * state == 'rolled_back' means the update failed — do NOT show success.
  */
 export interface OtaStatus {
+  nodeId?: string;
+  targetBinding?: boolean;
   state:
     | 'idle'
     | 'pending_reboot'
@@ -64,6 +69,7 @@ export interface OtaStatus {
   maxFirmwareBytes?: number;
   runningPartition?: string;
   nextPartition?: string;
+  targetPartition?: string;
   partitionLayout?: number;
   imageBytes?: number;
   verificationStartedMs?: number;
@@ -86,63 +92,150 @@ export function uploadFirmware(
   ip: string,
   binary: Blob | ArrayBuffer,
   onProgress?: (pct: number) => void,
+  options: { signal?: AbortSignal; expectedNodeId?: string } = {},
 ): Promise<OtaUploadResponse> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     const session = nodeAuthStore.getSession(ip);
+    const signal = options.signal;
+    let settled = false;
+    const cleanup = () => {
+      signal?.removeEventListener('abort', abort);
+      xhr.upload.onprogress = null;
+      xhr.onload = xhr.onerror = xhr.ontimeout = xhr.onabort = null;
+    };
+    const finish = (value?: OtaUploadResponse, error?: Error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (error) reject(error);
+      else resolve(value!);
+    };
+    const abort = () => {
+      finish(undefined, new DOMException('Firmware request cancelled; an accepted update may still finish on the node.', 'AbortError'));
+      xhr.abort();
+    };
+    if (signal?.aborted) { finish(undefined, new DOMException('Firmware request cancelled', 'AbortError')); return; }
+    signal?.addEventListener('abort', abort, { once: true });
 
     xhr.upload.onprogress = (e) => {
-      if (e.lengthComputable && onProgress) {
-        onProgress(Math.round((e.loaded / e.total) * 90));
+      if (!settled && nodeAuthStore.getSession(ip) === session && e.lengthComputable && e.total > 0 && onProgress) {
+        onProgress(Math.min(90, Math.max(0, Math.round((e.loaded / e.total) * 90))));
       }
     };
 
     xhr.onload = () => {
+      if (nodeAuthStore.getSession(ip) !== session) {
+        finish(undefined, new DOMException('Credentials changed before upload confirmation', 'AbortError'));
+        return;
+      }
       if (xhr.status === 401) {
         nodeAuthStore.clearSession(ip);
-        reject(new Error(`[${ip}] /api/v1/ota → HTTP 401 Authentication required`));
+        finish(undefined, new Error(`[${ip}] /api/v1/ota → HTTP 401 Authentication required`));
         return;
       }
       if (xhr.status >= 200 && xhr.status < 300) {
         try {
-          const res = JSON.parse(xhr.responseText) as OtaUploadResponse;
-          resolve(res);
+          const res = JSON.parse(xhr.responseText) as Partial<OtaUploadResponse> | null;
+          if (!res || res.accepted !== true || res.state !== 'pending_reboot' ||
+              typeof res.targetVersion !== 'string' || !res.targetVersion.trim() ||
+              !Number.isInteger(res.commandId) || res.commandId! <= 0 ||
+              !Number.isInteger(res.jobId) || res.jobId! <= 0) {
+            throw new Error('Incomplete update receipt');
+          }
+          if (options.expectedNodeId && res.nodeId !== options.expectedNodeId) {
+            throw new Error('Update receipt does not identify the selected node');
+          }
+          finish(res as OtaUploadResponse);
         } catch {
-          // If firmware returns non-JSON (old firmware compat), synthesise minimal response
-          resolve({
-            accepted: true,
-            commandId: 0,
-            jobId: 0,
-            targetVersion: '',
-            projectName: '',
-            state: 'pending_reboot',
-          });
+          finish(undefined, new OtaUnconfirmedError('The node returned no valid update receipt. Check its status before retrying; the update may still finish.'));
         }
       } else {
-        reject(new Error(`[${ip}] /api/v1/ota → HTTP ${xhr.status}: ${xhr.statusText}`));
+        finish(undefined, new Error(`[${ip}] /api/v1/ota → HTTP ${xhr.status}: ${xhr.statusText}`));
       }
     };
 
-    xhr.onerror = () => reject(new Error(`[${ip}] /api/v1/ota → Network error during OTA upload`));
-    xhr.ontimeout = () => reject(new Error(`[${ip}] /api/v1/ota → Upload timed out`));
+    xhr.onerror = () => finish(undefined, new OtaUnconfirmedError(`[${ip}] Upload connection lost. The update outcome is unconfirmed.`));
+    xhr.ontimeout = () => finish(undefined, new OtaUnconfirmedError(`[${ip}] Upload timed out. The update outcome is unconfirmed.`));
+    xhr.onabort = () => finish(undefined, new DOMException('Firmware request cancelled', 'AbortError'));
     xhr.timeout = 120000;
 
     // ALWAYS use getNodeHttpBase — never infer HTTPS from dashboard origin
-    const base = getNodeHttpBase(ip);
-    xhr.open('POST', `${base}/api/v1/ota`, true);
-    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
-    if (session?.sessionToken) {
-      xhr.setRequestHeader('Authorization', `Bearer ${session.sessionToken}`);
+    try {
+      const base = getNodeHttpBase(ip);
+      xhr.open('POST', `${base}/api/v1/ota`, true);
+      xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+      if (session?.sessionToken) xhr.setRequestHeader('Authorization', `Bearer ${session.sessionToken}`);
+      if (options.expectedNodeId) xhr.setRequestHeader('X-LumiGrid-Node-Id', options.expectedNodeId);
+      xhr.send(binary);
+    } catch (error) {
+      finish(undefined, error instanceof Error ? error : new Error(String(error)));
     }
-
-    xhr.send(binary);
   });
 }
 
 // ── OTA status ────────────────────────────────────────────────────────────────
 
-export function getOtaStatus(ip: string): Promise<OtaStatus> {
-  return apiJson<OtaStatus>(ip, '/api/v1/ota/status');
+export function getOtaStatus(ip: string, signal?: AbortSignal): Promise<OtaStatus> {
+  return apiJson<OtaStatus>(ip, '/api/v1/ota/status', { signal, cache: 'no-store' });
+}
+
+export class OtaUnconfirmedError extends Error {
+  constructor(message: string) { super(message); this.name = 'OtaUnconfirmedError'; }
+}
+
+export class OtaIdentityError extends Error {
+  constructor() { super('This address no longer identifies the selected node. Update confirmation stopped.'); this.name = 'OtaIdentityError'; }
+}
+
+export interface OtaVerificationTarget {
+  nodeId: string;
+  targetVersion: string;
+  targetPartition: string;
+}
+
+/** Require complete slot metadata before starting a write. */
+export function isOtaSlotReady(status: OtaStatus): boolean {
+  return Number.isSafeInteger(status.maxFirmwareBytes) && status.maxFirmwareBytes! > 0 &&
+    typeof status.runningPartition === 'string' && Boolean(status.runningPartition.trim()) &&
+    typeof status.nextPartition === 'string' && Boolean(status.nextPartition.trim()) &&
+    status.runningPartition !== 'unknown' && status.nextPartition !== 'unknown' &&
+    status.runningPartition !== status.nextPartition;
+}
+
+/** Preserve the accepted candidate identity, including same-version updates. */
+export function bindOtaTarget(receipt: OtaUploadResponse, before: OtaStatus, nodeId: string): OtaVerificationTarget {
+  const partition = receipt.targetPartition ?? before.nextPartition;
+  if (!nodeId || (receipt.nodeId !== undefined && receipt.nodeId !== nodeId)) throw new OtaIdentityError();
+  if (receipt.accepted !== true || receipt.state !== 'pending_reboot' || !receipt.targetVersion ||
+      !isOtaSlotReady(before) || !partition || partition === 'unknown' || partition === before.runningPartition) {
+    throw new OtaUnconfirmedError('The accepted candidate cannot be identified. Check the node before retrying.');
+  }
+  return { nodeId, targetVersion: receipt.targetVersion, targetPartition: partition };
+}
+
+/** Older nodes expose identity separately; never treat an unavailable identity as a match. */
+export async function getVerifiedOtaStatus(ip: string, nodeId: string, signal?: AbortSignal): Promise<OtaStatus> {
+  const [identity, status] = await Promise.all([
+    apiJson<{ id: string }>(ip, '/api/v1/identity', { signal, cache: 'no-store' }),
+    getOtaStatus(ip, signal),
+  ]);
+  if (identity.id !== nodeId || (status.nodeId !== undefined && status.nodeId !== nodeId)) throw new OtaIdentityError();
+  return { ...status, nodeId };
+}
+
+export function isOtaTargetStatus(status: OtaStatus, target: OtaVerificationTarget): boolean {
+  return status.nodeId === target.nodeId && status.targetVersion === target.targetVersion &&
+    status.targetPartition === target.targetPartition;
+}
+
+export function waitForOtaDelay(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const abort = () => { clearTimeout(timer); signal?.removeEventListener('abort', abort); reject(new DOMException('Update confirmation cancelled', 'AbortError')); };
+    const timer = setTimeout(() => { signal?.removeEventListener('abort', abort); resolve(); }, ms);
+    if (signal?.aborted) abort();
+    else signal?.addEventListener('abort', abort, { once: true });
+  });
 }
 
 export interface StoragePartition { label: string; type: string; address: number; size: number }
@@ -160,7 +253,7 @@ export function getStorageDiagnostics(ip: string): Promise<StorageDiagnostics> {
   return apiJson<StorageDiagnostics>(ip, '/api/v1/diagnostics/storage');
 }
 export function firmwareFitsSlot(imageBytes: number, slotBytes: number): boolean {
-  return imageBytes > 0 && slotBytes > 0 && imageBytes <= slotBytes;
+  return Number.isSafeInteger(imageBytes) && Number.isSafeInteger(slotBytes) && imageBytes > 0 && slotBytes > 0 && imageBytes <= slotBytes;
 }
 
 // ── Job queries ────────────────────────────────────────────────────────────────
@@ -179,11 +272,12 @@ export async function getCurrentJob(ip: string): Promise<OperationJob | null> {
  * Returns true only when OTA is definitively confirmed successful.
  * confirmed state AND running version matches target — no other condition is success.
  */
-export function isOtaSuccess(status: OtaStatus): boolean {
+export function isOtaSuccess(status: OtaStatus, target?: OtaVerificationTarget): boolean {
   return (
-    status.state === 'confirmed' &&
+    status.state === 'confirmed' && !status.rolledBack &&
     Boolean(status.targetVersion) &&
-    status.runningVersion === status.targetVersion
+    status.runningVersion === status.targetVersion &&
+    (!target || (isOtaTargetStatus(status, target) && status.runningPartition === target.targetPartition))
   );
 }
 

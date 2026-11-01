@@ -165,9 +165,8 @@ esp_err_t CueRunner::pause(uint64_t current_ms) {
         return ESP_ERR_INVALID_STATE; // Manual mode has no timed phases
     }
 
-    const uint64_t now = cue_start_ms_ + paused_elapsed_ms_ + current_ms;
-    const uint32_t elapsed = cue_elapsed_ms_unsafe(now);
-    const uint32_t remaining = cue_remaining_ms_unsafe(now);
+    const uint32_t elapsed = cue_elapsed_ms_unsafe(current_ms);
+    const uint32_t remaining = cue_remaining_ms_unsafe(current_ms);
 
     paused_from_ = state_;
     paused_elapsed_ms_ = elapsed;
@@ -193,11 +192,11 @@ esp_err_t CueRunner::resume(uint64_t current_ms) {
     }
 
     state_ = paused_from_;
-    cue_start_ms_ = current_ms;
-    if (state_ == CueRunnerState::Holding) {
-        hold_duration_ms_ = paused_remaining_ms_;
-    } else if (state_ == CueRunnerState::Fading) {
-        fade_duration_ms_ = paused_remaining_ms_;
+    // Keep the original phase duration and cumulative elapsed time. Rebase the
+    // anchor to exclude the pause, including after repeated pause/resume cycles.
+    cue_start_ms_ = (current_ms >= paused_elapsed_ms_)
+        ? current_ms - paused_elapsed_ms_ : 0;
+    if (state_ == CueRunnerState::Fading) {
         // §6: continue toward the existing target over the remaining duration,
         // starting from the frozen visual state (not the original source).
         signage_.resume_frozen_transition(paused_remaining_ms_,
@@ -475,8 +474,14 @@ CueSyncSnapshot CueRunner::sync_snapshot(uint64_t now_ms) const {
     return snap;
 }
 
-esp_err_t CueRunner::apply_remote_sync(const CueSyncSnapshot& snapshot, uint64_t current_ms) {
+esp_err_t CueRunner::apply_remote_sync(const CueSyncSnapshot& snapshot, uint64_t current_ms,
+                                     CueSyncError* error) {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (error) *error = CueSyncError::None;
+    const auto reject = [error](CueSyncError detail, esp_err_t result) {
+        if (error) *error = detail;
+        return result;
+    };
     if (!snapshot.active || snapshot.state == CueRunnerState::Stopped) {
         if (state_ != CueRunnerState::Stopped) {
             state_ = CueRunnerState::Stopped;
@@ -487,29 +492,66 @@ esp_err_t CueRunner::apply_remote_sync(const CueSyncSnapshot& snapshot, uint64_t
         return ESP_OK;
     }
 
-    remote_sync_active_ = true;
-    remote_generation_ = snapshot.generation;
+    if (snapshot.state != CueRunnerState::Holding &&
+        snapshot.state != CueRunnerState::Fading &&
+        snapshot.state != CueRunnerState::Paused &&
+        snapshot.state != CueRunnerState::Manual) {
+        return reject(CueSyncError::StateInvalid, ESP_ERR_INVALID_ARG);
+    }
+    if (snapshot.list_index >= kMaxCueLists) {
+        return reject(CueSyncError::ListMissing, ESP_ERR_INVALID_ARG);
+    }
 
-    if (active_list_index_ != snapshot.list_index || active_list_.count == 0) {
-        CueList list;
-        esp_err_t err = config_.load_cue_list(snapshot.list_index, list);
-        if (err != ESP_OK || list.count == 0) {
+    // Admit the exact content that will run before changing either ownership or
+    // the immutable active snapshot. A saved edit may differ from a still-valid
+    // active copy; a new checksum in the same slot must load the matching edit.
+    CueList loaded{};
+    const bool replace_active = active_list_index_ != snapshot.list_index ||
+        active_list_.count == 0 ||
+        (snapshot.list_checksum != 0 && active_list_.checksum != snapshot.list_checksum);
+    const CueList* candidate = &active_list_;
+    if (replace_active) {
+        const esp_err_t err = config_.load_cue_list(snapshot.list_index, loaded);
+        if (err != ESP_OK || loaded.count == 0) {
             ESP_LOGW(TAG, "Sync failed: follower missing cue list %u", snapshot.list_index);
-            return (err == ESP_OK) ? ESP_ERR_NOT_FOUND : err;
+            return reject(CueSyncError::ListMissing,
+                          (err == ESP_OK) ? ESP_ERR_NOT_FOUND : err);
         }
-        active_list_ = list;
-        active_list_index_ = snapshot.list_index;
+        candidate = &loaded;
+    }
+    if (candidate->count > kMaxCuesPerList) {
+        return reject(CueSyncError::ListMissing, ESP_ERR_INVALID_ARG);
+    }
+    if (snapshot.list_checksum != 0 && candidate->checksum != snapshot.list_checksum) {
+        return reject(CueSyncError::ListMismatch, ESP_ERR_INVALID_CRC);
     }
 
-    if (snapshot.current_cue >= active_list_.count) {
-        return ESP_ERR_INVALID_ARG;
+    if (snapshot.current_cue >= candidate->count || snapshot.next_cue >= candidate->count) {
+        return reject(CueSyncError::CueInvalid, ESP_ERR_INVALID_ARG);
     }
 
-    const uint8_t scene_idx = active_list_.cues[snapshot.current_cue].scene_index;
+    const CueEntry& candidate_cue = candidate->cues[snapshot.current_cue];
+    const uint8_t scene_idx = candidate_cue.scene_index;
     if (!config_.scene_exists(scene_idx)) {
         ESP_LOGW(TAG, "Sync failed: follower missing scene %u for cue %u", scene_idx, snapshot.current_cue);
-        return ESP_ERR_NOT_FOUND;
+        return reject(CueSyncError::SceneMissing, ESP_ERR_NOT_FOUND);
     }
+    const bool needs_next_scene = snapshot.state == CueRunnerState::Manual ||
+        (snapshot.state == CueRunnerState::Paused && candidate_cue.fade_ms > 0 &&
+         (snapshot.paused_from == CueRunnerState::Fading ||
+          snapshot.paused_from == CueRunnerState::Stopped));
+    if (needs_next_scene && !config_.scene_exists(candidate->cues[snapshot.next_cue].scene_index)) {
+        return reject(CueSyncError::SceneMissing, ESP_ERR_NOT_FOUND);
+    }
+
+    const bool cue_changed = !remote_sync_active_ || replace_active ||
+        current_cue_index_ != snapshot.current_cue ||
+        transport_generation_ != snapshot.generation ||
+        state_ == CueRunnerState::Stopped || state_ == CueRunnerState::Paused;
+    if (replace_active) active_list_ = loaded;
+    active_list_index_ = snapshot.list_index;
+    remote_sync_active_ = true;
+    remote_generation_ = snapshot.generation;
 
     if (snapshot.state == CueRunnerState::Manual) {
         state_ = CueRunnerState::Manual;
@@ -575,12 +617,6 @@ esp_err_t CueRunner::apply_remote_sync(const CueSyncSnapshot& snapshot, uint64_t
     }
 
     // Holding or Fading state
-    const bool cue_changed = (current_cue_index_ != snapshot.current_cue ||
-                              active_list_index_ != snapshot.list_index ||
-                              transport_generation_ != snapshot.generation ||
-                              state_ == CueRunnerState::Stopped ||
-                              state_ == CueRunnerState::Paused);
-
     current_cue_index_ = snapshot.current_cue;
     next_cue_index_ = snapshot.next_cue;
     state_ = snapshot.state;

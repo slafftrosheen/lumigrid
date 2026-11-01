@@ -1,5 +1,9 @@
 import type { RuntimeSnapshotV3, RuntimeChannelState, OutputState } from '../runtimeSnapshot';
 
+function finiteNonnegative(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
 function normalizePowerEstimate(raw: unknown): OutputState['power'] {
   if (!raw || typeof raw !== 'object') return undefined;
   const power = raw as Record<string, unknown>;
@@ -95,6 +99,14 @@ export function normalizeRuntimeSnapshot(raw: unknown): RuntimeSnapshotV3 {
         timeline: {
           running: Boolean(data.transport?.timeline?.running),
           bpm: Number(data.transport?.timeline?.bpm) || 120,
+          generation: finiteNonnegative(data.transport?.timeline?.generation),
+          anchorMs: finiteNonnegative(data.transport?.timeline?.anchorMs),
+          elapsedMs: finiteNonnegative(data.transport?.timeline?.elapsedMs),
+          currentBeat: finiteNonnegative(data.transport?.timeline?.currentBeat),
+          activeChecksum: finiteNonnegative(data.transport?.timeline?.activeChecksum),
+          savedChecksum: finiteNonnegative(data.transport?.timeline?.savedChecksum),
+          contentStale: typeof data.transport?.timeline?.contentStale === 'boolean'
+            ? data.transport.timeline.contentStale : undefined,
         },
         cue: {
           running: Boolean(data.transport?.cue?.running),

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onDestroy } from 'svelte';
   import { onlineNodes } from '$lib/fleet/fleetStore';
   import { getNodeDisplayName } from '$lib/fleet/types';
   import {
@@ -14,13 +15,17 @@
   let progress = $state<DeploymentProgress | null>(null);
   let errorMsg = $state('');
   let successMsg = $state('');
+  let disposed = false;
+  let controller: AbortController | null = null;
+  onDestroy(() => { disposed = true; controller?.abort(); });
 
   function onFileChange(e: Event) {
     const file = (e.target as HTMLInputElement).files?.[0];
     (e.target as HTMLInputElement).value = '';
     if (!file) return;
-    if (!file.name.toLowerCase().endsWith('.bin')) {
-      errorMsg = 'Select a firmware .bin file.';
+    if (!file.name.toLowerCase().endsWith('.bin') || file.size <= 0) {
+      selectedFile = null;
+      errorMsg = 'Select a non-empty firmware .bin file.';
       return;
     }
     selectedFile = file;
@@ -49,6 +54,8 @@
     errorMsg = '';
     successMsg = '';
     isDeploying = true;
+    progress = null;
+    const operation = new AbortController(); controller = operation;
 
     // Build nodeAddressMap mapping immutable ID -> IP from fleet store
     const nodeAddressMap = new Map<string, string>();
@@ -74,19 +81,22 @@
         nodeAddressMap,
         selectedFile,
         (p) => {
-          progress = p;
-        }
+          if (!disposed && controller === operation) progress = p;
+        },
+        { signal: operation.signal }
       );
 
+      if (disposed || controller !== operation) return;
       if (result.success) {
         successMsg = `Deployment completed successfully on ${result.completed.length} nodes.`;
       } else {
         errorMsg = progress?.error || `Deployment halted. Failed nodes: ${result.failed.join(', ')}`;
       }
     } catch (e) {
+      if (disposed || controller !== operation) return;
       errorMsg = `Deployment failed: ${e instanceof Error ? e.message : String(e)}`;
     } finally {
-      isDeploying = false;
+      if (!disposed && controller === operation) { isDeploying = false; controller = null; }
     }
   }
 </script>
@@ -96,7 +106,7 @@
     <h2>Staged Fleet OTA Deployment</h2>
     <p class="description">
       Deploys firmware with automatic canary staging and cross-reboot verification.
-      If the canary node rolls back, deployment halts immediately to protect the fleet.
+      A failed or unconfirmed canary stops the rollout. Later batches stop after any failed verification. Keep this page open; leaving stops further uploads, while already accepted updates may still finish.
     </p>
   </div>
 
@@ -256,7 +266,7 @@
   .btn-text {
     background: none;
     border: none;
-    color: #5e81f4;
+    color: var(--dash-accent);
     font-size: 0.8rem;
     cursor: pointer;
     padding: 0;
@@ -312,8 +322,8 @@
   }
 
   .node-chip.selected {
-    border-color: #5e81f4;
-    background: #1f2335;
+    border-color: var(--dash-accent);
+    background: rgba(var(--dash-accent-rgb), .12);
   }
 
   .node-chip-info {
@@ -372,7 +382,7 @@
   .phase-preflight { background: #28283a; color: #a0a0c0; }
   .phase-canary { background: #3a2e10; color: #ffd60a; }
   .phase-verifying { background: #1a2a3a; color: #64d2ff; }
-  .phase-deploying { background: #1a243a; color: #5e81f4; }
+  .phase-deploying { background: rgba(var(--dash-accent-rgb), .12); color: var(--dash-accent); }
   .phase-completed { background: #123018; color: #4cd964; }
   .phase-failed { background: #3a1515; color: #ff453a; }
 
@@ -397,8 +407,9 @@
   }
 
   .btn-deploy {
-    background: #5e81f4;
-    color: #fff;
+    background: var(--dash-accent);
+    /* The opaque accent needs a dark label in both page color schemes. */
+    color: #000;
     border: none;
     border-radius: 6px;
     padding: 9px 20px;
@@ -431,4 +442,7 @@
     font-size: 0.88rem;
     margin-bottom: 14px;
   }
+  button:focus-visible, input:focus-visible { outline: 2px solid var(--dash-accent); outline-offset: 3px; }
+  .file-name, .stat-val { overflow-wrap: anywhere; }
+  .progress-details, .section-header, .progress-header { flex-wrap: wrap; gap: 12px; }
 </style>

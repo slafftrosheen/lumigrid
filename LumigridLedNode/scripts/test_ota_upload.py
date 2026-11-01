@@ -132,7 +132,12 @@ HARNESS = r'''
 struct SimulatedPowerCut {};
 constexpr int HTTPD_SOCK_ERR_TIMEOUT=-3;
 struct httpd_req_t { void* user_ctx=nullptr; size_t content_len=0; std::vector<uint8_t> input;
- size_t offset=0; std::string status,body; };
+ size_t offset=0; std::string status,body,expected_node; };
+size_t httpd_req_get_hdr_value_len(httpd_req_t* req,const char*) { return req->expected_node.size(); }
+int httpd_req_get_hdr_value_str(httpd_req_t* req,const char*,char* dst,size_t size) {
+ if(req->expected_node.size()>=size) return ESP_FAIL;
+ std::memcpy(dst,req->expected_node.c_str(),req->expected_node.size()+1); return ESP_OK;
+}
 inline int receive_calls=0,restart_calls=0;
 inline size_t receive_chunk=512;
 inline bool intermittent_prefix_timeout=false,body_timeout=false;
@@ -173,6 +178,8 @@ struct FakeJobs { int failures=0; int start_job(JobType,uint32_t* id) { *id=1; r
  void fail_job(uint32_t,int,const char*) { ++failures; }
 };
 class FactoryApi { public: FakeJournal journal; FakeJobs jobs;
+ struct Identity { char id[24]="lg-test-node"; };
+ Identity identity() const { return {}; }
  MaintenanceMode current_maintenance_mode() { return MaintenanceMode::None; }
  FakeJournal& command_journal() { return journal; }
  FakeJobs& job_manager() { return jobs; }
@@ -218,6 +225,9 @@ int main(int argc,char** argv) {
  else if(name=="invalid_chip") image[offsetof(esp_image_header_t,chip_id)]=5;
  else if(name=="unterminated_version") std::memset(image.data()+sizeof(esp_image_header_t)+sizeof(esp_image_segment_header_t)+offsetof(esp_app_desc_t,version),'x',32);
  request.input=image; request.content_len=image.size();
+ if(name=="target_identity_match") request.expected_node="lg-test-node";
+ else if(name=="target_identity_mismatch") request.expected_node="lg-different-node";
+ else if(name=="target_identity_oversized") request.expected_node=std::string(32,'x');
  if(name=="truncated_old_tail" || name=="truncated_hash_tail") {
   std::copy(image.begin(),image.end(),flash.begin());
   request.input.resize(name=="truncated_old_tail" ? 4096 : 8192); request.content_len=request.input.size();
@@ -242,6 +252,8 @@ int main(int argc,char** argv) {
   verifier.rollback_candidate("test_failure");
   request={}; request.user_ctx=&api; assert(get_ota_status(&request)==ESP_OK);
   cJSON* result=cJSON_Parse(request.body.c_str()); assert(result);
+  assert(std::strcmp(cJSON_GetObjectItem(result,"nodeId")->valuestring,"lg-test-node")==0);
+  assert(cJSON_IsTrue(cJSON_GetObjectItem(result,"targetBinding")));
   assert(cJSON_IsTrue(cJSON_GetObjectItem(result,"pendingVerification")));
   assert(cJSON_GetObjectItem(result,"lastError")->valueint==ESP_ERR_OTA_ROLLBACK_FAILED);
   assert(cJSON_GetObjectItem(result,"persistenceError")->valueint==commit_error);
@@ -259,9 +271,11 @@ int main(int argc,char** argv) {
    assert(select_calls==0 && selected_boot==&factory);
    commit_hook=nullptr; assert(verifier.init()==ESP_OK); assert(verifier.boot_state()==OtaBootState::Failed);
   } else assert(selected_boot==update_partition && select_calls==1);
- } else if(name=="valid_image" || name=="valid_hash_image" || name=="prefix_timeout_progress" || name=="version_json_escaped") {
+ } else if(name=="valid_image" || name=="valid_hash_image" || name=="prefix_timeout_progress" || name=="version_json_escaped" || name=="target_identity_match") {
   assert(request.status=="200 OK" && restart_calls==1 && selected_boot==update_partition);
   cJSON* result=cJSON_Parse(request.body.c_str()); assert(result && cJSON_IsTrue(cJSON_GetObjectItem(result,"accepted")));
+  assert(std::strcmp(cJSON_GetObjectItem(result,"nodeId")->valuestring,"lg-test-node")==0);
+  assert(std::strcmp(cJSON_GetObjectItem(result,"targetPartition")->valuestring,"ota_1")==0);
   if(name=="version_json_escaped") assert(std::strcmp(cJSON_GetObjectItem(result,"targetVersion")->valuestring,"rc\"quoted")==0);
   cJSON_Delete(result);
   assert(verifier.boot_state()==OtaBootState::PendingReboot);
@@ -278,7 +292,9 @@ int main(int argc,char** argv) {
   }
   else assert(select_calls==0);
   if(name=="pending_candidate_rejected" || name=="invalid_magic" || name=="invalid_chip" ||
-     name=="invalid_project" || name=="unterminated_version" || name=="oversized") assert(begin_calls==0);
+     name=="invalid_project" || name=="unterminated_version" || name=="oversized" ||
+     name=="target_identity_mismatch" || name=="target_identity_oversized") assert(begin_calls==0);
+  if(name=="target_identity_mismatch" || name=="target_identity_oversized") assert(receive_calls==0 && write_calls==0);
   if(name=="short_transport" || name=="prefix_write_error" || name=="body_write_error" || name=="body_timeouts") assert(abort_calls==1);
  }
  std::cout << "PASS " << name << '\n';
@@ -286,6 +302,7 @@ int main(int argc,char** argv) {
 '''
 
 CASES = (
+    "target_identity_match", "target_identity_mismatch", "target_identity_oversized",
     "valid_image", "valid_hash_image", "truncated_old_tail", "truncated_hash_tail", "short_transport", "oversized",
     "invalid_project", "invalid_magic", "invalid_chip", "unterminated_version", "pending_candidate_rejected",
     "prefix_write_error", "body_write_error", "body_timeouts", "end_validation_error", "invalid_final_descriptor",

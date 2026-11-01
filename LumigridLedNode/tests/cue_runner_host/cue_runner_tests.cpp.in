@@ -1,0 +1,366 @@
+#include "CueRunner.hpp"
+#include "NodeSync.hpp"
+#include "ShowTransport.hpp"
+#include "cJSON.h"
+#include <cassert>
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <inttypes.h>
+#include <string>
+
+struct httpd_req_t {
+    void* user_ctx = nullptr;
+    std::string input, status, output;
+};
+
+namespace lg {
+// These boundaries record ownership changes; production CueRunner owns its
+// real state machine, mutex, timing, active content and event dispatch.
+struct Scheduler {
+    enum class RemoteShowMode { None, Scene, Timeline, Cue };
+    RemoteShowMode mode = RemoteShowMode::None;
+    unsigned mode_changes = 0, timeline_starts = 0, timeline_stops = 0;
+    unsigned sync_clears = 0;
+    bool local_timeline = false;
+    void apply_remote_show_mode(RemoteShowMode value, uint16_t, uint64_t) {
+        mode = value; ++mode_changes;
+    }
+    void apply_remote_timeline(uint32_t, uint64_t, uint32_t, uint16_t, uint64_t) {
+        mode = RemoteShowMode::Timeline; ++mode_changes;
+    }
+    void clear_remote_show_mode() { mode = RemoteShowMode::None; ++mode_changes; }
+    void clear_sync_transport() { ++sync_clears; }
+    void start_local_timeline(uint16_t) { local_timeline = true; ++timeline_starts; }
+    void stop_local_timeline() { local_timeline = false; ++timeline_stops; }
+    ShowTransportSnapshot transport_snapshot(uint64_t now) const {
+        ShowTransportSnapshot result{};
+        result.timeline_anchor_ms = now;
+        result.transport_generation = timeline_starts;
+        return result;
+    }
+};
+
+struct Harness {
+    ConfigStore config_;
+    LightingRuntime lighting_;
+    CueRunner cue_runner_{config_, lighting_};
+    Scheduler scheduler_;
+    struct Clock {
+        uint64_t value = 100000;
+        uint64_t now_ms() const { return value; }
+    } clock_;
+    struct SyncBoundary {
+        NodeSync::RemoteTransportCallback callback;
+        void set_remote_transport_callback(NodeSync::RemoteTransportCallback value) {
+            callback = std::move(value);
+        }
+    } node_sync_;
+    unsigned events = 0;
+    Harness() {
+        cue_runner_.set_event_callback([this](CueRunner::Event) { ++events; });
+        @@REMOTE_CALLBACK@@
+    }
+};
+
+namespace api {
+enum class ApiRole { Operator };
+bool authorize(httpd_req_t*, ApiRole) { return true; }
+struct AuditLog {
+    static AuditLog& instance() { static AuditLog instance; return instance; }
+    void log(ApiRole, const char*, const char*) {}
+};
+}
+enum class CommandDomain { Scene, Timeline, Cue };
+struct Journal {
+    unsigned accepted = 0, applied_count = 0, failed_count = 0;
+    esp_err_t failure = ESP_OK;
+    uint32_t accept(CommandDomain, uint32_t = 0) { return ++accepted; }
+    void applied(uint32_t) { ++applied_count; }
+    void failed(uint32_t, esp_err_t error) { ++failed_count; failure = error; }
+};
+struct FactoryApi {
+    Harness& harness;
+    Journal journal;
+    ShowTransportCoordinator transport;
+    explicit FactoryApi(Harness& value) : harness(value) {}
+    LightingRuntime* signage() { return &harness.lighting_; }
+    CueRunner* cue_runner() { return &harness.cue_runner_; }
+    ConfigStore* config() { return &harness.config_; }
+    Scheduler* scheduler() { return &harness.scheduler_; }
+    uint64_t show_clock_now_ms() { return harness.clock_.now_ms(); }
+    Journal& command_journal() { return journal; }
+    ShowTransportCoordinator* show_transport() { return &transport; }
+    void notify_status_async() {}
+};
+bool is_sync_follower_read_only(FactoryApi*, char*, size_t) { return false; }
+esp_err_t read_json(httpd_req_t* request, cJSON** root) {
+    *root = cJSON_Parse(request->input.c_str());
+    return *root ? ESP_OK : ESP_ERR_INVALID_ARG;
+}
+bool json_u8(const cJSON* root, const char* key, uint8_t minimum,
+             uint8_t maximum, uint8_t& out) {
+    const auto* value = cJSON_GetObjectItemCaseSensitive(root, key);
+    if (!cJSON_IsNumber(value) || value->valuedouble < minimum ||
+        value->valuedouble > maximum || std::floor(value->valuedouble) != value->valuedouble)
+        return false;
+    out = static_cast<uint8_t>(value->valuedouble);
+    return true;
+}
+esp_err_t send_json(httpd_req_t* request, const char* body, const char* status) {
+    request->output = body; request->status = status; return ESP_OK;
+}
+esp_err_t send_error(httpd_req_t* request, const char* status, const char* error) {
+    request->output = error; request->status = status; return ESP_OK;
+}
+@@FACTORY_HANDLERS@@
+}
+
+using namespace lg;
+
+CueList content(uint32_t checksum, uint8_t first_scene = 1, uint16_t fade = 0) {
+    CueList result{};
+    result.count = 2; result.mode = CueRunMode::Loop; result.checksum = checksum;
+    for (uint8_t index = 0; index < result.count; ++index) {
+        result.cues[index].scene_index = first_scene + index;
+        result.cues[index].hold_ms = 1000;
+        result.cues[index].fade_ms = fade;
+    }
+    return result;
+}
+
+void save(Harness& h, uint8_t slot, const CueList& list) {
+    h.config_.lists[slot] = list; h.config_.present[slot] = true;
+}
+
+void start(Harness& h, uint8_t slot = 0, uint16_t fade = 0) {
+    save(h, slot, content(111, 1, fade));
+    assert(h.cue_runner_.start(slot, 0, h.clock_.value) == ESP_OK);
+}
+
+CueSyncSnapshot remote(uint8_t slot = 0, uint32_t checksum = 111) {
+    CueSyncSnapshot result{};
+    result.active = true; result.state = CueRunnerState::Holding;
+    result.list_index = slot; result.list_checksum = checksum;
+    result.current_cue = 0; result.next_cue = 1; result.generation = 99;
+    result.cue_anchor_ms = 100000;
+    return result;
+}
+
+ShowTransportSnapshot packet(const CueSyncSnapshot& cue) {
+    ShowTransportSnapshot result{};
+    result.mode = ShowTransportMode::Cue;
+    result.cue.active = cue.active; result.cue.state = static_cast<uint8_t>(cue.state);
+    result.cue.list_index = cue.list_index; result.cue.current_cue = cue.current_cue;
+    result.cue.next_cue = cue.next_cue; result.cue.generation = cue.generation;
+    result.cue.cue_anchor_ms = cue.cue_anchor_ms;
+    result.cue.paused_elapsed_ms = cue.paused_elapsed_ms;
+    result.cue.manual_fade_q15 = cue.manual_fade_q15;
+    result.cue_list_checksum = cue.list_checksum;
+    result.cue_paused_from = static_cast<uint8_t>(cue.paused_from);
+    result.cue_transition_progress_q15 = cue.transition_progress_q15;
+    return result;
+}
+
+void unchanged(Harness& h, const CueRunnerSnapshot& before, unsigned events,
+               unsigned activations) {
+    const auto after = h.cue_runner_.snapshot(h.clock_.value);
+    assert(after.running == before.running && after.state == before.state);
+    assert(after.list_index == before.list_index && after.current_cue == before.current_cue);
+    assert(after.current_scene == before.current_scene && after.next_cue == before.next_cue);
+    assert(after.active_checksum == before.active_checksum && after.generation == before.generation);
+    assert(after.remote_driven == before.remote_driven);
+    assert(h.events == events && h.lighting_.activations == activations);
+}
+
+int main(int argc, char** argv) {
+    assert(argc == 2);
+    const std::string name = argv[1];
+    Harness h;
+    if (name == "pause_hold_uses_phase_anchor") {
+        h.clock_.value = 80000; start(h, 0, 500);
+        h.cue_runner_.update(80600);
+        assert(h.cue_runner_.pause(80900) == ESP_OK);
+        auto snap = h.cue_runner_.snapshot(85000);
+        assert(snap.state == CueRunnerState::Paused && snap.paused_from == CueRunnerState::Holding);
+        assert(snap.elapsed_ms == 300 && snap.remaining_ms == 700);
+        assert(h.cue_runner_.resume(86000) == ESP_OK);
+        assert(h.cue_runner_.snapshot(86000).remaining_ms == 700);
+        h.cue_runner_.update(86699);
+        assert(h.cue_runner_.snapshot(86699).current_cue == 0);
+        h.cue_runner_.update(86700);
+        assert(h.cue_runner_.snapshot(86700).current_cue == 1);
+    } else if (name == "pause_fade_keeps_remaining_time") {
+        h.clock_.value = 90000; start(h, 0, 500);
+        assert(h.cue_runner_.pause(90250) == ESP_OK);
+        auto snap = h.cue_runner_.snapshot(91000);
+        assert(snap.elapsed_ms == 250 && snap.remaining_ms == 250 && h.lighting_.freezes == 1);
+        assert(h.cue_runner_.resume(92000) == ESP_OK && h.lighting_.resumed_ms == 250);
+        h.cue_runner_.update(92249);
+        assert(h.cue_runner_.snapshot(92249).state == CueRunnerState::Fading);
+        h.cue_runner_.update(92250);
+        assert(h.cue_runner_.snapshot(92250).state == CueRunnerState::Holding);
+    } else if (name == "repeated_pause_keeps_phase_elapsed") {
+        start(h);
+        assert(h.cue_runner_.pause(100200) == ESP_OK);
+        assert(h.cue_runner_.resume(101000) == ESP_OK);
+        assert(h.cue_runner_.pause(101300) == ESP_OK);
+        auto snap = h.cue_runner_.snapshot(120000);
+        assert(snap.elapsed_ms == 500 && snap.remaining_ms == 500);
+        assert(h.cue_runner_.sync_snapshot(120000).paused_elapsed_ms == 500);
+        assert(h.cue_runner_.resume(120000) == ESP_OK);
+        h.cue_runner_.update(120499);
+        assert(h.cue_runner_.snapshot(120499).current_cue == 0);
+        h.cue_runner_.update(120500);
+        assert(h.cue_runner_.snapshot(120500).current_cue == 1);
+    } else if (name == "pause_before_anchor_is_bounded") {
+        start(h);
+        assert(h.cue_runner_.pause(99900) == ESP_OK);
+        auto snap = h.cue_runner_.snapshot(100000);
+        assert(snap.elapsed_ms == 0 && snap.remaining_ms == 1000);
+    } else if (name == "changed_remote_list_with_same_generation_is_applied") {
+        save(h, 0, content(111)); save(h, 1, content(222, 4));
+        auto old = remote(); assert(h.cue_runner_.apply_remote_sync(old, 100000) == ESP_OK);
+        const auto count = h.lighting_.activations;
+        auto next = remote(1, 222);
+        assert(h.cue_runner_.apply_remote_sync(next, 100000) == ESP_OK);
+        assert(h.lighting_.scene == 4 && h.lighting_.activations == count + 1);
+        assert(h.cue_runner_.snapshot(100000).active_checksum == 222);
+    } else if (name == "same_slot_new_checksum_loads_new_content") {
+        start(h); save(h, 0, content(222, 4));
+        assert(h.cue_runner_.apply_remote_sync(remote(0, 222), 100000) == ESP_OK);
+        assert(h.lighting_.scene == 4 && h.cue_runner_.snapshot(100000).active_checksum == 222);
+    } else if (name == "matching_active_content_survives_saved_edit") {
+        start(h); save(h, 0, content(222, 4));
+        assert(h.cue_runner_.apply_remote_sync(remote(), 100000) == ESP_OK);
+        auto snap = h.cue_runner_.snapshot(100000);
+        assert(snap.active_checksum == 111 && snap.saved_checksum == 222 && snap.content_stale);
+        assert(snap.remote_driven && h.lighting_.scene == 1);
+    } else if (name == "remote_stop_without_saved_content_is_accepted") {
+        start(h);
+        assert(h.cue_runner_.apply_remote_sync(remote(), 100000) == ESP_OK);
+        h.config_.present[0] = false;
+        auto request = remote(); request.active = false; request.state = CueRunnerState::Stopped;
+        assert(h.cue_runner_.apply_remote_sync(request, 100000) == ESP_OK);
+        const auto snap = h.cue_runner_.snapshot(100000);
+        assert(!snap.running && !snap.remote_driven);
+    } else if (name.rfind("callback_", 0) == 0) {
+        start(h);
+        if (name == "callback_valid_scene_and_cue_are_accepted") {
+            ShowTransportSnapshot scene{}; scene.mode = ShowTransportMode::Scene; scene.active_scene = 4;
+            uint8_t error = 0;
+            assert(h.node_sync_.callback(scene, error));
+            assert(!h.cue_runner_.snapshot(100000).running && h.lighting_.scene == 4);
+            assert(h.scheduler_.mode == Scheduler::RemoteShowMode::Scene);
+            assert(h.node_sync_.callback(packet(remote()), error));
+            assert(h.cue_runner_.snapshot(100000).remote_driven && h.lighting_.scene == 1);
+            assert(h.scheduler_.mode == Scheduler::RemoteShowMode::Cue);
+        } else if (name == "callback_matching_active_content_is_accepted") {
+            save(h, 0, content(222, 4)); uint8_t error = 0;
+            assert(h.node_sync_.callback(packet(remote()), error));
+            assert(h.lighting_.scene == 1 && h.scheduler_.mode == Scheduler::RemoteShowMode::Cue);
+        } else {
+            const auto before = h.cue_runner_.snapshot(100000);
+            const auto events = h.events, activations = h.lighting_.activations;
+            auto request = packet(remote()); SyncTransportError expected{};
+            if (name == "callback_missing_scene_does_not_preempt") {
+                request.mode = ShowTransportMode::Scene; request.active_scene = 4;
+                h.config_.scenes[4] = false; expected = SyncTransportError::SceneMissing;
+            } else if (name == "callback_missing_list_does_not_change_mode") {
+                request.cue.list_index = 1; expected = SyncTransportError::CueListMissing;
+            } else if (name == "callback_mismatched_list_does_not_change_mode") {
+                request.cue_list_checksum = 999; expected = SyncTransportError::CueListMismatch;
+            } else if (name == "callback_invalid_cue_does_not_change_mode") {
+                request.cue.current_cue = 14; expected = SyncTransportError::CueIndexInvalid;
+            } else assert(false && "unknown callback case");
+            uint8_t error = 0;
+            assert(!h.node_sync_.callback(request, error));
+            assert(error == static_cast<uint8_t>(expected));
+            unchanged(h, before, events, activations);
+            assert(h.scheduler_.mode_changes == 0);
+            h.cue_runner_.update(101000);
+            assert(h.cue_runner_.snapshot(101000).current_cue == 1);
+        }
+    } else if (name.rfind("local_", 0) == 0) {
+        start(h); FactoryApi api(h); httpd_req_t request{}; request.user_ctx = &api;
+        if (name == "local_cue_missing_preserves_timeline" || name == "local_cue_admitted_preempts_timeline") {
+            h.cue_runner_.stop(CueStopReason::Preempted, 100000);
+            h.scheduler_.local_timeline = true;
+            api.transport.set_timeline(true, 120, 100000, 999, 999);
+            const auto generation = api.transport.generation();
+            const auto before = h.cue_runner_.snapshot(100000);
+            const auto events = h.events, activations = h.lighting_.activations;
+            if (name == "local_cue_admitted_preempts_timeline") save(h, 1, content(222, 4));
+            request.input = "{\"mode\":\"cue\",\"action\":\"start\",\"cueListIndex\":1}";
+            post_show_control(&request);
+            if (name == "local_cue_missing_preserves_timeline") {
+                assert(request.status == "400 Bad Request" && api.journal.failed_count == 1);
+                assert(h.scheduler_.local_timeline && h.scheduler_.timeline_stops == 0);
+                assert(api.transport.mode() == ShowTransportMode::Timeline && api.transport.generation() == generation);
+                unchanged(h, before, events, activations);
+            } else {
+                assert(request.status == "200 OK" && api.journal.applied_count == 1);
+                assert(!h.scheduler_.local_timeline && h.scheduler_.timeline_stops == 1);
+                assert(api.transport.mode() == ShowTransportMode::Cue && h.lighting_.scene == 4);
+            }
+        } else if (name == "local_valid_scene_and_timeline_are_accepted") {
+            request.input = "{\"mode\":\"scene\",\"sceneIndex\":4}";
+            assert(post_show_control(&request) == ESP_OK && request.status == "200 OK");
+            assert(!h.cue_runner_.snapshot(100000).running && h.lighting_.scene == 4);
+            start(h);
+            request.input = "{\"mode\":\"timeline\",\"action\":\"start\"}";
+            assert(post_show_control(&request) == ESP_OK && request.status == "200 OK");
+            assert(!h.cue_runner_.snapshot(100000).running && h.scheduler_.timeline_starts == 1);
+            assert(api.journal.applied_count == 2 && api.journal.failed_count == 0);
+        } else {
+            const auto before = h.cue_runner_.snapshot(100000);
+            const auto events = h.events, activations = h.lighting_.activations;
+            if (name == "local_scene_missing_preserves_cue" || name == "local_activate_missing_preserves_cue") {
+                h.config_.scenes[4] = false;
+                // A real checked activation also rejects the missing scene.
+                h.lighting_.available = false;
+                request.input = "{\"mode\":\"scene\",\"sceneIndex\":4,\"preset\":4}";
+                if (name == "local_activate_missing_preserves_cue") post_activate(&request);
+                else post_show_control(&request);
+            } else {
+                assert(name == "local_timeline_missing_preserves_cue" || name == "local_timeline_corrupt_preserves_cue");
+                h.config_.sequence_result = name == "local_timeline_missing_preserves_cue" ? ESP_ERR_NOT_FOUND : ESP_ERR_INVALID_CRC;
+                request.input = "{\"mode\":\"timeline\",\"action\":\"restart\"}";
+                post_show_control(&request);
+            }
+            assert(request.status != "200 OK" && request.status != "202 Accepted");
+            assert(api.journal.failed_count == 1 && api.journal.applied_count == 0);
+            unchanged(h, before, events, activations);
+            assert(h.scheduler_.timeline_starts == 0 && h.scheduler_.timeline_stops == 0 && h.scheduler_.sync_clears == 0);
+            h.cue_runner_.update(101000);
+            assert(h.cue_runner_.snapshot(101000).current_cue == 1);
+        }
+    } else {
+        start(h);
+        auto request = remote();
+        if (name == "missing_remote_list_preserves_local_playback") request.list_index = 1;
+        else if (name == "invalid_remote_cue_preserves_active_content") {
+            save(h, 1, content(222, 4)); request.list_index = 1; request.list_checksum = 222; request.current_cue = 15;
+        } else if (name == "missing_remote_scene_preserves_local_playback") {
+            save(h, 1, content(222, 4)); request.list_index = 1; request.list_checksum = 222; h.config_.scenes[4] = false;
+        } else if (name == "invalid_remote_next_cue_is_rejected") {
+            request.state = CueRunnerState::Manual; request.next_cue = 15;
+        } else if (name == "missing_manual_next_scene_preserves_owner" || name == "missing_paused_next_scene_preserves_owner") {
+            request.list_index = 1; request.list_checksum = 222;
+            save(h, 1, content(222, 4, 500)); h.config_.scenes[5] = false;
+            request.state = name == "missing_manual_next_scene_preserves_owner" ? CueRunnerState::Manual : CueRunnerState::Paused;
+            request.paused_from = CueRunnerState::Fading;
+        } else if (name == "invalid_remote_state_is_rejected") request.state = static_cast<CueRunnerState>(255);
+        else if (name == "mismatched_remote_content_keeps_previous_owner") {
+            assert(h.cue_runner_.apply_remote_sync(remote(), 100000) == ESP_OK);
+            request.list_checksum = 999; request.generation++;
+        } else assert(false && "unknown test case");
+        const auto before = h.cue_runner_.snapshot(100000);
+        const auto events = h.events, activations = h.lighting_.activations;
+        assert(h.cue_runner_.apply_remote_sync(request, 100000) != ESP_OK);
+        unchanged(h, before, events, activations);
+        h.cue_runner_.update(101000);
+        assert(h.cue_runner_.snapshot(101000).current_cue == (before.remote_driven ? 0 : 1));
+    }
+    std::printf("PASS %s\n", name.c_str());
+}
